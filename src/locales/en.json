@@ -6,7 +6,17 @@
   "home": {
     "welcome": "Welcome to Promise of Planet",
     "description": "A leading platform for environmental journalism, knowledge, training, and community engagement in Sudan.",
-    "tagline": "Environmental Educational and Media Platform"
+    "tagline": "Environmental Educational and Media Platform",
+    "exploreMap": "Explore Environmental Map",
+    "exploreLibrary": "Environmental Library",
+    "exploreTraining": "Training Center",
+    "mapSectionTitle": "Interactive Geospatial Eco-Tracking",
+    "mapSectionSubtitle": "Interactive cartographic monitoring of climate, natural resources, and biodiversity centered on Sudan and the African Sahel",
+    "librarySectionTitle": "Latest from the Library",
+    "librarySectionSubtitle": "Knowledge publications, peer-reviewed studies, and practical guides for researchers and local communities",
+    "trainingSectionTitle": "Latest Training Courses",
+    "trainingSectionSubtitle": "National capacity building in environmental journalism, GIS remote sensing, and resource governance",
+    "noContentAvailable": "No items are currently available in this section."
   },
   "common": {
     "languageToggle": "العربية",
@@ -25,4 +35,3 @@
     "rights": "All rights reserved © 2026 Promise of Planet"
   }
 }
-
