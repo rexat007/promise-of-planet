@@ -1,0 +1,21 @@
+{
+  "brand": {
+    "name": "Promise of Planet",
+    "subtitle": "Promise of Planet - Innovative Educational Platform"
+  },
+  "home": {
+    "welcome": "Welcome",
+    "description": "This is a demo project to verify technical environment setup successfully.",
+    "tagline": "Innovative Educational Platform"
+  },
+  "common": {
+    "languageToggle": "العربية",
+    "loading": "Loading..."
+  },
+  "navigation": {
+    "home": "Home",
+    "library": "Library",
+    "training": "Training Center",
+    "news": "News"
+  }
+}
