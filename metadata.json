@@ -1,0 +1,6 @@
+{
+  "name": "Promise of Planet - وعد الكوكب",
+  "description": "منصة تعليمية مبتكرة",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
