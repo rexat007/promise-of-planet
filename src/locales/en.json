@@ -1,12 +1,12 @@
 {
   "brand": {
     "name": "Promise of Planet",
-    "subtitle": "Promise of Planet - Innovative Educational Platform"
+    "subtitle": "Sudanese Platform for Environmental Journalism and Knowledge"
   },
   "home": {
-    "welcome": "Welcome",
-    "description": "This is a demo project to verify technical environment setup successfully.",
-    "tagline": "Innovative Educational Platform"
+    "welcome": "Welcome to Promise of Planet",
+    "description": "A leading platform for environmental journalism, knowledge, training, and community engagement in Sudan.",
+    "tagline": "Environmental Educational and Media Platform"
   },
   "common": {
     "languageToggle": "العربية",
@@ -14,8 +14,15 @@
   },
   "navigation": {
     "home": "Home",
-    "library": "Library",
+    "news": "Environmental News",
+    "library": "Environmental Library",
     "training": "Training Center",
-    "news": "News"
+    "citizenJournalism": "Citizen Journalism",
+    "aboutUs": "About Us"
+  },
+  "footer": {
+    "description": "Sudanese platform for environmental journalism, knowledge, training, and community engagement.",
+    "rights": "All rights reserved © 2026 Promise of Planet"
   }
 }
+

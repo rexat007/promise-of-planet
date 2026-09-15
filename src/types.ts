@@ -4,3 +4,5 @@ export type LocalizedText = {
 };
 
 export type Language = 'ar' | 'en';
+
+
