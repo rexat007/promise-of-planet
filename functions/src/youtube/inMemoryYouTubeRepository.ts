@@ -1,5 +1,5 @@
 import type { YouTubeRepository } from './youtubeRepository';
-import type { YouTubeIntegrationConfig, YouTubeImportCandidate } from '../types/youtube';
+import type { YouTubeIntegrationConfig, YouTubeImportCandidate, CandidateLifecycleStatus } from '../types/youtube';
 
 export class InMemoryYouTubeRepository implements YouTubeRepository {
   private configs: Record<string, YouTubeIntegrationConfig> = {};
@@ -27,4 +27,13 @@ export class InMemoryYouTubeRepository implements YouTubeRepository {
     this.candidates[candidate.id] = { ...candidate };
     return { ...candidate };
   }
+
+  async listCandidates(filter?: { status?: CandidateLifecycleStatus }): Promise<YouTubeImportCandidate[]> {
+    const all = Object.values(this.candidates).map(c => ({ ...c }));
+    if (filter?.status) {
+      return all.filter(c => c.status === filter.status);
+    }
+    return all;
+  }
 }
+

@@ -6,6 +6,7 @@ import { initializeApp } from "firebase-admin/app";
 initializeApp();
 
 export { syncYouTubeUploads } from "./youtube/manualSyncHandler";
+export { manageYouTubeIntegration, reviewYouTubeCandidate } from "./youtube/youtubeAdminHandlers";
 
 /**
  * Basic HTTPS onRequest skeleton conforming to 2nd-gen specifications.

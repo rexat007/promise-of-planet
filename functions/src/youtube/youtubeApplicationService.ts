@@ -65,6 +65,11 @@ export class YoutubeApplicationService {
     return this.repository.getCandidate(id);
   }
 
+  public async listCandidates(filter?: { status?: CandidateLifecycleStatus }): Promise<YouTubeImportCandidate[]> {
+    return this.repository.listCandidates(filter);
+  }
+
+
   /**
    * Secure Server Fetch & Candidate Ingestion Engine
    */

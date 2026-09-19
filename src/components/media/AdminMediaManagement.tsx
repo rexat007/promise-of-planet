@@ -30,8 +30,18 @@ import {
   AlertCircle, 
   RefreshCw,
   X,
-  FileText
+  FileText,
+  Tv,
+  DownloadCloud,
+  Settings2
 } from 'lucide-react';
+import { YouTubeAdminClient } from '../../services/youtubeAdminClient';
+import { YouTubeCandidateReviewModal } from './YouTubeCandidateReviewModal';
+import type {
+  YouTubeImportCandidate,
+  YouTubeIntegrationConfig,
+  YouTubeFetchResult
+} from '../../types/youtube';
 
 interface AdminMediaManagementProps {
   currentUser: AdminUser;
@@ -111,6 +121,125 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   const canEdit = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.Edit), [currentUser]);
   const canReview = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.Review), [currentUser]);
   const canManageRights = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.ManageRights), [currentUser]);
+  const canManageSettings = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.ManageSettings), [currentUser]);
+
+  // YouTube Integration & Candidate Review State
+  const [ytConfig, setYtConfig] = useState<YouTubeIntegrationConfig | null>(null);
+  const [ytChannelId, setYtChannelId] = useState('');
+  const [ytEnabled, setYtEnabled] = useState(false);
+  const [isSavingYtConfig, setIsSavingYtConfig] = useState(false);
+
+  // Manual Sync UI State (Local UI states only: Idle, Requesting, Success, Error)
+  const [syncState, setSyncState] = useState<'Idle' | 'Requesting' | 'Success' | 'Error'>('Idle');
+  const [syncResult, setSyncResult] = useState<YouTubeFetchResult | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  // Candidates Review State
+  const [candidates, setCandidates] = useState<YouTubeImportCandidate[]>([]);
+  const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
+  const [selectedCandidate, setSelectedCandidate] = useState<YouTubeImportCandidate | null>(null);
+  const [isCandidateModalOpen, setIsCandidateModalOpen] = useState(false);
+
+  // Honest Backend / Auth Availability
+  const isBackendAvailable = YouTubeAdminClient.isBackendAvailable();
+  const isAuthenticated = YouTubeAdminClient.isAuthenticated();
+
+  const loadYouTubeCandidates = async () => {
+    if (!isAuthenticated || !canReview) return;
+    setIsLoadingCandidates(true);
+    try {
+      const list = await YouTubeAdminClient.listCandidates('PendingReview');
+      setCandidates(list);
+    } catch (err: any) {
+      console.warn('Failed to fetch YouTube candidates:', err?.message || err);
+    } finally {
+      setIsLoadingCandidates(false);
+    }
+  };
+
+  const loadYouTubeConfig = async () => {
+    if (!isAuthenticated || !canManageSettings) return;
+    try {
+      const cfg = await YouTubeAdminClient.getConfig();
+      if (cfg) {
+        setYtConfig(cfg);
+        setYtChannelId(cfg.channelId || '');
+        setYtEnabled(cfg.enabled ?? false);
+      }
+    } catch (err: any) {
+      console.warn('Failed to load YouTube config:', err?.message || err);
+    }
+  };
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadYouTubeConfig();
+      loadYouTubeCandidates();
+    }
+  }, [isAuthenticated, canManageSettings, canReview]);
+
+  const handleSaveYouTubeConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canManageSettings) {
+      setErrorMsg(tText('غير مصرح لك بتعديل إعدادات يوتيوب (مطلوب صلاحية إدارة الإعدادات)', 'Unauthorized: ManageSettings permission required to update config'));
+      return;
+    }
+    if (!ytChannelId.trim()) {
+      setErrorMsg(tText('معرف القناة مطلوب', 'Channel ID is required'));
+      return;
+    }
+    setIsSavingYtConfig(true);
+    setErrorMsg(null);
+    try {
+      const updated = await YouTubeAdminClient.updateConfig({
+        channelId: ytChannelId.trim(),
+        enabled: ytEnabled,
+        version: ytConfig ? ytConfig.version : 1,
+      });
+      setYtConfig(updated);
+      setSuccessMsg(tText('تم حفظ إعدادات تكامل يوتيوب بنجاح.', 'YouTube integration settings saved successfully.'));
+    } catch (err: any) {
+      setErrorMsg(err?.message || tText('فشل حفظ إعدادات يوتيوب', 'Failed to save YouTube config'));
+    } finally {
+      setIsSavingYtConfig(false);
+    }
+  };
+
+  const handleManualSync = async (pageToken?: string) => {
+    if (syncState === 'Requesting') return;
+    if (!canManageSettings) {
+      setErrorMsg(tText('غير مصرح لك ببدء الجلب اليدوي (مطلوب صلاحية إدارة الإعدادات)', 'Unauthorized: ManageSettings permission required to trigger manual sync'));
+      return;
+    }
+    setSyncState('Requesting');
+    setSyncError(null);
+    try {
+      const result = await YouTubeAdminClient.syncUploads(pageToken);
+      setSyncResult(result);
+      setSyncState('Success');
+      await loadYouTubeCandidates();
+    } catch (err: any) {
+      const msg = err?.message || tText('فشل الجلب من يوتيوب', 'Failed to fetch from YouTube');
+      setSyncError(msg);
+      setSyncState('Error');
+    }
+  };
+
+  const handleSaveCandidateDraft = async (candidateId: string, draft: any) => {
+    const updated = await YouTubeAdminClient.updateEditorialDraft(candidateId, draft);
+    setCandidates(prev => prev.map(c => c.id === candidateId ? updated : c));
+    if (selectedCandidate?.id === candidateId) {
+      setSelectedCandidate(updated);
+    }
+  };
+
+  const handleRejectCandidate = async (candidateId: string, reviewedVersion: number) => {
+    const rejected = await YouTubeAdminClient.rejectCandidate(candidateId, reviewedVersion);
+    setCandidates(prev => prev.filter(c => c.id !== candidateId));
+    if (selectedCandidate?.id === candidateId) {
+      setSelectedCandidate(rejected);
+    }
+  };
 
   // Filtered videos
   const filteredVideos = useMemo(() => {
@@ -432,6 +561,457 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
               {videos.filter(v => v.visibilityDecision === 'Hidden').length}
             </p>
           </div>
+        </div>
+      </div>
+
+      {/* 4.5 YOUTUBE INTEGRATION & REVIEW WORKSPACE */}
+      <div className="bg-white dark:bg-gray-900 p-5 rounded-2xl border border-gray-200/80 dark:border-gray-800 space-y-5 shadow-xs" id="youtube-integration-section">
+        {/* SECTION HEADER */}
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-gray-100 dark:border-gray-800 pb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-red-50 dark:bg-red-950/40 text-red-600 rounded-xl">
+              <Tv className="w-6 h-6" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-black text-gray-950 dark:text-white">
+                  {tText('استيراد ومراجعة فيديوهات يوتيوب', 'YouTube Channel Ingestion & Review')}
+                </h2>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+                  {tText('قناة الوعد بالكوكب', 'Promise of Planet Channel')}
+                </span>
+              </div>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                {tText(
+                  'جلب الفيديوهات يدويًا من القناة الرسمية ومراجعة مسوداتها وتدقيق تصنيفاتها البيئية قبل الاعتماد.',
+                  'Manually fetch uploads from the official channel, audit editorial drafts, and curate canonical categories.'
+                )}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                loadYouTubeConfig();
+                loadYouTubeCandidates();
+              }}
+              disabled={isLoadingCandidates}
+              className="px-3 py-1.5 text-xs font-bold text-gray-600 dark:text-gray-400 hover:text-emerald-600 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title={tText('تحديث المرشحين', 'Refresh Candidates')}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingCandidates ? 'animate-spin' : ''}`} />
+              <span>{tText('تحديث', 'Refresh')}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* HONEST OPERATIONAL STATUS & ARCHITECTURAL DISCLOSURE */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs" id="youtube-operational-status-grid">
+          <div className="p-3 bg-gray-50 dark:bg-gray-950 rounded-xl border border-gray-200/70 dark:border-gray-800">
+            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">
+              {tText('حالة التهيئة', 'Configuration')}
+            </span>
+            <span className="font-extrabold text-gray-900 dark:text-white mt-1 block">
+              {ytConfig?.channelId
+                ? tText('مهيأ (قناة معرفة)', 'Configured')
+                : tText('غير مهيأ', 'Not Configured')}
+            </span>
+          </div>
+
+          <div className="p-3 bg-gray-50 dark:bg-gray-950 rounded-xl border border-gray-200/70 dark:border-gray-800">
+            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">
+              {tText('حالة التكامل', 'Integration Status')}
+            </span>
+            <span className={`font-extrabold mt-1 block ${ytConfig?.enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-500'}`}>
+              {ytConfig?.enabled ? tText('مفعل تحريريًا', 'Enabled') : tText('معطل', 'Disabled')}
+            </span>
+          </div>
+
+          <div className="p-3 bg-gray-50 dark:bg-gray-950 rounded-xl border border-gray-200/70 dark:border-gray-800">
+            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">
+              {tText('الخادم السحابي', 'Cloud Backend')}
+            </span>
+            <span className={`font-extrabold mt-1 block ${isBackendAvailable ? 'text-emerald-600' : 'text-amber-600'}`}>
+              {isBackendAvailable ? tText('متصل بالخادم', 'Provisioned') : tText('غير متصل حالياً', 'Not Provisioned')}
+            </span>
+          </div>
+
+          <div className="p-3 bg-gray-50 dark:bg-gray-950 rounded-xl border border-gray-200/70 dark:border-gray-800">
+            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block">
+              {tText('جلسة المصادقة', 'Auth Session')}
+            </span>
+            <span className={`font-extrabold mt-1 block ${isAuthenticated ? 'text-emerald-600' : 'text-amber-600'}`}>
+              {isAuthenticated ? tText('مسؤول معتمد', 'Authenticated Admin') : tText('مطلوب تسجيل دخول', 'Login Required')}
+            </span>
+          </div>
+        </div>
+
+        {/* HONEST BACKEND / AUTH NOTICE WHEN NOT LOGGED IN */}
+        {(!isBackendAvailable || !isAuthenticated) && (
+          <div className="p-3.5 bg-amber-50/80 dark:bg-amber-950/20 border border-amber-200/80 dark:border-amber-900/50 rounded-xl text-xs text-amber-900 dark:text-amber-300 flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <div className="space-y-0.5 leading-relaxed">
+              <p className="font-extrabold">
+                {tText('المصادقة وبنية خادم يوتيوب التحتية:', 'YouTube Backend & Authentication Requirement:')}
+              </p>
+              <p className="text-[11px] text-amber-800 dark:text-amber-400">
+                {tText(
+                  'يتطلب جلب الفيديوهات الحية من يوتيوب وتحديث الإعدادات اتصالاً سحابياً معتمداً بدوال Firebase ومفتاح YOUTUBE_API_KEY السحابي الآمن وجلسة مسؤول نشطة بصلاحية إدارة الإعدادات. تظل بيانات الوسائط التوضيحية تعمل محلياً بشكل مستقل.',
+                  'Live YouTube synchronization and config updates require Firebase Functions backend connectivity, the secure server YOUTUBE_API_KEY secret, and an authenticated Admin session with ManageSettings permission. Session-based media remains functional independently.'
+                )}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* CONFIGURATION & MANUAL SYNC CONTROLS */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+          {/* CONFIGURATION PANEL (6 Cols) */}
+          <div className="lg:col-span-6 bg-gray-50 dark:bg-gray-950/60 p-4 rounded-xl border border-gray-200/70 dark:border-gray-800 space-y-3">
+            <div className="flex items-center gap-2 text-xs font-bold text-gray-700 dark:text-gray-300">
+              <Settings2 className="w-4 h-4 text-gray-500" />
+              <span>{tText('إعدادات قناة يوتيوب (صلاحية إدارة الإعدادات)', 'YouTube Channel Configuration (ManageSettings)')}</span>
+            </div>
+
+            <form onSubmit={handleSaveYouTubeConfig} className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold text-gray-600 dark:text-gray-400 mb-1">
+                  {tText('معرف القناة الرسمي (Channel ID)', 'Official Channel ID')}
+                </label>
+                <input
+                  type="text"
+                  value={ytChannelId}
+                  onChange={e => setYtChannelId(e.target.value)}
+                  disabled={!canManageSettings || isSavingYtConfig}
+                  placeholder="UC..."
+                  className="w-full px-3 py-1.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg text-xs font-mono disabled:opacity-60 focus:outline-hidden focus:border-emerald-600"
+                  id="yt-channel-id-input"
+                />
+              </div>
+
+              <div className="flex items-center justify-between pt-1">
+                <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={ytEnabled}
+                    onChange={e => setYtEnabled(e.target.checked)}
+                    disabled={!canManageSettings || isSavingYtConfig}
+                    className="rounded-md text-emerald-600 focus:ring-emerald-500 h-4 w-4 disabled:opacity-50"
+                  />
+                  <span>{tText('تفعيل تكامل يوتيوب', 'Enable YouTube Integration')}</span>
+                </label>
+
+                {canManageSettings ? (
+                  <button
+                    type="submit"
+                    disabled={isSavingYtConfig || !ytChannelId.trim()}
+                    className="px-3.5 py-1.5 bg-gray-900 hover:bg-black dark:bg-gray-800 dark:hover:bg-gray-700 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                    id="save-yt-config-btn"
+                  >
+                    {isSavingYtConfig ? tText('جاري الحفظ...', 'Saving...') : tText('حفظ الإعدادات', 'Save Settings')}
+                  </button>
+                ) : (
+                  <span className="text-[10px] text-gray-400 font-bold flex items-center gap-1">
+                    <Lock className="w-3 h-3" />
+                    <span>{tText('يتطلب صلاحية إدارة الإعدادات', 'Requires ManageSettings')}</span>
+                  </span>
+                )}
+              </div>
+            </form>
+          </div>
+
+          {/* MANUAL SYNC TRIGGER & RESULTS (6 Cols) */}
+          <div className="lg:col-span-6 bg-gray-50 dark:bg-gray-950/60 p-4 rounded-xl border border-gray-200/70 dark:border-gray-800 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-bold text-gray-700 dark:text-gray-300">
+                <DownloadCloud className="w-4 h-4 text-emerald-600" />
+                <span>{tText('الجلب والمزامنة اليدوية', 'Manual Synchronization')}</span>
+              </div>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+                {tText('يدوي فقط - لا يوجد جلب آلي', 'Manual Only - No Auto-Sync')}
+              </span>
+            </div>
+
+            <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed">
+              {tText(
+                'استدعاء دالة syncYouTubeUploads المشفرة لجلب أحدث 25 فيديو من قائمة التشغيل وتخزينها كمرشحين للمراجعة.',
+                'Invokes secure syncYouTubeUploads callable to fetch the latest 25 uploads and register them as PendingReview candidates.'
+              )}
+            </p>
+
+            <div className="pt-1 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => handleManualSync()}
+                disabled={syncState === 'Requesting' || !canManageSettings}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black flex items-center gap-2 transition-colors cursor-pointer shadow-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                id="fetch-youtube-btn"
+              >
+                {syncState === 'Requesting' ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>{tText('جاري الجلب من يوتيوب...', 'Fetching from YouTube...')}</span>
+                  </>
+                ) : (
+                  <>
+                    <DownloadCloud className="w-3.5 h-3.5" />
+                    <span>{tText('جلب الفيديوهات من يوتيوب', 'Fetch from YouTube')}</span>
+                  </>
+                )}
+              </button>
+
+              {syncResult?.nextPageToken && (
+                <button
+                  type="button"
+                  onClick={() => handleManualSync(syncResult.nextPageToken)}
+                  disabled={syncState === 'Requesting' || !canManageSettings}
+                  className="px-3.5 py-2 bg-gray-200 hover:bg-gray-300 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-800 dark:text-gray-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  id="load-more-youtube-btn"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>{tText('تحميل المزيد من يوتيوب', 'Load more from YouTube')}</span>
+                </button>
+              )}
+            </div>
+
+            {/* SYNC ERROR BANNER */}
+            {syncError && (
+              <div className="p-2.5 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/60 rounded-lg text-xs text-rose-800 dark:text-rose-400 flex items-center gap-2 font-bold animate-fadeIn">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{syncError}</span>
+              </div>
+            )}
+
+            {/* COMPACT SYNC RESULT METRICS */}
+            {syncResult && (
+              <div className="p-3 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 text-xs space-y-1.5 animate-fadeIn">
+                <div className="flex items-center justify-between font-bold text-emerald-700 dark:text-emerald-400">
+                  <span className="flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>{tText('نتائج الجلب الأخير:', 'Last Fetch Results:')}</span>
+                  </span>
+                  <span className="text-[10px] text-gray-400">{tText('جلسة حالية', 'Current Session')}</span>
+                </div>
+                <div className="grid grid-cols-5 gap-1.5 text-center pt-1 font-mono text-[11px]">
+                  <div className="p-1 bg-gray-50 dark:bg-gray-800/50 rounded">
+                    <span className="text-gray-400 block text-[9px]">{tText('تم جلب', 'Fetched')}</span>
+                    <span className="font-black text-gray-900 dark:text-white">{syncResult.fetched}</span>
+                  </div>
+                  <div className="p-1 bg-emerald-50 dark:bg-emerald-950/40 rounded text-emerald-600">
+                    <span className="text-gray-400 block text-[9px]">{tText('جديد', 'Created')}</span>
+                    <span className="font-black">{syncResult.created}</span>
+                  </div>
+                  <div className="p-1 bg-blue-50 dark:bg-blue-950/40 rounded text-blue-600">
+                    <span className="text-gray-400 block text-[9px]">{tText('محدّث', 'Updated')}</span>
+                    <span className="font-black">{syncResult.updated}</span>
+                  </div>
+                  <div className="p-1 bg-gray-50 dark:bg-gray-800/50 rounded text-gray-600 dark:text-gray-300">
+                    <span className="text-gray-400 block text-[9px]">{tText('لم يتغير', 'Unchanged')}</span>
+                    <span className="font-black">{syncResult.unchanged}</span>
+                  </div>
+                  <div className="p-1 bg-gray-50 dark:bg-gray-800/50 rounded text-gray-400">
+                    <span className="text-gray-400 block text-[9px]">{tText('تم تخطي', 'Skipped')}</span>
+                    <span className="font-black">{syncResult.skippedTerminal}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 3. PENDING REVIEW CANDIDATE LIST */}
+        <div className="pt-2">
+          <div className="flex items-center justify-between pb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">
+                {tText(`مرشحون بانتظار المراجعة (${candidates.length})`, `Pending Review Candidates (${candidates.length})`)}
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-400">
+                PendingReview
+              </span>
+            </div>
+            <span className="text-[11px] text-gray-400">
+              {tText('يتطلب صلاحية المراجعة والتعديل للتدقيق', 'Requires Review & Edit permissions to audit')}
+            </span>
+          </div>
+
+          {candidates.length === 0 ? (
+            <div className="p-8 text-center bg-gray-50/50 dark:bg-gray-950/40 rounded-xl border border-dashed border-gray-200 dark:border-gray-800 text-gray-400">
+              <Tv className="w-10 h-10 mx-auto mb-2 opacity-30 text-gray-400" />
+              <p className="text-xs font-bold text-gray-600 dark:text-gray-300">
+                {tText('لا توجد فيديوهات بانتظار المراجعة حاليًا', 'No candidates pending review currently')}
+              </p>
+              <p className="text-[11px] text-gray-400 mt-1">
+                {tText(
+                  'انقر على «جلب الفيديوهات من يوتيوب» لاستيراد أحدث المواد وفحص مسوداتها وتصنيفها بيئيًا.',
+                  'Click «Fetch from YouTube» to fetch uploads, inspect drafts, and classify canonical categories.'
+                )}
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* DESKTOP VIEW (>=1280px) DENSE TABLE */}
+              <div className="hidden xl:block overflow-x-auto border border-gray-200/80 dark:border-gray-800 rounded-xl">
+                <table className="w-full text-start text-xs font-semibold text-gray-700 dark:text-gray-300">
+                  <thead className="bg-gray-100/60 dark:bg-gray-800/40 text-gray-500 text-[10px] uppercase tracking-wider text-start">
+                    <tr>
+                      <th className="px-4 py-3 text-start">{tText('المادة المستوردة (يوتيوب)', 'Source Video (YouTube)')}</th>
+                      <th className="px-4 py-3 text-start">{tText('تاريخ النشر', 'Published Date')}</th>
+                      <th className="px-4 py-3 text-start">{tText('العنوان التحريري', 'Editorial Title')}</th>
+                      <th className="px-4 py-3 text-start">{tText('التصنيف البيئي', 'Category Status')}</th>
+                      <th className="px-3 py-3 text-center">{tText('الإصدار', 'Version')}</th>
+                      <th className="px-4 py-3 text-center">{tText('الإجراء', 'Action')}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                    {candidates.map(candidate => {
+                      const hasCategory = !!candidate.editorialDraft.category;
+                      return (
+                        <tr
+                          key={candidate.id}
+                          className="hover:bg-gray-50/70 dark:hover:bg-gray-850/40 transition-colors"
+                        >
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-3">
+                              <div className="h-10 w-16 bg-gray-100 dark:bg-gray-850 rounded-lg overflow-hidden border border-gray-200/50 dark:border-gray-800 shrink-0">
+                                {candidate.sourceSnapshot.sourceThumbnailUrl ? (
+                                  <img
+                                    src={candidate.sourceSnapshot.sourceThumbnailUrl}
+                                    alt=""
+                                    referrerPolicy="no-referrer"
+                                    className="h-full w-full object-cover"
+                                  />
+                                ) : (
+                                  <div className="h-full w-full flex items-center justify-center text-gray-400">
+                                    <Tv className="w-4 h-4" />
+                                  </div>
+                                )}
+                              </div>
+                              <div className="min-w-0">
+                                <h4 className="font-bold text-gray-900 dark:text-white truncate max-w-[220px]">
+                                  {candidate.sourceSnapshot.sourceTitle}
+                                </h4>
+                                <p className="text-[10px] font-mono text-gray-400 dark:text-gray-500 truncate max-w-[220px] mt-0.5">
+                                  {candidate.externalVideoId}
+                                </p>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-gray-500 dark:text-gray-400 text-[11px] whitespace-nowrap">
+                            {new Date(candidate.sourceSnapshot.youtubePublishedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', {
+                              dateStyle: 'medium',
+                            })}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="font-bold text-gray-800 dark:text-gray-200 truncate max-w-[200px] block">
+                              {candidate.editorialDraft.titleAr || tText('مسودة غير معنونة', 'Untitled Draft')}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            {hasCategory ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-bold bg-emerald-100 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-400">
+                                <CheckCircle2 className="w-3 h-3" />
+                                <span>{candidate.editorialDraft.category}</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-bold bg-amber-100 dark:bg-amber-950/40 text-amber-800 dark:text-amber-400">
+                                <AlertTriangle className="w-3 h-3" />
+                                <span>{tText('غير محدد', 'Unset')}</span>
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-3 text-center">
+                            <span className="font-mono text-[11px] font-bold text-gray-500">
+                              v{candidate.candidateVersion}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedCandidate(candidate);
+                                setIsCandidateModalOpen(true);
+                              }}
+                              className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:hover:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                              id={`inspect-candidate-btn-${candidate.id}`}
+                            >
+                              {tText('فحص ومراجعة', 'Inspect & Review')}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* MOBILE / TABLET VIEW (<1280px) COMPACT TOUCH CARDS */}
+              <div className="xl:hidden grid grid-cols-1 sm:grid-cols-2 gap-3" id="mobile-candidates-grid">
+                {candidates.map(candidate => {
+                  const hasCategory = !!candidate.editorialDraft.category;
+                  return (
+                    <div
+                      key={candidate.id}
+                      className="bg-gray-50 dark:bg-gray-950/60 p-3.5 rounded-xl border border-gray-200/70 dark:border-gray-800 space-y-2.5 shadow-2xs"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="h-14 w-20 bg-gray-100 dark:bg-gray-850 rounded-lg overflow-hidden border border-gray-200/50 dark:border-gray-800 shrink-0">
+                          {candidate.sourceSnapshot.sourceThumbnailUrl ? (
+                            <img
+                              src={candidate.sourceSnapshot.sourceThumbnailUrl}
+                              alt=""
+                              referrerPolicy="no-referrer"
+                              className="h-full w-full object-cover"
+                            />
+                          ) : (
+                            <div className="h-full w-full flex items-center justify-center text-gray-400">
+                              <Tv className="w-5 h-5" />
+                            </div>
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-[10px] font-mono text-gray-400">v{candidate.candidateVersion}</span>
+                            {hasCategory ? (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-md font-bold bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400">
+                                {candidate.editorialDraft.category}
+                              </span>
+                            ) : (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-md font-bold bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400">
+                                {tText('تصنيف غير محدد', 'Unset')}
+                              </span>
+                            )}
+                          </div>
+                          <h4 className="font-bold text-xs text-gray-900 dark:text-white line-clamp-2 mt-1">
+                            {candidate.sourceSnapshot.sourceTitle}
+                          </h4>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-1 border-t border-gray-200/60 dark:border-gray-800 text-[11px]">
+                        <span className="text-gray-400">
+                          {new Date(candidate.sourceSnapshot.youtubePublishedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', {
+                            dateStyle: 'short',
+                          })}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedCandidate(candidate);
+                            setIsCandidateModalOpen(true);
+                          }}
+                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold cursor-pointer transition-colors"
+                        >
+                          {tText('فحص ومراجعة', 'Inspect & Review')}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -1411,6 +1991,23 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
             </form>
           </div>
         </div>
+      )}
+
+      {/* YOUTUBE CANDIDATE REVIEW MODAL */}
+      {isCandidateModalOpen && selectedCandidate && (
+        <YouTubeCandidateReviewModal
+          candidate={selectedCandidate}
+          isOpen={isCandidateModalOpen}
+          onClose={() => {
+            setIsCandidateModalOpen(false);
+            setSelectedCandidate(null);
+          }}
+          onSaveDraft={handleSaveCandidateDraft}
+          onReject={handleRejectCandidate}
+          hasPermission={(perm) => AdminAccessService.hasPermission(currentUser, perm)}
+          isBackendAvailable={isBackendAvailable}
+          isAuthenticated={isAuthenticated}
+        />
       )}
 
     </div>

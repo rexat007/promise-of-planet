@@ -1,6 +1,6 @@
 import { getFirestore } from 'firebase-admin/firestore';
 import type { YouTubeRepository } from './youtubeRepository';
-import type { YouTubeIntegrationConfig, YouTubeImportCandidate } from '../types/youtube';
+import type { YouTubeIntegrationConfig, YouTubeImportCandidate, CandidateLifecycleStatus } from '../types/youtube';
 
 export class FirestoreYouTubeRepository implements YouTubeRepository {
   public static readonly COLLECTIONS = ['youtubeIntegration', 'youtubeImportCandidates'] as const;
@@ -30,4 +30,14 @@ export class FirestoreYouTubeRepository implements YouTubeRepository {
     await this.db.collection('youtubeImportCandidates').doc(candidate.id).set(candidate);
     return candidate;
   }
+
+  async listCandidates(filter?: { status?: CandidateLifecycleStatus }): Promise<YouTubeImportCandidate[]> {
+    let query: FirebaseFirestore.Query = this.db.collection('youtubeImportCandidates');
+    if (filter?.status) {
+      query = query.where('status', '==', filter.status);
+    }
+    const snapshot = await query.get();
+    return snapshot.docs.map(doc => doc.data() as YouTubeImportCandidate);
+  }
 }
+
