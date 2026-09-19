@@ -8,6 +8,8 @@ import {
   type RelationType,
   type Placement,
   isCanonicalCategory,
+  isCanonicalRightsStatus,
+  isCanonicalVisibilityDecision,
 } from '../types/media';
 
 export interface RegisterMediaInput {
@@ -64,6 +66,10 @@ export class MediaApplicationService {
     return this.mediaRepo.getVideoById(id.trim());
   }
 
+  /**
+   * Resolves a canonical Media record by provider and external ID.
+   * YouTube is the single canonical provider supported by the canonical Video schema.
+   */
   async getByYoutubeId(provider: string, externalVideoId: string): Promise<Video | null> {
     if (provider !== 'YouTube') {
       return null;
@@ -74,6 +80,11 @@ export class MediaApplicationService {
     return this.mediaRepo.getVideoByYoutubeId(externalVideoId.trim());
   }
 
+  /**
+   * Registers a new canonical Media document atomically.
+   * Uses repository createVideo with create-if-absent / transactional semantics
+   * to guarantee that concurrent registrations for the same deterministic ID cannot overwrite existing media.
+   */
   async register(input: RegisterMediaInput): Promise<Video> {
     // 1. Enforce canonical provider and external identity
     if (!input.youtubeSource || !input.youtubeSource.youtubeVideoId || input.youtubeSource.youtubeVideoId.trim() === '') {
@@ -82,18 +93,28 @@ export class MediaApplicationService {
 
     const externalVideoId = input.youtubeSource.youtubeVideoId.trim();
 
-    // 2. Prevent duplicate provider + externalVideoId
+    // 2. Prevent duplicate provider + externalVideoId before persistence
     const existing = await this.mediaRepo.getVideoByYoutubeId(externalVideoId);
     if (existing) {
       throw new Error(`DUPLICATE_MEDIA: Video with YouTube ID ${externalVideoId} is already registered`);
     }
 
-    // 3. Category validation
+    // 3. Category validation using canonical validator
     if (!input.category || !isCanonicalCategory(input.category)) {
       throw new Error(`INVALID_CATEGORY: Category must be one of the canonical categories`);
     }
 
-    // 4. Require essential localized text
+    // 4. RightsStatus validation if provided
+    if (input.rightsStatus !== undefined && !isCanonicalRightsStatus(input.rightsStatus)) {
+      throw new Error(`INVALID_RIGHTS_STATUS: Invalid rights status: ${input.rightsStatus}`);
+    }
+
+    // 5. VisibilityDecision validation if provided
+    if (input.visibilityDecision !== undefined && !isCanonicalVisibilityDecision(input.visibilityDecision)) {
+      throw new Error(`INVALID_VISIBILITY_DECISION: Invalid visibility decision: ${input.visibilityDecision}`);
+    }
+
+    // 6. Require essential localized text
     if (!input.titleAr || input.titleAr.trim() === '') {
       throw new Error('VALIDATION_ERROR: titleAr is required');
     }
@@ -140,7 +161,8 @@ export class MediaApplicationService {
       updatedAt: now,
     };
 
-    return this.mediaRepo.saveVideo(newVideo);
+    // Atomic create: repository rejects if document already exists
+    return this.mediaRepo.createVideo(newVideo);
   }
 
   async updateMetadata(id: string, updates: UpdateMediaMetadataInput): Promise<Video> {
@@ -162,12 +184,11 @@ export class MediaApplicationService {
       updatedAt: new Date().toISOString(),
     };
 
-    return this.mediaRepo.saveVideo(updatedVideo);
+    return this.mediaRepo.updateVideo(updatedVideo);
   }
 
   async updateRightsStatus(id: string, rightsStatus: RightsStatus, notes?: string): Promise<Video> {
-    const validStatuses: RightsStatus[] = ['NotStarted', 'InReview', 'Cleared', 'NeedsChanges', 'Rejected'];
-    if (!validStatuses.includes(rightsStatus)) {
+    if (!isCanonicalRightsStatus(rightsStatus)) {
       throw new Error(`INVALID_RIGHTS_STATUS: Invalid rights status: ${rightsStatus}`);
     }
 
@@ -183,12 +204,11 @@ export class MediaApplicationService {
       updatedAt: new Date().toISOString(),
     };
 
-    return this.mediaRepo.saveVideo(updatedVideo);
+    return this.mediaRepo.updateVideo(updatedVideo);
   }
 
   async updateVisibilityDecision(id: string, visibilityDecision: VisibilityDecision): Promise<Video> {
-    const validDecisions: VisibilityDecision[] = ['Hidden', 'MediaHubOnly', 'NewsEligible', 'Featured'];
-    if (!validDecisions.includes(visibilityDecision)) {
+    if (!isCanonicalVisibilityDecision(visibilityDecision)) {
       throw new Error(`INVALID_VISIBILITY_DECISION: Invalid visibility decision: ${visibilityDecision}`);
     }
 
@@ -203,7 +223,7 @@ export class MediaApplicationService {
       updatedAt: new Date().toISOString(),
     };
 
-    return this.mediaRepo.saveVideo(updatedVideo);
+    return this.mediaRepo.updateVideo(updatedVideo);
   }
 
   async linkVideoToContent(
@@ -257,7 +277,9 @@ export class MediaApplicationService {
     const videos: Video[] = [];
     for (const rel of relations) {
       const v = await this.getById(rel.videoId);
-      if (v) videos.push(v);
+      if (v) {
+        videos.push(v);
+      }
     }
     return videos;
   }

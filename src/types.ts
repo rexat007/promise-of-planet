@@ -40,12 +40,19 @@ export type ApprovalStatus =
 /**
  * Intellectual property and media rights status.
  */
-export type RightsStatus =
-  | 'NotStarted'
-  | 'InReview'
-  | 'Cleared'
-  | 'NeedsChanges'
-  | 'Rejected';
+export const CANONICAL_RIGHTS_STATUSES = [
+  'NotStarted',
+  'InReview',
+  'Cleared',
+  'NeedsChanges',
+  'Rejected',
+] as const;
+
+export type RightsStatus = (typeof CANONICAL_RIGHTS_STATUSES)[number];
+
+export function isCanonicalRightsStatus(value: unknown): value is RightsStatus {
+  return typeof value === 'string' && (CANONICAL_RIGHTS_STATUSES as readonly string[]).includes(value);
+}
 
 /**
  * Physical availability of the video on YouTube source platform.
@@ -76,11 +83,18 @@ export type TranslationStatus =
 /**
  * Editorial visibility scope decisions for videos.
  */
-export type VisibilityDecision =
-  | 'Hidden'
-  | 'MediaHubOnly'
-  | 'NewsEligible'
-  | 'Featured';
+export const CANONICAL_VISIBILITY_DECISIONS = [
+  'Hidden',
+  'MediaHubOnly',
+  'NewsEligible',
+  'Featured',
+] as const;
+
+export type VisibilityDecision = (typeof CANONICAL_VISIBILITY_DECISIONS)[number];
+
+export function isCanonicalVisibilityDecision(value: unknown): value is VisibilityDecision {
+  return typeof value === 'string' && (CANONICAL_VISIBILITY_DECISIONS as readonly string[]).includes(value);
+}
 
 /**
  * Approved core environmental categories for Promise of Planet.

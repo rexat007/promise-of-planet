@@ -40,9 +40,47 @@ export class FirestoreMediaRepository implements MediaRepository {
     return this.deserializeVideo(doc.data());
   }
 
-  async saveVideo(video: Video): Promise<Video> {
+  /**
+   * Atomically creates a new canonical Media document using Firestore transaction / create-if-absent.
+   * If a document with the deterministic ID already exists, fails deterministically with DUPLICATE_MEDIA.
+   */
+  async createVideo(video: Video): Promise<Video> {
+    const docRef = this.db.collection(FirestoreMediaRepository.COLLECTION).doc(video.id);
     const cleanVideo = this.serializeVideo(video);
-    await this.db.collection(FirestoreMediaRepository.COLLECTION).doc(video.id).set(cleanVideo);
+
+    await this.db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(docRef);
+      if (snapshot.exists) {
+        throw new Error(`DUPLICATE_MEDIA: Video with ID ${video.id} already exists`);
+      }
+      transaction.set(docRef, cleanVideo);
+    });
+
+    return video;
+  }
+
+  /**
+   * Updates an existing canonical Media document.
+   * Fails if the document does not exist, guaranteeing separation of create vs update.
+   */
+  async updateVideo(video: Video): Promise<Video> {
+    const docRef = this.db.collection(FirestoreMediaRepository.COLLECTION).doc(video.id);
+    const cleanVideo = this.serializeVideo(video);
+
+    await this.db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(docRef);
+      if (!snapshot.exists) {
+        throw new Error(`NOT_FOUND: Video with ID ${video.id} not found`);
+      }
+      // Preserve existing relations if present on document
+      const existingData = snapshot.data();
+      const existingRelations = existingData?._relations;
+      if (existingRelations !== undefined) {
+        cleanVideo._relations = existingRelations;
+      }
+      transaction.set(docRef, cleanVideo);
+    });
+
     return video;
   }
 
