@@ -423,80 +423,144 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-right rtl:text-right ltr:text-left text-xs sm:text-sm">
-              <thead className="bg-gray-50/80 dark:bg-gray-950/80 text-gray-500 dark:text-gray-400 font-extrabold uppercase border-b border-gray-100 dark:border-gray-800">
-                <tr>
-                  <th className="p-3.5 sm:p-4">{isAr ? 'عنوان الوثيقة البيئية' : 'Document Title'}</th>
-                  <th className="p-3.5 sm:p-4">{isAr ? 'النوع والمؤسسة' : 'Type & Entity'}</th>
-                  <th className="p-3.5 sm:p-4">{isAr ? 'الوضع الحقوقي' : 'Rights Status'}</th>
-                  <th className="p-3.5 sm:p-4">{isAr ? 'حالة التحرير' : 'Editorial Workflow'}</th>
-                  <th className="p-3.5 sm:p-4 text-center">{isAr ? 'الإجراءات' : 'Actions'}</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-800/60 font-medium text-gray-800 dark:text-gray-200">
-                {filteredDocuments.map((doc) => (
-                  <tr key={doc.id} className="hover:bg-gray-50/60 dark:hover:bg-gray-800/40 transition-colors">
-                    {/* Title & Metadata */}
-                    <td className="p-3.5 sm:p-4 max-w-xs sm:max-w-md">
-                      <div className="space-y-1">
-                        <p className="font-extrabold text-gray-900 dark:text-gray-100 text-xs sm:text-sm leading-snug">
-                          {isAr ? doc.titleAr : doc.titleEn}
-                        </p>
-                        <p className="text-[11px] text-gray-500 dark:text-gray-400 line-clamp-1">
-                          {isAr ? doc.summaryAr : doc.summaryEn}
-                        </p>
-                        <div className="flex flex-wrap gap-1.5 pt-1 text-[10px]">
-                          <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-semibold">
-                            📍 {isAr ? doc.geographyAr : doc.geographyEn}
-                          </span>
-                          <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-semibold">
-                            🗓️ {doc.publicationDate}
-                          </span>
-                        </div>
-                      </div>
-                    </td>
+          <>
+            {/* Compact Cards List (< 1024px) */}
+            <div className="block lg:hidden divide-y divide-gray-100 dark:divide-gray-800 w-full max-w-full min-w-0">
+              {filteredDocuments.map((doc) => (
+                <div key={doc.id} className="p-4 sm:p-5 space-y-3 hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors w-full max-w-full min-w-0">
+                  {/* Document Identity */}
+                  <div className="space-y-1.5">
+                    <h4 className="font-extrabold text-gray-900 dark:text-gray-100 text-sm leading-snug">
+                      {isAr ? doc.titleAr : doc.titleEn}
+                    </h4>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
+                      {isAr ? doc.summaryAr : doc.summaryEn}
+                    </p>
+                    <div className="flex flex-wrap gap-1.5 pt-1 text-[10px]">
+                      <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-semibold">
+                        📍 {isAr ? doc.geographyAr : doc.geographyEn}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-semibold">
+                        🗓️ {doc.publicationDate}
+                      </span>
+                    </div>
+                  </div>
 
-                    {/* Type & Entity */}
-                    <td className="p-3.5 sm:p-4 whitespace-nowrap">
-                      <div className="space-y-1">
-                        <span className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 inline-block">
-                          {doc.documentType}
-                        </span>
-                        <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 truncate max-w-[160px]">
-                          {getOrganizationName(doc.organizationId)}
-                        </p>
-                      </div>
-                    </td>
+                  {/* Type & Entity */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <span className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                      {doc.documentType}
+                    </span>
+                    <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                      🏛️ {getOrganizationName(doc.organizationId)}
+                    </span>
+                  </div>
 
-                    {/* Rights Status */}
-                    <td className="p-3.5 sm:p-4 whitespace-nowrap">
+                  {/* Rights & Workflow Status */}
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <div>
+                      <span className="text-[10px] font-bold text-gray-400 block mb-0.5">{isAr ? 'الوضع الحقوقي' : 'Rights Status'}</span>
                       {getRightsBadge(doc.rightsStatus)}
-                    </td>
-
-                    {/* Editorial Workflow State */}
-                    <td className="p-3.5 sm:p-4 whitespace-nowrap">
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-gray-400 block mb-0.5">{isAr ? 'حالة التحرير' : 'Editorial Workflow'}</span>
                       {getWorkflowBadge(doc.workflowState)}
-                    </td>
+                    </div>
+                  </div>
 
-                    {/* Actions */}
-                    <td className="p-3.5 sm:p-4 whitespace-nowrap text-center">
-                      <button
-                        onClick={() => {
-                          setActiveModalDoc(doc);
-                          setIsModalOpen(true);
-                        }}
-                        className="px-3 py-1.5 rounded-xl bg-gray-100 hover:bg-emerald-100 dark:bg-gray-800 dark:hover:bg-emerald-950/60 text-gray-800 dark:text-gray-200 hover:text-emerald-700 dark:hover:text-emerald-300 font-bold text-xs transition-all border border-gray-200 dark:border-gray-700 inline-flex items-center gap-1.5"
-                      >
-                        <Edit3 className="h-3.5 w-3.5" />
-                        <span>{isAr ? 'عرض وتعديل' : 'View / Edit'}</span>
-                      </button>
-                    </td>
+                  {/* Actions */}
+                  <div className="pt-2 flex items-center justify-end">
+                    <button
+                      onClick={() => {
+                        setActiveModalDoc(doc);
+                        setIsModalOpen(true);
+                      }}
+                      className="w-full sm:w-auto px-4 py-2 rounded-xl bg-gray-100 hover:bg-emerald-100 dark:bg-gray-800 dark:hover:bg-emerald-950/60 text-gray-800 dark:text-gray-200 hover:text-emerald-700 dark:hover:text-emerald-300 font-bold text-xs transition-all border border-gray-200 dark:border-gray-700 inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                      <span>{isAr ? 'عرض وتعديل الوثيقة' : 'View / Edit Document'}</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Desktop Table View (>= 1024px) */}
+            <div className="hidden lg:block overflow-x-auto w-full max-w-full min-w-0">
+              <table className="w-full text-right rtl:text-right ltr:text-left text-xs sm:text-sm">
+                <thead className="bg-gray-50/80 dark:bg-gray-950/80 text-gray-500 dark:text-gray-400 font-extrabold uppercase border-b border-gray-100 dark:border-gray-800">
+                  <tr>
+                    <th className="p-3.5 sm:p-4">{isAr ? 'عنوان الوثيقة البيئية' : 'Document Title'}</th>
+                    <th className="p-3.5 sm:p-4">{isAr ? 'النوع والمؤسسة' : 'Type & Entity'}</th>
+                    <th className="p-3.5 sm:p-4">{isAr ? 'الوضع الحقوقي' : 'Rights Status'}</th>
+                    <th className="p-3.5 sm:p-4">{isAr ? 'حالة التحرير' : 'Editorial Workflow'}</th>
+                    <th className="p-3.5 sm:p-4 text-center">{isAr ? 'الإجراءات' : 'Actions'}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-800/60 font-medium text-gray-800 dark:text-gray-200">
+                  {filteredDocuments.map((doc) => (
+                    <tr key={doc.id} className="hover:bg-gray-50/60 dark:hover:bg-gray-800/40 transition-colors">
+                      {/* Title & Metadata */}
+                      <td className="p-3.5 sm:p-4 max-w-xs sm:max-w-md">
+                        <div className="space-y-1">
+                          <p className="font-extrabold text-gray-900 dark:text-gray-100 text-xs sm:text-sm leading-snug">
+                            {isAr ? doc.titleAr : doc.titleEn}
+                          </p>
+                          <p className="text-[11px] text-gray-500 dark:text-gray-400 line-clamp-1">
+                            {isAr ? doc.summaryAr : doc.summaryEn}
+                          </p>
+                          <div className="flex flex-wrap gap-1.5 pt-1 text-[10px]">
+                            <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-semibold">
+                              📍 {isAr ? doc.geographyAr : doc.geographyEn}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-semibold">
+                              🗓️ {doc.publicationDate}
+                            </span>
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Type & Entity */}
+                      <td className="p-3.5 sm:p-4 whitespace-nowrap">
+                        <div className="space-y-1">
+                          <span className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 inline-block">
+                            {doc.documentType}
+                          </span>
+                          <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 truncate max-w-[160px]">
+                            {getOrganizationName(doc.organizationId)}
+                          </p>
+                        </div>
+                      </td>
+
+                      {/* Rights Status */}
+                      <td className="p-3.5 sm:p-4 whitespace-nowrap">
+                        {getRightsBadge(doc.rightsStatus)}
+                      </td>
+
+                      {/* Editorial Workflow State */}
+                      <td className="p-3.5 sm:p-4 whitespace-nowrap">
+                        {getWorkflowBadge(doc.workflowState)}
+                      </td>
+
+                      {/* Actions */}
+                      <td className="p-3.5 sm:p-4 whitespace-nowrap text-center">
+                        <button
+                          onClick={() => {
+                            setActiveModalDoc(doc);
+                            setIsModalOpen(true);
+                          }}
+                          className="px-3 py-1.5 rounded-xl bg-gray-100 hover:bg-emerald-100 dark:bg-gray-800 dark:hover:bg-emerald-950/60 text-gray-800 dark:text-gray-200 hover:text-emerald-700 dark:hover:text-emerald-300 font-bold text-xs transition-all border border-gray-200 dark:border-gray-700 inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Edit3 className="h-3.5 w-3.5" />
+                          <span>{isAr ? 'عرض وتعديل' : 'View / Edit'}</span>
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
 
