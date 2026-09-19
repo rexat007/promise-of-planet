@@ -1,6 +1,6 @@
 import { getFirestore } from 'firebase-admin/firestore';
 import type { AdminRepository } from './adminRepository';
-import type { AdminUser, AdminRole } from '../types/admin';
+import { isValidAdminRole, type AdminUser } from '../types/admin';
 
 export class FirestoreAdminRepository implements AdminRepository {
   private db = getFirestore();
@@ -23,13 +23,17 @@ export class FirestoreAdminRepository implements AdminRepository {
         return null;
       }
 
+      if (!isValidAdminRole(data.role)) {
+        console.error(`Invalid or non-canonical AdminRole (${data.role}) encountered for UID (${uid}). Failing closed.`);
+        return null;
+      }
+
       return {
         id: snapshot.id,
         name: data.name || '',
         email: data.email || '',
-        role: (data.role as AdminRole) || 'Viewer',
+        role: data.role,
         isActive: Boolean(data.isActive),
-        firebaseUid: snapshot.id,
       };
     } catch (e: any) {
       console.error(`Error resolving AdminUser by UID (${uid}):`, e?.message || e);
@@ -38,26 +42,32 @@ export class FirestoreAdminRepository implements AdminRepository {
   }
 
   public async saveAdmin(admin: AdminUser): Promise<AdminUser> {
-    const targetUid = admin.firebaseUid || admin.id;
-    if (!targetUid || targetUid.trim() === '') {
-      throw new Error('Cannot save AdminUser: UID is missing');
+    if (!admin.id || admin.id.trim() === '') {
+      throw new Error('Cannot save AdminUser: admin.id (UID) is missing');
     }
 
-    const docRef = this.db.collection('admins').doc(targetUid.trim());
+    if (!isValidAdminRole(admin.role)) {
+      throw new Error(`Cannot save AdminUser: invalid AdminRole '${admin.role}'`);
+    }
+
+    const targetUid = admin.id.trim();
+    const docRef = this.db.collection('admins').doc(targetUid);
     const payload = {
       name: admin.name,
       email: admin.email,
       role: admin.role,
-      isActive: admin.isActive,
+      isActive: Boolean(admin.isActive),
       updatedAt: new Date().toISOString(),
     };
 
     await docRef.set(payload, { merge: true });
 
     return {
-      ...admin,
       id: targetUid,
-      firebaseUid: targetUid,
+      name: admin.name,
+      email: admin.email,
+      role: admin.role,
+      isActive: Boolean(admin.isActive),
     };
   }
 }

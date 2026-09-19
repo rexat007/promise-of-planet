@@ -1,5 +1,5 @@
 import type { AdminRepository } from './adminRepository';
-import type { AdminUser } from '../types/admin';
+import { isValidAdminRole, type AdminUser } from '../types/admin';
 
 export class InMemoryAdminRepository implements AdminRepository {
   private admins: Map<string, AdminUser> = new Map();
@@ -9,23 +9,39 @@ export class InMemoryAdminRepository implements AdminRepository {
       return null;
     }
     const admin = this.admins.get(uid.trim());
-    return admin ? { ...admin } : null;
+    if (!admin) {
+      return null;
+    }
+    if (!isValidAdminRole(admin.role)) {
+      return null;
+    }
+    return { ...admin };
   }
 
   public async saveAdmin(admin: AdminUser): Promise<AdminUser> {
-    const targetUid = admin.firebaseUid || admin.id;
+    const targetUid = admin.id;
     if (!targetUid || targetUid.trim() === '') {
-      throw new Error('Cannot save AdminUser in memory: missing UID');
+      throw new Error('Cannot save AdminUser in memory: missing admin.id (UID)');
+    }
+
+    if (!isValidAdminRole(admin.role)) {
+      throw new Error(`Cannot save AdminUser in memory: invalid AdminRole '${admin.role}'`);
     }
 
     const record: AdminUser = {
-      ...admin,
-      id: targetUid,
-      firebaseUid: targetUid,
+      id: targetUid.trim(),
+      name: admin.name,
+      email: admin.email,
+      role: admin.role,
+      isActive: Boolean(admin.isActive),
     };
 
-    this.admins.set(targetUid, record);
+    this.admins.set(record.id, record);
     return { ...record };
+  }
+
+  public setRawAdmin(uid: string, raw: any): void {
+    this.admins.set(uid.trim(), raw);
   }
 
   public clear(): void {

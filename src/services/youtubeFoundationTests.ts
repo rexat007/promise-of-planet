@@ -7,7 +7,9 @@ import { youtubeApiKeySecret } from '../../functions/src/youtube/youtubeSecrets'
 import { InMemoryAdminRepository } from '../../functions/src/admin/inMemoryAdminRepository';
 import { executeManualYouTubeSyncRequest } from '../../functions/src/youtube/manualSyncHandler';
 import { MediaService } from './mediaService';
-import { AdminRole, AdminPermission } from '../types/admin';
+import { AdminRole, AdminPermission, AdminRole as FrontendRole, AdminPermission as FrontendPermission } from '../types/admin';
+import { AdminRole as FunctionsRole, AdminPermission as FunctionsPermission } from '../../functions/src/types/admin';
+import * as SharedContract from '../shared/adminContract';
 import { AdminAccessService } from './adminAccess';
 import type { AdminUser } from '../types/admin';
 import type { CandidateSourceSnapshot } from '../types/youtube';
@@ -1096,7 +1098,6 @@ export async function runYoutubeFoundationVerification(): Promise<TestResult[]> 
   // Seed Admin Users
   await mockAdminRepo.saveAdmin({
     id: 'uid-owner',
-    firebaseUid: 'uid-owner',
     name: 'Owner User',
     email: 'owner@promiseofplanet.sd',
     role: AdminRole.Owner,
@@ -1105,7 +1106,6 @@ export async function runYoutubeFoundationVerification(): Promise<TestResult[]> 
 
   await mockAdminRepo.saveAdmin({
     id: 'uid-viewer',
-    firebaseUid: 'uid-viewer',
     name: 'Viewer User',
     email: 'viewer@promiseofplanet.sd',
     role: AdminRole.Viewer,
@@ -1114,7 +1114,6 @@ export async function runYoutubeFoundationVerification(): Promise<TestResult[]> 
 
   await mockAdminRepo.saveAdmin({
     id: 'uid-inactive',
-    firebaseUid: 'uid-inactive',
     name: 'Inactive Owner',
     email: 'inactive@promiseofplanet.sd',
     role: AdminRole.Owner,
@@ -1458,6 +1457,201 @@ export async function runYoutubeFoundationVerification(): Promise<TestResult[]> 
     );
   } catch (e: any) {
     assert('Security Test 45 - No automatic Owner bootstrap', false, e.message);
+  }
+
+  // Remediation Test 46: frontend and server AdminRole use the same canonical source
+  try {
+    const isFEMatch = JSON.stringify(FrontendRole) === JSON.stringify(SharedContract.AdminRole);
+    const isFuncMatch = JSON.stringify(FunctionsRole) === JSON.stringify(SharedContract.AdminRole);
+    assert(
+      'Remediation Test 46 - Frontend and server AdminRole use canonical source',
+      isFEMatch && isFuncMatch,
+      'Both frontend and Functions re-export the exact same AdminRole definitions from shared/adminContract'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 46 - Frontend and server AdminRole use canonical source', false, e.message);
+  }
+
+  // Remediation Test 47: frontend and server AdminPermission use the same canonical source
+  try {
+    const isFEMatch = JSON.stringify(FrontendPermission) === JSON.stringify(SharedContract.AdminPermission);
+    const isFuncMatch = JSON.stringify(FunctionsPermission) === JSON.stringify(SharedContract.AdminPermission);
+    assert(
+      'Remediation Test 47 - Frontend and server AdminPermission use canonical source',
+      isFEMatch && isFuncMatch,
+      'Both frontend and Functions re-export the exact same AdminPermission definitions from shared/adminContract'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 47 - Frontend and server AdminPermission use canonical source', false, e.message);
+  }
+
+  // Remediation Test 48: server permission evaluation uses canonical shared ROLE_PERMISSIONS_MAP
+  try {
+    const { AdminAuthorizationService } = await import('../../functions/src/admin/adminAuthorizationService');
+    let allRolesMatch = true;
+
+    for (const roleKey of Object.values(SharedContract.AdminRole)) {
+      const role = roleKey as SharedContract.AdminRole;
+      const serverPerms = AdminAuthorizationService.getPermissionsForRole(role);
+      const sharedPerms = SharedContract.ROLE_PERMISSIONS_MAP[role];
+      const clientPerms = AdminAccessService.getPermissionsForRole(role);
+
+      if (serverPerms.size !== sharedPerms.size || clientPerms.size !== sharedPerms.size) {
+        allRolesMatch = false;
+        break;
+      }
+      for (const perm of sharedPerms) {
+        if (!serverPerms.has(perm) || !clientPerms.has(perm)) {
+          allRolesMatch = false;
+          break;
+        }
+      }
+    }
+
+    assert(
+      'Remediation Test 48 - Server permission evaluation uses canonical shared ROLE_PERMISSIONS_MAP',
+      allRolesMatch,
+      'Server AdminAuthorizationService and client AdminAccessService resolve identical permissions matching canonical ROLE_PERMISSIONS_MAP across all roles'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 48 - Server permission evaluation uses canonical shared ROLE_PERMISSIONS_MAP', false, e.message);
+  }
+
+  // Remediation Test 49: invalid Firestore role cannot become a valid AdminUser
+  try {
+    const rawRepo = new InMemoryAdminRepository();
+    rawRepo.setRawAdmin('uid-invalid-role', {
+      id: 'uid-invalid-role',
+      name: 'Hacker',
+      email: 'hacker@evil.com',
+      role: 'SUPER_ADMIN_HACK',
+      isActive: true,
+    });
+
+    const invalidUser = await rawRepo.getAdminByUid('uid-invalid-role');
+
+    assert(
+      'Remediation Test 49 - Invalid Firestore role cannot become a valid AdminUser',
+      invalidUser === null,
+      'Non-canonical role SUPER_ADMIN_HACK failed closed and returned null AdminUser'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 49 - Invalid Firestore role cannot become a valid AdminUser', false, e.message);
+  }
+
+  // Remediation Test 50: unknown role does not fall back to Viewer
+  try {
+    const rawRepo = new InMemoryAdminRepository();
+    rawRepo.setRawAdmin('uid-unknown-role-viewer', {
+      id: 'uid-unknown-role-viewer',
+      name: 'Unknown Role Attempt',
+      email: 'unknown@test.com',
+      role: 'MEMBER',
+      isActive: true,
+    });
+
+    const unknownUser = await rawRepo.getAdminByUid('uid-unknown-role-viewer');
+
+    assert(
+      'Remediation Test 50 - Unknown role does not fall back to Viewer',
+      unknownUser === null,
+      'Unknown role MEMBER failed closed and did NOT fall back to Viewer'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 50 - Unknown role does not fall back to Viewer', false, e.message);
+  }
+
+  // Remediation Test 51: unknown role does not fall back to Owner
+  try {
+    const rawRepo = new InMemoryAdminRepository();
+    rawRepo.setRawAdmin('uid-unknown-role-owner', {
+      id: 'uid-unknown-role-owner',
+      name: 'Unknown Role Attempt Owner',
+      email: 'unknown2@test.com',
+      role: 'SUPERUSER',
+      isActive: true,
+    });
+
+    const unknownUser = await rawRepo.getAdminByUid('uid-unknown-role-owner');
+
+    assert(
+      'Remediation Test 51 - Unknown role does not fall back to Owner',
+      unknownUser === null,
+      'Unknown role SUPERUSER failed closed and did NOT fall back to Owner'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 51 - Unknown role does not fall back to Owner', false, e.message);
+  }
+
+  // Remediation Test 52: inactive admin still has zero permissions
+  try {
+    const { AdminAuthorizationService } = await import('../../functions/src/admin/adminAuthorizationService');
+    const inactiveOwnerUser: AdminUser = {
+      id: 'uid-inactive-owner-check',
+      name: 'Inactive Owner',
+      email: 'inactive@owner.com',
+      role: AdminRole.Owner,
+      isActive: false,
+    };
+
+    const hasManageSettings = AdminAuthorizationService.hasPermission(inactiveOwnerUser, AdminPermission.ManageSettings);
+    const hasView = AdminAuthorizationService.hasPermission(inactiveOwnerUser, AdminPermission.View);
+
+    assert(
+      'Remediation Test 52 - Inactive admin still has zero permissions',
+      !hasManageSettings && !hasView,
+      'Inactive Owner user holds zero effective permissions in AdminAuthorizationService'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 52 - Inactive admin still has zero permissions', false, e.message);
+  }
+
+  // Remediation Test 53: admins/{uid} document ID remains the identity binding
+  try {
+    const fetchedAdmin = await mockAdminRepo.getAdminByUid('uid-owner');
+
+    assert(
+      'Remediation Test 53 - admins/{uid} document ID remains identity binding',
+      fetchedAdmin !== null && fetchedAdmin.id === 'uid-owner',
+      'AdminUser.id strictly matches document key / Firebase Auth UID (uid-owner)'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 53 - admins/{uid} document ID remains identity binding', false, e.message);
+  }
+
+  // Remediation Test 54: no redundant firebaseUid field is required or persisted
+  try {
+    const fetchedAdmin = await mockAdminRepo.getAdminByUid('uid-owner');
+    const adminKeys = fetchedAdmin ? Object.keys(fetchedAdmin) : [];
+    const hasFirebaseUid = adminKeys.includes('firebaseUid');
+
+    assert(
+      'Remediation Test 54 - No redundant firebaseUid field is required or persisted',
+      !hasFirebaseUid,
+      'Verified firebaseUid property is completely absent from AdminUser model'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 54 - No redundant firebaseUid field is required or persisted', false, e.message);
+  }
+
+  // Remediation Test 55: syncYouTubeUploads still requires ManageSettings before YouTube execution
+  try {
+    mockYtClient.callCounts.getUploadsPlaylistId = 0;
+    let deniedErrorMsg = '';
+
+    try {
+      await executeManualYouTubeSyncRequest({ auth: { uid: 'uid-viewer' } }, mockAdminRepo, mockYtService);
+    } catch (e: any) {
+      deniedErrorMsg = e.message;
+    }
+
+    assert(
+      'Remediation Test 55 - syncYouTubeUploads still requires ManageSettings before YouTube execution',
+      deniedErrorMsg.includes('PERMISSION_DENIED') && mockYtClient.callCounts.getUploadsPlaylistId === 0,
+      'Viewer role without ManageSettings rejected with PERMISSION_DENIED prior to any YouTube execution'
+    );
+  } catch (e: any) {
+    assert('Remediation Test 55 - syncYouTubeUploads still requires ManageSettings before YouTube execution', false, e.message);
   }
 
   return results;

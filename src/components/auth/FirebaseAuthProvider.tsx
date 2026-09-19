@@ -21,7 +21,7 @@ export function FirebaseAuthProvider({ children }: { children: ReactNode }) {
   const [isAuthLoading, setIsAuthLoading] = useState(true);
 
   // Default fallback mock users list for lookup
-  const [allAdmins, setAllAdmins] = useState<AdminUser[]>(() => AdminAccessService.getMockUsers());
+  const [allAdmins] = useState<AdminUser[]>(() => AdminAccessService.getMockUsers());
 
   useEffect(() => {
     // Standard Firebase Auth listener (Identity/Session gate)
@@ -30,17 +30,12 @@ export function FirebaseAuthProvider({ children }: { children: ReactNode }) {
       
       if (user) {
         // BRIDGE: Map authenticated identity to a canonical AdminUser
-        // Fallback search by email, then link the Firebase UID as the stable reference
+        // Fallback search by ID or email
         const matchedAdmin = allAdmins.find(
-          admin => admin.firebaseUid === user.uid || admin.email.toLowerCase() === user.email?.toLowerCase()
+          admin => admin.id === user.uid || admin.email.toLowerCase() === user.email?.toLowerCase()
         );
 
         if (matchedAdmin) {
-          // Bind the Firebase UID if not yet populated
-          if (!matchedAdmin.firebaseUid) {
-            matchedAdmin.firebaseUid = user.uid;
-            setAllAdmins(prev => prev.map(a => a.id === matchedAdmin.id ? matchedAdmin : a));
-          }
           setCanonicalAdminUser({ ...matchedAdmin });
         } else {
           // Authenticated but has no administrative profile - defaults to guest viewer safety

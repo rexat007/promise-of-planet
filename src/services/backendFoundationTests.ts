@@ -75,18 +75,10 @@ export function runBackendFoundationVerification(): { test: string; passed: bool
     const mockUsers = AdminAccessService.getMockUsers();
     const owner = mockUsers.find(u => u.role === AdminRole.Owner)!;
     
-    // Simulate linking Firebase Auth identity (stable UID reference) to the admin profile
-    const simulatedAuthUid = 'simulated-uid-12345';
-    const originalUid = owner.firebaseUid;
-    owner.firebaseUid = simulatedAuthUid;
-    
     const hasOwnerManageSettings = AdminAccessService.hasPermission(owner, AdminPermission.ManageSettings);
     
     const viewer = mockUsers.find(u => u.role === AdminRole.Viewer)!;
     const hasViewerManageSettings = AdminAccessService.hasPermission(viewer, AdminPermission.ManageSettings);
-    
-    // Restore state
-    owner.firebaseUid = originalUid;
 
     const rbacIsAuthorized = hasOwnerManageSettings === true && hasViewerManageSettings === false;
     assert(
