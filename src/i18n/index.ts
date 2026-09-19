@@ -3,6 +3,7 @@ import { initReactI18next } from 'react-i18next';
 
 import arTranslation from '../locales/ar.json';
 import enTranslation from '../locales/en.json';
+import { GlobalSettingsService } from '../services/globalSettingsService';
 
 const resources = {
   ar: {
@@ -13,12 +14,14 @@ const resources = {
   },
 };
 
+const defaultLang = GlobalSettingsService.getSettings().defaultLanguage;
+
 i18n
   .use(initReactI18next)
   .init({
     resources,
-    lng: 'ar',
-    fallbackLng: 'ar',
+    lng: defaultLang,
+    fallbackLng: defaultLang,
     interpolation: {
       escapeValue: false,
     },
@@ -40,7 +43,7 @@ i18n.on('languageChanged', (lng) => {
 });
 
 // Set initial html lang and ensure root html/body stay ltr
-const initialLang = i18n.language || 'ar';
+const initialLang = i18n.language || defaultLang;
 document.documentElement.setAttribute('dir', 'ltr');
 document.documentElement.setAttribute('lang', initialLang);
 if (document.body) {

@@ -108,10 +108,10 @@ export function Header({ onEnterAdmin }: HeaderProps) {
       id="main-header"
     >
       <Container className="relative w-full max-w-full min-w-0">
-        <div className="flex items-center justify-between h-16 sm:h-20 w-full min-w-0" dir="ltr">
+        <div className="flex items-center justify-between h-16 sm:h-20 w-full min-w-0 gap-2 sm:gap-4" dir="ltr">
           {/* Brand Logo / Name (Anchored Left in Header Bar) */}
-          <div className="flex items-center gap-3 shrink-0" dir={isAr ? 'rtl' : 'ltr'}>
-            <span className="text-xl sm:text-2xl font-bold text-emerald-700 dark:text-emerald-400">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0" dir={isAr ? 'rtl' : 'ltr'}>
+            <span className="text-base min-[390px]:text-lg sm:text-xl lg:text-2xl font-bold text-emerald-700 dark:text-emerald-400 truncate sm:overflow-visible min-w-0">
               {t('brand.name')}
             </span>
           </div>
@@ -159,12 +159,12 @@ export function Header({ onEnterAdmin }: HeaderProps) {
           {/* Dedicated Physical Control Zone:
               Pinned strictly to dir="ltr" so control buttons keep their exact 
               physical position on screen regardless of document direction. */}
-          <div className="flex items-center gap-2 sm:gap-3 shrink-0" dir="ltr" id="header-fixed-control-zone">
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0" dir="ltr" id="header-fixed-control-zone">
             {/* Admin Portal Gateway */}
             {onEnterAdmin && (
               <button
                 onClick={onEnterAdmin}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-2 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:hover:bg-emerald-900/40 text-emerald-800 dark:text-emerald-300 border border-emerald-100 dark:border-emerald-900/40 rounded-lg text-xs font-bold pop-motion-micro pop-hover-lift cursor-pointer shadow-xs focus-visible:outline-2 shrink-0"
+                className="inline-flex items-center gap-1 sm:gap-1.5 px-2 py-1.5 sm:px-3 sm:py-2 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:hover:bg-emerald-900/40 text-emerald-800 dark:text-emerald-300 border border-emerald-100 dark:border-emerald-900/40 rounded-lg text-xs font-bold pop-motion-micro pop-hover-lift cursor-pointer shadow-xs focus-visible:outline-2 shrink-0 min-h-[36px]"
                 id="header-enter-admin-btn"
                 dir={isAr ? 'rtl' : 'ltr'}
               >
@@ -177,7 +177,7 @@ export function Header({ onEnterAdmin }: HeaderProps) {
             {/* Language Switcher — Physically Anchored at Far Right Edge */}
             <button
               onClick={toggleLanguage}
-              className="px-3 py-1.5 sm:px-4 sm:py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs sm:text-sm font-semibold pop-motion-micro pop-hover-lift shadow-sm cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 shrink-0"
+              className="px-2.5 py-1.5 sm:px-4 sm:py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs sm:text-sm font-semibold pop-motion-micro pop-hover-lift shadow-sm cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-600 shrink-0 min-h-[36px] inline-flex items-center justify-center"
               id="header-lang-toggle-btn"
             >
               {t('common.languageToggle')}

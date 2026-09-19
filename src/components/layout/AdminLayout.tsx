@@ -3,11 +3,21 @@ import { useTranslation } from 'react-i18next';
 import { AdminPermission } from '../../types/admin';
 import type { AdminUser, NavigationItem } from '../../types/admin';
 import { AdminAccessService } from '../../services/adminAccess';
+import { AdminAuditService } from '../../services/adminAuditService';
+import { AuditAction, AuditTargetType } from '../../types/audit';
+import type { AuditChange } from '../../types/audit';
 import { AdminOverview } from '../content/AdminOverview';
 import { AdminNewsManagement } from '../news/AdminNewsManagement';
 import { AdminLibraryManagement } from '../library/AdminLibraryManagement';
 import { AdminTrainingManagement } from '../training/AdminTrainingManagement';
 import { AdminPlaceholderView } from '../content/AdminPlaceholderView';
+import { AdminCommunityManagement } from '../community/AdminCommunityManagement';
+import { AdminAIReviewManagement } from '../aiReview/AdminAIReviewManagement';
+import { AdminUsersManagement } from '../users/AdminUsersManagement';
+import { AdminAuditLogManagement } from '../audit/AdminAuditLogManagement';
+import { AdminReportsManagement } from '../reports/AdminReportsManagement';
+import { AdminGlobalSettings } from '../settings/AdminGlobalSettings';
+import { AdminMediaManagement } from '../media/AdminMediaManagement';
 import { ViewTransition } from '../common/ViewTransition';
 import { 
   LayoutDashboard, 
@@ -27,7 +37,8 @@ import {
   X,
   LogOut,
   Globe,
-  Shield
+  Shield,
+  Film
 } from 'lucide-react';
 
 interface AdminLayoutProps {
@@ -38,16 +49,83 @@ export function AdminLayout({ onExitAdmin }: AdminLayoutProps) {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
 
-  const mockUsers = AdminAccessService.getMockUsers();
-  const [currentUser, setCurrentUser] = useState<AdminUser>(mockUsers[0]); // Default to Owner for full visibility first
+  const [users, setUsers] = useState<AdminUser[]>(() => AdminAccessService.getMockUsers());
+  const [currentUser, setCurrentUser] = useState<AdminUser>(() => users[0]); // Default to Owner for full visibility first
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
+
+  // Filter active users for role switcher
+  const activeUsers = useMemo(() => users.filter(u => u.isActive), [users]);
+
+  // Handle user identity updates in session
+  const handleUpdateUser = (updatedUser: AdminUser) => {
+    const prevUser = users.find(u => u.id === updatedUser.id);
+    setUsers(prev => prev.map(u => u.id === updatedUser.id ? updatedUser : u));
+    if (currentUser.id === updatedUser.id) {
+      setCurrentUser(updatedUser);
+    }
+
+    // Observational Platform Audit Logging
+    if (prevUser) {
+      const changes: AuditChange[] = [];
+      let action: (typeof AuditAction)[keyof typeof AuditAction] = AuditAction.Updated;
+
+      if (prevUser.role !== updatedUser.role) {
+        action = AuditAction.RoleChanged;
+        changes.push({ field: 'role', previousValue: prevUser.role, newValue: updatedUser.role });
+      }
+      if (prevUser.isActive !== updatedUser.isActive) {
+        action = AuditAction.StatusChanged;
+        changes.push({ field: 'isActive', previousValue: prevUser.isActive, newValue: updatedUser.isActive });
+      }
+      if (prevUser.name !== updatedUser.name) {
+        changes.push({ field: 'name', previousValue: prevUser.name, newValue: updatedUser.name });
+      }
+      if (prevUser.email !== updatedUser.email) {
+        changes.push({ field: 'email', previousValue: prevUser.email, newValue: updatedUser.email });
+      }
+
+      if (changes.length > 0) {
+        AdminAuditService.recordEvent({
+          actorUserId: currentUser.id,
+          actorName: currentUser.name,
+          actorRole: currentUser.role,
+          action,
+          targetType: AuditTargetType.AdminUser,
+          targetId: updatedUser.id,
+          targetTitle: `${updatedUser.name} (${updatedUser.email})`,
+          changes,
+        });
+      }
+    }
+  };
+
+  // Handle user identity creation in session
+  const handleCreateUser = (newUser: AdminUser) => {
+    setUsers(prev => [newUser, ...prev]);
+
+    // Observational Platform Audit Logging
+    AdminAuditService.recordEvent({
+      actorUserId: currentUser.id,
+      actorName: currentUser.name,
+      actorRole: currentUser.role,
+      action: AuditAction.Created,
+      targetType: AuditTargetType.AdminUser,
+      targetId: newUser.id,
+      targetTitle: `${newUser.name} (${newUser.email})`,
+      changes: [
+        { field: 'role', previousValue: null, newValue: newUser.role },
+        { field: 'isActive', previousValue: null, newValue: newUser.isActive },
+      ],
+    });
+  };
 
   // Set up the full 11 admin navigation sections mapped to existing required permissions
   const navigationItems: NavigationItem[] = [
     { id: 'overview', labelAr: 'لوحة التحكم والمؤشرات', labelEn: 'Overview Dashboard', iconName: 'LayoutDashboard', requiredPermission: AdminPermission.View },
     { id: 'news', labelAr: 'إدارة الأخبار البيئية', labelEn: 'Environmental News', iconName: 'Newspaper', requiredPermission: AdminPermission.Create },
     { id: 'library', labelAr: 'المكتبة البيئية والمعرفية', labelEn: 'Knowledge Library', iconName: 'BookOpen', requiredPermission: AdminPermission.Create },
+    { id: 'media', labelAr: 'إدارة الوسائط والتشغيل', labelEn: 'Media & Videos', iconName: 'Film', requiredPermission: AdminPermission.View },
     { id: 'training', labelAr: 'البرامج والمسارات التدريبية', labelEn: 'Training & Courses', iconName: 'GraduationCap', requiredPermission: AdminPermission.Edit },
     { id: 'community', labelAr: 'صحافة المواطن والمجتمع', labelEn: 'Community & Moderator', iconName: 'Users', requiredPermission: AdminPermission.Review },
     { id: 'subscriptions', labelAr: 'الاشتراكات والتبرعات', labelEn: 'Subscriptions & Sponsors', iconName: 'CreditCard', requiredPermission: AdminPermission.ViewReports },
@@ -55,7 +133,7 @@ export function AdminLayout({ onExitAdmin }: AdminLayoutProps) {
     { id: 'users', labelAr: 'المستخدمون والصلاحيات', labelEn: 'Users & Permissions', iconName: 'ShieldAlert', requiredPermission: AdminPermission.ManageUsers },
     { id: 'auditLog', labelAr: 'سجل تدقيق الأنشطة', labelEn: 'Audit Log & History', iconName: 'History', requiredPermission: AdminPermission.ManageSettings },
     { id: 'reports', labelAr: 'التقارير والتحليلات البيئية', labelEn: 'System Reports', iconName: 'BarChart3', requiredPermission: AdminPermission.ViewReports },
-    { id: 'settings', labelAr: 'الإعدادات العامة للـ API', labelEn: 'Global Settings', iconName: 'Settings', requiredPermission: AdminPermission.ManageSettings },
+    { id: 'settings', labelAr: 'الإعدادات العامة', labelEn: 'Global Settings', iconName: 'Settings', requiredPermission: AdminPermission.ManageSettings },
   ];
 
   // Derive visible admin sections from active role permissions
@@ -68,7 +146,7 @@ export function AdminLayout({ onExitAdmin }: AdminLayoutProps) {
 
   // Handle mock user role changes, resetting activeTab if current section becomes unauthorized
   const handleUserChange = (userId: string) => {
-    const selected = mockUsers.find(u => u.id === userId);
+    const selected = activeUsers.find(u => u.id === userId);
     if (selected) {
       setCurrentUser(selected);
       // Check if activeTab is authorized under the new user's permissions
@@ -109,6 +187,7 @@ export function AdminLayout({ onExitAdmin }: AdminLayoutProps) {
       case 'History': return <History className={className} />;
       case 'BarChart3': return <BarChart3 className={className} />;
       case 'Settings': return <Settings className={className} />;
+      case 'Film': return <Film className={className} />;
       default: return <Settings className={className} />;
     }
   };
@@ -116,11 +195,11 @@ export function AdminLayout({ onExitAdmin }: AdminLayoutProps) {
   return (
     <div className="min-h-screen bg-gray-50/50 dark:bg-gray-950 flex flex-col text-gray-900 dark:text-gray-100 transition-colors pop-page-fade w-full max-w-full min-w-0" dir={isAr ? 'rtl' : 'ltr'} data-responsive-guard>
       
-      {/* A. ADMIN HEAD-BAR - Optimized for narrow mobile screens */}
-      <header className="h-16 border-b border-gray-200/80 dark:border-gray-800/80 bg-white dark:bg-gray-900/90 backdrop-blur-md sticky top-0 z-30 flex items-center justify-between px-2.5 sm:px-6 shadow-xs max-w-full overflow-hidden w-full min-w-0" id="admin-top-header" dir="ltr">
+      {/* A. ADMIN HEAD-BAR - Optimized for narrow mobile screens with robust containment */}
+      <header className="h-16 border-b border-gray-200/80 dark:border-gray-800/80 bg-white dark:bg-gray-900/90 backdrop-blur-md sticky top-0 z-30 flex items-center justify-between px-2 sm:px-6 shadow-xs max-w-full w-full min-w-0" id="admin-top-header" dir="ltr">
         
         {/* Left / Start Branding and Hamburger */}
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink" dir={isAr ? 'rtl' : 'ltr'}>
+        <div className="flex items-center gap-1.5 sm:gap-3 min-w-0 shrink" dir={isAr ? 'rtl' : 'ltr'}>
           <button 
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
             className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg lg:hidden cursor-pointer focus:outline-hidden shrink-0 pop-motion-micro"
@@ -131,29 +210,29 @@ export function AdminLayout({ onExitAdmin }: AdminLayoutProps) {
           
           <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
             <span className="h-2 w-2 sm:h-2.5 sm:w-2.5 rounded-full bg-emerald-600 animate-pulse shrink-0" />
-            <span className="text-xs sm:text-base md:text-lg font-extrabold text-emerald-800 dark:text-emerald-400 truncate max-w-[110px] min-[380px]:max-w-[160px] min-[480px]:max-w-[220px] sm:max-w-none">
+            <span className="text-xs sm:text-base md:text-lg font-extrabold text-emerald-800 dark:text-emerald-400 truncate max-w-[90px] min-[360px]:max-w-[110px] min-[400px]:max-w-[180px] sm:max-w-none min-w-0">
               {isAr ? 'لوحة التحكم الإدارية' : 'Promise of Planet Back-Office'}
             </span>
           </div>
         </div>
 
         {/* Right / End Controls (Role Switcher, Language Toggle, Exit Button) — Fixed Physical Control Zone */}
-        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0" dir="ltr" id="admin-fixed-control-zone">
+        <div className="flex items-center gap-1 sm:gap-2.5 shrink-0 min-w-0" dir="ltr" id="admin-fixed-control-zone">
           
           {/* Role selector dropdown */}
-          <div className="flex items-center gap-1" id="role-selector-container" dir={isAr ? 'rtl' : 'ltr'}>
-            <span className="hidden xl:inline-flex items-center gap-1 text-xs text-gray-400 font-medium">
-              <Shield className="w-3.5 h-3.5 text-emerald-600" />
+          <div className="flex items-center gap-1 min-w-0 shrink" id="role-selector-container" dir={isAr ? 'rtl' : 'ltr'}>
+            <span className="hidden xl:inline-flex items-center gap-1 text-xs text-gray-400 font-medium shrink-0">
+              <Shield className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
               <span>{isAr ? 'اختبار الدور:' : 'Simulation Role:'}</span>
             </span>
             <select
               value={currentUser.id}
               onChange={(e) => handleUserChange(e.target.value)}
-              className="max-w-[105px] min-[380px]:max-w-[140px] sm:max-w-xs px-2 py-1.5 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-750 border border-gray-200/80 dark:border-gray-700/80 rounded-lg text-xs font-bold text-gray-800 dark:text-gray-200 cursor-pointer focus:outline-hidden focus:border-emerald-600 pop-motion-micro truncate"
+              className="w-[88px] min-[360px]:w-[102px] min-[400px]:w-[135px] sm:w-auto sm:max-w-xs px-1.5 sm:px-2 py-1.5 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-750 border border-gray-200/80 dark:border-gray-700/80 rounded-lg text-xs font-bold text-gray-800 dark:text-gray-200 cursor-pointer focus:outline-hidden focus:border-emerald-600 pop-motion-micro truncate min-w-0"
               id="rbac-user-select"
               title={isAr ? 'تغيير المستخدم والدور الفني' : 'Switch Active User Role'}
             >
-              {mockUsers.map((user) => (
+              {activeUsers.map((user) => (
                 <option key={user.id} value={user.id}>
                   {user.name} ({user.role})
                 </option>
@@ -176,7 +255,7 @@ export function AdminLayout({ onExitAdmin }: AdminLayoutProps) {
           {/* EXIT GATEWAY button */}
           <button
             onClick={onExitAdmin}
-            className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs pop-motion-micro pop-hover-lift shrink-0"
+            className="px-2 sm:px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs pop-motion-micro pop-hover-lift shrink-0"
             id="exit-admin-btn"
             dir={isAr ? 'rtl' : 'ltr'}
           >
@@ -265,8 +344,30 @@ export function AdminLayout({ onExitAdmin }: AdminLayoutProps) {
               <AdminNewsManagement currentUser={currentUser} />
             ) : effectiveTab === 'library' ? (
               <AdminLibraryManagement currentUser={currentUser} />
+            ) : effectiveTab === 'media' ? (
+              <AdminMediaManagement currentUser={currentUser} />
             ) : effectiveTab === 'training' ? (
               <AdminTrainingManagement currentUser={currentUser} />
+            ) : effectiveTab === 'community' ? (
+              <AdminCommunityManagement currentUser={currentUser} />
+            ) : effectiveTab === 'aiReviews' ? (
+              <AdminAIReviewManagement currentUser={currentUser} />
+            ) : effectiveTab === 'users' ? (
+              <AdminUsersManagement
+                currentUser={currentUser}
+                users={users}
+                onUpdateUser={handleUpdateUser}
+                onCreateUser={handleCreateUser}
+              />
+            ) : effectiveTab === 'auditLog' ? (
+              <AdminAuditLogManagement currentUser={currentUser} />
+            ) : effectiveTab === 'reports' ? (
+              <AdminReportsManagement
+                currentUser={currentUser}
+                onNavigate={(tabId: string) => setActiveTab(tabId)}
+              />
+            ) : effectiveTab === 'settings' ? (
+              <AdminGlobalSettings currentUser={currentUser} />
             ) : (
               <AdminPlaceholderView id={effectiveTab} currentUser={currentUser} />
             )}

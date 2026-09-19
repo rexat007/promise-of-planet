@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net: Catch-All Default Deny Rule (Required)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Secure helper primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Admins Collection Rules Block
+    match /admins/{adminId} {
+      // Allow administrators to retrieve their own canonical profile
+      allow get: if isOwner(adminId);
+      
+      // Prevent any arbitrary client creations, updates, or deletions (Fail-Closed System-Only)
+      allow create, update, delete: if false;
+    }
+  }
+}

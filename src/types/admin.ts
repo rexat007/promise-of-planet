@@ -32,6 +32,8 @@ export interface AdminUser {
   name: string;
   email: string;
   role: AdminRole;
+  isActive: boolean;
+  firebaseUid?: string;
 }
 
 export interface NavigationItem {

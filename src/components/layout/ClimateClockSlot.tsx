@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { GlobalSettingsService } from '../../services/globalSettingsService';
 
 // Patch document.getElementById safely once to catch unmounted climate-clock widgets from widget-v2.js
 if (typeof window !== 'undefined') {
@@ -20,8 +21,17 @@ if (typeof window !== 'undefined') {
 
 export function ClimateClockSlot() {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [isEnabled, setIsEnabled] = useState(() => GlobalSettingsService.getSettings().climateClockEnabled);
+
+  // Subscribe to settings changes for reactive presentation
+  useEffect(() => {
+    return GlobalSettingsService.subscribe((settings) => {
+      setIsEnabled(settings.climateClockEnabled);
+    });
+  }, []);
 
   useEffect(() => {
+    if (!isEnabled) return;
     const scriptSrc = 'https://climateclock.world/widget-v2.js';
     const existing = document.querySelector(`script[src="${scriptSrc}"]`);
     if (!existing) {
@@ -30,7 +40,7 @@ export function ClimateClockSlot() {
       script.async = true;
       document.body.appendChild(script);
     }
-  }, []);
+  }, [isEnabled]);
 
   // Recalculate climate-clock layout on mount & container resize (e.g. returning from Admin Portal on mobile)
   useEffect(() => {
@@ -68,7 +78,11 @@ export function ClimateClockSlot() {
       cancelAnimationFrame(rafId);
       observer.disconnect();
     };
-  }, []);
+  }, [isEnabled]);
+
+  if (!isEnabled) {
+    return null;
+  }
 
   return (
     <div className="w-full max-w-full bg-transparent overflow-hidden" ref={containerRef}>

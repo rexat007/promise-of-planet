@@ -415,4 +415,6 @@ export interface YouTubeSyncLog {
   diagnostics?: Record<string, unknown>;
 }
 
+export * from './types/youtube';
+
 
