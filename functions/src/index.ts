@@ -5,6 +5,8 @@ import * as logger from "firebase-functions/logger";
 import { initializeApp } from "firebase-admin/app";
 initializeApp();
 
+export { syncYouTubeUploads } from "./youtube/manualSyncHandler";
+
 /**
  * Basic HTTPS onRequest skeleton conforming to 2nd-gen specifications.
  * This can act as a secure gateway for future administrative triggers.

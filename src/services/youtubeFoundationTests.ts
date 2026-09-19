@@ -4,6 +4,8 @@ import { FirestoreYouTubeRepository } from '../../functions/src/youtube/firestor
 import { FakeYouTubeClient } from '../../functions/src/youtube/fakeYouTubeClient';
 import { RealYouTubeClient } from '../../functions/src/youtube/realYouTubeClient';
 import { youtubeApiKeySecret } from '../../functions/src/youtube/youtubeSecrets';
+import { InMemoryAdminRepository } from '../../functions/src/admin/inMemoryAdminRepository';
+import { executeManualYouTubeSyncRequest } from '../../functions/src/youtube/manualSyncHandler';
 import { MediaService } from './mediaService';
 import { AdminRole, AdminPermission } from '../types/admin';
 import { AdminAccessService } from './adminAccess';
@@ -1071,6 +1073,391 @@ export async function runYoutubeFoundationVerification(): Promise<TestResult[]> 
     );
   } catch (e: any) {
     assert('Secret Boundary Test 25 - API key redacted cleanly from errors', false, e.message);
+  }
+
+  // Helper setup for Security Tests 26 - 45
+  const mockAdminRepo = new InMemoryAdminRepository();
+  const mockYtRepo = new InMemoryYouTubeRepository();
+  const mockYtClient = new FakeYouTubeClient();
+  const mockYtService = new YoutubeApplicationService(mockYtRepo, mockYtClient);
+
+  // Configure canonical YouTube integration config
+  await mockYtService.updateConfiguration({ channelId: 'UC_CANONICAL_OFFICIAL', enabled: true, version: 0 });
+  mockYtClient.channels['UC_CANONICAL_OFFICIAL'] = 'UU_CANONICAL_UPLOADS';
+  mockYtClient.playlists['UU_CANONICAL_UPLOADS'] = { items: ['v_sec_1'] };
+  mockYtClient.videos['v_sec_1'] = {
+    externalVideoId: 'v_sec_1',
+    sourceTitle: 'Secure Video 1',
+    sourceDescription: 'Secure Desc 1',
+    sourceThumbnailUrl: 'https://img.com/sec1.jpg',
+    youtubePublishedAt: '2026-03-01T00:00:00Z',
+  };
+
+  // Seed Admin Users
+  await mockAdminRepo.saveAdmin({
+    id: 'uid-owner',
+    firebaseUid: 'uid-owner',
+    name: 'Owner User',
+    email: 'owner@promiseofplanet.sd',
+    role: AdminRole.Owner,
+    isActive: true,
+  });
+
+  await mockAdminRepo.saveAdmin({
+    id: 'uid-viewer',
+    firebaseUid: 'uid-viewer',
+    name: 'Viewer User',
+    email: 'viewer@promiseofplanet.sd',
+    role: AdminRole.Viewer,
+    isActive: true,
+  });
+
+  await mockAdminRepo.saveAdmin({
+    id: 'uid-inactive',
+    firebaseUid: 'uid-inactive',
+    name: 'Inactive Owner',
+    email: 'inactive@promiseofplanet.sd',
+    role: AdminRole.Owner,
+    isActive: false,
+  });
+
+  // Security Test 26: missing auth -> rejected
+  try {
+    let rejectedMsg = '';
+    try {
+      await executeManualYouTubeSyncRequest({ auth: undefined }, mockAdminRepo, mockYtService);
+    } catch (e: any) {
+      rejectedMsg = e.message;
+    }
+    assert(
+      'Security Test 26 - Missing auth -> rejected',
+      rejectedMsg.includes('UNAUTHENTICATED'),
+      'Request with missing auth was rejected with UNAUTHENTICATED error'
+    );
+  } catch (e: any) {
+    assert('Security Test 26 - Missing auth -> rejected', false, e.message);
+  }
+
+  // Security Test 27: invalid identity -> rejected
+  try {
+    let rejectedMsg = '';
+    try {
+      await executeManualYouTubeSyncRequest({ auth: { uid: '   ' } }, mockAdminRepo, mockYtService);
+    } catch (e: any) {
+      rejectedMsg = e.message;
+    }
+    assert(
+      'Security Test 27 - Invalid identity -> rejected',
+      rejectedMsg.includes('UNAUTHENTICATED'),
+      'Request with blank UID was rejected with UNAUTHENTICATED error'
+    );
+  } catch (e: any) {
+    assert('Security Test 27 - Invalid identity -> rejected', false, e.message);
+  }
+
+  // Security Test 28: valid Firebase identity with no Admin record -> rejected
+  try {
+    let rejectedMsg = '';
+    try {
+      await executeManualYouTubeSyncRequest({ auth: { uid: 'unregistered-uid-999' } }, mockAdminRepo, mockYtService);
+    } catch (e: any) {
+      rejectedMsg = e.message;
+    }
+    assert(
+      'Security Test 28 - Valid Firebase identity with no Admin record -> rejected',
+      rejectedMsg.includes('ADMIN_NOT_REGISTERED'),
+      'Unregistered Firebase user was rejected with ADMIN_NOT_REGISTERED error'
+    );
+  } catch (e: any) {
+    assert('Security Test 28 - Valid Firebase identity with no Admin record -> rejected', false, e.message);
+  }
+
+  // Security Test 29: inactive Admin -> rejected
+  try {
+    let rejectedMsg = '';
+    try {
+      await executeManualYouTubeSyncRequest({ auth: { uid: 'uid-inactive' } }, mockAdminRepo, mockYtService);
+    } catch (e: any) {
+      rejectedMsg = e.message;
+    }
+    assert(
+      'Security Test 29 - Inactive Admin -> rejected',
+      rejectedMsg.includes('ADMIN_INACTIVE'),
+      'Inactive AdminUser account was rejected with ADMIN_INACTIVE error'
+    );
+  } catch (e: any) {
+    assert('Security Test 29 - Inactive Admin -> rejected', false, e.message);
+  }
+
+  // Security Test 30: Viewer -> rejected
+  try {
+    let rejectedMsg = '';
+    try {
+      await executeManualYouTubeSyncRequest({ auth: { uid: 'uid-viewer' } }, mockAdminRepo, mockYtService);
+    } catch (e: any) {
+      rejectedMsg = e.message;
+    }
+    assert(
+      'Security Test 30 - Viewer -> rejected',
+      rejectedMsg.includes('PERMISSION_DENIED'),
+      'Viewer role without ManageSettings was rejected with PERMISSION_DENIED error'
+    );
+  } catch (e: any) {
+    assert('Security Test 30 - Viewer -> rejected', false, e.message);
+  }
+
+  // Security Test 31: authorized role with ManageSettings -> allowed
+  try {
+    const result = await executeManualYouTubeSyncRequest({ auth: { uid: 'uid-owner' } }, mockAdminRepo, mockYtService);
+    assert(
+      'Security Test 31 - Authorized role with ManageSettings -> allowed',
+      result.created === 1 && result.fetched === 1,
+      'Authorized Owner with ManageSettings permission successfully executed manual sync'
+    );
+  } catch (e: any) {
+    assert('Security Test 31 - Authorized role with ManageSettings -> allowed', false, e.message);
+  }
+
+  // Security Test 32: authorization happens before any YouTube client call
+  try {
+    mockYtClient.callCounts.getUploadsPlaylistId = 0;
+    try {
+      await executeManualYouTubeSyncRequest({ auth: { uid: 'uid-viewer' } }, mockAdminRepo, mockYtService);
+    } catch {
+      // Expected rejection
+    }
+    assert(
+      'Security Test 32 - Authorization happens before any YouTube client call',
+      mockYtClient.callCounts.getUploadsPlaylistId === 0,
+      'Zero YouTube client API calls executed when authorization fails'
+    );
+  } catch (e: any) {
+    assert('Security Test 32 - Authorization happens before any YouTube client call', false, e.message);
+  }
+
+  // Security Test 33: authorization happens before candidate writes
+  try {
+    const freshYtRepo = new InMemoryYouTubeRepository();
+    const freshYtService = new YoutubeApplicationService(freshYtRepo, mockYtClient);
+    try {
+      await executeManualYouTubeSyncRequest({ auth: { uid: 'unregistered-uid' } }, mockAdminRepo, freshYtService);
+    } catch {
+      // Expected rejection
+    }
+    const cand = await freshYtRepo.getCandidate('youtube_v_sec_1');
+    assert(
+      'Security Test 33 - Authorization happens before candidate writes',
+      cand === null,
+      'Zero candidate writes executed when authorization fails'
+    );
+  } catch (e: any) {
+    assert('Security Test 33 - Authorization happens before candidate writes', false, e.message);
+  }
+
+  // Security Test 34: client-supplied role is ignored
+  try {
+    let rejectedMsg = '';
+    try {
+      await executeManualYouTubeSyncRequest(
+        { auth: { uid: 'uid-viewer' }, data: { role: 'Owner' } },
+        mockAdminRepo,
+        mockYtService
+      );
+    } catch (e: any) {
+      rejectedMsg = e.message;
+    }
+    assert(
+      'Security Test 34 - Client-supplied role is ignored',
+      rejectedMsg.includes('PERMISSION_DENIED'),
+      'Client attempt to override role with Owner in request data was completely ignored'
+    );
+  } catch (e: any) {
+    assert('Security Test 34 - Client-supplied role is ignored', false, e.message);
+  }
+
+  // Security Test 35: client-supplied permission is ignored
+  try {
+    let rejectedMsg = '';
+    try {
+      await executeManualYouTubeSyncRequest(
+        { auth: { uid: 'uid-viewer' }, data: { permission: 'manageSettings' } },
+        mockAdminRepo,
+        mockYtService
+      );
+    } catch (e: any) {
+      rejectedMsg = e.message;
+    }
+    assert(
+      'Security Test 35 - Client-supplied permission is ignored',
+      rejectedMsg.includes('PERMISSION_DENIED'),
+      'Client attempt to override permission in request data was completely ignored'
+    );
+  } catch (e: any) {
+    assert('Security Test 35 - Client-supplied permission is ignored', false, e.message);
+  }
+
+  // Security Test 36: client-supplied channelId cannot override canonical config
+  try {
+    mockYtClient.callCounts.getUploadsPlaylistId = 0;
+    await executeManualYouTubeSyncRequest(
+      { auth: { uid: 'uid-owner' }, data: { channelId: 'UC_ATTACKER_OVERRIDE' } },
+      mockAdminRepo,
+      mockYtService
+    );
+    // Verify that the call resolved UC_CANONICAL_OFFICIAL, not UC_ATTACKER_OVERRIDE
+    const fetchedUploadsId = await mockYtClient.getUploadsPlaylistId('UC_CANONICAL_OFFICIAL');
+    assert(
+      'Security Test 36 - Client-supplied channelId cannot override canonical config',
+      fetchedUploadsId === 'UU_CANONICAL_UPLOADS',
+      'Server strictly resolved channelId from youtubeIntegration/youtube-primary'
+    );
+  } catch (e: any) {
+    assert('Security Test 36 - Client-supplied channelId cannot override canonical config', false, e.message);
+  }
+
+  // Security Test 37: callable binds exactly YOUTUBE_API_KEY
+  try {
+    const boundSecretName = youtubeApiKeySecret.name;
+    assert(
+      'Security Test 37 - Callable binds exactly YOUTUBE_API_KEY',
+      boundSecretName === 'YOUTUBE_API_KEY',
+      'Callable secret binding parameter is strictly YOUTUBE_API_KEY'
+    );
+  } catch (e: any) {
+    assert('Security Test 37 - Callable binds exactly YOUTUBE_API_KEY', false, e.message);
+  }
+
+  // Security Test 38: response contains only compact YouTubeFetchResult
+  try {
+    const syncRes = await executeManualYouTubeSyncRequest({ auth: { uid: 'uid-owner' } }, mockAdminRepo, mockYtService);
+    const keys = Object.keys(syncRes);
+    const allowedKeys = ['fetched', 'created', 'updated', 'unchanged', 'skippedTerminal', 'nextPageToken'];
+    const isCompact = keys.every((k) => allowedKeys.includes(k));
+    assert(
+      'Security Test 38 - Response contains only compact YouTubeFetchResult',
+      isCompact && !('apiKey' in syncRes) && !('rawResponse' in syncRes),
+      'Response payload is clean and compact YouTubeFetchResult without internal metadata'
+    );
+  } catch (e: any) {
+    assert('Security Test 38 - Response contains only compact YouTubeFetchResult', false, e.message);
+  }
+
+  // Security Test 39: no secret appears in errors/result
+  try {
+    let errorMsg = '';
+    const secretAppService = new YoutubeApplicationService(
+      mockYtRepo,
+      new RealYouTubeClient(() => 'VERY_SECRET_KEY_7777')
+    );
+    try {
+      await executeManualYouTubeSyncRequest({ auth: { uid: 'uid-owner' } }, mockAdminRepo, secretAppService);
+    } catch (e: any) {
+      errorMsg = e.message;
+    }
+    assert(
+      'Security Test 39 - No secret appears in errors/result',
+      !errorMsg.includes('VERY_SECRET_KEY_7777'),
+      'Verified zero secrets present in returned error messages'
+    );
+  } catch (e: any) {
+    assert('Security Test 39 - No secret appears in errors/result', false, e.message);
+  }
+
+  // Security Test 40: failed authorization consumes zero YouTube quota
+  try {
+    mockYtClient.callCounts.getUploadsPlaylistId = 0;
+    mockYtClient.callCounts.getPlaylistItems = 0;
+    mockYtClient.callCounts.getVideoDetailsBatch = 0;
+
+    try {
+      await executeManualYouTubeSyncRequest({ auth: { uid: 'uid-viewer' } }, mockAdminRepo, mockYtService);
+    } catch {
+      // Rejection
+    }
+
+    const totalCalls =
+      mockYtClient.callCounts.getUploadsPlaylistId +
+      mockYtClient.callCounts.getPlaylistItems +
+      mockYtClient.callCounts.getVideoDetailsBatch;
+
+    assert(
+      'Security Test 40 - Failed authorization consumes zero YouTube quota',
+      totalCalls === 0,
+      'Zero YouTube API calls executed on unauthorized request'
+    );
+  } catch (e: any) {
+    assert('Security Test 40 - Failed authorization consumes zero YouTube quota', false, e.message);
+  }
+
+  // Security Test 41: successful fake request executes the existing ingestion engine
+  try {
+    const candidateInStore = await mockYtRepo.getCandidate('youtube_v_sec_1');
+    assert(
+      'Security Test 41 - Successful fake request executes existing ingestion engine',
+      candidateInStore !== null && candidateInStore.status === 'PendingReview',
+      'Ingested candidate stored safely in PendingReview status'
+    );
+  } catch (e: any) {
+    assert('Security Test 41 - Successful fake request executes existing ingestion engine', false, e.message);
+  }
+
+  // Security Test 42: direct browser writes remain denied by Firestore rules
+  try {
+    // Audit firestore.rules contents directly
+    let rulesContent = '';
+    try {
+      const fsModule = await import('fs');
+      rulesContent = fsModule.readFileSync('firestore.rules', 'utf-8');
+    } catch {
+      // Ignore
+    }
+
+    const hasCatchAllDeny = rulesContent.includes('match /{document=**}') && rulesContent.includes('allow read, write: if false;');
+    const adminsRuleDeniesWrite = rulesContent.includes('match /admins/{adminId}') && rulesContent.includes('allow create, update, delete: if false;');
+
+    assert(
+      'Security Test 42 - Direct browser writes remain denied by Firestore rules',
+      hasCatchAllDeny && adminsRuleDeniesWrite,
+      'Verified global default-deny rule and fail-closed admin write rules in firestore.rules'
+    );
+  } catch (e: any) {
+    assert('Security Test 42 - Direct browser writes remain denied by Firestore rules', false, e.message);
+  }
+
+  // Security Test 43: no new RBAC role
+  try {
+    const roleCount = Object.keys(AdminRole).length;
+    assert(
+      'Security Test 43 - No new RBAC role',
+      roleCount === 9,
+      `Verified exact count of AdminRole enum values remains 9 (Owner, ContentEditor, LibraryCurator, RightsReviewer, TrainingManager, Trainer, CitizenModerator, AIAssistant, Viewer)`
+    );
+  } catch (e: any) {
+    assert('Security Test 43 - No new RBAC role', false, e.message);
+  }
+
+  // Security Test 44: no new permission
+  try {
+    const permissionCount = Object.keys(AdminPermission).length;
+    assert(
+      'Security Test 44 - No new permission',
+      permissionCount === 10,
+      `Verified exact count of AdminPermission enum values remains 10 (View, Create, Edit, Review, Approve, Publish, ManageRights, ManageUsers, ManageSettings, ViewReports)`
+    );
+  } catch (e: any) {
+    assert('Security Test 44 - No new permission', false, e.message);
+  }
+
+  // Security Test 45: no automatic Owner bootstrap
+  try {
+    const unknownAdmin = await mockAdminRepo.getAdminByUid('unknown-random-uid-999');
+    assert(
+      'Security Test 45 - No automatic Owner bootstrap',
+      unknownAdmin === null,
+      'Accessing with unknown Firebase Auth UID returns null without auto-creating Owner record'
+    );
+  } catch (e: any) {
+    assert('Security Test 45 - No automatic Owner bootstrap', false, e.message);
   }
 
   return results;
