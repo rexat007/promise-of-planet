@@ -3,6 +3,8 @@ import type { YouTubeRepository } from './youtubeRepository';
 import type { YouTubeIntegrationConfig, YouTubeImportCandidate } from '../types/youtube';
 
 export class FirestoreYouTubeRepository implements YouTubeRepository {
+  public static readonly COLLECTIONS = ['youtubeIntegration', 'youtubeImportCandidates'] as const;
+
   private get db() {
     return getFirestore();
   }

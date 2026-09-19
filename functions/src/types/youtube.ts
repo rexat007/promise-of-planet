@@ -25,7 +25,7 @@ export interface CandidateEditorialDraft {
   excerptEn?: string;
   editorialDescriptionAr: string;
   editorialDescriptionEn?: string;
-  category: Category;
+  category?: Category; // Unset until human editorial review
   tags: Tag[];
 }
 
@@ -47,4 +47,13 @@ export interface YouTubeIntegrationConfig {
   enabled: boolean; // toggle to administratively enable/disable YouTube integration functionality
   updatedAt: string;
   version: number;
+}
+
+export interface YouTubeFetchResult {
+  fetched: number;
+  created: number;
+  updated: number;
+  unchanged: number;
+  skippedTerminal: number;
+  nextPageToken?: string;
 }

@@ -1,19 +1,23 @@
 import type { YouTubeRepository } from './youtubeRepository';
 import { FirestoreYouTubeRepository } from './firestoreYouTubeRepository';
+import type { YouTubeClient } from './youtubeClient';
+import { RealYouTubeClient } from './realYouTubeClient';
 import type {
   YouTubeIntegrationConfig,
   YouTubeImportCandidate,
   CandidateSourceSnapshot,
   CandidateEditorialDraft,
   CandidateLifecycleStatus,
+  YouTubeFetchResult,
 } from '../types/youtube';
 
 export class YoutubeApplicationService {
   private repository: YouTubeRepository;
+  private client: YouTubeClient;
 
-  constructor(repository?: YouTubeRepository) {
-    // Defaults to server production Firestore repository when no explicit repo is injected
+  constructor(repository?: YouTubeRepository, client?: YouTubeClient) {
     this.repository = repository || new FirestoreYouTubeRepository();
+    this.client = client || new RealYouTubeClient();
   }
 
   // ---------------------------------------------------------------------------
@@ -54,11 +58,136 @@ export class YoutubeApplicationService {
   }
 
   // ---------------------------------------------------------------------------
-  // 2. YouTube Import Candidate Lifecycle
+  // 2. YouTube Import Candidate Ingestion & Lifecycle
   // ---------------------------------------------------------------------------
 
   public async getCandidate(id: string): Promise<YouTubeImportCandidate | null> {
     return this.repository.getCandidate(id);
+  }
+
+  /**
+   * Secure Server Fetch & Candidate Ingestion Engine
+   */
+  public async fetchChannelUploads(input?: {
+    pageToken?: string;
+    maxResults?: number;
+  }): Promise<YouTubeFetchResult> {
+    const config = await this.repository.getConfiguration('youtube-primary');
+
+    if (!config) {
+      throw new Error('Configuration missing: youtube-primary is not initialized');
+    }
+
+    if (!config.enabled) {
+      throw new Error('YouTube integration is disabled');
+    }
+
+    if (!config.channelId || config.channelId.trim() === '') {
+      throw new Error('Invalid Configuration: channelId is required');
+    }
+
+    // 1. Resolve channel's uploads playlist ID
+    const uploadsPlaylistId = await this.client.getUploadsPlaylistId(config.channelId);
+
+    // 2. Fetch playlist items (default 25 newest videos)
+    const playlistPage = await this.client.getPlaylistItems(
+      uploadsPlaylistId,
+      input?.pageToken,
+      input?.maxResults || 25
+    );
+
+    const videoIds = playlistPage.items.map((item) => item.videoId);
+    if (videoIds.length === 0) {
+      return {
+        fetched: 0,
+        created: 0,
+        updated: 0,
+        unchanged: 0,
+        skippedTerminal: 0,
+        nextPageToken: playlistPage.nextPageToken,
+      };
+    }
+
+    // 3. Batch fetch video details
+    const fetchedVideos = await this.client.getVideoDetailsBatch(videoIds);
+
+    let created = 0;
+    let updated = 0;
+    let unchanged = 0;
+    let skippedTerminal = 0;
+
+    // 4. Normalize and upsert candidates
+    for (const fetchedVideo of fetchedVideos) {
+      const snapshot: CandidateSourceSnapshot = {
+        sourceTitle: fetchedVideo.sourceTitle,
+        sourceDescription: fetchedVideo.sourceDescription,
+        sourceThumbnailUrl: fetchedVideo.sourceThumbnailUrl,
+        youtubePublishedAt: fetchedVideo.youtubePublishedAt,
+      };
+
+      const candidateId = `youtube_${fetchedVideo.externalVideoId}`;
+      const existing = await this.repository.getCandidate(candidateId);
+
+      if (existing && (existing.status === 'Accepted' || existing.status === 'Rejected')) {
+        skippedTerminal++;
+        continue;
+      }
+
+      if (existing) {
+        const sourceHasChanged =
+          existing.sourceSnapshot.sourceTitle !== snapshot.sourceTitle ||
+          existing.sourceSnapshot.sourceDescription !== snapshot.sourceDescription ||
+          existing.sourceSnapshot.sourceThumbnailUrl !== snapshot.sourceThumbnailUrl ||
+          existing.sourceSnapshot.youtubePublishedAt !== snapshot.youtubePublishedAt;
+
+        if (!sourceHasChanged) {
+          unchanged++;
+        } else {
+          const updatedCandidate: YouTubeImportCandidate = {
+            ...existing,
+            sourceSnapshot: { ...snapshot },
+            candidateVersion: existing.candidateVersion + 1,
+            updatedAt: new Date().toISOString(),
+          };
+          await this.repository.saveCandidate(updatedCandidate);
+          updated++;
+        }
+      } else {
+        const newCandidate: YouTubeImportCandidate = {
+          id: candidateId,
+          provider: 'YouTube',
+          externalVideoId: fetchedVideo.externalVideoId,
+          sourceSnapshot: { ...snapshot },
+          editorialDraft: {
+            titleAr: snapshot.sourceTitle,
+            titleEn: '',
+            excerptAr:
+              snapshot.sourceDescription.substring(0, 150) +
+              (snapshot.sourceDescription.length > 150 ? '...' : ''),
+            excerptEn: '',
+            editorialDescriptionAr: snapshot.sourceDescription,
+            editorialDescriptionEn: '',
+            category: undefined, // Unset until human review
+            tags: [],
+          },
+          status: 'PendingReview',
+          candidateVersion: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        await this.repository.saveCandidate(newCandidate);
+        created++;
+      }
+    }
+
+    return {
+      fetched: fetchedVideos.length,
+      created,
+      updated,
+      unchanged,
+      skippedTerminal,
+      nextPageToken: playlistPage.nextPageToken,
+    };
   }
 
   public async saveCandidateFromSource(
@@ -101,7 +230,7 @@ export class YoutubeApplicationService {
         excerptEn: '',
         editorialDescriptionAr: snapshot.sourceDescription,
         editorialDescriptionEn: '',
-        category: 'Climate',
+        category: undefined,
         tags: [],
       };
     }
@@ -195,6 +324,10 @@ export class YoutubeApplicationService {
 
     if (candidate.candidateVersion !== reviewedVersion) {
       throw new Error('Stale Review: The candidate material was updated since review began');
+    }
+
+    if (!candidate.editorialDraft.category) {
+      throw new Error('Invalid Draft: Canonical Category must be assigned by a human editor before acceptance');
     }
 
     if (mediaRegisterFn) {
