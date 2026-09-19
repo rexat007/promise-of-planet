@@ -6,6 +6,7 @@ import { AdminAccessService } from '../../services/adminAccess';
 import { AdminOverview } from '../content/AdminOverview';
 import { AdminNewsManagement } from '../news/AdminNewsManagement';
 import { AdminLibraryManagement } from '../library/AdminLibraryManagement';
+import { AdminTrainingManagement } from '../training/AdminTrainingManagement';
 import { AdminPlaceholderView } from '../content/AdminPlaceholderView';
 import { ViewTransition } from '../common/ViewTransition';
 import { 
@@ -264,6 +265,8 @@ export function AdminLayout({ onExitAdmin }: AdminLayoutProps) {
               <AdminNewsManagement currentUser={currentUser} />
             ) : effectiveTab === 'library' ? (
               <AdminLibraryManagement currentUser={currentUser} />
+            ) : effectiveTab === 'training' ? (
+              <AdminTrainingManagement currentUser={currentUser} />
             ) : (
               <AdminPlaceholderView id={effectiveTab} currentUser={currentUser} />
             )}

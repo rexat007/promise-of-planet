@@ -424,8 +424,8 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
           </div>
         ) : (
           <>
-            {/* Compact Cards List (< 1024px) */}
-            <div className="block lg:hidden divide-y divide-gray-100 dark:divide-gray-800 w-full max-w-full min-w-0">
+            {/* Compact Cards List (< 1280px) */}
+            <div className="block xl:hidden divide-y divide-gray-100 dark:divide-gray-800 w-full max-w-full min-w-0">
               {filteredDocuments.map((doc) => (
                 <div key={doc.id} className="p-4 sm:p-5 space-y-3 hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors w-full max-w-full min-w-0">
                   {/* Document Identity */}
@@ -485,8 +485,8 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
               ))}
             </div>
 
-            {/* Desktop Table View (>= 1024px) */}
-            <div className="hidden lg:block overflow-x-auto w-full max-w-full min-w-0">
+            {/* Desktop Table View (>= 1280px) */}
+            <div className="hidden xl:block overflow-x-auto w-full max-w-full min-w-0">
               <table className="w-full text-right rtl:text-right ltr:text-left text-xs sm:text-sm">
                 <thead className="bg-gray-50/80 dark:bg-gray-950/80 text-gray-500 dark:text-gray-400 font-extrabold uppercase border-b border-gray-100 dark:border-gray-800">
                   <tr>

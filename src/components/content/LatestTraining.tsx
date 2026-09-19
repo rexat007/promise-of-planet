@@ -1,62 +1,9 @@
 import React from 'react';
-import type { Category } from '../../types';
 import { getCategoryLabel } from './contentFormatters';
+import type { TrainingCourse } from '../../types/training';
+import { MOCK_TRAINING_COURSES } from '../../data/mockTrainingData';
 
-export interface TrainingCoursePreview {
-  id: string;
-  titleAr: string;
-  titleEn: string;
-  summaryAr: string;
-  summaryEn: string;
-  category: Category;
-  level: 'Beginner' | 'Intermediate' | 'Advanced';
-  durationHours: number;
-  deliveryMode: 'OnlineSelfPaced' | 'LiveWorkshop' | 'FieldCohort';
-  targetAudienceAr: string;
-  targetAudienceEn: string;
-}
-
-const MOCK_TRAINING_COURSES: TrainingCoursePreview[] = [
-  {
-    id: 'course-01',
-    titleAr: 'أساسيات الصحافة البيئية وتغطية أزمات المناخ في السودان',
-    titleEn: 'Foundations of Environmental Journalism & Climate Reporting in Sudan',
-    summaryAr: 'برنامج تدريبي يزود الصحفيين والباحثين بمهارات التحقق من البيانات المناخية وتوثيق الأثر المجتمعي.',
-    summaryEn: 'Training curriculum equipping journalists with climate data verification and community impact storytelling.',
-    category: 'Climate',
-    level: 'Beginner',
-    durationHours: 16,
-    deliveryMode: 'OnlineSelfPaced',
-    targetAudienceAr: 'الصحفيون، طلاب الإعلام، ونشطاء المجتمع المدني',
-    targetAudienceEn: 'Journalists, media students, and civil society activists',
-  },
-  {
-    id: 'course-02',
-    titleAr: 'أدوات الاستشعار عن بعد ونظم المعلومات الجغرافية (GIS) في رصد التصحر',
-    titleEn: 'Remote Sensing & GIS Tools for Desertification Tracking',
-    summaryAr: 'تدريب تطبيقي على قراءة صور الأقمار الاصطناعية ومؤشرات الغطاء النباتي (NDVI) لتحليل تدهور الأراضي.',
-    summaryEn: 'Hands-on training in satellite imagery analysis and vegetation indexes (NDVI) for land degradation.',
-    category: 'Agriculture',
-    level: 'Intermediate',
-    durationHours: 24,
-    deliveryMode: 'LiveWorkshop',
-    targetAudienceAr: 'الباحثون البيئيون، المهندسون الزراعيون، ومحللو البيانات',
-    targetAudienceEn: 'Environmental researchers, agronomists, and data analysts',
-  },
-  {
-    id: 'course-03',
-    titleAr: 'صحافة التحقيقات الاستقصائية الميدانية في حوكمة الموارد الطبيعية والمياه',
-    titleEn: 'Investigative Field Reporting on Water Governance & Natural Resources',
-    summaryAr: 'منهجية إعداد التحقيقات الميدانية المعمقة، حماية المصادر، وتوثيق انتهاكات استغلال الموارد.',
-    summaryEn: 'Methodology for in-depth investigative reporting, source protection, and resource governance audits.',
-    category: 'Water',
-    level: 'Advanced',
-    durationHours: 30,
-    deliveryMode: 'FieldCohort',
-    targetAudienceAr: 'المحققون الصحفيون، القانونيون، وفرق الاستقصاء البيئي',
-    targetAudienceEn: 'Investigative journalists, legal researchers, and environmental investigators',
-  },
-];
+export type TrainingCoursePreview = TrainingCourse;
 
 export interface LatestTrainingProps {
   currentLanguage: 'ar' | 'en';

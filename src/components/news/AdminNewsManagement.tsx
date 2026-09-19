@@ -382,7 +382,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
         </div>
       </div>
 
-      {/* News Table / List */}
+      {/* News Management View (< 1280px Compact Cards, >= 1280px Dense Table) */}
       <div data-responsive-guard className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl overflow-hidden shadow-xs w-full max-w-full min-w-0">
         {filteredNews.length === 0 ? (
           <div className="p-12 text-center text-gray-500 dark:text-gray-400 space-y-2">
@@ -390,61 +390,100 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
             <p className="font-semibold text-sm">{isAr ? 'لا توجد أخبار تنطبق على محددات البحث' : 'No news articles match the selected filters'}</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-start text-xs sm:text-sm">
-              <thead className="bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800 text-gray-500 dark:text-gray-400 font-bold uppercase tracking-wider">
-                <tr>
-                  <th className="p-3.5 text-start">{isAr ? 'عنوان الخبر البيئي' : 'News Article Title'}</th>
-                  <th className="p-3.5 text-start">{isAr ? 'التصنيف' : 'Category'}</th>
-                  <th className="p-3.5 text-start">{isAr ? 'الكاتب' : 'Author'}</th>
-                  <th className="p-3.5 text-start">{isAr ? 'حالة الاعتماد' : 'Workflow Status'}</th>
-                  <th className="p-3.5 text-start">{isAr ? 'آخر تحديث' : 'Last Updated'}</th>
-                  <th className="p-3.5 text-end">{isAr ? 'الإجراءات' : 'Actions'}</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                {filteredNews.map(item => (
-                  <tr key={item.id} className="hover:bg-gray-50/60 dark:hover:bg-gray-800/30 transition-colors">
-                    <td className="p-3.5 max-w-xs sm:max-w-md">
-                      <p className="font-bold text-gray-900 dark:text-white line-clamp-1">
-                        {isAr ? item.titleAr : (item.titleEn || item.titleAr)}
-                      </p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-1 mt-0.5">
-                        {isAr ? (item.titleEn || item.summaryAr) : item.summaryEn}
-                      </p>
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap">
-                      <span className="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-medium text-xs">
-                        {item.category}
-                      </span>
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap font-medium text-gray-700 dark:text-gray-300">
-                      {item.author}
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap">
-                      {renderStatusBadge(item.workflowState)}
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
-                      {new Date(item.updatedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', {
-                        year: 'numeric',
-                        month: 'short',
-                        day: 'numeric'
-                      })}
-                    </td>
-                    <td className="p-3.5 whitespace-nowrap text-end">
-                      <button
-                        onClick={() => handleOpenItem(item)}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/60 dark:text-emerald-400 font-bold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>{isAr ? 'العرض والتحرير' : 'View & Edit'}</span>
-                      </button>
-                    </td>
+          <>
+            {/* Compact Cards List (< 1280px) */}
+            <div className="block xl:hidden divide-y divide-gray-100 dark:divide-gray-800 w-full max-w-full min-w-0">
+              {filteredNews.map(item => (
+                <div key={item.id} className="p-4 sm:p-5 space-y-3 hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors w-full max-w-full min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-medium text-xs">
+                      {item.category}
+                    </span>
+                    {renderStatusBadge(item.workflowState)}
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="font-bold text-gray-900 dark:text-white text-sm sm:text-base leading-snug">
+                      {isAr ? item.titleAr : (item.titleEn || item.titleAr)}
+                    </h3>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
+                      {isAr ? (item.titleEn || item.summaryAr) : item.summaryEn}
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-between pt-2 border-t border-gray-100 dark:border-gray-800 text-xs text-gray-500 dark:text-gray-400">
+                    <div>
+                      <span className="font-semibold text-gray-700 dark:text-gray-300">{item.author}</span>
+                      <span className="mx-2">•</span>
+                      <span>{new Date(item.updatedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                    </div>
+                    <button
+                      onClick={() => handleOpenItem(item)}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/60 dark:text-emerald-400 font-bold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>{isAr ? 'العرض والتحرير' : 'View & Edit'}</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Dense Desktop Table View (>= 1280px) */}
+            <div className="hidden xl:block overflow-x-auto w-full max-w-full min-w-0">
+              <table className="w-full text-start text-xs sm:text-sm">
+                <thead className="bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800 text-gray-500 dark:text-gray-400 font-bold uppercase tracking-wider">
+                  <tr>
+                    <th className="p-3.5 text-start">{isAr ? 'عنوان الخبر البيئي' : 'News Article Title'}</th>
+                    <th className="p-3.5 text-start">{isAr ? 'التصنيف' : 'Category'}</th>
+                    <th className="p-3.5 text-start">{isAr ? 'الكاتب' : 'Author'}</th>
+                    <th className="p-3.5 text-start">{isAr ? 'حالة الاعتماد' : 'Workflow Status'}</th>
+                    <th className="p-3.5 text-start">{isAr ? 'آخر تحديث' : 'Last Updated'}</th>
+                    <th className="p-3.5 text-end">{isAr ? 'الإجراءات' : 'Actions'}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                  {filteredNews.map(item => (
+                    <tr key={item.id} className="hover:bg-gray-50/60 dark:hover:bg-gray-800/30 transition-colors">
+                      <td className="p-3.5 max-w-xs sm:max-w-md">
+                        <p className="font-bold text-gray-900 dark:text-white line-clamp-1">
+                          {isAr ? item.titleAr : (item.titleEn || item.titleAr)}
+                        </p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-1 mt-0.5">
+                          {isAr ? (item.titleEn || item.summaryAr) : item.summaryEn}
+                        </p>
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap">
+                        <span className="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-medium text-xs">
+                          {item.category}
+                        </span>
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap font-medium text-gray-700 dark:text-gray-300">
+                        {item.author}
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap">
+                        {renderStatusBadge(item.workflowState)}
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                        {new Date(item.updatedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric'
+                        })}
+                      </td>
+                      <td className="p-3.5 whitespace-nowrap text-end">
+                        <button
+                          onClick={() => handleOpenItem(item)}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/60 dark:text-emerald-400 font-bold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>{isAr ? 'العرض والتحرير' : 'View & Edit'}</span>
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
 
