@@ -10,6 +10,7 @@ import {
   executeManageYouTubeIntegrationRequest,
   executeReviewYouTubeCandidateRequest
 } from '../functions/src/youtube/youtubeAdminHandlers';
+import { executeManualYouTubeSyncRequest } from '../functions/src/youtube/manualSyncHandler';
 
 async function runReviewTests() {
   console.log('=========================================================');
@@ -522,6 +523,129 @@ async function runReviewTests() {
     functionsCategories.includes('EnvironmentalPolicy'),
     'Review Test 19',
     'Category vocabulary has exactly one canonical source of truth shared across frontend and functions'
+  );
+
+  // TEST 20: Manual sync - Disabled integration error does not expose original raw error
+  const disabledRepo = new InMemoryYouTubeRepository();
+  const disabledAppService = new YoutubeApplicationService(disabledRepo, new FakeYouTubeClient());
+  await disabledAppService.updateConfiguration({
+    channelId: 'UC_DISABLED',
+    enabled: false,
+    version: 0
+  });
+
+  let disabledError: any;
+  try {
+    await executeManualYouTubeSyncRequest(
+      { auth: { uid: 'uid-owner' } },
+      adminRepo,
+      disabledAppService
+    );
+  } catch (err: any) {
+    disabledError = err;
+  }
+  assert(
+    disabledError &&
+    disabledError.code === 'failed-precondition' &&
+    disabledError.message === 'INTEGRATION_DISABLED: YouTube integration is disabled',
+    'Review Test 20',
+    'Disabled integration error is bounded and does not leak internal error strings'
+  );
+
+  // TEST 21: Manual sync - Missing configuration error does not expose original raw error
+  const unconfiguredRepo = new InMemoryYouTubeRepository();
+  const unconfiguredAppService = new YoutubeApplicationService(unconfiguredRepo, new FakeYouTubeClient());
+  let missingConfigError: any;
+  try {
+    await executeManualYouTubeSyncRequest(
+      { auth: { uid: 'uid-owner' } },
+      adminRepo,
+      unconfiguredAppService
+    );
+  } catch (err: any) {
+    missingConfigError = err;
+  }
+  assert(
+    missingConfigError &&
+    missingConfigError.code === 'failed-precondition' &&
+    missingConfigError.message === 'CONFIGURATION_MISSING: YouTube integration configuration is incomplete',
+    'Review Test 21',
+    'Missing configuration error is bounded and does not leak internal repository strings'
+  );
+
+  // TEST 22: Manual sync - Upstream YouTube error does not expose raw error
+  const failingRepo = new InMemoryYouTubeRepository();
+  const failingClient = new FakeYouTubeClient();
+  failingClient.getUploadsPlaylistId = async () => {
+    throw new Error('Raw internal Gaxios/GoogleApi error: quotaExceeded: The request cannot be completed because you have exceeded your quota.');
+  };
+  const upstreamFailingAppService = new YoutubeApplicationService(failingRepo, failingClient);
+  await upstreamFailingAppService.updateConfiguration({
+    channelId: 'UC_FAILING',
+    enabled: true,
+    version: 0
+  });
+
+  let upstreamError: any;
+  try {
+    await executeManualYouTubeSyncRequest(
+      { auth: { uid: 'uid-owner' } },
+      adminRepo,
+      upstreamFailingAppService
+    );
+  } catch (err: any) {
+    upstreamError = err;
+  }
+  assert(
+    upstreamError &&
+    upstreamError.code === 'unavailable' &&
+    upstreamError.message === 'UPSTREAM_YOUTUBE_ERROR: Unable to synchronize with YouTube' &&
+    !upstreamError.message.includes('Gaxios') &&
+    !upstreamError.message.includes('quotaExceeded'),
+    'Review Test 22',
+    'Arbitrary upstream error does not expose raw internal error text'
+  );
+
+  // TEST 23: Manual sync - YOUTUBE_API_KEY-like content in upstream exception cannot reach client
+  const secretFailingRepo = new InMemoryYouTubeRepository();
+  const secretLeakingClient = new FakeYouTubeClient();
+  secretLeakingClient.getUploadsPlaylistId = async () => {
+    throw new Error('HTTP 403 Forbidden with YOUTUBE_API_KEY=AIzaSySecretKeyValue12345 in URL query');
+  };
+  const secretFailingAppService = new YoutubeApplicationService(secretFailingRepo, secretLeakingClient);
+  await secretFailingAppService.updateConfiguration({
+    channelId: 'UC_SECRET_FAILING',
+    enabled: true,
+    version: 0
+  });
+
+  let secretLeakError: any;
+  try {
+    await executeManualYouTubeSyncRequest(
+      { auth: { uid: 'uid-owner' } },
+      adminRepo,
+      secretFailingAppService
+    );
+  } catch (err: any) {
+    secretLeakError = err;
+  }
+  assert(
+    secretLeakError &&
+    secretLeakError.message === 'UPSTREAM_YOUTUBE_ERROR: Unable to synchronize with YouTube' &&
+    !secretLeakError.message.includes('AIzaSySecretKeyValue12345') &&
+    !secretLeakError.message.includes('YOUTUBE_API_KEY'),
+    'Review Test 23',
+    'YOUTUBE_API_KEY-like content in upstream exception is completely isolated from client response'
+  );
+
+  // TEST 24: Manual sync - Semantic error categories remain distinguishable
+  assert(
+    disabledError.message.startsWith('INTEGRATION_DISABLED:') &&
+    missingConfigError.message.startsWith('CONFIGURATION_MISSING:') &&
+    upstreamError.message.startsWith('UPSTREAM_YOUTUBE_ERROR:') &&
+    disabledError.code !== upstreamError.code,
+    'Review Test 24',
+    'Semantic error categories (INTEGRATION_DISABLED, CONFIGURATION_MISSING, UPSTREAM_YOUTUBE_ERROR) remain cleanly distinguishable'
   );
 
   console.log('\n=========================================================');

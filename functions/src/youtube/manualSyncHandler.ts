@@ -71,14 +71,14 @@ export async function executeManualYouTubeSyncRequest(
     const rawMsg = err instanceof Error ? err.message : String(err);
 
     if (rawMsg.toLowerCase().includes('disabled')) {
-      throw new HttpsError('failed-precondition', `INTEGRATION_DISABLED: ${rawMsg}`);
+      throw new HttpsError('failed-precondition', 'INTEGRATION_DISABLED: YouTube integration is disabled');
     }
 
     if (rawMsg.toLowerCase().includes('missing')) {
-      throw new HttpsError('failed-precondition', `CONFIGURATION_MISSING: ${rawMsg}`);
+      throw new HttpsError('failed-precondition', 'CONFIGURATION_MISSING: YouTube integration configuration is incomplete');
     }
 
-    throw new HttpsError('unavailable', `UPSTREAM_YOUTUBE_ERROR: ${rawMsg}`);
+    throw new HttpsError('unavailable', 'UPSTREAM_YOUTUBE_ERROR: Unable to synchronize with YouTube');
   }
 }
 
