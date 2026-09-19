@@ -5,9 +5,11 @@ import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
 import { AdminPermission } from '../types/admin';
 import type { AdminUser } from '../types/admin';
-import type {
-  CandidateLifecycleStatus,
-  CandidateEditorialDraft
+import {
+  type CandidateLifecycleStatus,
+  type CandidateEditorialDraft,
+  CANONICAL_CATEGORIES,
+  isCanonicalCategory,
 } from '../types/youtube';
 
 export interface AdminRequestContext {
@@ -16,16 +18,6 @@ export interface AdminRequestContext {
   };
   data?: any;
 }
-
-const CANONICAL_CATEGORIES = [
-  'Climate',
-  'Water',
-  'Biodiversity',
-  'Pollution',
-  'Energy',
-  'Agriculture',
-  'EnvironmentalPolicy'
-] as const;
 
 async function authenticateAndAuthorize(
   requestContext: AdminRequestContext,
@@ -37,7 +29,13 @@ async function authenticateAndAuthorize(
   }
 
   const uid = requestContext.auth.uid.trim();
-  const admin = await adminRepo.getAdminByUid(uid);
+  let admin: AdminUser | null = null;
+  try {
+    admin = await adminRepo.getAdminByUid(uid);
+  } catch (_err) {
+    throw new HttpsError('internal', 'ADMIN_LOOKUP_FAILED: Failed to verify admin identity');
+  }
+
   if (!admin) {
     throw new HttpsError('permission-denied', 'ADMIN_NOT_REGISTERED: User identity is not registered as a canonical AdminUser');
   }
@@ -68,8 +66,13 @@ export async function executeManageYouTubeIntegrationRequest(
 
   if (action === 'getConfig') {
     await authenticateAndAuthorize(requestContext, AdminPermission.ManageSettings, adminRepo);
-    const config = await youtubeAppService.getConfiguration();
-    return { config };
+    try {
+      const config = await youtubeAppService.getConfiguration();
+      return { config };
+    } catch (err: any) {
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError('internal', 'CONFIG_FETCH_FAILED: Unable to retrieve YouTube integration configuration');
+    }
   }
 
   if (action === 'updateConfig') {
@@ -96,9 +99,9 @@ export async function executeManageYouTubeIntegrationRequest(
       if (err instanceof HttpsError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('Concurrency conflict')) {
-        throw new HttpsError('aborted', `CONCURRENCY_CONFLICT: ${msg}`);
+        throw new HttpsError('aborted', 'CONCURRENCY_CONFLICT: YouTube configuration version mismatch. Refresh and retry.');
       }
-      throw new HttpsError('internal', `CONFIG_UPDATE_FAILED: ${msg}`);
+      throw new HttpsError('internal', 'CONFIG_UPDATE_FAILED: Unable to update YouTube configuration');
     }
   }
 
@@ -113,8 +116,13 @@ export async function executeManageYouTubeIntegrationRequest(
       statusFilter = data.status as CandidateLifecycleStatus;
     }
 
-    const candidates = await youtubeAppService.listCandidates(statusFilter ? { status: statusFilter } : undefined);
-    return { candidates };
+    try {
+      const candidates = await youtubeAppService.listCandidates(statusFilter ? { status: statusFilter } : undefined);
+      return { candidates };
+    } catch (err: any) {
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError('internal', 'LIST_CANDIDATES_FAILED: Unable to list YouTube import candidates');
+    }
   }
 
   if (action === 'getCandidate') {
@@ -124,8 +132,13 @@ export async function executeManageYouTubeIntegrationRequest(
       throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: Candidate id is required');
     }
 
-    const candidate = await youtubeAppService.getCandidate(data.id.trim());
-    return { candidate };
+    try {
+      const candidate = await youtubeAppService.getCandidate(data.id.trim());
+      return { candidate };
+    } catch (err: any) {
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError('internal', 'GET_CANDIDATE_FAILED: Unable to retrieve YouTube import candidate');
+    }
   }
 
   throw new HttpsError('invalid-argument', 'INVALID_ACTION: Unsupported action requested');
@@ -168,7 +181,7 @@ export async function executeReviewYouTubeCandidateRequest(
     if (data.editorialDraft.category !== undefined) {
       if (data.editorialDraft.category === null || data.editorialDraft.category === '') {
         sanitizedDraft.category = undefined;
-      } else if (CANONICAL_CATEGORIES.includes(data.editorialDraft.category)) {
+      } else if (isCanonicalCategory(data.editorialDraft.category)) {
         sanitizedDraft.category = data.editorialDraft.category;
       } else {
         throw new HttpsError('invalid-argument', `INVALID_CATEGORY: Category must be one of: ${CANONICAL_CATEGORIES.join(', ')}`);
@@ -182,12 +195,12 @@ export async function executeReviewYouTubeCandidateRequest(
       if (err instanceof HttpsError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('terminal')) {
-        throw new HttpsError('failed-precondition', `INVALID_TRANSITION: ${msg}`);
+        throw new HttpsError('failed-precondition', 'INVALID_TRANSITION: Candidate is in a terminal state and cannot be edited');
       }
       if (msg.includes('not found')) {
-        throw new HttpsError('not-found', `NOT_FOUND: ${msg}`);
+        throw new HttpsError('not-found', 'NOT_FOUND: YouTube candidate was not found');
       }
-      throw new HttpsError('internal', `UPDATE_DRAFT_FAILED: ${msg}`);
+      throw new HttpsError('internal', 'UPDATE_DRAFT_FAILED: Unable to update editorial draft');
     }
   }
 
@@ -208,15 +221,15 @@ export async function executeReviewYouTubeCandidateRequest(
       if (err instanceof HttpsError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('Stale Review')) {
-        throw new HttpsError('failed-precondition', `STALE_REVIEW: ${msg}`);
+        throw new HttpsError('failed-precondition', 'STALE_REVIEW: Candidate material was updated since review began. Please refresh and review latest changes.');
       }
       if (msg.includes('terminal')) {
-        throw new HttpsError('failed-precondition', `INVALID_TRANSITION: ${msg}`);
+        throw new HttpsError('failed-precondition', 'INVALID_TRANSITION: Candidate is already in a terminal state');
       }
       if (msg.includes('not found')) {
-        throw new HttpsError('not-found', `NOT_FOUND: ${msg}`);
+        throw new HttpsError('not-found', 'NOT_FOUND: YouTube candidate was not found');
       }
-      throw new HttpsError('internal', `REJECT_FAILED: ${msg}`);
+      throw new HttpsError('internal', 'REJECT_FAILED: Unable to reject candidate');
     }
   }
 

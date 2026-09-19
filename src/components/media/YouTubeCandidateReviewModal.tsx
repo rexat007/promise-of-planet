@@ -15,18 +15,9 @@ import {
   Info
 } from 'lucide-react';
 import type { YouTubeImportCandidate, Category } from '../../types/youtube';
+import { CANONICAL_CATEGORY_DEFINITIONS } from '../../types';
 import { AdminPermission } from '../../types/admin';
 import { useTranslation } from 'react-i18next';
-
-const CANONICAL_CATEGORIES: { value: Category; labelAr: string; labelEn: string }[] = [
-  { value: 'Climate', labelAr: 'المناخ', labelEn: 'Climate' },
-  { value: 'Water', labelAr: 'المياه', labelEn: 'Water' },
-  { value: 'Biodiversity', labelAr: 'التنوع الحيوي', labelEn: 'Biodiversity' },
-  { value: 'Pollution', labelAr: 'التلوث', labelEn: 'Pollution' },
-  { value: 'Energy', labelAr: 'الطاقة', labelEn: 'Energy' },
-  { value: 'Agriculture', labelAr: 'الزراعة', labelEn: 'Agriculture' },
-  { value: 'EnvironmentalPolicy', labelAr: 'السياسات البيئية', labelEn: 'Environmental Policy' },
-];
 
 interface YouTubeCandidateReviewModalProps {
   candidate: YouTubeImportCandidate;
@@ -368,7 +359,7 @@ export const YouTubeCandidateReviewModal: React.FC<YouTubeCandidateReviewModalPr
                       id="candidate-category-select"
                     >
                       <option value="">{tText('-- اختر التصنيف المعتمد --', '-- Select Canonical Category --')}</option>
-                      {CANONICAL_CATEGORIES.map(c => (
+                      {CANONICAL_CATEGORY_DEFINITIONS.map(c => (
                         <option key={c.value} value={c.value}>
                           {isAr ? c.labelAr : c.labelEn} ({c.value})
                         </option>

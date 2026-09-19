@@ -85,14 +85,37 @@ export type VisibilityDecision =
 /**
  * Approved core environmental categories for Promise of Planet.
  */
-export type Category =
-  | 'Climate'
-  | 'Water'
-  | 'Biodiversity'
-  | 'Pollution'
-  | 'Energy'
-  | 'Agriculture'
-  | 'EnvironmentalPolicy';
+export const CANONICAL_CATEGORIES = [
+  'Climate',
+  'Water',
+  'Biodiversity',
+  'Pollution',
+  'Energy',
+  'Agriculture',
+  'EnvironmentalPolicy',
+] as const;
+
+export type Category = (typeof CANONICAL_CATEGORIES)[number];
+
+export function isCanonicalCategory(value: unknown): value is Category {
+  return typeof value === 'string' && (CANONICAL_CATEGORIES as readonly string[]).includes(value);
+}
+
+export interface CanonicalCategoryDefinition {
+  value: Category;
+  labelAr: string;
+  labelEn: string;
+}
+
+export const CANONICAL_CATEGORY_DEFINITIONS: readonly CanonicalCategoryDefinition[] = [
+  { value: 'Climate', labelAr: 'المناخ', labelEn: 'Climate' },
+  { value: 'Water', labelAr: 'المياه', labelEn: 'Water' },
+  { value: 'Biodiversity', labelAr: 'التنوع الحيوي', labelEn: 'Biodiversity' },
+  { value: 'Pollution', labelAr: 'التلوث', labelEn: 'Pollution' },
+  { value: 'Energy', labelAr: 'الطاقة', labelEn: 'Energy' },
+  { value: 'Agriculture', labelAr: 'الزراعة', labelEn: 'Agriculture' },
+  { value: 'EnvironmentalPolicy', labelAr: 'السياسات البيئية', labelEn: 'Environmental Policy' },
+] as const;
 
 /**
  * Editorial topic tag.

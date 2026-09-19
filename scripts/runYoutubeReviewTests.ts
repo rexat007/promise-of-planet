@@ -4,6 +4,8 @@ import { FakeYouTubeClient } from '../functions/src/youtube/fakeYouTubeClient';
 import { InMemoryAdminRepository } from '../functions/src/admin/inMemoryAdminRepository';
 import { AdminRole, AdminPermission } from '../functions/src/types/admin';
 import type { YouTubeImportCandidate, CandidateSourceSnapshot, CandidateEditorialDraft } from '../functions/src/types/youtube';
+import { CANONICAL_CATEGORIES as functionsCategories } from '../functions/src/types/youtube';
+import { CANONICAL_CATEGORIES as srcCategories, CANONICAL_CATEGORY_DEFINITIONS } from '../src/types';
 import {
   executeManageYouTubeIntegrationRequest,
   executeReviewYouTubeCandidateRequest
@@ -453,6 +455,73 @@ async function runReviewTests() {
     unclassifiedAcceptBlocked,
     'Review Test 16',
     'acceptCandidate strictly enforces human-curated canonical Category before acceptance'
+  );
+
+  // TEST 17: Bounded error verification - Stale review returns bounded client-safe message without raw exceptions
+  let staleErrorMessage = '';
+  try {
+    await executeReviewYouTubeCandidateRequest(
+      {
+        auth: { uid: 'uid-editor', token: {} as any },
+        data: {
+          action: 'reject',
+          candidateId: candidate1.id, // candidate1 is still PendingReview
+          reviewedVersion: 999, // Stale version
+        }
+      },
+      adminRepo,
+      ytAppService
+    );
+  } catch (err: any) {
+    staleErrorMessage = err.message || '';
+  }
+  assert(
+    staleErrorMessage.includes('STALE_REVIEW:') &&
+    !staleErrorMessage.includes('Firestore') &&
+    !staleErrorMessage.includes('Error:') &&
+    !staleErrorMessage.includes('stack'),
+    'Review Test 17',
+    'Stale review error is strictly bounded and safe for browser display'
+  );
+
+  // TEST 18: Bounded error verification - Non-existent candidate returns bounded NOT_FOUND message
+  let notFoundErrorMessage = '';
+  try {
+    await executeReviewYouTubeCandidateRequest(
+      {
+        auth: { uid: 'uid-editor', token: {} as any },
+        data: {
+          action: 'reject',
+          candidateId: 'non_existent_candidate_id',
+          reviewedVersion: 1,
+        }
+      },
+      adminRepo,
+      ytAppService
+    );
+  } catch (err: any) {
+    notFoundErrorMessage = err.message || '';
+  }
+  assert(
+    notFoundErrorMessage.includes('NOT_FOUND:') &&
+    !notFoundErrorMessage.includes('Firestore') &&
+    !notFoundErrorMessage.includes('internal'),
+    'Review Test 18',
+    'Not found error is strictly bounded without internal trace or database details'
+  );
+
+  // TEST 19: Single canonical category source verification
+  assert(
+    JSON.stringify(srcCategories) === JSON.stringify(functionsCategories) &&
+    srcCategories.length === 7 &&
+    functionsCategories.length === 7 &&
+    CANONICAL_CATEGORY_DEFINITIONS.length === 7 &&
+    srcCategories.includes('Climate') &&
+    srcCategories.includes('EnvironmentalPolicy') &&
+    functionsCategories.includes('Climate') &&
+    functionsCategories.includes('EnvironmentalPolicy'),
+    'Review Test 19',
+    'Category vocabulary has exactly one canonical source of truth shared across frontend and functions'
   );
 
   console.log('\n=========================================================');

@@ -1,11 +1,14 @@
-export type Category =
-  | 'Climate'
-  | 'Water'
-  | 'Biodiversity'
-  | 'Pollution'
-  | 'Energy'
-  | 'Agriculture'
-  | 'EnvironmentalPolicy';
+import {
+  CANONICAL_CATEGORIES,
+  type Category,
+  isCanonicalCategory,
+} from '../../../src/types';
+
+export {
+  CANONICAL_CATEGORIES,
+  type Category,
+  isCanonicalCategory,
+};
 
 export type Tag = string;
 
