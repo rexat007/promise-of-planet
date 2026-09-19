@@ -3,6 +3,7 @@ import { InMemoryYouTubeRepository } from '../../functions/src/youtube/inMemoryY
 import { FirestoreYouTubeRepository } from '../../functions/src/youtube/firestoreYouTubeRepository';
 import { FakeYouTubeClient } from '../../functions/src/youtube/fakeYouTubeClient';
 import { RealYouTubeClient } from '../../functions/src/youtube/realYouTubeClient';
+import { youtubeApiKeySecret } from '../../functions/src/youtube/youtubeSecrets';
 import { MediaService } from './mediaService';
 import { AdminRole, AdminPermission } from '../types/admin';
 import { AdminAccessService } from './adminAccess';
@@ -873,8 +874,7 @@ export async function runYoutubeFoundationVerification(): Promise<TestResult[]> 
 
   // Test 17: API key never appears in result/errors
   try {
-    const realClient = new RealYouTubeClient();
-    process.env.YOUTUBE_API_KEY = 'SECRET_KEY_123456789_TEST';
+    const realClient = new RealYouTubeClient(() => 'SECRET_KEY_123456789_TEST');
 
     let errorMsg = '';
     try {
@@ -882,8 +882,6 @@ export async function runYoutubeFoundationVerification(): Promise<TestResult[]> 
       await (realClient as any).fetchWithRetry('https://www.googleapis.com/youtube/v3/channels?key=SECRET_KEY_123456789_TEST');
     } catch (e: any) {
       errorMsg = e.message;
-    } finally {
-      delete process.env.YOUTUBE_API_KEY;
     }
 
     assert(
@@ -981,6 +979,98 @@ export async function runYoutubeFoundationVerification(): Promise<TestResult[]> 
     );
   } catch (e: any) {
     assert('Fetch Test 20 - Category is never guessed/fabricated', false, e.message);
+  }
+
+  // Secret Boundary Test 21: Production secret identifier is strictly YOUTUBE_API_KEY
+  try {
+    const secretName = youtubeApiKeySecret.name;
+    assert(
+      'Secret Boundary Test 21 - Canonical secret identifier is YOUTUBE_API_KEY',
+      secretName === 'YOUTUBE_API_KEY',
+      'Secret parameter name matches exactly YOUTUBE_API_KEY'
+    );
+  } catch (e: any) {
+    assert('Secret Boundary Test 21 - Canonical secret identifier is YOUTUBE_API_KEY', false, e.message);
+  }
+
+  // Secret Boundary Test 22: No VITE_YOUTUBE_API_KEY exists
+  try {
+    const viteKeyInMeta = (import.meta as any).env?.VITE_YOUTUBE_API_KEY;
+    const viteKeyInProc = typeof process !== 'undefined' ? process.env?.VITE_YOUTUBE_API_KEY : undefined;
+
+    assert(
+      'Secret Boundary Test 22 - No VITE_YOUTUBE_API_KEY exists',
+      viteKeyInMeta === undefined && viteKeyInProc === undefined,
+      'Verified zero VITE_YOUTUBE_API_KEY in client or process environment'
+    );
+  } catch (e: any) {
+    assert('Secret Boundary Test 22 - No VITE_YOUTUBE_API_KEY exists', false, e.message);
+  }
+
+  // Secret Boundary Test 23: RealYouTubeClient does not rely on direct process.env.YOUTUBE_API_KEY as authority
+  try {
+    const customClient = new RealYouTubeClient(() => 'CUSTOM_SECRET_PROVIDER_KEY');
+    let keyAccessedInClient = '';
+    try {
+      keyAccessedInClient = (customClient as any).getApiKey();
+    } catch {
+      // Ignored
+    }
+
+    assert(
+      'Secret Boundary Test 23 - RealYouTubeClient uses secret abstraction rather than direct process.env authority',
+      keyAccessedInClient === 'CUSTOM_SECRET_PROVIDER_KEY',
+      'RealYouTubeClient accesses credential via injected secret provider abstraction'
+    );
+  } catch (e: any) {
+    assert('Secret Boundary Test 23 - RealYouTubeClient uses secret abstraction rather than direct process.env authority', false, e.message);
+  }
+
+  // Secret Boundary Test 24: Fake tests consume zero live YouTube quota
+  try {
+    const fakeClient = new FakeYouTubeClient();
+    fakeClient.channels['UC_ZERO'] = 'UU_ZERO';
+    fakeClient.playlists['UU_ZERO'] = { items: ['z1'] };
+    fakeClient.videos['z1'] = {
+      externalVideoId: 'z1',
+      sourceTitle: 'Zero Quota',
+      sourceDescription: 'No live HTTP calls',
+      sourceThumbnailUrl: 'https://img.com/z.jpg',
+      youtubePublishedAt: '2026-03-01T00:00:00Z',
+    };
+
+    const repo = new InMemoryYouTubeRepository();
+    const appService = new YoutubeApplicationService(repo, fakeClient);
+    await appService.updateConfiguration({ channelId: 'UC_ZERO', enabled: true, version: 0 });
+
+    const result = await appService.fetchChannelUploads();
+
+    assert(
+      'Secret Boundary Test 24 - Fake tests consume zero live YouTube quota',
+      result.created === 1 && fakeClient.callCounts.getUploadsPlaylistId === 1,
+      'Test execution executed 100% offline using FakeYouTubeClient double without network calls'
+    );
+  } catch (e: any) {
+    assert('Secret Boundary Test 24 - Fake tests consume zero live YouTube quota', false, e.message);
+  }
+
+  // Secret Boundary Test 25: API key error redaction works cleanly with secret provider
+  try {
+    const secretProviderClient = new RealYouTubeClient(() => 'SECRET_PROVIDER_KEY_999');
+    let sanitizedError = '';
+    try {
+      throw (secretProviderClient as any).sanitizeError(new Error('Failed request key=SECRET_PROVIDER_KEY_999'));
+    } catch (err: any) {
+      sanitizedError = err.message;
+    }
+
+    assert(
+      'Secret Boundary Test 25 - API key redacted cleanly from errors',
+      !sanitizedError.includes('SECRET_PROVIDER_KEY_999') && sanitizedError.includes('[REDACTED_KEY]'),
+      'Secret credential redacted cleanly from error messages'
+    );
+  } catch (e: any) {
+    assert('Secret Boundary Test 25 - API key redacted cleanly from errors', false, e.message);
   }
 
   return results;

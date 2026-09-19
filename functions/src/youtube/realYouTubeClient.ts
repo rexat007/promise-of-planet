@@ -3,19 +3,38 @@ import type {
   YouTubeFetchedVideo,
   YouTubePlaylistPage,
 } from './youtubeClient';
+import { defaultProductionApiKeyProvider, type YouTubeApiKeyProvider } from './youtubeSecrets';
 
 export class RealYouTubeClient implements YouTubeClient {
+  private readonly apiKeyProvider: YouTubeApiKeyProvider;
+
+  constructor(apiKeyProvider: YouTubeApiKeyProvider = defaultProductionApiKeyProvider) {
+    this.apiKeyProvider = apiKeyProvider;
+  }
+
   private getApiKey(): string {
-    const key = process.env.YOUTUBE_API_KEY;
+    let key: string | undefined;
+    try {
+      key = this.apiKeyProvider();
+    } catch (e: any) {
+      throw new Error(`YouTube API key missing: YOUTUBE_API_KEY secret is not configured (${e?.message || 'Secret missing'})`);
+    }
+
     if (!key || key.trim() === '') {
-      throw new Error('YouTube API key missing: YOUTUBE_API_KEY environment variable is not configured');
+      throw new Error('YouTube API key missing: YOUTUBE_API_KEY secret is not configured');
     }
     return key.trim();
   }
 
   private sanitizeError(err: unknown): Error {
     const rawMsg = err instanceof Error ? err.message : String(err);
-    const key = process.env.YOUTUBE_API_KEY;
+    let key: string | undefined;
+    try {
+      key = this.apiKeyProvider();
+    } catch {
+      // Key lookup may fail if secret uninitialized
+    }
+
     let safeMsg = rawMsg;
     if (key && key.trim() !== '') {
       safeMsg = safeMsg.split(key.trim()).join('[REDACTED_KEY]');
