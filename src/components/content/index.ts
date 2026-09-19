@@ -9,6 +9,5 @@ export * from './ContentSourceList';
 export * from './VideoRelationList';
 export * from './SectionHeading';
 export * from './FeaturedSection';
-export * from './InteractiveWorldMap';
 export * from './LatestLibrary';
 export * from './LatestTraining';

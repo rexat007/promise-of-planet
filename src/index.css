@@ -47,7 +47,141 @@
   --pop-font-size-2xl: 1.5rem;         /* 24px */
   --pop-font-size-4xl: 2.25rem;        /* 36px */
 
+  /* 9. Motion System Tokens — Promise of Planet Interaction Vocabulary */
+  --pop-duration-micro: 150ms;         /* Micro-interactions: button clicks, toggles, icon presses */
+  --pop-duration-standard: 220ms;      /* Standard UI transitions: card elevations, state shifts */
+  --pop-duration-panel: 250ms;         /* Contextual header dropdowns, mega-panels, drawers */
+  --pop-duration-modal: 280ms;         /* Modal, dialog & overlay origin transitions */
+  --pop-duration-section: 400ms;       /* Editorial section focus & smooth scroll arrival */
+
+  --pop-ease-out: cubic-bezier(0, 0, 0.2, 1);          /* Swift natural entrances */
+  --pop-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);     /* Smooth morphs & state toggles */
+  --pop-ease-editorial: cubic-bezier(0.16, 1, 0.3, 1);  /* Refined, calm editorial easing */
+
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+/* ==========================================
+   Motion System Classes & Accessibility
+   ========================================== */
+
+.pop-motion-micro {
+  transition-property: color, background-color, border-color, opacity, transform, box-shadow;
+  transition-duration: var(--pop-duration-micro);
+  transition-timing-function: var(--pop-ease-out);
+}
+
+.pop-motion-standard {
+  transition-property: color, background-color, border-color, opacity, transform, box-shadow;
+  transition-duration: var(--pop-duration-standard);
+  transition-timing-function: var(--pop-ease-in-out);
+}
+
+/* Rule L: Root Viewport Scrollbar Anchor Stability */
+html {
+  direction: ltr !important;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  direction: ltr !important;
+  margin: 0;
+  padding: 0;
+}
+
+#root, #app-root-container {
+  width: 100%;
+  min-height: 100vh;
+}
+
+#root[dir="rtl"], #app-root-container[dir="rtl"] {
+  direction: rtl;
+  text-align: right;
+}
+
+#root[dir="ltr"], #app-root-container[dir="ltr"] {
+  direction: ltr;
+  text-align: left;
+}
+
+/* Rule M: Restrained Page/State Transition */
+.pop-page-fade {
+  animation: popPageFadeIn var(--pop-duration-standard) var(--pop-ease-editorial);
+}
+
+@keyframes popPageFadeIn {
+  from {
+    opacity: 0.92;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.pop-motion-panel {
+  transition-property: opacity, transform, filter, visibility;
+  transition-duration: var(--pop-duration-panel);
+  transition-timing-function: var(--pop-ease-editorial);
+}
+
+.pop-motion-modal {
+  transition-property: opacity, transform, filter;
+  transition-duration: var(--pop-duration-modal);
+  transition-timing-function: var(--pop-ease-editorial);
+}
+
+.pop-motion-section {
+  transition-property: opacity, transform, box-shadow;
+  transition-duration: var(--pop-duration-section);
+  transition-timing-function: var(--pop-ease-editorial);
+}
+
+.pop-hover-lift {
+  transition: transform var(--pop-duration-micro) var(--pop-ease-out), box-shadow var(--pop-duration-micro) var(--pop-ease-out);
+}
+.pop-hover-lift:hover {
+  transform: translateY(-2px);
+}
+
+/* Section Destination Highlight Animation */
+@keyframes popSectionEmphasis {
+  0% {
+    outline: 2px solid rgba(5, 150, 105, 0);
+    box-shadow: 0 0 0 0 rgba(5, 150, 105, 0);
+  }
+  35% {
+    outline: 2px solid rgba(5, 150, 105, 0.6);
+    box-shadow: 0 0 0 8px rgba(5, 150, 105, 0.12);
+  }
+  100% {
+    outline: 2px solid rgba(5, 150, 105, 0);
+    box-shadow: 0 0 0 0 rgba(5, 150, 105, 0);
+  }
+}
+
+.pop-section-highlight {
+  animation: popSectionEmphasis 1.3s var(--pop-ease-editorial);
+}
+
+/* Accessibility: Respect user prefers-reduced-motion setting */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .pop-hover-lift:hover {
+    transform: none !important;
+  }
+  .pop-section-highlight {
+    animation: none !important;
+  }
 }
 
 body {
@@ -58,3 +192,250 @@ body {
 #root {
   min-height: 100vh;
 }
+
+/* ==========================================
+   Global Responsive Foundation
+   Breakpoints: Phone (<768px), Tablet (768px-1023px), Desktop (>=1024px)
+   ========================================== */
+
+/* 1. Container & Content Width Safeguards */
+.pop-container-responsive {
+  width: 100%;
+  max-width: 80rem;
+  margin-left: auto;
+  margin-right: auto;
+  min-width: 0;
+  padding-left: 0.875rem;
+  padding-right: 0.875rem;
+}
+
+@media (min-width: 640px) {
+  .pop-container-responsive {
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .pop-container-responsive {
+    padding-left: 2rem;
+    padding-right: 2rem;
+  }
+}
+
+/* 2. Flex & Grid Text Shrink & Wrapping Safeguards */
+.pop-flex-child-safe {
+  flex: 1 1 0%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pop-text-safe {
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 3. Reusable Responsive Grid Utilities */
+.pop-grid-auto {
+  display: grid;
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+@media (min-width: 768px) {
+  .pop-grid-auto {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.25rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .pop-grid-auto {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1.5rem;
+  }
+}
+
+.pop-grid-2col {
+  display: grid;
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+@media (min-width: 768px) {
+  .pop-grid-2col {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.5rem;
+  }
+}
+
+.pop-grid-4col {
+  display: grid;
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+@media (min-width: 640px) {
+  .pop-grid-4col {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+}
+
+@media (min-width: 768px) {
+  .pop-grid-4col {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1.25rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .pop-grid-4col {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1.25rem;
+  }
+}
+
+/* 4. Responsive Toolbars & Controls */
+.pop-toolbar-responsive {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  min-width: 0;
+}
+
+@media (min-width: 640px) {
+  .pop-toolbar-responsive {
+    flex-direction: row;
+    align-items: center;
+  }
+}
+
+.pop-control-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+}
+
+@media (min-width: 640px) {
+  .pop-control-group {
+    width: auto;
+  }
+}
+
+/* 5. Responsive Modal Foundation */
+.pop-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background-color: rgb(0 0 0 / 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+@media (min-width: 640px) {
+  .pop-modal-overlay {
+    padding: 1.5rem;
+  }
+}
+
+.pop-modal-card {
+  width: 100%;
+  max-width: 56rem;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 1rem;
+  min-width: 0;
+  overflow: hidden;
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
+/* 6. Responsive Media & Typography Utilities */
+.pop-media-responsive {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  object-fit: cover;
+}
+
+.pop-typography-title-1 {
+  font-size: 1.5rem;
+  line-height: 2rem;
+  font-weight: 800;
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 640px) {
+  .pop-typography-title-1 {
+    font-size: 1.875rem;
+    line-height: 2.25rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .pop-typography-title-1 {
+    font-size: 2.25rem;
+    line-height: 2.5rem;
+  }
+}
+
+.pop-typography-title-2 {
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  font-weight: 700;
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 640px) {
+  .pop-typography-title-2 {
+    font-size: 1.5rem;
+    line-height: 2rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .pop-typography-title-2 {
+    font-size: 1.75rem;
+    line-height: 2.25rem;
+  }
+}
+
+.pop-section-responsive {
+  padding-top: 1.5rem;
+  padding-bottom: 1.5rem;
+  width: 100%;
+  min-width: 0;
+}
+
+@media (min-width: 640px) {
+  .pop-section-responsive {
+    padding-top: 2.5rem;
+    padding-bottom: 2.5rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .pop-section-responsive {
+    padding-top: 3rem;
+    padding-bottom: 3rem;
+  }
+}
+

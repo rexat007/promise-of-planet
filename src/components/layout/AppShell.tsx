@@ -5,19 +5,23 @@ import { Footer } from './Footer';
 
 interface AppShellProps {
   children: React.ReactNode;
+  onEnterAdmin?: () => void;
 }
 
-export function AppShell({ children }: AppShellProps) {
+export function AppShell({ children, onEnterAdmin }: AppShellProps) {
   return (
-    <div className="min-h-screen flex flex-col bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 transition-colors">
+    <div 
+      data-responsive-guard 
+      className="min-h-screen flex flex-col w-full max-w-full min-w-0 bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 transition-colors"
+    >
       {/* 1. Climate Clock in independent space before Header */}
       <ClimateClockSlot />
 
       {/* 2. Header */}
-      <Header />
+      <Header onEnterAdmin={onEnterAdmin} />
 
-      {/* 3. Main Content */}
-      <main className="flex-grow">
+      {/* 3. Main Content with full-width structural safety */}
+      <main className="flex-grow pop-page-fade w-full max-w-full min-w-0">
         {children}
       </main>
 
@@ -26,3 +30,5 @@ export function AppShell({ children }: AppShellProps) {
     </div>
   );
 }
+
+
