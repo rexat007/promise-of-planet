@@ -24,5 +24,13 @@ service cloud.firestore {
       // Prevent any arbitrary client creations, updates, or deletions (Fail-Closed System-Only)
       allow create, update, delete: if false;
     }
+
+    // Accounts Collection Rules Block
+    match /accounts/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && request.resource.data.id == userId;
+      allow update: if isOwner(userId) && resource.data.id == userId;
+      allow delete: if false;
+    }
   }
 }
