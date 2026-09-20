@@ -67,11 +67,16 @@ export function AccountAuthWidget({ isAr = false }: AccountAuthWidgetProps) {
     setSubmitting(true);
     try {
       const res = await AccountService.register(email, password, displayName);
-      setAccount(res.account);
-      setSuccess(isAr ? 'تم إنشاء الحساب بنجاح' : 'Account created successfully');
-      setEmail('');
-      setPassword('');
-      setDisplayName('');
+      if (res.account) {
+        setAccount(res.account);
+        setSuccess(isAr ? 'تم إنشاء الحساب بنجاح' : 'Account created successfully');
+        setEmail('');
+        setPassword('');
+        setDisplayName('');
+      } else {
+        setAccount(null);
+        setError(res.error || (isAr ? 'فشل إنشاء مستند الحساب' : 'Account profile document provisioning failed'));
+      }
     } catch (err: any) {
       setError(err?.message || (isAr ? 'فشل إنشاء الحساب' : 'Registration failed'));
     } finally {

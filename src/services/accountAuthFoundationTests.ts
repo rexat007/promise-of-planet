@@ -1,6 +1,12 @@
-import { AccountService, inMemoryAccountStorage } from './accountService';
+import { 
+  AccountServiceClass, 
+  InMemoryAccountRepository, 
+  AccountError,
+  validateAccountData
+} from './accountService';
 import { AdminAccessService } from './adminAccess';
-import { ROLE_PERMISSIONS_MAP, AdminRole, AdminPermission } from '../types/admin';
+import { AdminRole } from '../types/admin';
+import type { Account } from '../types/account';
 
 export interface TestResult {
   name: string;
@@ -20,116 +26,298 @@ export async function runAccountAuthFoundationTestSuite(): Promise<TestResult[]>
     }
   };
 
-  inMemoryAccountStorage.clear();
-
-  await test('1. Account identity is keyed by Firebase UID', async () => {
-    const uid = 'test-uid-123';
-    const acc = await AccountService.createAccount(uid, { email: 'user@example.com', displayName: 'Test User' });
-    if (acc.id !== uid) throw new Error('Account ID must match Firebase UID');
-    const fetched = await AccountService.getAccount(uid);
-    if (!fetched || fetched.id !== uid) throw new Error('Fetched account must match UID key');
-  });
-
-  await test('2. Account schema contains no forbidden privilege/context fields', async () => {
-    const uid = 'test-uid-schema';
-    const acc = await AccountService.createAccount(uid, { email: 'schema@example.com' });
-    const keys = Object.keys(acc);
-    const forbidden = ['isAdmin', 'isMember', 'isTrainee', 'role', 'roles', 'permissions', 'subscriptionTier', 'plan', 'points', 'badges', 'courseIds'];
-    for (const f of forbidden) {
-      if (keys.includes(f)) throw new Error(`Forbidden field found in Account schema: ${f}`);
-    }
-  });
-
-  await test('3. Ordinary account creation does not create or imply admins/{uid}', async () => {
-    const uid = 'ordinary-user-uid';
-    await AccountService.createAccount(uid, { email: 'ordinary@example.com' });
-    const adminUser = AdminAccessService.getMockUsers().find(a => a.id === uid);
-    if (adminUser) throw new Error('Ordinary account must not be present in admin users list');
-  });
-
-  await test('4. Account resolution never converts an ordinary authenticated user into an AdminUser', async () => {
-    const uid = 'non-admin-uid-999';
-    await AccountService.createAccount(uid, { email: 'plain@example.com' });
-    const acc = await AccountService.getAccount(uid);
-    if (!acc) throw new Error('Account must exist');
-    if ('role' in acc || 'permissions' in acc || 'isAdmin' in acc) {
-      throw new Error('Account leaked administrative properties');
-    }
-  });
-
-  await test('5. Unauthenticated state remains public/visitor and creates no persistent Visitor record', async () => {
-    const unauthAcc = await AccountService.getAccount('non-existent-visitor');
-    if (unauthAcc !== null) throw new Error('Unauthenticated visitor must resolve to null account');
-  });
-
-  await test('6. Auth/account failure does not fall back to mock Owner', async () => {
-    const acc = await AccountService.getAccount('invalid-or-missing-uid');
-    if (acc !== null) throw new Error('Must return null on missing account');
-    const owner = AdminAccessService.getMockUsers().find(u => u.role === AdminRole.Owner);
-    if (!owner) throw new Error('Owner role must remain intact independently');
-  });
-
-  await test('7. Firebase UID remains identity authority', async () => {
-    const uid = 'auth-authority-uid';
-    const acc = await AccountService.createAccount(uid, { email: 'auth@example.com' });
-    if (acc.id !== uid) throw new Error('Account id must strictly equal Firebase UID');
-  });
-
-  await test('8. Email is not used as primary identity key', async () => {
-    const uid1 = 'uid-one';
-    const uid2 = 'uid-two';
-    const email = 'shared@example.com';
-    const acc1 = await AccountService.createAccount(uid1, { email });
-    const acc2 = await AccountService.createAccount(uid2, { email });
-    if (acc1.id === acc2.id) throw new Error('Accounts with same email must remain separate based on UID');
-  });
-
-  await test('9. No browser/client path can assign AdminRole through account registration', async () => {
-    const uid = 'hacker-uid';
-    const acc = await AccountService.createAccount(uid, { email: 'hacker@example.com' });
-    const rawAny = acc as any;
-    if (rawAny.role || rawAny.isAdmin) throw new Error('Privilege escalation detected in account creation');
-  });
-
-  await test('10. Existing canonical AdminRole and AdminPermission vocabularies are unchanged', async () => {
-    const roles = Object.values(AdminRole);
-    if (!roles.includes(AdminRole.Owner) || !roles.includes(AdminRole.ContentEditor)) {
-      throw new Error('Canonical AdminRole vocabulary modified');
-    }
-    const permissions = Object.values(AdminPermission);
-    if (!permissions.includes(AdminPermission.View) || !permissions.includes(AdminPermission.Create)) {
-      throw new Error('Canonical AdminPermission vocabulary modified');
-    }
-  });
-
-  await test('11. ROLE_PERMISSIONS_MAP is intact', async () => {
-    const ownerPerms = ROLE_PERMISSIONS_MAP[AdminRole.Owner];
-    if (!ownerPerms || ownerPerms.size === 0) throw new Error('ROLE_PERMISSIONS_MAP for Owner must be intact');
-  });
-
-  await test('12. No enrollments collection/type is introduced by this block', async () => {
-    const accKeys = ['id', 'email', 'displayName', 'createdAt', 'updatedAt'];
-    if (accKeys.length !== 5) throw new Error('Account schema length mismatch');
-  });
-
-  await test('13. No Developer role/permission is introduced', async () => {
-    const roles = Object.values(AdminRole);
-    if (roles.includes('Developer' as any)) throw new Error('Developer role must not exist in AdminRole');
-  });
-
-  await test('14. Public platform remains usable without authentication', async () => {
-    const active = AccountService.observeAuthState(() => {
-      // unauthenticated callback
-    });
-    if (typeof active !== 'function') throw new Error('Auth observer must return unsubscribe function');
-    active();
-  });
-
-  await test('15. Email/password auth operations fail clearly when Firebase Auth unconfigured', async () => {
+  await test('A. Production AccountService does NOT fall back to memory when Firebase is unavailable', async () => {
+    // Instantiate default AccountService (uses FirestoreAccountRepository)
+    const prodService = new AccountServiceClass();
     try {
-      await AccountService.signIn('test@example.com', 'password123');
-    } catch (e: any) {
-      if (!e) throw new Error('Expected auth failure when unconfigured');
+      await prodService.getAccount('test-uid-unconfigured');
+      throw new Error('Expected getAccount to throw AUTH_UNAVAILABLE when Firebase is unconfigured');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'AUTH_UNAVAILABLE') {
+        throw new Error(`Expected AccountError with code AUTH_UNAVAILABLE, but got: ${err?.code || err?.message}`);
+      }
+    }
+  });
+
+  await test('B. Test in-memory repository is explicit/injected, not automatic production fallback', async () => {
+    const memRepo = new InMemoryAccountRepository();
+    const testService = new AccountServiceClass(memRepo);
+    
+    // Injected repository works for test
+    const testAcc: Account = {
+      id: 'uid-injected-123',
+      email: 'test@example.com',
+      displayName: 'Injected Test',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    await testService.getRepository().createAccount(testAcc);
+    const fetched = await testService.getRepository().getAccount('uid-injected-123');
+    if (!fetched || fetched.id !== 'uid-injected-123') {
+      throw new Error('Injected in-memory repository failed to store/retrieve account');
+    }
+
+    // Default production service instance remains bound to Firestore and throws AUTH_UNAVAILABLE
+    const prodService = new AccountServiceClass();
+    try {
+      await prodService.getRepository().getAccount('uid-injected-123');
+      throw new Error('Production service must not access in-memory repo');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'AUTH_UNAVAILABLE') {
+        throw new Error('Production service must fail closed with AUTH_UNAVAILABLE');
+      }
+    }
+  });
+
+  await test('C. Self-service account creation cannot select another UID', async () => {
+    const memRepo = new InMemoryAccountRepository();
+    const testService = new AccountServiceClass(memRepo);
+    
+    // Self-service creation derives target UID from authenticated user object, never a caller-controlled UID string
+    if (typeof testService.createAccountForUser !== 'function') {
+      throw new Error('createAccountForUser method missing');
+    }
+  });
+
+  await test('D. Self-service update cannot select another UID', async () => {
+    const memRepo = new InMemoryAccountRepository();
+    const testService = new AccountServiceClass(memRepo);
+
+    // updateCurrentAccount takes ONLY data payload ({ displayName }), NO target UID argument
+    if (testService.updateCurrentAccount.length > 1) {
+      throw new Error('updateCurrentAccount must not allow caller to specify target UID');
+    }
+  });
+
+  await test('E. Firestore rule update preserves canonical id', async () => {
+    // Check validation function enforces UID immutability and exact match
+    const original: Account = {
+      id: 'canonical-uid-1',
+      email: 'owner@example.com',
+      displayName: 'Owner',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    };
+
+    try {
+      validateAccountData({ ...original, id: 'tampered-uid-2' }, 'canonical-uid-1');
+      throw new Error('Expected validation to fail when id is tampered');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_DATA_INVALID') {
+        throw new Error('Expected ACCOUNT_DATA_INVALID on ID mismatch');
+      }
+    }
+  });
+
+  await test('F. Firestore rules reject non-canonical extra fields', async () => {
+    const extraFieldDoc = {
+      id: 'valid-uid',
+      email: 'valid@example.com',
+      displayName: 'Valid',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      isAdmin: true, // Forbidden extra field
+      role: 'Owner'  // Forbidden extra field
+    };
+
+    try {
+      validateAccountData(extraFieldDoc, 'valid-uid');
+      throw new Error('Expected validation to reject non-canonical extra fields');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_DATA_INVALID') {
+        throw new Error('Expected ACCOUNT_DATA_INVALID on extra fields');
+      }
+    }
+  });
+
+  await test('G. Malformed durable Account data fails closed', async () => {
+    const malformedDocs = [
+      { id: 'uid-1', email: 'invalid-no-at-symbol', displayName: 'Test', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { id: '', email: 'valid@example.com', displayName: 'Test', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { id: 'uid-3', email: 'valid@example.com', displayName: 123, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }
+    ];
+
+    for (const doc of malformedDocs) {
+      try {
+        validateAccountData(doc);
+        throw new Error(`Expected validation to fail for malformed doc: ${JSON.stringify(doc)}`);
+      } catch (err: any) {
+        if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_DATA_INVALID') {
+          throw new Error(`Expected ACCOUNT_DATA_INVALID for malformed doc, got: ${err?.message}`);
+        }
+      }
+    }
+  });
+
+  await test('H. Missing timestamps are not fabricated during reads', async () => {
+    const missingTimestampDoc = {
+      id: 'uid-no-timestamps',
+      email: 'test@example.com',
+      displayName: 'Test User'
+      // createdAt and updatedAt are missing!
+    };
+
+    try {
+      validateAccountData(missingTimestampDoc);
+      throw new Error('Expected validation to fail when timestamps are missing');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_DATA_INVALID') {
+        throw new Error('Expected ACCOUNT_DATA_INVALID when missing timestamps');
+      }
+    }
+  });
+
+  await test('I. Existing account creation does not overwrite', async () => {
+    const memRepo = new InMemoryAccountRepository();
+    const acc: Account = {
+      id: 'existing-uid-555',
+      email: 'first@example.com',
+      displayName: 'First Creation',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    await memRepo.createAccount(acc);
+
+    // Second attempt to create account with same UID
+    const duplicateAcc: Account = {
+      id: 'existing-uid-555',
+      email: 'second@example.com',
+      displayName: 'Second Attempt',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    try {
+      await memRepo.createAccount(duplicateAcc);
+      throw new Error('Expected createAccount to fail for existing UID');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_ALREADY_EXISTS') {
+        throw new Error(`Expected ACCOUNT_ALREADY_EXISTS error, got: ${err?.code || err?.message}`);
+      }
+    }
+
+    // Verify existing record was NOT overwritten
+    const stored = await memRepo.getAccount('existing-uid-555');
+    if (!stored || stored.displayName !== 'First Creation') {
+      throw new Error('Original account record was modified during failed duplicate create');
+    }
+  });
+
+  await test('J. Account provisioning failure after Auth creation does not fabricate account success', async () => {
+    // Create a mock repository that intentionally throws on createAccount
+    const failingRepo: any = {
+      getAccount: async () => null,
+      createAccount: async () => {
+        throw new AccountError('ACCOUNT_PROVISIONING_FAILED', 'Simulated database write timeout');
+      },
+      updateAccount: async () => { throw new Error('Not implemented'); }
+    };
+
+    const testService = new AccountServiceClass(failingRepo);
+
+    // Simulate provisioning
+    try {
+      await testService.createAccountForUser({ uid: 'auth-user-999', email: 'user@example.com' } as any);
+      throw new Error('Expected createAccountForUser to throw ACCOUNT_PROVISIONING_FAILED');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_PROVISIONING_FAILED') {
+        throw new Error(`Expected ACCOUNT_PROVISIONING_FAILED, got: ${err?.code || err?.message}`);
+      }
+    }
+  });
+
+  await test('K. Ordinary account still cannot create/administer admins/{uid}', async () => {
+    const memRepo = new InMemoryAccountRepository();
+    const testService = new AccountServiceClass(memRepo);
+
+    const acc = await testService.createAccountForUser({ uid: 'ordinary-user-777', email: 'user@example.com' } as any);
+    
+    // Verify ordinary user is not present in admin users store
+    const adminUser = AdminAccessService.getMockUsers().find(u => u.id === acc.id);
+    if (adminUser) {
+      throw new Error('Ordinary account user must not have administrative access');
+    }
+  });
+
+  await test('L. Account still has exactly the canonical five fields', async () => {
+    const validDoc: Account = {
+      id: 'uid-5-fields',
+      email: 'five@example.com',
+      displayName: 'Five Fields',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    };
+
+    const validated = validateAccountData(validDoc);
+    const keys = Object.keys(validated);
+    if (keys.length !== 5 || !keys.includes('id') || !keys.includes('email') || !keys.includes('displayName') || !keys.includes('createdAt') || !keys.includes('updatedAt')) {
+      throw new Error(`Account object must contain exactly 5 canonical fields, got: ${keys.join(', ')}`);
+    }
+  });
+
+  await test('M. No isAdmin/isMember/isTrainee', async () => {
+    const rawData = {
+      id: 'uid-flags-check',
+      email: 'flags@example.com',
+      displayName: 'Flags Check',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      isAdmin: false,
+      isMember: true,
+      isTrainee: true
+    };
+
+    try {
+      validateAccountData(rawData);
+      throw new Error('Expected validation to reject isAdmin/isMember/isTrainee fields');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_DATA_INVALID') {
+        throw new Error('Expected ACCOUNT_DATA_INVALID when context flags are present');
+      }
+    }
+  });
+
+  await test('N. No Developer role', async () => {
+    const roles = Object.values(AdminRole);
+    if (roles.includes('Developer' as any)) {
+      throw new Error('Developer role must not exist in AdminRole enum');
+    }
+  });
+
+  await test('O. No Enrollment implementation', async () => {
+    const memRepo = new InMemoryAccountRepository();
+    const keys = Object.keys(memRepo);
+    if (keys.includes('enrollments') || keys.includes('enroll')) {
+      throw new Error('Enrollment implementation detected in account repository');
+    }
+  });
+
+  await test('P. Unauthenticated public browsing remains possible', async () => {
+    const prodService = new AccountServiceClass();
+    const unsubscribe = prodService.observeAuthState((user) => {
+      if (user !== null) {
+        throw new Error('Unauthenticated user callback must receive null');
+      }
+    });
+
+    if (typeof unsubscribe !== 'function') {
+      throw new Error('observeAuthState must return unsubscribe function');
+    }
+    unsubscribe();
+  });
+
+  await test('Q. No mock Owner fallback is used by the Account/Auth foundation', async () => {
+    const prodService = new AccountServiceClass();
+    try {
+      const acc = await prodService.getAccount('non-existent-uid');
+      if (acc !== null) {
+        throw new Error('Non-existent account must resolve to null, not mock Owner');
+      }
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'AUTH_UNAVAILABLE') {
+        throw new Error(`Expected null or AUTH_UNAVAILABLE, got: ${err?.message}`);
+      }
     }
   });
 

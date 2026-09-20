@@ -16,6 +16,15 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isCanonicalAccountShape() {
+      return request.resource.data.keys().hasOnly(['id', 'email', 'displayName', 'createdAt', 'updatedAt'])
+        && request.resource.data.id is string
+        && request.resource.data.email is string
+        && request.resource.data.displayName is string
+        && request.resource.data.createdAt is string
+        && request.resource.data.updatedAt is string;
+    }
+
     // Admins Collection Rules Block
     match /admins/{adminId} {
       // Allow administrators to retrieve their own canonical profile
@@ -28,8 +37,13 @@ service cloud.firestore {
     // Accounts Collection Rules Block
     match /accounts/{userId} {
       allow get: if isOwner(userId);
-      allow create: if isOwner(userId) && request.resource.data.id == userId;
-      allow update: if isOwner(userId) && resource.data.id == userId;
+      allow create: if isOwner(userId) 
+        && request.resource.data.id == userId
+        && isCanonicalAccountShape();
+      allow update: if isOwner(userId) 
+        && request.resource.data.id == userId
+        && request.resource.data.id == resource.data.id
+        && isCanonicalAccountShape();
       allow delete: if false;
     }
   }
