@@ -112,3 +112,91 @@ export function hasAdminPermission(user: AdminUser | null | undefined, permissio
   const permissions = getPermissionsForRole(user.role);
   return permissions.has(permission);
 }
+
+export const AdminDomain = {
+  Overview: 'overview',
+  News: 'news',
+  Library: 'library',
+  Media: 'media',
+  Training: 'training',
+  Community: 'community',
+  AIReviews: 'aiReviews',
+  Users: 'users',
+  AuditLog: 'auditLog',
+  Reports: 'reports',
+  Settings: 'settings',
+} as const;
+
+export type AdminDomain = typeof AdminDomain[keyof typeof AdminDomain];
+
+export const ROLE_DOMAINS_MAP: Record<AdminRole, Set<AdminDomain>> = {
+  [AdminRole.Owner]: new Set([
+    AdminDomain.Overview,
+    AdminDomain.News,
+    AdminDomain.Library,
+    AdminDomain.Media,
+    AdminDomain.Training,
+    AdminDomain.Community,
+    AdminDomain.AIReviews,
+    AdminDomain.Users,
+    AdminDomain.AuditLog,
+    AdminDomain.Reports,
+    AdminDomain.Settings,
+  ]),
+  [AdminRole.ContentEditor]: new Set([
+    AdminDomain.Overview,
+    AdminDomain.News,
+    AdminDomain.AIReviews,
+  ]),
+  [AdminRole.LibraryCurator]: new Set([
+    AdminDomain.Overview,
+    AdminDomain.Library,
+  ]),
+  [AdminRole.RightsReviewer]: new Set([
+    AdminDomain.Overview,
+    AdminDomain.Media,
+  ]),
+  [AdminRole.TrainingManager]: new Set([
+    AdminDomain.Overview,
+    AdminDomain.Training,
+  ]),
+  [AdminRole.Trainer]: new Set([
+    AdminDomain.Overview,
+    AdminDomain.Training,
+  ]),
+  [AdminRole.CitizenModerator]: new Set([
+    AdminDomain.Overview,
+    AdminDomain.Community,
+  ]),
+  [AdminRole.AIAssistant]: new Set([
+    AdminDomain.Overview,
+    AdminDomain.AIReviews,
+  ]),
+  [AdminRole.Viewer]: new Set([
+    AdminDomain.Overview,
+    AdminDomain.Reports,
+  ]),
+};
+
+export function hasDomainResponsibility(role: AdminRole, domain: AdminDomain): boolean {
+  const domains = ROLE_DOMAINS_MAP[role];
+  return domains ? domains.has(domain) : false;
+}
+
+export function isTabAuthorized(
+  user: AdminUser | null | undefined,
+  domain: AdminDomain,
+  requiredPermission?: AdminPermission
+): boolean {
+  if (!user || !user.isActive) {
+    return false;
+  }
+  if (!hasDomainResponsibility(user.role, domain)) {
+    return false;
+  }
+  if (requiredPermission && !hasAdminPermission(user, requiredPermission)) {
+    return false;
+  }
+  return true;
+}
+

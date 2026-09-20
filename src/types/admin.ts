@@ -1,18 +1,23 @@
-import { AdminPermission } from '../shared/adminContract';
+import { AdminPermission, AdminDomain } from '../shared/adminContract';
 
 export {
   AdminRole,
   AdminPermission,
+  AdminDomain,
   type AdminUser,
   ROLE_PERMISSIONS_MAP,
+  ROLE_DOMAINS_MAP,
   isValidAdminRole,
   isValidAdminPermission,
   getPermissionsForRole,
   hasAdminPermission,
+  hasDomainResponsibility,
+  isTabAuthorized,
 } from '../shared/adminContract';
 
 export interface NavigationItem {
   id: string;
+  domain: AdminDomain;
   labelAr: string;
   labelEn: string;
   iconName: string;

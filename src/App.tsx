@@ -8,7 +8,7 @@ import {
   LatestLibrary,
   LatestTraining,
 } from './components/content';
-import { AdminLayout } from './components/layout/AdminLayout';
+import { AdminAccessGate } from './components/layout/AdminAccessGate';
 import { ViewTransition } from './components/common/ViewTransition';
 import { ResponsiveGuard } from './components/dev/ResponsiveGuard';
 import { smoothScrollToSection } from './lib/interaction';
@@ -34,7 +34,7 @@ function App() {
       <ResponsiveGuard />
       <ViewTransition viewKey={isAdminOpen ? 'admin-workspace' : 'public-portal'}>
         {isAdminOpen ? (
-          <AdminLayout onExitAdmin={() => setIsAdminOpen(false)} />
+          <AdminAccessGate onExitAdmin={() => setIsAdminOpen(false)} />
         ) : (
           <AppShell onEnterAdmin={() => setIsAdminOpen(true)}>
             {/* 1. Hero Section: Gateway to the Platform (Preserved without turning into a news portal) */}
