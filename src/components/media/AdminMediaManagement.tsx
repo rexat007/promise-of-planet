@@ -1144,7 +1144,7 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
                                   </div>
                                 )}
                                 <span className="absolute bottom-0.5 right-0.5 text-[8px] bg-black/75 text-white px-1 py-0.2 rounded-xs font-bold font-mono">
-                                  {v.youtubeSource.duration.replace('PT', '').replace('M', ':').replace('S', '')}
+                                  {v.youtubeSource.duration?.replace('PT', '').replace('M', ':').replace('S', '') || ''}
                                 </span>
                               </div>
                               <div className="min-w-0">
@@ -1228,7 +1228,7 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
                             </div>
                           )}
                           <span className="absolute bottom-0.5 right-0.5 text-[8px] bg-black/75 text-white px-1.5 py-0.2 rounded-xs font-bold font-mono">
-                            {v.youtubeSource.duration.replace('PT', '').replace('M', ':').replace('S', '')}
+                            {v.youtubeSource.duration?.replace('PT', '').replace('M', ':').replace('S', '')}
                           </span>
                         </div>
 

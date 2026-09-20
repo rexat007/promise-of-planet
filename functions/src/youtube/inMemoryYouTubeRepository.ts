@@ -10,6 +10,18 @@ export class InMemoryYouTubeRepository implements YouTubeRepository {
     this.candidates = {};
   }
 
+  public takeSnapshot(): { configs: Record<string, YouTubeIntegrationConfig>; candidates: Record<string, YouTubeImportCandidate> } {
+    return {
+      configs: JSON.parse(JSON.stringify(this.configs)),
+      candidates: JSON.parse(JSON.stringify(this.candidates)),
+    };
+  }
+
+  public restoreSnapshot(snapshot: { configs: Record<string, YouTubeIntegrationConfig>; candidates: Record<string, YouTubeImportCandidate> }): void {
+    this.configs = JSON.parse(JSON.stringify(snapshot.configs));
+    this.candidates = JSON.parse(JSON.stringify(snapshot.candidates));
+  }
+
   async getConfiguration(id: string = 'youtube-primary'): Promise<YouTubeIntegrationConfig | null> {
     return this.configs[id] ? { ...this.configs[id] } : null;
   }

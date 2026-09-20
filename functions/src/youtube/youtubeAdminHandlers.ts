@@ -236,7 +236,7 @@ export async function executeReviewYouTubeCandidateRequest(
   }
 
   if (action === 'accept') {
-    await authenticateAndAuthorize(requestContext, AdminPermission.Review, adminRepo);
+    const adminUser = await authenticateAndAuthorize(requestContext, AdminPermission.Review, adminRepo);
 
     if (typeof data.candidateId !== 'string' || data.candidateId.trim() === '') {
       throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: candidateId is required');
@@ -246,7 +246,8 @@ export async function executeReviewYouTubeCandidateRequest(
     }
 
     try {
-      const result = await acceptanceService.acceptCandidate(data.candidateId.trim(), data.reviewedVersion);
+      const actorIdentity = adminUser.name || adminUser.email || adminUser.id;
+      const result = await acceptanceService.acceptCandidate(data.candidateId.trim(), data.reviewedVersion, actorIdentity);
       return {
         candidate: result.candidate,
         video: result.video,

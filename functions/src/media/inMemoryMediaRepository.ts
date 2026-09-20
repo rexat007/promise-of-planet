@@ -14,6 +14,18 @@ export class InMemoryMediaRepository implements MediaRepository {
     this.relations = {};
   }
 
+  public takeSnapshot(): { videos: Record<string, Video>; relations: Record<string, ContentVideoRelation[]> } {
+    return {
+      videos: JSON.parse(JSON.stringify(this.videos)),
+      relations: JSON.parse(JSON.stringify(this.relations)),
+    };
+  }
+
+  public restoreSnapshot(snapshot: { videos: Record<string, Video>; relations: Record<string, ContentVideoRelation[]> }): void {
+    this.videos = JSON.parse(JSON.stringify(snapshot.videos));
+    this.relations = JSON.parse(JSON.stringify(snapshot.relations));
+  }
+
   async getVideoById(id: string): Promise<Video | null> {
     const v = this.videos[id];
     return v ? JSON.parse(JSON.stringify(v)) : null;

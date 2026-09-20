@@ -400,16 +400,27 @@ export async function runCandidateAcceptanceTests(): Promise<{ test: string; pas
   }
 
   // 15. Existing Media -> DUPLICATE_MEDIA
-  // Pre-seed Media with candidate1's deterministic ID
+  const candForDup: YouTubeImportCandidate = {
+    id: 'youtube_dup_test_01',
+    provider: 'YouTube',
+    externalVideoId: 'dup_test_01',
+    sourceSnapshot: sampleSnapshot,
+    editorialDraft: sampleDraft,
+    status: 'PendingReview',
+    candidateVersion: 1,
+    createdAt: '2026-03-01T12:00:00Z',
+    updatedAt: '2026-03-01T12:00:00Z',
+  };
+  await ytRepo.saveCandidate(candForDup);
   await mediaRepo.createVideo({
-    ...mapCandidateToCanonicalVideo(candidate1),
+    ...mapCandidateToCanonicalVideo(candForDup),
     titleAr: 'فيديو موجود مسبقاً في وسائط النظام',
   });
 
   try {
     let duplicateMediaBlocked = false;
     try {
-      await acceptanceService.acceptCandidate(candidate1.id, 1);
+      await acceptanceService.acceptCandidate(candForDup.id, 1);
     } catch (err: any) {
       duplicateMediaBlocked = err.message.includes('DUPLICATE_MEDIA');
     }
@@ -424,7 +435,7 @@ export async function runCandidateAcceptanceTests(): Promise<{ test: string; pas
 
   // 16. Existing Media is never overwritten
   try {
-    const existingVideo = await mediaRepo.getVideoById('video_yt_sudan_ref_01');
+    const existingVideo = await mediaRepo.getVideoById('video_yt_dup_test_01');
     assert(
       'Acceptance Test 16 - Existing Media is never overwritten',
       existingVideo?.titleAr === 'فيديو موجود مسبقاً في وسائط النظام',
@@ -436,7 +447,7 @@ export async function runCandidateAcceptanceTests(): Promise<{ test: string; pas
 
   // 17. Candidate remains unchanged when duplicate Media blocks acceptance
   try {
-    const candidateAfterDup = await ytRepo.getCandidate(candidate1.id);
+    const candidateAfterDup = await ytRepo.getCandidate(candForDup.id);
     assert(
       'Acceptance Test 17 - Candidate remains unchanged when duplicate Media blocks acceptance',
       candidateAfterDup?.status === 'PendingReview',
@@ -446,11 +457,7 @@ export async function runCandidateAcceptanceTests(): Promise<{ test: string; pas
     assert('Acceptance Test 17 - Candidate remains unchanged when duplicate Media blocks acceptance', false, e.message);
   }
 
-  // Clear pre-seeded duplicate media for clean acceptance execution
-  (mediaRepo as any).videos['video_yt_sudan_ref_01'] = undefined;
-  delete (mediaRepo as any).videos['video_yt_sudan_ref_01'];
-
-  // 18. sourceSnapshot maps only to appropriate source-owned Media fields
+  // 18. sourceSnapshot maps only to appropriate source-owned Media fields without placeholders
   try {
     const mapped = mapCandidateToCanonicalVideo(candidate1);
     assert(
@@ -458,8 +465,14 @@ export async function runCandidateAcceptanceTests(): Promise<{ test: string; pas
       mapped.youtubeSource.originalTitle === candidate1.sourceSnapshot.sourceTitle &&
       mapped.youtubeSource.originalDescription === candidate1.sourceSnapshot.sourceDescription &&
       mapped.youtubeSource.youtubePublishedAt === candidate1.sourceSnapshot.youtubePublishedAt &&
-      mapped.youtubeSource.thumbnails.default === candidate1.sourceSnapshot.sourceThumbnailUrl,
-      'Source snapshot metadata maps exclusively into youtubeSource'
+      mapped.youtubeSource.thumbnails.default === candidate1.sourceSnapshot.sourceThumbnailUrl &&
+      mapped.youtubeSource.channelId === undefined &&
+      mapped.youtubeSource.channelName === undefined &&
+      mapped.youtubeSource.channelUrl === undefined &&
+      mapped.youtubeSource.duration === undefined &&
+      mapped.youtubeSource.availabilityStatus === undefined &&
+      mapped.youtubeSource.lastSyncedAt === undefined,
+      'Source snapshot metadata maps exclusively into youtubeSource without fabricated source data'
     );
   } catch (e: any) {
     assert('Acceptance Test 18 - sourceSnapshot maps only to appropriate source-owned Media fields', false, e.message);
@@ -522,7 +535,7 @@ export async function runCandidateAcceptanceTests(): Promise<{ test: string; pas
   // 23. Successful operation creates exactly one canonical Media
   let acceptResult: any = null;
   try {
-    acceptResult = await acceptanceService.acceptCandidate(candidate1.id, 1);
+    acceptResult = await acceptanceService.acceptCandidate(candidate1.id, 1, 'Content Editor');
     const createdMedia = await mediaRepo.getVideoById('video_yt_sudan_ref_01');
     assert(
       'Acceptance Test 23 - Successful operation creates exactly one canonical Media',
@@ -867,6 +880,172 @@ export async function runCandidateAcceptanceTests(): Promise<{ test: string; pas
     );
   } catch (e: any) {
     assert('Acceptance Test 40 - Production callable count does not increase', false, e.message);
+  }
+
+  // 41. Truthful Mapping: No fake channelId, channelName, or channelUrl created
+  try {
+    const mapped = mapCandidateToCanonicalVideo(candidate1);
+    assert(
+      'Acceptance Test 41 - No fake channelId/Name/Url created',
+      mapped.youtubeSource.channelId === undefined &&
+      mapped.youtubeSource.channelName === undefined &&
+      mapped.youtubeSource.channelUrl === undefined,
+      'Missing channel metadata truthfully left undefined'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 41 - No fake channelId/Name/Url created', false, e.message);
+  }
+
+  // 42. Truthful Mapping: No PT0M duration placeholder created
+  try {
+    const mapped = mapCandidateToCanonicalVideo(candidate1);
+    assert(
+      'Acceptance Test 42 - No PT0M duration placeholder created',
+      mapped.youtubeSource.duration === undefined,
+      'Unfetched duration truthfully omitted rather than set to PT0M placeholder'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 42 - No PT0M duration placeholder created', false, e.message);
+  }
+
+  // 43. Truthful Mapping: Availability is not asserted without persisted evidence
+  try {
+    const mapped = mapCandidateToCanonicalVideo(candidate1);
+    assert(
+      'Acceptance Test 43 - Availability not asserted without evidence',
+      mapped.youtubeSource.availabilityStatus === undefined,
+      'Unchecked availability status truthfully left undefined'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 43 - Availability not asserted without evidence', false, e.message);
+  }
+
+  // 44. Truthful Mapping: Acceptance timestamp is not misrepresented as lastSyncedAt
+  try {
+    const acceptanceTime = '2026-03-20T10:00:00.000Z';
+    const mapped = mapCandidateToCanonicalVideo(candidate1, acceptanceTime);
+    assert(
+      'Acceptance Test 44 - Acceptance timestamp is not misrepresented as lastSyncedAt',
+      mapped.youtubeSource.lastSyncedAt === undefined &&
+      mapped.createdAt === acceptanceTime &&
+      mapped.updatedAt === acceptanceTime,
+      'Acceptance timestamp recorded as Media createdAt/updatedAt, not forged as YouTube sync timestamp'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 44 - Acceptance timestamp is not misrepresented as lastSyncedAt', false, e.message);
+  }
+
+  // 45. Truthful Mapping: Translation status is not falsely asserted
+  try {
+    const candWithEn: YouTubeImportCandidate = {
+      ...candidate1,
+      editorialDraft: { ...sampleDraft, titleEn: 'English Title' },
+    };
+    const mappedWithEn = mapCandidateToCanonicalVideo(candWithEn);
+    const candWithoutEn: YouTubeImportCandidate = {
+      ...candidate1,
+      editorialDraft: { ...sampleDraft, titleEn: undefined },
+    };
+    const mappedWithoutEn = mapCandidateToCanonicalVideo(candWithoutEn);
+
+    assert(
+      'Acceptance Test 45 - Translation status is not falsely asserted',
+      mappedWithEn.translationStatus === undefined &&
+      mappedWithoutEn.translationStatus === undefined,
+      'translationStatus is not manufactured without explicit workflow state'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 45 - Translation status is not falsely asserted', false, e.message);
+  }
+
+  // 46. Editorial Governance: No literal Editor identity is fabricated
+  try {
+    const mappedNoActor = mapCandidateToCanonicalVideo(candidate1);
+    assert(
+      'Acceptance Test 46 - No literal Editor identity is fabricated',
+      mappedNoActor.editor === undefined,
+      'editor is undefined when no actor identity is provided'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 46 - No literal Editor identity is fabricated', false, e.message);
+  }
+
+  // 47. Editorial Governance: Accepting actor identity is server-derived
+  try {
+    const mappedWithActor = mapCandidateToCanonicalVideo(candidate1, '2026-03-20T10:00:00Z', 'Content Editor');
+    assert(
+      'Acceptance Test 47 - Accepting actor identity is server-derived',
+      mappedWithActor.editor === 'Content Editor',
+      'editor field populated truthfully from authenticated admin actor identity'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 47 - Accepting actor identity is server-derived', false, e.message);
+  }
+
+  // 48. Encapsulation: In-memory rollback does not access repository private internals
+  try {
+    const sourceCodeRunner = fs.readFileSync('functions/src/youtube/candidateAcceptanceService.ts', 'utf-8');
+    const hasPrivateAccess = sourceCodeRunner.includes('(this.mediaRepo as any)') ||
+      sourceCodeRunner.includes('(mediaRepo as any)') ||
+      sourceCodeRunner.includes('(this.ytRepo as any)') ||
+      sourceCodeRunner.includes('(ytRepo as any)');
+
+    assert(
+      'Acceptance Test 48 - In-memory rollback does not access repository private internals',
+      !hasPrivateAccess,
+      'Transaction runner uses encapsulated takeSnapshot / restoreSnapshot methods'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 48 - In-memory rollback does not access repository private internals', false, e.message);
+  }
+
+  // 49. Zero fabricated placeholder strings in mapper
+  try {
+    const mapperCode = fs.readFileSync('functions/src/youtube/candidateVideoMapper.ts', 'utf-8');
+    const hasFakeDuration = mapperCode.includes("'PT0M'");
+    const hasFakeEditor = mapperCode.includes("'Editor'");
+    const hasFakeChannelId = mapperCode.includes("channelId: ''");
+    const hasFakeChannelName = mapperCode.includes("channelName: ''");
+    const hasFakeChannelUrl = mapperCode.includes("channelUrl: ''");
+
+    assert(
+      'Acceptance Test 49 - Zero fabricated placeholder strings in mapper',
+      !hasFakeDuration && !hasFakeEditor && !hasFakeChannelId && !hasFakeChannelName && !hasFakeChannelUrl,
+      'candidateVideoMapper.ts contains zero invented placeholder strings'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 49 - Zero fabricated placeholder strings in mapper', false, e.message);
+  }
+
+  // 50. Handlers pass authenticated admin identity to acceptance service
+  try {
+    const candForHandler: YouTubeImportCandidate = {
+      id: 'youtube_handler_test_01',
+      provider: 'YouTube',
+      externalVideoId: 'handler_test_01',
+      sourceSnapshot: sampleSnapshot,
+      editorialDraft: sampleDraft,
+      status: 'PendingReview',
+      candidateVersion: 1,
+      createdAt: '2026-03-01T12:00:00Z',
+      updatedAt: '2026-03-01T12:00:00Z',
+    };
+    await ytRepo.saveCandidate(candForHandler);
+
+    const handlerRes = await executeReviewYouTubeCandidateRequest(
+      { auth: { uid: 'uid-editor' }, data: { action: 'accept', candidateId: candForHandler.id, reviewedVersion: 1 } },
+      adminRepo,
+      ytAppService,
+      acceptanceService
+    );
+
+    assert(
+      'Acceptance Test 50 - Handlers pass authenticated admin identity to acceptance service',
+      handlerRes.video && handlerRes.video.editor === 'Content Editor' && handlerRes.candidate.status === 'Accepted',
+      'executeReviewYouTubeCandidateRequest derives actorIdentity from authenticated AdminUser'
+    );
+  } catch (e: any) {
+    assert('Acceptance Test 50 - Handlers pass authenticated admin identity to acceptance service', false, e.message);
   }
 
   return results;

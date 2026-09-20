@@ -286,17 +286,17 @@ export interface ContentSource {
 export interface YouTubeSource {
   youtubeVideoId: string;
   youtubeUrl: string;
-  channelId: string;
-  channelName: string;
-  channelUrl: string;
+  channelId?: string;
+  channelName?: string;
+  channelUrl?: string;
   originalTitle: string;
   originalDescription: string;
   youtubePublishedAt: string;
   thumbnails: YouTubeThumbnails;
-  duration: string;
+  duration?: string;
   originalAudioLanguage?: string;
   hasCaptions?: boolean;
-  availabilityStatus: AvailabilityStatus;
+  availabilityStatus?: AvailabilityStatus;
   lastSyncedAt?: string; // Timestamp of the last SUCCESSFUL sync only
 }
 
@@ -316,16 +316,16 @@ export interface ContentItem {
   excerptEn?: string;
   category: Category;
   tags: Tag[];
-  originalLanguage: Language;
-  availableLanguages: Language[];
-  translationStatus: TranslationStatus;
+  originalLanguage?: Language;
+  availableLanguages?: Language[];
+  translationStatus?: TranslationStatus;
   featuredImage?: ImageObject;
   createdAt: string;
   updatedAt: string;
   publishedAt?: string;
   author?: string;
   producer?: string;
-  editor: string;
+  editor?: string;
   status: ContentStatus;
   approvalStatus: ApprovalStatus;
   rightsStatus?: RightsStatus;

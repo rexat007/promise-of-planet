@@ -14,7 +14,8 @@ export interface AcceptCandidateResult {
 export interface YouTubeCandidateAcceptanceTransactionRunner {
   acceptCandidateAtomic(
     candidateId: string,
-    reviewedVersion: number
+    reviewedVersion: number,
+    actorIdentity?: string
   ): Promise<AcceptCandidateResult>;
 }
 
@@ -43,7 +44,8 @@ export class FirestoreCandidateAcceptanceRunner implements YouTubeCandidateAccep
 
   async acceptCandidateAtomic(
     candidateId: string,
-    reviewedVersion: number
+    reviewedVersion: number,
+    actorIdentity?: string
   ): Promise<AcceptCandidateResult> {
     const candidateRef = this.db.collection('youtubeImportCandidates').doc(candidateId);
 
@@ -75,7 +77,7 @@ export class FirestoreCandidateAcceptanceRunner implements YouTubeCandidateAccep
 
       // 6. Derive canonical Media document
       const nowIso = new Date().toISOString();
-      const video = mapCandidateToCanonicalVideo(candidate, nowIso);
+      const video = mapCandidateToCanonicalVideo(candidate, nowIso, actorIdentity);
 
       // 7. Check deterministic Media document does not already exist
       const mediaRef = this.db.collection('media').doc(video.id);
@@ -131,7 +133,8 @@ export class InMemoryCandidateAcceptanceRunner implements YouTubeCandidateAccept
 
   async acceptCandidateAtomic(
     candidateId: string,
-    reviewedVersion: number
+    reviewedVersion: number,
+    actorIdentity?: string
   ): Promise<AcceptCandidateResult> {
     // 1. Read candidate
     const candidate = await this.ytRepo.getCandidate(candidateId);
@@ -158,7 +161,7 @@ export class InMemoryCandidateAcceptanceRunner implements YouTubeCandidateAccept
 
     // 6. Derive canonical Media
     const nowIso = new Date().toISOString();
-    const video = mapCandidateToCanonicalVideo(candidate, nowIso);
+    const video = mapCandidateToCanonicalVideo(candidate, nowIso, actorIdentity);
 
     // 7. Check existing Media
     const existingVideo = await this.mediaRepo.getVideoById(video.id);
@@ -166,8 +169,9 @@ export class InMemoryCandidateAcceptanceRunner implements YouTubeCandidateAccept
       throw new Error(`DUPLICATE_MEDIA: Video with ID ${video.id} already exists`);
     }
 
-    // Snapshot state for atomic rollback simulation in memory
-    const candidateSnapshot = JSON.parse(JSON.stringify(candidate));
+    // Take clean type-safe snapshots for atomic rollback
+    const mediaSnapshot = this.mediaRepo.takeSnapshot();
+    const ytSnapshot = this.ytRepo.takeSnapshot();
 
     try {
       // 8. Create media
@@ -192,18 +196,9 @@ export class InMemoryCandidateAcceptanceRunner implements YouTubeCandidateAccept
         video,
       };
     } catch (err) {
-      // Rollback memory state on any failure
-      await this.ytRepo.saveCandidate(candidateSnapshot);
-      // Remove created video if it was created before failure
-      try {
-        const createdVid = await this.mediaRepo.getVideoById(video.id);
-        if (createdVid) {
-          (this.mediaRepo as any).videos[video.id] = undefined;
-          delete (this.mediaRepo as any).videos[video.id];
-        }
-      } catch {
-        // ignore
-      }
+      // Clean, encapsulated rollback without touching private fields
+      this.mediaRepo.restoreSnapshot(mediaSnapshot);
+      this.ytRepo.restoreSnapshot(ytSnapshot);
       throw err;
     }
   }
@@ -222,7 +217,8 @@ export class YouTubeCandidateAcceptanceService {
 
   public async acceptCandidate(
     candidateId: string,
-    reviewedVersion: number
+    reviewedVersion: number,
+    actorIdentity?: string
   ): Promise<AcceptCandidateResult> {
     if (!candidateId || typeof candidateId !== 'string' || candidateId.trim() === '') {
       throw new Error('INVALID_ARGUMENT: candidateId is required');
@@ -231,6 +227,6 @@ export class YouTubeCandidateAcceptanceService {
       throw new Error('INVALID_ARGUMENT: reviewedVersion must be a number');
     }
 
-    return this.runner.acceptCandidateAtomic(candidateId.trim(), reviewedVersion);
+    return this.runner.acceptCandidateAtomic(candidateId.trim(), reviewedVersion, actorIdentity);
   }
 }
