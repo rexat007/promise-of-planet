@@ -1,5 +1,6 @@
 import { 
   AccountServiceClass, 
+  FirestoreAccountRepository,
   InMemoryAccountRepository, 
   AccountError,
   validateAccountData
@@ -317,6 +318,183 @@ export async function runAccountAuthFoundationTestSuite(): Promise<TestResult[]>
     } catch (err: any) {
       if (!(err instanceof AccountError) || err.code !== 'AUTH_UNAVAILABLE') {
         throw new Error(`Expected null or AUTH_UNAVAILABLE, got: ${err?.message}`);
+      }
+    }
+  });
+
+  await test('R1. Unexpected Firestore read failure does not expose raw SDK error text', async () => {
+    class FailingReadRepo extends FirestoreAccountRepository {
+      protected isConfigured(): boolean { return true; }
+      protected async fetchDoc(_uid: string): Promise<any> {
+        throw new Error('FirebaseError: [code=permission-denied] Missing or insufficient permissions. Internal trace: secrets-12345');
+      }
+    }
+
+    const repo = new FailingReadRepo();
+    try {
+      await repo.getAccount('uid-123');
+      throw new Error('Expected getAccount to throw');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_DATA_INVALID') {
+        throw new Error(`Expected AccountError with code ACCOUNT_DATA_INVALID, got: ${err?.code || err?.message}`);
+      }
+      if (err.message.includes('FirebaseError') || err.message.includes('permission-denied') || err.message.includes('secrets-12345')) {
+        throw new Error(`Raw Firestore SDK text leaked in error message: ${err.message}`);
+      }
+      if (err.message !== 'Unable to read account profile.') {
+        throw new Error(`Expected bounded message 'Unable to read account profile.', got: ${err.message}`);
+      }
+    }
+  });
+
+  await test('R2. Unexpected Firestore create failure does not expose raw SDK error text', async () => {
+    class FailingCreateRepo extends FirestoreAccountRepository {
+      protected isConfigured(): boolean { return true; }
+      protected async runTx(_fn: any): Promise<any> {
+        throw new Error('FirebaseError: [code=unavailable] Connection timed out. Internal trace: db-cluster-secret-789');
+      }
+    }
+
+    const repo = new FailingCreateRepo();
+    const acc: Account = {
+      id: 'uid-create-fail',
+      email: 'create@example.com',
+      displayName: 'Create Fail',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    try {
+      await repo.createAccount(acc);
+      throw new Error('Expected createAccount to throw');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_PROVISIONING_FAILED') {
+        throw new Error(`Expected AccountError with code ACCOUNT_PROVISIONING_FAILED, got: ${err?.code || err?.message}`);
+      }
+      if (err.message.includes('FirebaseError') || err.message.includes('unavailable') || err.message.includes('db-cluster-secret-789')) {
+        throw new Error(`Raw Firestore SDK text leaked in error message: ${err.message}`);
+      }
+      if (err.message !== 'Unable to provision account profile.') {
+        throw new Error(`Expected bounded message 'Unable to provision account profile.', got: ${err.message}`);
+      }
+    }
+  });
+
+  await test('R3. Unexpected Firestore update failure does not expose raw SDK error text', async () => {
+    class FailingUpdateRepo extends FirestoreAccountRepository {
+      protected isConfigured(): boolean { return true; }
+      protected async runTx(_fn: any): Promise<any> {
+        throw new Error('FirebaseError: [code=internal] Transaction aborted due to internal lock failure. Internal trace: lock-id-555');
+      }
+    }
+
+    const repo = new FailingUpdateRepo();
+    try {
+      await repo.updateAccount('uid-update-fail', { displayName: 'New Name' });
+      throw new Error('Expected updateAccount to throw');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'ACCOUNT_DATA_INVALID') {
+        throw new Error(`Expected AccountError with code ACCOUNT_DATA_INVALID, got: ${err?.code || err?.message}`);
+      }
+      if (err.message.includes('FirebaseError') || err.message.includes('internal') || err.message.includes('lock-id-555')) {
+        throw new Error(`Raw Firestore SDK text leaked in error message: ${err.message}`);
+      }
+      if (err.message !== 'Unable to update account profile.') {
+        throw new Error(`Expected bounded message 'Unable to update account profile.', got: ${err.message}`);
+      }
+    }
+  });
+
+  await test('R4. Sign-in failure does not return raw Firebase SDK message', async () => {
+    class FailingAuthService extends AccountServiceClass {
+      protected isConfigured(): boolean { return true; }
+      protected async performSignIn(_email: string, _pass: string): Promise<any> {
+        throw new Error('Firebase: Error (auth/wrong-password). Internal trace: auth-token-secret-999');
+      }
+    }
+
+    const service = new FailingAuthService();
+    try {
+      await service.signIn('user@example.com', 'badpassword');
+      throw new Error('Expected signIn to throw');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'AUTH_UNAVAILABLE') {
+        throw new Error(`Expected AccountError with code AUTH_UNAVAILABLE, got: ${err?.code || err?.message}`);
+      }
+      if (err.message.includes('Firebase') || err.message.includes('auth/wrong-password') || err.message.includes('auth-token-secret-999')) {
+        throw new Error(`Raw Firebase Auth SDK text leaked in error message: ${err.message}`);
+      }
+    }
+  });
+
+  await test('R5. Registration Auth failure does not return raw Firebase SDK message', async () => {
+    class FailingAuthRegisterService extends AccountServiceClass {
+      protected isConfigured(): boolean { return true; }
+      protected async performCreateUser(_email: string, _pass: string): Promise<any> {
+        throw new Error('Firebase: Error (auth/email-already-in-use). Internal trace: auth-server-id-888');
+      }
+    }
+
+    const service = new FailingAuthRegisterService();
+    try {
+      await service.register('user@example.com', 'password123');
+      throw new Error('Expected register to throw');
+    } catch (err: any) {
+      if (!(err instanceof AccountError) || err.code !== 'AUTH_UNAVAILABLE') {
+        throw new Error(`Expected AccountError with code AUTH_UNAVAILABLE, got: ${err?.code || err?.message}`);
+      }
+      if (err.message.includes('Firebase') || err.message.includes('auth/email-already-in-use') || err.message.includes('auth-server-id-888')) {
+        throw new Error(`Raw Firebase Auth SDK text leaked in error message: ${err.message}`);
+      }
+    }
+  });
+
+  await test('R6. Account provisioning failure returns bounded ACCOUNT_PROVISIONING_FAILED without raw underlying message', async () => {
+    class MockAuthUserRegisterService extends AccountServiceClass {
+      protected isConfigured(): boolean { return true; }
+      protected async performCreateUser(_email: string, _pass: string): Promise<any> {
+        return { uid: 'auth-user-bound-111', email: 'user@example.com' };
+      }
+    }
+
+    const failingRepo: any = {
+      getAccount: async () => null,
+      createAccount: async () => {
+        throw new Error('Fatal underlying DB crash: secret-db-connection-string');
+      },
+      updateAccount: async () => { throw new Error('Not implemented'); }
+    };
+
+    const service = new MockAuthUserRegisterService(failingRepo);
+    const result = await service.register('user@example.com', 'password123');
+
+    if (result.account !== null) {
+      throw new Error('Expected account profile to be null on provisioning failure');
+    }
+    if (!result.error) {
+      throw new Error('Expected error message in registration result');
+    }
+    if (result.error.includes('Fatal underlying DB crash') || result.error.includes('secret-db-connection-string')) {
+      throw new Error(`Raw underlying error message leaked in registration result: ${result.error}`);
+    }
+    if (result.error !== 'ACCOUNT_PROVISIONING_FAILED: Unable to provision platform account.') {
+      throw new Error(`Expected bounded error string, got: ${result.error}`);
+    }
+  });
+
+  await test('R7. Existing semantic AccountError codes remain preserved', async () => {
+    const validCodes = [
+      'AUTH_UNAVAILABLE',
+      'ACCOUNT_NOT_FOUND',
+      'ACCOUNT_ALREADY_EXISTS',
+      'ACCOUNT_DATA_INVALID',
+      'ACCOUNT_PROVISIONING_FAILED'
+    ];
+
+    for (const code of validCodes) {
+      const err = new AccountError(code as any, 'Test message');
+      if (err.code !== code || err.name !== 'AccountError') {
+        throw new Error(`AccountError failed for code: ${code}`);
       }
     }
   });

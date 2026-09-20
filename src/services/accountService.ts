@@ -6,7 +6,7 @@ import {
 } from 'firebase/auth';
 import type { User } from 'firebase/auth';
 import { doc, getDoc, runTransaction } from 'firebase/firestore';
-import { auth, db, isFirebaseConfigured, handleFirestoreError, OperationType } from './firebase';
+import { auth, db, isFirebaseConfigured } from './firebase';
 import type { Account } from '../types/account';
 
 export type AccountErrorType = 
@@ -88,19 +88,31 @@ export interface AccountRepository {
  * Does NOT fall back to in-memory storage when Firebase is unconfigured.
  */
 export class FirestoreAccountRepository implements AccountRepository {
+  protected isConfigured(): boolean {
+    return isFirebaseConfigured && !!db;
+  }
+
+  protected async fetchDoc(uid: string): Promise<any> {
+    const docRef = doc(db, 'accounts', uid);
+    return await getDoc(docRef);
+  }
+
+  protected async runTx(updateFunction: (transaction: any) => Promise<any>): Promise<any> {
+    return await runTransaction(db, updateFunction);
+  }
+
   async getAccount(uid: string): Promise<Account | null> {
     if (!uid || typeof uid !== 'string') {
       return null;
     }
 
-    if (!isFirebaseConfigured || !db) {
-      throw new AccountError('AUTH_UNAVAILABLE', 'Firebase Backend is unconfigured or unavailable.');
+    if (!this.isConfigured()) {
+      throw new AccountError('AUTH_UNAVAILABLE', 'Authentication backend is unconfigured or unavailable.');
     }
 
     try {
-      const docRef = doc(db, 'accounts', uid);
-      const snapshot = await getDoc(docRef);
-      if (!snapshot.exists()) {
+      const snapshot = await this.fetchDoc(uid);
+      if (!snapshot || !snapshot.exists()) {
         return null;
       }
       return validateAccountData(snapshot.data(), uid);
@@ -108,21 +120,21 @@ export class FirestoreAccountRepository implements AccountRepository {
       if (error instanceof AccountError) {
         throw error;
       }
-      handleFirestoreError(error, OperationType.GET, `accounts/${uid}`);
-      throw new AccountError('ACCOUNT_DATA_INVALID', `Failed to read account: ${error?.message || String(error)}`);
+      console.error('Firestore getAccount error:', error);
+      throw new AccountError('ACCOUNT_DATA_INVALID', 'Unable to read account profile.');
     }
   }
 
   async createAccount(account: Account): Promise<Account> {
-    if (!isFirebaseConfigured || !db) {
-      throw new AccountError('AUTH_UNAVAILABLE', 'Firebase Backend is unconfigured or unavailable.');
+    if (!this.isConfigured()) {
+      throw new AccountError('AUTH_UNAVAILABLE', 'Authentication backend is unconfigured or unavailable.');
     }
 
     const validated = validateAccountData(account, account.id);
-    const docRef = doc(db, 'accounts', validated.id);
 
     try {
-      await runTransaction(db, async (transaction) => {
+      await this.runTx(async (transaction) => {
+        const docRef = doc(db, 'accounts', validated.id);
         const snapshot = await transaction.get(docRef);
         if (snapshot.exists()) {
           throw new AccountError('ACCOUNT_ALREADY_EXISTS', `Account record already exists for UID: ${validated.id}`);
@@ -134,24 +146,23 @@ export class FirestoreAccountRepository implements AccountRepository {
       if (error instanceof AccountError) {
         throw error;
       }
-      handleFirestoreError(error, OperationType.CREATE, `accounts/${validated.id}`);
-      throw new AccountError('ACCOUNT_PROVISIONING_FAILED', `Failed to create account: ${error?.message || String(error)}`);
+      console.error('Firestore createAccount error:', error);
+      throw new AccountError('ACCOUNT_PROVISIONING_FAILED', 'Unable to provision account profile.');
     }
   }
 
   async updateAccount(uid: string, data: Partial<Pick<Account, 'displayName'>>): Promise<Account> {
-    if (!isFirebaseConfigured || !db) {
-      throw new AccountError('AUTH_UNAVAILABLE', 'Firebase Backend is unconfigured or unavailable.');
+    if (!this.isConfigured()) {
+      throw new AccountError('AUTH_UNAVAILABLE', 'Authentication backend is unconfigured or unavailable.');
     }
 
     if (!uid) {
       throw new AccountError('ACCOUNT_DATA_INVALID', 'UID is required to update account.');
     }
 
-    const docRef = doc(db, 'accounts', uid);
-
     try {
-      return await runTransaction(db, async (transaction) => {
+      return await this.runTx(async (transaction) => {
+        const docRef = doc(db, 'accounts', uid);
         const snapshot = await transaction.get(docRef);
         if (!snapshot.exists()) {
           throw new AccountError('ACCOUNT_NOT_FOUND', `Account not found for UID: ${uid}`);
@@ -172,8 +183,8 @@ export class FirestoreAccountRepository implements AccountRepository {
       if (error instanceof AccountError) {
         throw error;
       }
-      handleFirestoreError(error, OperationType.UPDATE, `accounts/${uid}`);
-      throw new AccountError('ACCOUNT_DATA_INVALID', `Failed to update account: ${error?.message || String(error)}`);
+      console.error('Firestore updateAccount error:', error);
+      throw new AccountError('ACCOUNT_DATA_INVALID', 'Unable to update account profile.');
     }
   }
 }
@@ -291,18 +302,35 @@ export class AccountServiceClass {
     return await this.repository.createAccount(newAccount);
   }
 
+  protected isConfigured(): boolean {
+    return isFirebaseConfigured && !!auth;
+  }
+
+  protected async performSignIn(email: string, password: string): Promise<User> {
+    const cred = await realSignIn(auth, email, password);
+    return cred.user;
+  }
+
+  protected async performCreateUser(email: string, password: string): Promise<User> {
+    const cred = await realCreateUser(auth, email, password);
+    return cred.user;
+  }
+
   /**
    * Sign in with email and password.
    */
   async signIn(email: string, password: string): Promise<User> {
-    if (!isFirebaseConfigured || !auth) {
-      throw new AccountError('AUTH_UNAVAILABLE', 'Firebase Authentication is unconfigured.');
+    if (!this.isConfigured()) {
+      throw new AccountError('AUTH_UNAVAILABLE', 'Authentication is currently unavailable.');
     }
     try {
-      const cred = await realSignIn(auth, email, password);
-      return cred.user;
+      return await this.performSignIn(email, password);
     } catch (err: any) {
-      throw new AccountError('AUTH_UNAVAILABLE', err?.message || 'Sign in failed.');
+      if (err instanceof AccountError) {
+        throw err;
+      }
+      console.error('Sign in failed:', err);
+      throw new AccountError('AUTH_UNAVAILABLE', 'Authentication failed. Please check your credentials and try again.');
     }
   }
 
@@ -310,16 +338,19 @@ export class AccountServiceClass {
    * Register new account with email and password. Provisions accounts/{user.uid} bound to authenticated UID.
    */
   async register(email: string, password: string, displayName?: string): Promise<{ user: User; account: Account | null; error?: string }> {
-    if (!isFirebaseConfigured || !auth) {
-      throw new AccountError('AUTH_UNAVAILABLE', 'Firebase Authentication is unconfigured in this environment.');
+    if (!this.isConfigured()) {
+      throw new AccountError('AUTH_UNAVAILABLE', 'Authentication is currently unavailable.');
     }
 
     let user: User;
     try {
-      const cred = await realCreateUser(auth, email, password);
-      user = cred.user;
+      user = await this.performCreateUser(email, password);
     } catch (err: any) {
-      throw new AccountError('AUTH_UNAVAILABLE', err?.message || 'User creation failed.');
+      if (err instanceof AccountError) {
+        throw err;
+      }
+      console.error('Registration auth failed:', err);
+      throw new AccountError('AUTH_UNAVAILABLE', 'Registration failed. Unable to create authentication credentials.');
     }
 
     // Provision account profile bound to newly authenticated user UID
@@ -327,11 +358,11 @@ export class AccountServiceClass {
       const account = await this.createAccountForUser(user, displayName);
       return { user, account };
     } catch (err: any) {
-      const msg = err instanceof AccountError ? err.message : (err?.message || String(err));
+      console.error('Account profile provisioning failed after auth creation:', err);
       return {
         user,
         account: null,
-        error: `ACCOUNT_PROVISIONING_FAILED: ${msg}`
+        error: 'ACCOUNT_PROVISIONING_FAILED: Unable to provision platform account.'
       };
     }
   }
