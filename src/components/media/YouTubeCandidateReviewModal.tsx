@@ -25,6 +25,7 @@ interface YouTubeCandidateReviewModalProps {
   onClose: () => void;
   onSaveDraft: (candidateId: string, draft: any) => Promise<void>;
   onReject: (candidateId: string, reviewedVersion: number) => Promise<void>;
+  onAccept: (candidateId: string, reviewedVersion: number) => Promise<void>;
   hasPermission: (perm: AdminPermission) => boolean;
   isBackendAvailable: boolean;
   isAuthenticated: boolean;
@@ -36,6 +37,7 @@ export const YouTubeCandidateReviewModal: React.FC<YouTubeCandidateReviewModalPr
   onClose,
   onSaveDraft,
   onReject,
+  onAccept,
   hasPermission,
   isBackendAvailable: _isBackendAvailable,
   isAuthenticated: _isAuthenticated,
@@ -59,6 +61,7 @@ export const YouTubeCandidateReviewModal: React.FC<YouTubeCandidateReviewModalPr
 
   const [isSaving, setIsSaving] = useState(false);
   const [isRejecting, setIsRejecting] = useState(false);
+  const [isAccepting, setIsAccepting] = useState(false);
   const [confirmReject, setConfirmReject] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -123,6 +126,37 @@ export const YouTubeCandidateReviewModal: React.FC<YouTubeCandidateReviewModalPr
       setErrorMsg(err?.message || tText('فشل رفض الفيديو', 'Failed to reject candidate'));
       setIsRejecting(false);
       setConfirmReject(false);
+    }
+  };
+
+  const handleAccept = async () => {
+    if (!canReview) {
+      setErrorMsg(tText('غير مصرح لك باعتماد الفيديو المستورد (مطلوب صلاحية المراجعة)', 'Unauthorized: Review permission required to accept'));
+      return;
+    }
+    if (!hasCategory) {
+      setErrorMsg(tText('يتطلب تحديد تصنيف معتمد قبل الاعتماد', 'Valid category is required before acceptance'));
+      return;
+    }
+
+    setIsAccepting(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+
+    try {
+      await onAccept(candidate.id, candidate.candidateVersion);
+      setSuccessMsg(tText('تم اعتماد الفيديو المستورد بنجاح وإنشاء سجل الوسائط الدائم.', 'Candidate accepted and durable media created successfully.'));
+      setTimeout(() => {
+        onClose();
+      }, 1200);
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (msg.includes('STALE_REVIEW')) {
+        setErrorMsg(tText('تنبيه مراجعة قديمة: تغيرت النسخة الحالية للمرشح. يرجى تحديث وإعادة المراجعة.', 'Stale Review: Candidate version has changed. Please refresh and review again.'));
+      } else {
+        setErrorMsg(msg || tText('فشل اعتماد الفيديو المستورد', 'Failed to accept candidate'));
+      }
+      setIsAccepting(false);
     }
   };
 
@@ -551,20 +585,24 @@ export const YouTubeCandidateReviewModal: React.FC<YouTubeCandidateReviewModalPr
               {tText('إغلاق', 'Close')}
             </button>
 
-            {/* ACCEPT BUTTON - INTENTIONALLY LOCKED AS CONTRACT MANDATES */}
+            {/* ACCEPT BUTTON - ACTIVATED FOR DURABLE SERVER CONVERGENCE */}
             <div className="relative group w-full sm:w-auto">
               <button
                 type="button"
-                disabled
-                className="w-full sm:w-auto px-4 py-2 bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 cursor-not-allowed border border-gray-300 dark:border-gray-700"
-                id="accept-candidate-locked-btn"
-                title={tText(
-                  'غير متاح حالياً: بانتظار مسار تسجيل الوسائط الدائم على الخادم',
-                  'Currently unavailable: Pending durable Media registration boundary'
-                )}
+                disabled={isAccepting || !canReview || !hasCategory}
+                onClick={handleAccept}
+                className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                id="accept-candidate-btn"
+                title={
+                  !hasCategory
+                    ? tText('يرجى تحديد تصنيف قبل الاعتماد', 'Category required before acceptance')
+                    : !canReview
+                    ? tText('مطلوب صلاحية المراجعة للاعتماد', 'Review permission required to accept')
+                    : tText('اعتماد المرشح وإنشاء سجل وسائط دائم', 'Accept candidate and create durable media record')
+                }
               >
                 <CheckCircle2 className="w-4 h-4" />
-                <span>{tText('اعتماد في الوسائط (معلق)', 'Accept into Media (Pending)')}</span>
+                <span>{isAccepting ? tText('جاري الاعتماد...', 'Accepting...') : tText('اعتماد في الوسائط الدائمة', 'Accept into Durable Media')}</span>
               </button>
             </div>
           </div>

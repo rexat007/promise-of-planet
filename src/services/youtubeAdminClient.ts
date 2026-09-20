@@ -1,5 +1,6 @@
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { app, auth, isFirebaseConfigured } from './firebase';
+import type { Video } from '../types';
 import type {
   YouTubeIntegrationConfig,
   YouTubeImportCandidate,
@@ -114,5 +115,22 @@ export const YouTubeAdminClient = {
       reviewedVersion,
     });
     return res.data.candidate;
+  },
+
+  async acceptCandidate(
+    candidateId: string,
+    reviewedVersion: number
+  ): Promise<{ candidate: YouTubeImportCandidate; video: Video }> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<
+      { action: string; candidateId: string; reviewedVersion: number },
+      { candidate: YouTubeImportCandidate; video: Video }
+    >(fns, 'reviewYouTubeCandidate');
+    const res = await callable({
+      action: 'accept',
+      candidateId,
+      reviewedVersion,
+    });
+    return res.data;
   },
 };

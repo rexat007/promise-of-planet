@@ -36,6 +36,7 @@ import {
   Settings2
 } from 'lucide-react';
 import { YouTubeAdminClient } from '../../services/youtubeAdminClient';
+import { MediaAdminClient } from '../../services/mediaAdminClient';
 import { YouTubeCandidateReviewModal } from './YouTubeCandidateReviewModal';
 import type {
   YouTubeImportCandidate,
@@ -53,6 +54,11 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
 
   // Helper for inline translations
   const tText = (ar: string, en: string) => isAr ? ar : en;
+
+  // Honest Backend / Auth Availability
+  const isBackendAvailable = YouTubeAdminClient.isBackendAvailable();
+  const isAuthenticated = YouTubeAdminClient.isAuthenticated();
+  const useBackend = isBackendAvailable && isAuthenticated;
 
   // State
   const [videos, setVideos] = useState<Video[]>(() => MediaService.listAll());
@@ -98,15 +104,58 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   const [relationType, setRelationType] = useState<'Embedded' | 'RelatedCoverage' | 'SupportingMaterial'>('Embedded');
   const [placement, setPlacement] = useState<'Top' | 'Inline' | 'Bottom' | 'Sidebar'>('Inline');
 
-  // Refresh lists
-  const refreshData = () => {
-    const list = MediaService.listAll();
-    setVideos(list);
-    if (selectedVideo) {
-      const updated = list.find(v => v.id === selectedVideo.id);
-      setSelectedVideo(updated || null);
+  // Linked relations state for backend mode
+  const [linkedRelations, setLinkedRelations] = useState<any[]>([]);
+
+  const loadRelationsForSelectedVideo = async (videoId: string) => {
+    try {
+      if (useBackend) {
+        const rels = await MediaAdminClient.getRelationsForVideo(videoId);
+        setLinkedRelations(rels);
+      } else {
+        const rels = MediaService.getRelationsForVideo(videoId);
+        setLinkedRelations(rels);
+      }
+    } catch (err) {
+      console.warn('Failed to load relations:', err);
     }
   };
+
+  useEffect(() => {
+    if (selectedVideo) {
+      loadRelationsForSelectedVideo(selectedVideo.id);
+    } else {
+      setLinkedRelations([]);
+    }
+  }, [selectedVideo, useBackend]);
+
+  // Refresh lists
+  const refreshData = async () => {
+    try {
+      if (useBackend) {
+        const list = await MediaAdminClient.listAll();
+        setVideos(list);
+        if (selectedVideo) {
+          const updated = list.find(v => v.id === selectedVideo.id);
+          setSelectedVideo(updated || null);
+          await loadRelationsForSelectedVideo(selectedVideo.id);
+        }
+      } else {
+        const list = MediaService.listAll();
+        setVideos(list);
+        if (selectedVideo) {
+          const updated = list.find(v => v.id === selectedVideo.id);
+          setSelectedVideo(updated || null);
+        }
+      }
+    } catch (err: any) {
+      console.warn('Failed to refresh data:', err);
+    }
+  };
+
+  useEffect(() => {
+    refreshData();
+  }, [useBackend]);
 
   // Auto clear success message
   useEffect(() => {
@@ -139,10 +188,6 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
   const [selectedCandidate, setSelectedCandidate] = useState<YouTubeImportCandidate | null>(null);
   const [isCandidateModalOpen, setIsCandidateModalOpen] = useState(false);
-
-  // Honest Backend / Auth Availability
-  const isBackendAvailable = YouTubeAdminClient.isBackendAvailable();
-  const isAuthenticated = YouTubeAdminClient.isAuthenticated();
 
   const loadYouTubeCandidates = async () => {
     if (!isAuthenticated || !canReview) return;
@@ -258,7 +303,7 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   }, [videos, searchQuery, selectedCategory, selectedRights, selectedVisibility]);
 
   // Handle video registration
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
 
@@ -272,46 +317,81 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     }
 
     try {
-      const data: Omit<Video, 'id' | 'createdAt' | 'updatedAt'> = {
-        contentType: 'Video',
-        category: regCategory,
-        titleAr: regTitleAr,
-        titleEn: regTitleEn || undefined,
-        excerptAr: regExcerptAr || regTitleAr,
-        excerptEn: regExcerptEn || undefined,
-        originalLanguage: 'ar',
-        availableLanguages: regTitleEn ? ['ar', 'en'] : ['ar'],
-        translationStatus: regTitleEn ? 'Completed' : 'NotRequired',
-        editor: currentUser.name,
-        producer: regChannelName || tText('جهة خارجية', 'External Source'),
-        status: 'Draft',
-        approvalStatus: 'Pending',
-        visibilityDecision: 'Hidden',
-        rightsStatus: 'NotStarted',
-        editorialDescriptionAr: regDescAr,
-        editorialDescriptionEn: regDescEn || undefined,
-        tags: regTags ? regTags.split(',').map(t => t.trim()).filter(Boolean) : [],
-        editorialThumbnail: regThumbnailUrl ? { url: regThumbnailUrl, altAr: regTitleAr } : undefined,
-        youtubeSource: {
-          youtubeVideoId: regYoutubeId.trim(),
-          youtubeUrl: `https://www.youtube.com/watch?v=${regYoutubeId.trim()}`,
-          channelId: 'UC-external',
-          channelName: regChannelName || 'External YouTube Creator',
-          channelUrl: 'https://youtube.com',
-          originalTitle: regTitleEn || regTitleAr,
-          originalDescription: regDescEn || regDescAr,
-          youtubePublishedAt: new Date().toISOString(),
-          duration: regDuration,
-          availabilityStatus: 'Available',
-          thumbnails: regThumbnailUrl ? { medium: regThumbnailUrl } : {}
-        }
-      };
-
-      const newVideo = MediaService.register(data, currentUser);
-      setSuccessMsg(tText('تم تسجيل الفيديو بنجاح كمسودة غير منشورة', 'Video successfully registered as draft'));
-      setIsRegisterOpen(false);
-      setSelectedVideo(newVideo);
-      refreshData();
+      if (useBackend) {
+        const input = {
+          contentType: 'Video' as const,
+          category: regCategory,
+          titleAr: regTitleAr,
+          titleEn: regTitleEn || undefined,
+          excerptAr: regExcerptAr || regTitleAr,
+          excerptEn: regExcerptEn || undefined,
+          originalLanguage: 'ar' as const,
+          availableLanguages: regTitleEn ? ['ar', 'en'] : ['ar'],
+          translationStatus: regTitleEn ? 'Completed' as const : 'NotRequired' as const,
+          status: 'Draft' as const,
+          approvalStatus: 'Pending' as const,
+          visibilityDecision: 'Hidden' as const,
+          rightsStatus: 'NotStarted' as const,
+          editorialDescriptionAr: regDescAr,
+          editorialDescriptionEn: regDescEn || undefined,
+          tags: regTags ? regTags.split(',').map(t => t.trim()).filter(Boolean) : [],
+          editorialThumbnail: regThumbnailUrl ? { url: regThumbnailUrl, altAr: regTitleAr } : undefined,
+          youtubeSource: {
+            youtubeVideoId: regYoutubeId.trim(),
+            youtubeUrl: `https://www.youtube.com/watch?v=${regYoutubeId.trim()}`,
+            originalTitle: regTitleAr,
+            originalDescription: regDescAr,
+            youtubePublishedAt: new Date().toISOString(),
+            thumbnails: regThumbnailUrl ? { medium: regThumbnailUrl } : {},
+            ...(regChannelName ? { channelName: regChannelName } : {})
+          }
+        };
+        const newVideo = await MediaAdminClient.register(input);
+        setSuccessMsg(tText('تم تسجيل الفيديو بنجاح كمسودة على الخادم الدائم', 'Video successfully registered as draft on durable server'));
+        setIsRegisterOpen(false);
+        setSelectedVideo(newVideo);
+        await refreshData();
+      } else {
+        const data: Omit<Video, 'id' | 'createdAt' | 'updatedAt'> = {
+          contentType: 'Video',
+          category: regCategory,
+          titleAr: regTitleAr,
+          titleEn: regTitleEn || undefined,
+          excerptAr: regExcerptAr || regTitleAr,
+          excerptEn: regExcerptEn || undefined,
+          originalLanguage: 'ar',
+          availableLanguages: regTitleEn ? ['ar', 'en'] : ['ar'],
+          translationStatus: regTitleEn ? 'Completed' : 'NotRequired',
+          editor: currentUser.name,
+          producer: regChannelName || tText('جهة خارجية', 'External Source'),
+          status: 'Draft',
+          approvalStatus: 'Pending',
+          visibilityDecision: 'Hidden',
+          rightsStatus: 'NotStarted',
+          editorialDescriptionAr: regDescAr,
+          editorialDescriptionEn: regDescEn || undefined,
+          tags: regTags ? regTags.split(',').map(t => t.trim()).filter(Boolean) : [],
+          editorialThumbnail: regThumbnailUrl ? { url: regThumbnailUrl, altAr: regTitleAr } : undefined,
+          youtubeSource: {
+            youtubeVideoId: regYoutubeId.trim(),
+            youtubeUrl: `https://www.youtube.com/watch?v=${regYoutubeId.trim()}`,
+            channelId: 'UC-external',
+            channelName: regChannelName || 'External YouTube Creator',
+            channelUrl: 'https://youtube.com',
+            originalTitle: regTitleEn || regTitleAr,
+            originalDescription: regDescEn || regDescAr,
+            youtubePublishedAt: new Date().toISOString(),
+            duration: regDuration,
+            availabilityStatus: 'Available',
+            thumbnails: regThumbnailUrl ? { medium: regThumbnailUrl } : {}
+          }
+        };
+        const newVideo = MediaService.register(data, currentUser);
+        setSuccessMsg(tText('تم تسجيل الفيديو بنجاح كمسودة غير منشورة', 'Video successfully registered as draft'));
+        setIsRegisterOpen(false);
+        setSelectedVideo(newVideo);
+        refreshData();
+      }
       
       // Reset form
       setRegTitleAr('');
@@ -340,7 +420,7 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   };
 
   // Handle Edit Metadata Submit
-  const handleEditMetadata = (e: React.FormEvent) => {
+  const handleEditMetadata = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedVideo) return;
     setErrorMsg(null);
@@ -353,85 +433,112 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
         tags: editTags ? editTags.split(',').map(t => t.trim()).filter(Boolean) : []
       };
 
-      MediaService.updateMetadata(selectedVideo.id, updates, currentUser);
+      if (useBackend) {
+        const updated = await MediaAdminClient.updateMetadata(selectedVideo.id, updates);
+        setSelectedVideo(updated);
+      } else {
+        MediaService.updateMetadata(selectedVideo.id, updates, currentUser);
+      }
       setSuccessMsg(tText('تم تحديث البيانات الوصفية التحريرية بنجاح', 'Editorial metadata successfully updated'));
       setIsEditMetadataOpen(false);
-      refreshData();
+      await refreshData();
     } catch (e: any) {
       setErrorMsg(e.message || tText('فشل تحديث البيانات الوصفية', 'Metadata update failed'));
     }
   };
 
   // Handle Rights Change
-  const handleUpdateRights = (status: RightsStatus) => {
+  const handleUpdateRights = async (status: RightsStatus) => {
     if (!selectedVideo) return;
     setErrorMsg(null);
 
     try {
-      MediaService.updateRightsStatus(selectedVideo.id, status, rightsNotes || undefined, currentUser);
+      if (useBackend) {
+        const updated = await MediaAdminClient.updateRightsStatus(selectedVideo.id, status, rightsNotes || undefined);
+        setSelectedVideo(updated);
+      } else {
+        MediaService.updateRightsStatus(selectedVideo.id, status, rightsNotes || undefined, currentUser);
+      }
+      setRightsNotes('');
       setSuccessMsg(tText(`تم تحديث حالة حقوق النشر إلى: ${status}`, `Rights status updated to: ${status}`));
-      refreshData();
+      await refreshData();
     } catch (e: any) {
       setErrorMsg(e.message || tText('فشل تحديث حقوق النشر', 'Rights update failed'));
     }
   };
 
   // Handle Visibility Change
-  const handleUpdateVisibility = (decision: VisibilityDecision) => {
+  const handleUpdateVisibility = async (decision: VisibilityDecision) => {
     if (!selectedVideo) return;
     setErrorMsg(null);
 
     try {
-      MediaService.updateVisibilityDecision(selectedVideo.id, decision, currentUser);
+      if (useBackend) {
+        const updated = await MediaAdminClient.updateVisibilityDecision(selectedVideo.id, decision);
+        setSelectedVideo(updated);
+      } else {
+        MediaService.updateVisibilityDecision(selectedVideo.id, decision, currentUser);
+      }
       setSuccessMsg(tText(`تم تحديث قرار الظهور إلى: ${decision}`, `Visibility decision updated to: ${decision}`));
-      refreshData();
+      await refreshData();
     } catch (e: any) {
       setErrorMsg(e.message || tText('فشل تحديث قرار الظهور', 'Visibility update failed'));
     }
   };
 
   // Handle linking News content
-  const handleLinkNews = (e: React.FormEvent) => {
+  const handleLinkNews = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedVideo || !selectedNewsId) return;
     setErrorMsg(null);
 
     try {
-      MediaService.linkVideoToContent(
-        selectedVideo.id, 
-        selectedNewsId, 
-        'News', 
-        relationType, 
-        placement, 
-        currentUser
-      );
+      if (useBackend) {
+        await MediaAdminClient.linkVideoToContent(selectedVideo.id, selectedNewsId, relationType, placement);
+      } else {
+        MediaService.linkVideoToContent(
+          selectedVideo.id, 
+          selectedNewsId, 
+          'News', 
+          relationType, 
+          placement, 
+          currentUser
+        );
+      }
       setSuccessMsg(tText('تم ربط الفيديو بالخبر بنجاح', 'Successfully linked video to news item'));
       setSelectedNewsId('');
-      refreshData();
+      await refreshData();
     } catch (e: any) {
       setErrorMsg(e.message || tText('فشل ربط الفيديو بالخبر', 'Linking failed'));
     }
   };
 
   // Handle unlinking News
-  const handleUnlinkNews = (newsId: string) => {
+  const handleUnlinkNews = async (newsId: string) => {
     if (!selectedVideo) return;
     setErrorMsg(null);
 
     try {
-      MediaService.unlinkVideoFromContent(selectedVideo.id, newsId, currentUser);
+      if (useBackend) {
+        await MediaAdminClient.unlinkVideoFromContent(selectedVideo.id, newsId);
+      } else {
+        MediaService.unlinkVideoFromContent(selectedVideo.id, newsId, currentUser);
+      }
       setSuccessMsg(tText('تم إلغاء ربط الفيديو بنجاح', 'Successfully unlinked video'));
-      refreshData();
+      await refreshData();
     } catch (e: any) {
       setErrorMsg(e.message || tText('فشل إلغاء الربط', 'Unlinking failed'));
     }
   };
 
-  // Helper to get linked news relations for selected video
-  const linkedRelations = useMemo(() => {
-    if (!selectedVideo) return [];
-    return MediaService.getRelationsForVideo(selectedVideo.id);
-  }, [selectedVideo, videos]);
+  const handleAcceptCandidate = async (candidateId: string, reviewedVersion: number) => {
+    const res = await YouTubeAdminClient.acceptCandidate(candidateId, reviewedVersion);
+    setCandidates(prev => prev.filter(c => c.id !== candidateId));
+    await refreshData();
+    if (res.video) {
+      setSelectedVideo(res.video);
+    }
+  };
 
   // Helper to find the News entity based on relationship
   const getNewsTitle = (newsId: string) => {
@@ -451,20 +558,28 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     <div className="space-y-6 w-full max-w-full min-w-0" id="admin-media-workspace" dir={isAr ? 'rtl' : 'ltr'}>
       
       {/* 1. PERSISTENCE DISCLOSURE BANNER */}
-      <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/60 p-4 rounded-2xl flex items-start gap-3 shadow-xs" id="persistence-disclosure-banner">
-        <AlertCircle className="w-5 h-5 text-amber-700 dark:text-amber-400 shrink-0 mt-0.5" />
-        <div className="space-y-1 text-xs sm:text-sm text-amber-900 dark:text-amber-300">
+      <div className={`border p-4 rounded-2xl flex items-start gap-3 shadow-xs ${useBackend ? 'bg-emerald-50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-900/60' : 'bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-900/60'}`} id="persistence-disclosure-banner">
+        {useBackend ? (
+          <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+        ) : (
+          <AlertCircle className="w-5 h-5 text-amber-700 dark:text-amber-400 shrink-0 mt-0.5" />
+        )}
+        <div className={`space-y-1 text-xs sm:text-sm ${useBackend ? 'text-emerald-900 dark:text-emerald-300' : 'text-amber-900 dark:text-amber-300'}`}>
           <p className="font-extrabold">
-            {tText(
-              'تنبيه الحفظ في الذاكرة التحريرية (جلسة العمل الحالية)', 
-              'In-Memory Session Persistence Disclosure'
-            )}
+            {useBackend
+              ? tText('الحفظ الدائم على الخادم (قاعدة بيانات Firestore)', 'Durable Server Persistence (Firestore Database)')
+              : tText('تنبيه الحفظ في الذاكرة التحريرية (جلسة العمل الحالية)', 'In-Memory Session Persistence Disclosure')}
           </p>
-          <p className="font-medium text-amber-800 dark:text-amber-400/90 leading-relaxed">
-            {tText(
-              'يتم حفظ جميع التعديلات والتسجيلات وربط المواد الإخبارية في ذاكرة الجلسة الحالية فقط. لن تظهر التغييرات محليًا في خوادم قاعدة البيانات المستقلة أو يتم إرسالها إلى YouTube المباشر.',
-              'All registrations, metadata changes, and news link associations are maintained locally in session memory. No changes will persist to permanent cloud databases or synchronize back to active YouTube channels.'
-            )}
+          <p className={`font-medium leading-relaxed ${useBackend ? 'text-emerald-800 dark:text-emerald-400/90' : 'text-amber-800 dark:text-amber-400/90'}`}>
+            {useBackend
+              ? tText(
+                  'جميع التسجيلات والتعديلات وحالات الحقوق وتعيينات العرض وحفظ المرشحين محفوظة بأمان ومزامنتها مع الخادم عبر نظام الصلاحيات الموحد (RBAC).',
+                  'All registrations, updates, rights decisions, visibility states, and candidate reviews are securely persisted and synchronized with the durable server backend under canonical RBAC.'
+                )
+              : tText(
+                  'يتم حفظ جميع التعديلات والتسجيلات وربط المواد الإخبارية في ذاكرة الجلسة الحالية فقط. لن تظهر التغييرات محليًا في خوادم قاعدة البيانات المستقلة أو يتم إرسالها إلى YouTube المباشر.',
+                  'All registrations, metadata changes, and news link associations are maintained locally in session memory. No changes will persist to permanent cloud databases or synchronize back to active YouTube channels.'
+                )}
           </p>
         </div>
       </div>
@@ -2003,6 +2118,7 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
             setSelectedCandidate(null);
           }}
           onSaveDraft={handleSaveCandidateDraft}
+          onAccept={handleAcceptCandidate}
           onReject={handleRejectCandidate}
           hasPermission={(perm) => AdminAccessService.hasPermission(currentUser, perm)}
           isBackendAvailable={isBackendAvailable}
