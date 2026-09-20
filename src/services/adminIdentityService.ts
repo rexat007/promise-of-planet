@@ -125,6 +125,17 @@ export class AdminIdentityServiceClass {
   }
 
   /**
+   * Resolves canonical AdminUser for an authenticated UID emitted by an auth observer event.
+   * Binds resolution to the exact supplied UID rather than re-reading auth.currentUser.
+   */
+  async resolveAdminForAuthenticatedUid(uid: string): Promise<AdminUser | null> {
+    if (!uid || typeof uid !== 'string') {
+      return null;
+    }
+    return await this.repository.getAdminUser(uid);
+  }
+
+  /**
    * Resolves the canonical AdminUser profile bound strictly to auth.currentUser.uid.
    * Does NOT allow caller to supply arbitrary UID for self-resolution.
    */
@@ -141,3 +152,97 @@ export class AdminIdentityServiceClass {
 }
 
 export const AdminIdentityService = new AdminIdentityServiceClass();
+
+export type AdminGateState = 
+  | 'AUTH_LOADING'
+  | 'UNAUTHENTICATED'
+  | 'ADMIN_RESOLVING'
+  | 'ADMIN_AUTHORIZED'
+  | 'ADMIN_DENIED';
+
+export interface AdminGateStateSnapshot {
+  gateState: AdminGateState;
+  firebaseUser: { uid: string; email?: string | null } | null;
+  adminUser: AdminUser | null;
+  generation: number;
+}
+
+export class AdminGateResolutionController {
+  private generation = 0;
+  private expectedUid: string | null = null;
+  private isMounted = true;
+  private snapshot: AdminGateStateSnapshot = {
+    gateState: 'AUTH_LOADING',
+    firebaseUser: null,
+    adminUser: null,
+    generation: 0,
+  };
+  private listeners = new Set<(snapshot: AdminGateStateSnapshot) => void>();
+
+  public getSnapshot(): AdminGateStateSnapshot {
+    return { ...this.snapshot };
+  }
+
+  public subscribe(listener: (snapshot: AdminGateStateSnapshot) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  public unmount(): void {
+    this.isMounted = false;
+  }
+
+  private emitState(
+    gateState: AdminGateState, 
+    firebaseUser: { uid: string; email?: string | null } | null, 
+    adminUser: AdminUser | null, 
+    gen: number
+  ) {
+    if (!this.isMounted) return;
+    this.snapshot = { gateState, firebaseUser, adminUser, generation: gen };
+    this.listeners.forEach((l) => l(this.snapshot));
+  }
+
+  public async handleAuthEvent(
+    user: { uid: string; email?: string | null } | null,
+    resolver: (uid: string) => Promise<AdminUser | null>
+  ): Promise<void> {
+    const currentGen = ++this.generation;
+
+    if (!this.isMounted) return;
+
+    if (!user) {
+      this.expectedUid = null;
+      this.emitState('UNAUTHENTICATED', null, null, currentGen);
+      return;
+    }
+
+    const uid = user.uid;
+    this.expectedUid = uid;
+    // Clear previous adminUser immediately upon starting resolution for new UID / new event
+    this.emitState('ADMIN_RESOLVING', user, null, currentGen);
+
+    try {
+      const resolved = await resolver(uid);
+
+      if (!this.isMounted) return;
+      if (this.generation !== currentGen) return;
+      if (this.expectedUid !== uid) return;
+
+      if (resolved && resolved.isActive) {
+        this.emitState('ADMIN_AUTHORIZED', user, resolved, currentGen);
+      } else {
+        this.emitState('ADMIN_DENIED', user, null, currentGen);
+      }
+    } catch {
+      if (!this.isMounted) return;
+      if (this.generation !== currentGen) return;
+      if (this.expectedUid !== uid) return;
+
+      this.emitState('ADMIN_DENIED', user, null, currentGen);
+    }
+  }
+}
+

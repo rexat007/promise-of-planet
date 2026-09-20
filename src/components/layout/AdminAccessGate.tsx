@@ -1,19 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { User as FirebaseUser } from 'firebase/auth';
 import { ShieldAlert, LogOut, ArrowLeft, Loader2, ShieldCheck, ArrowRight } from 'lucide-react';
-import type { AdminUser } from '../../types/admin';
 import { AccountService } from '../../services/accountService';
-import { AdminIdentityService } from '../../services/adminIdentityService';
+import { AdminIdentityService, AdminGateResolutionController, type AdminGateState, type AdminGateStateSnapshot } from '../../services/adminIdentityService';
 import { AccountAuthWidget } from '../auth/AccountAuthWidget';
 import { AdminLayout } from './AdminLayout';
 
-export type AdminGateState = 
-  | 'AUTH_LOADING'
-  | 'UNAUTHENTICATED'
-  | 'ADMIN_RESOLVING'
-  | 'ADMIN_AUTHORIZED'
-  | 'ADMIN_DENIED';
+export type { AdminGateState };
 
 interface AdminAccessGateProps {
   onExitAdmin: () => void;
@@ -25,62 +18,41 @@ export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentitySe
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
 
-  const [gateState, setGateState] = useState<AdminGateState>('AUTH_LOADING');
-  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
-  const [adminUser, setAdminUser] = useState<AdminUser | null>(null);
+  const controllerRef = useRef<AdminGateResolutionController | null>(null);
+  if (!controllerRef.current) {
+    controllerRef.current = new AdminGateResolutionController();
+  }
 
-  // Observe Auth State and resolve admins/{uid}
+  const [snapshot, setSnapshot] = useState<AdminGateStateSnapshot>(() => controllerRef.current!.getSnapshot());
+
+  // Observe Auth State and resolve admins/{uid} using AdminGateResolutionController
   useEffect(() => {
-    let isMounted = true;
+    const controller = controllerRef.current!;
+    const unsubscribeSnapshot = controller.subscribe(setSnapshot);
 
-    const unsubscribe = AccountService.observeAuthState(async (user) => {
-      if (!isMounted) return;
-
-      setFirebaseUser(user);
-
-      if (!user) {
-        setAdminUser(null);
-        setGateState('UNAUTHENTICATED');
-        return;
-      }
-
-      // User is authenticated, resolve admins/{user.uid}
-      setGateState('ADMIN_RESOLVING');
-      try {
-        const resolved = await identityService.getCurrentAdminUser();
-        if (!isMounted) return;
-
-        if (resolved && resolved.isActive) {
-          setAdminUser(resolved);
-          setGateState('ADMIN_AUTHORIZED');
-        } else {
-          setAdminUser(null);
-          setGateState('ADMIN_DENIED');
-        }
-      } catch (err) {
-        console.error('Failed to resolve admin identity:', err);
-        if (isMounted) {
-          setAdminUser(null);
-          setGateState('ADMIN_DENIED');
-        }
-      }
+    const unsubscribeAuth = AccountService.observeAuthState((user) => {
+      controller.handleAuthEvent(
+        user,
+        (uid) => identityService.resolveAdminForAuthenticatedUid(uid)
+      );
     });
 
     return () => {
-      isMounted = false;
-      unsubscribe();
+      controller.unmount();
+      unsubscribeSnapshot();
+      unsubscribeAuth();
     };
   }, [identityService]);
 
   const handleSignOut = async () => {
     try {
       await AccountService.signOut();
-      setAdminUser(null);
-      setGateState('UNAUTHENTICATED');
     } catch (err) {
       console.error('Sign out error:', err);
     }
   };
+
+  const { gateState, firebaseUser, adminUser } = snapshot;
 
   // 1. Loading State
   if (gateState === 'AUTH_LOADING' || gateState === 'ADMIN_RESOLVING') {

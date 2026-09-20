@@ -10,7 +10,8 @@ import {
 import { 
   AdminIdentityServiceClass, 
   InMemoryAdminIdentityRepository, 
-  validateAdminUserData 
+  validateAdminUserData,
+  AdminGateResolutionController
 } from './adminIdentityService';
 import { validateAccountData } from './accountService';
 import * as fs from 'fs';
@@ -154,15 +155,133 @@ export async function runAdminIdentityConvergenceTests(): Promise<{
     'Null user must be denied tab authorization'
   );
 
-  // 12. UID change clears previous AdminUser before resolving new UID
-  testRepo.clear();
-  testRepo.seed(activeOwner);
-  const user1 = await testService.getAdminUserByUid('uid-active-owner');
-  const user2 = await testService.getAdminUserByUid('different-uid');
+  // Helper for controllable deferred promise
+  function createDeferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: any) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  // 12. Behavioral Auth-Transition Async Race Safety Tests (A through F)
+  
+  // Test 12.A: Start Admin-A resolution -> emit unauthenticated/null before A resolves -> resolve A late -> EXPECT gate remains UNAUTHENTICATED
+  const controllerA = new AdminGateResolutionController();
+  const deferredA1 = createDeferred<AdminUser | null>();
+  const pA1 = controllerA.handleAuthEvent({ uid: 'UID-A', email: 'a@test.com' }, () => deferredA1.promise);
+  
+  // Gate enters ADMIN_RESOLVING
+  const stateA1_start = controllerA.getSnapshot().gateState === 'ADMIN_RESOLVING';
+  
+  // Emit null / sign-out
+  await controllerA.handleAuthEvent(null, async () => null);
+  const stateA1_signout = controllerA.getSnapshot().gateState === 'UNAUTHENTICATED';
+  
+  // Late completion of Admin-A
+  deferredA1.resolve({ id: 'UID-A', name: 'Admin A', email: 'a@test.com', role: AdminRole.Owner, isActive: true });
+  await pA1;
+  const stateA1_late = controllerA.getSnapshot().gateState === 'UNAUTHENTICATED' && controllerA.getSnapshot().adminUser === null;
+
   assert(
-    'Assertion 12: UID change resolves independent document or null',
-    user1 !== null && user2 === null,
-    'UID change must query new UID and not return previous cached identity'
+    'Assertion 12.A: Sign-out invalidates in-flight Admin-A resolution (gate remains UNAUTHENTICATED)',
+    stateA1_start && stateA1_signout && stateA1_late,
+    'Late Admin-A resolution must not authorize workspace after sign-out'
+  );
+
+  // Test 12.B: Start Admin-A resolution -> emit UID-B -> resolve Admin-B first -> resolve Admin-A late -> EXPECT Admin-B remains active
+  const controllerB = new AdminGateResolutionController();
+  const deferredB_A = createDeferred<AdminUser | null>();
+  const deferredB_B = createDeferred<AdminUser | null>();
+
+  const pB_A = controllerB.handleAuthEvent({ uid: 'UID-A', email: 'a@test.com' }, () => deferredB_A.promise);
+  const pB_B = controllerB.handleAuthEvent({ uid: 'UID-B', email: 'b@test.com' }, () => deferredB_B.promise);
+
+  // Resolve B first
+  deferredB_B.resolve({ id: 'UID-B', name: 'Admin B', email: 'b@test.com', role: AdminRole.ContentEditor, isActive: true });
+  await pB_B;
+  const stateB_active = controllerB.getSnapshot().gateState === 'ADMIN_AUTHORIZED' && controllerB.getSnapshot().adminUser?.id === 'UID-B';
+
+  // Resolve A late
+  deferredB_A.resolve({ id: 'UID-A', name: 'Admin A', email: 'a@test.com', role: AdminRole.Owner, isActive: true });
+  await pB_A;
+  const stateB_afterLateA = controllerB.getSnapshot().gateState === 'ADMIN_AUTHORIZED' && controllerB.getSnapshot().adminUser?.id === 'UID-B';
+
+  assert(
+    'Assertion 12.B: UID-B active state ignores late UID-A resolution',
+    stateB_active && stateB_afterLateA,
+    'Late UID-A completion must be ignored when UID-B is active'
+  );
+
+  // Test 12.C: Start Admin-A resolution -> emit UID-B -> resolve A first -> EXPECT A cannot render while B is current
+  const controllerC = new AdminGateResolutionController();
+  const deferredC_A = createDeferred<AdminUser | null>();
+  const deferredC_B = createDeferred<AdminUser | null>();
+
+  const pC_A = controllerC.handleAuthEvent({ uid: 'UID-A', email: 'a@test.com' }, () => deferredC_A.promise);
+  const pC_B = controllerC.handleAuthEvent({ uid: 'UID-B', email: 'b@test.com' }, () => deferredC_B.promise);
+
+  // Resolve A first
+  deferredC_A.resolve({ id: 'UID-A', name: 'Admin A', email: 'a@test.com', role: AdminRole.Owner, isActive: true });
+  await pC_A;
+  const stateC_duringB = controllerC.getSnapshot().gateState === 'ADMIN_RESOLVING' && 
+                         controllerC.getSnapshot().firebaseUser?.uid === 'UID-B' && 
+                         controllerC.getSnapshot().adminUser === null;
+
+  deferredC_B.resolve(null);
+  await pC_B;
+
+  assert(
+    'Assertion 12.C: Stale UID-A completion cannot render while UID-B is current/resolving',
+    stateC_duringB,
+    'UID-A completion must be discarded when current expected UID is UID-B'
+  );
+
+  // Test 12.D: Normal single active UID resolution reaches ADMIN_AUTHORIZED
+  const controllerD = new AdminGateResolutionController();
+  await controllerD.handleAuthEvent({ uid: 'UID-D', email: 'd@test.com' }, async () => ({
+    id: 'UID-D', name: 'Admin D', email: 'd@test.com', role: AdminRole.Owner, isActive: true
+  }));
+  const stateD = controllerD.getSnapshot().gateState === 'ADMIN_AUTHORIZED' && controllerD.getSnapshot().adminUser?.id === 'UID-D';
+
+  assert(
+    'Assertion 12.D: Normal single active UID resolution reaches ADMIN_AUTHORIZED',
+    stateD,
+    'Single active UID must reach ADMIN_AUTHORIZED'
+  );
+
+  // Test 12.E: Inactive / missing admin reaches ADMIN_DENIED for current auth generation
+  const controllerE = new AdminGateResolutionController();
+  await controllerE.handleAuthEvent({ uid: 'UID-Inactive', email: 'inactive@test.com' }, async () => ({
+    id: 'UID-Inactive', name: 'Inactive Admin', email: 'inactive@test.com', role: AdminRole.Owner, isActive: false
+  }));
+  const stateE_inactive = controllerE.getSnapshot().gateState === 'ADMIN_DENIED' && controllerE.getSnapshot().adminUser === null;
+
+  await controllerE.handleAuthEvent({ uid: 'UID-Missing', email: 'missing@test.com' }, async () => null);
+  const stateE_missing = controllerE.getSnapshot().gateState === 'ADMIN_DENIED' && controllerE.getSnapshot().adminUser === null;
+
+  assert(
+    'Assertion 12.E: Inactive or missing admin document reaches ADMIN_DENIED for current generation',
+    stateE_inactive && stateE_missing,
+    'Inactive and missing admin documents must reach ADMIN_DENIED'
+  );
+
+  // Test 12.F: Component unmount prevents state updates
+  const controllerF = new AdminGateResolutionController();
+  const deferredF = createDeferred<AdminUser | null>();
+  const pF = controllerF.handleAuthEvent({ uid: 'UID-F', email: 'f@test.com' }, () => deferredF.promise);
+  controllerF.unmount();
+
+  deferredF.resolve({ id: 'UID-F', name: 'Admin F', email: 'f@test.com', role: AdminRole.Owner, isActive: true });
+  await pF;
+  const stateF = controllerF.getSnapshot().gateState === 'ADMIN_RESOLVING' && controllerF.getSnapshot().adminUser === null;
+
+  assert(
+    'Assertion 12.F: Unmounted controller ignores completed async resolution',
+    stateF,
+    'Unmounted controller must not update snapshot state'
   );
 
   // 13. ContentEditor does not gain Library responsibility
