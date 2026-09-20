@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint src",
     "preview": "vite preview",
-    "test:youtube": "npx tsx scripts/runYoutubeTests.ts && npx tsx scripts/runYoutubeReviewTests.ts"
+    "test:youtube": "npx tsx scripts/runYoutubeTests.ts && npx tsx scripts/runYoutubeReviewTests.ts && npx tsx scripts/runCandidateAcceptanceTests.ts"
   },
   "dependencies": {
     "@types/uuid": "^11.0.0",

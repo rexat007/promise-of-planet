@@ -1,5 +1,6 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { YoutubeApplicationService } from './youtubeApplicationService';
+import { YouTubeCandidateAcceptanceService } from './candidateAcceptanceService';
 import type { AdminRepository } from '../admin/adminRepository';
 import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
@@ -151,7 +152,8 @@ export async function executeManageYouTubeIntegrationRequest(
 export async function executeReviewYouTubeCandidateRequest(
   requestContext: AdminRequestContext,
   adminRepo: AdminRepository = new FirestoreAdminRepository(),
-  youtubeAppService: YoutubeApplicationService = new YoutubeApplicationService()
+  youtubeAppService: YoutubeApplicationService = new YoutubeApplicationService(),
+  acceptanceService: YouTubeCandidateAcceptanceService = new YouTubeCandidateAcceptanceService()
 ): Promise<any> {
   const data = requestContext.data || {};
   const action = data.action;
@@ -230,6 +232,44 @@ export async function executeReviewYouTubeCandidateRequest(
         throw new HttpsError('not-found', 'NOT_FOUND: YouTube candidate was not found');
       }
       throw new HttpsError('internal', 'REJECT_FAILED: Unable to reject candidate');
+    }
+  }
+
+  if (action === 'accept') {
+    await authenticateAndAuthorize(requestContext, AdminPermission.Review, adminRepo);
+
+    if (typeof data.candidateId !== 'string' || data.candidateId.trim() === '') {
+      throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: candidateId is required');
+    }
+    if (typeof data.reviewedVersion !== 'number') {
+      throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: reviewedVersion must be a number');
+    }
+
+    try {
+      const result = await acceptanceService.acceptCandidate(data.candidateId.trim(), data.reviewedVersion);
+      return {
+        candidate: result.candidate,
+        video: result.video,
+      };
+    } catch (err: any) {
+      if (err instanceof HttpsError) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('STALE_REVIEW')) {
+        throw new HttpsError('failed-precondition', 'STALE_REVIEW: Candidate material was updated since review began. Please refresh and review latest changes.');
+      }
+      if (msg.includes('INVALID_TRANSITION')) {
+        throw new HttpsError('failed-precondition', 'INVALID_TRANSITION: Candidate is already in a terminal state');
+      }
+      if (msg.includes('NOT_FOUND')) {
+        throw new HttpsError('not-found', 'NOT_FOUND: YouTube candidate was not found');
+      }
+      if (msg.includes('INVALID_CATEGORY')) {
+        throw new HttpsError('failed-precondition', 'INVALID_CATEGORY: Canonical Category must be assigned by a human editor before acceptance');
+      }
+      if (msg.includes('DUPLICATE_MEDIA')) {
+        throw new HttpsError('already-exists', 'DUPLICATE_MEDIA: Canonical Media already exists for this video');
+      }
+      throw new HttpsError('internal', 'ACCEPT_FAILED: Unable to atomically accept candidate into canonical Media');
     }
   }
 

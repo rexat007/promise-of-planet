@@ -1,6 +1,7 @@
 import { MediaApplicationService } from '../../functions/src/media/mediaApplicationService';
 import { InMemoryMediaRepository } from '../../functions/src/media/inMemoryMediaRepository';
 import { FirestoreMediaRepository } from '../../functions/src/media/firestoreMediaRepository';
+import type { MediaRepository } from '../../functions/src/media/mediaRepository';
 import {
   CANONICAL_CATEGORIES,
   CANONICAL_RIGHTS_STATUSES,
@@ -143,7 +144,7 @@ export async function runDurableMediaTests(): Promise<{ test: string; passed: bo
 
   // Test 8: Canonical relation vocabulary is reused
   try {
-    const validRelations: RelationType[] = ['Featured', 'Embedded', 'Related'];
+    const validRelations: RelationType[] = ['Embedded', 'RelatedCoverage', 'SupportingMaterial'];
     const validPlacements: Placement[] = ['Top', 'Inline', 'Bottom', 'Sidebar'];
     assert(
       'Durable Media Test 8 - Canonical relation vocabulary is reused',
