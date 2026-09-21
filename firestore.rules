@@ -57,6 +57,19 @@ service cloud.firestore {
         && request.resource.data.language is string;
     }
 
+    function isCanonicalEnrollmentShape() {
+      return request.resource.data.keys().hasOnly(['id', 'accountId', 'courseId', 'createdAt'])
+        && request.resource.data.id is string
+        && request.resource.data.accountId is string
+        && request.resource.data.courseId is string
+        && request.resource.data.createdAt is string;
+    }
+
+    function isPublishedCourse(courseId) {
+      return exists(/databases/$(database)/documents/training_courses/$(courseId))
+        && get(/databases/$(database)/documents/training_courses/$(courseId)).data.workflowState == 'Published';
+    }
+
     // Admins Collection Rules Block
     match /admins/{adminId} {
       // Allow administrators to retrieve their own canonical profile
@@ -96,6 +109,24 @@ service cloud.firestore {
         && isCanonicalTrainingCourseShape();
 
       allow delete: if isAdmin();
+    }
+
+    // Enrollments Collection Rules Block
+    match /enrollments/{enrollmentId} {
+      // Authenticated owner can read their own enrollment
+      allow get: if isSignedIn() && resource.data.accountId == request.auth.uid;
+      allow list: if isSignedIn() && request.auth.uid == resource.data.accountId;
+
+      // Authenticated owner can create their own enrollment ONLY for Published courses
+      allow create: if isSignedIn()
+        && request.auth.uid == request.resource.data.accountId
+        && enrollmentId == request.resource.data.accountId + '_' + request.resource.data.courseId
+        && request.resource.data.id == enrollmentId
+        && isCanonicalEnrollmentShape()
+        && isPublishedCourse(request.resource.data.courseId);
+
+      // Immutable relationship: client updates and deletes are denied
+      allow update, delete: if false;
     }
   }
 }

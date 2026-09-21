@@ -311,8 +311,11 @@ export class FirestoreTrainingCourseRepository implements TrainingCourseReposito
       if (error instanceof TrainingCourseError) {
         throw error;
       }
-      console.error('Firestore listCourses error:', error);
-      handleFirestoreError(error, OperationType.LIST, 'training_courses');
+      try {
+        handleFirestoreError(error, OperationType.LIST, 'training_courses');
+      } catch {
+        throw new TrainingCourseError('BACKEND_UNAVAILABLE', 'Training course storage operation failed or backend is unavailable.');
+      }
     }
   }
 
@@ -336,8 +339,11 @@ export class FirestoreTrainingCourseRepository implements TrainingCourseReposito
       if (error instanceof TrainingCourseError) {
         throw error;
       }
-      console.error('Firestore getCourseById error:', error);
-      handleFirestoreError(error, OperationType.GET, `training_courses/${id}`);
+      try {
+        handleFirestoreError(error, OperationType.GET, `training_courses/${id}`);
+      } catch {
+        throw new TrainingCourseError('BACKEND_UNAVAILABLE', 'Training course storage operation failed or backend is unavailable.');
+      }
     }
   }
 
@@ -356,8 +362,11 @@ export class FirestoreTrainingCourseRepository implements TrainingCourseReposito
       if (error instanceof TrainingCourseError) {
         throw error;
       }
-      console.error('Firestore saveCourse error:', error);
-      handleFirestoreError(error, OperationType.WRITE, `training_courses/${validated.id}`);
+      try {
+        handleFirestoreError(error, OperationType.WRITE, `training_courses/${validated.id}`);
+      } catch {
+        throw new TrainingCourseError('BACKEND_UNAVAILABLE', 'Training course storage operation failed or backend is unavailable.');
+      }
     }
   }
 }
@@ -443,6 +452,14 @@ export class TrainingCourseServiceClass {
   async saveCourse(course: TrainingCourse, user: AdminUser): Promise<TrainingCourse> {
     if (!user) {
       throw new TrainingCourseError('UNAUTHORIZED', 'Administrative user authorization context is required to save training courses.');
+    }
+    if (!user.isActive) {
+      throw new TrainingCourseError('UNAUTHORIZED', 'Inactive administrator user has zero administrative authority.');
+    }
+    const hasCreate = AdminAccessService.hasPermission(user, AdminPermission.Create);
+    const hasEdit = AdminAccessService.hasPermission(user, AdminPermission.Edit);
+    if (!hasCreate && !hasEdit) {
+      throw new TrainingCourseError('UNAUTHORIZED', 'User does not possess administrative permission to save training courses.');
     }
     const existing = await this.repository.getCourseById(course.id);
     const requiredPermission = existing ? AdminPermission.Edit : AdminPermission.Create;

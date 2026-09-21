@@ -48,6 +48,18 @@
         "targetAudienceEn", "workflowState", "createdAt", "updatedAt",
         "author", "language"
       ]
+    },
+    "Enrollment": {
+      "title": "Enrollment",
+      "description": "Canonical Course Enrollment Relationship",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "accountId": { "type": "string" },
+        "courseId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "accountId", "courseId", "createdAt"]
     }
   },
   "firestore": {
@@ -62,6 +74,10 @@
     "/training_courses/{courseId}": {
       "schema": "TrainingCourse",
       "description": "Durable Training Courses Collection"
+    },
+    "/enrollments/{enrollmentId}": {
+      "schema": "Enrollment",
+      "description": "Durable Course Enrollments Collection"
     }
   }
 }
