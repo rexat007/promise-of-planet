@@ -1,0 +1,67 @@
+{
+  "entities": {
+    "Account": {
+      "title": "Account",
+      "description": "Platform User Account Profile",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "email", "displayName", "createdAt", "updatedAt"]
+    },
+    "TrainingCourse": {
+      "title": "TrainingCourse",
+      "description": "Canonical Environmental Training Course Resource",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "titleAr": { "type": "string" },
+        "titleEn": { "type": "string" },
+        "summaryAr": { "type": "string" },
+        "summaryEn": { "type": "string" },
+        "descriptionAr": { "type": "string" },
+        "descriptionEn": { "type": "string" },
+        "category": { "type": "string" },
+        "level": { "type": "string" },
+        "durationHours": { "type": "number" },
+        "deliveryMode": { "type": "string" },
+        "targetAudienceAr": { "type": "string" },
+        "targetAudienceEn": { "type": "string" },
+        "instructorNameAr": { "type": "string" },
+        "instructorNameEn": { "type": "string" },
+        "instructorBioAr": { "type": "string" },
+        "instructorBioEn": { "type": "string" },
+        "workflowState": { "type": "string" },
+        "workflowHistory": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "author": { "type": "string" },
+        "language": { "type": "string" }
+      },
+      "required": [
+        "id", "titleAr", "titleEn", "summaryAr", "summaryEn", "category",
+        "level", "durationHours", "deliveryMode", "targetAudienceAr",
+        "targetAudienceEn", "workflowState", "createdAt", "updatedAt",
+        "author", "language"
+      ]
+    }
+  },
+  "firestore": {
+    "/accounts/{userId}": {
+      "schema": "Account",
+      "description": "User Account Profiles"
+    },
+    "/admins/{adminId}": {
+      "schema": "AdminUser",
+      "description": "Admin Users Access Directory"
+    },
+    "/training_courses/{courseId}": {
+      "schema": "TrainingCourse",
+      "description": "Durable Training Courses Collection"
+    }
+  }
+}

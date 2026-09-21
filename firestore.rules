@@ -16,6 +16,10 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
     function isCanonicalAccountShape() {
       return request.resource.data.keys().hasOnly(['id', 'email', 'displayName', 'createdAt', 'updatedAt'])
         && request.resource.data.id is string
@@ -23,6 +27,32 @@ service cloud.firestore {
         && request.resource.data.displayName is string
         && request.resource.data.createdAt is string
         && request.resource.data.updatedAt is string;
+    }
+
+    function isCanonicalTrainingCourseShape() {
+      return request.resource.data.keys().hasAll([
+          'id', 'titleAr', 'titleEn', 'summaryAr', 'summaryEn', 'category',
+          'level', 'durationHours', 'deliveryMode', 'targetAudienceAr',
+          'targetAudienceEn', 'workflowState', 'workflowHistory',
+          'createdAt', 'updatedAt', 'author', 'language'
+        ])
+        && request.resource.data.id is string
+        && request.resource.data.titleAr is string
+        && request.resource.data.titleEn is string
+        && request.resource.data.summaryAr is string
+        && request.resource.data.summaryEn is string
+        && request.resource.data.category is string
+        && request.resource.data.level is string
+        && request.resource.data.durationHours is number
+        && request.resource.data.deliveryMode is string
+        && request.resource.data.targetAudienceAr is string
+        && request.resource.data.targetAudienceEn is string
+        && request.resource.data.workflowState is string
+        && request.resource.data.workflowHistory is list
+        && request.resource.data.createdAt is string
+        && request.resource.data.updatedAt is string
+        && request.resource.data.author is string
+        && request.resource.data.language is string;
     }
 
     // Admins Collection Rules Block
@@ -45,6 +75,25 @@ service cloud.firestore {
         && request.resource.data.id == resource.data.id
         && isCanonicalAccountShape();
       allow delete: if false;
+    }
+
+    // Training Courses Collection Rules Block
+    match /training_courses/{courseId} {
+      // Public read allowed ONLY for Published courses
+      // Admins can read all courses (including Draft, InReview, etc.)
+      allow get, list: if (resource.data.workflowState == 'Published') || isAdmin();
+
+      // Administrative write operations require admin identity
+      allow create: if isAdmin()
+        && request.resource.data.id == courseId
+        && isCanonicalTrainingCourseShape();
+
+      allow update: if isAdmin()
+        && request.resource.data.id == courseId
+        && request.resource.data.id == resource.data.id
+        && isCanonicalTrainingCourseShape();
+
+      allow delete: if isAdmin();
     }
   }
 }
