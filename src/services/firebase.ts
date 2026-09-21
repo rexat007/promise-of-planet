@@ -115,6 +115,9 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     operationType,
     path
   };
+  // Internal diagnostic logging retains full details safely for server/console inspection
   console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+
+  // The outward thrown Error is strictly bounded and stripped of internal path, UID, or raw error string
+  throw new Error('FIRESTORE_ACCESS_ERROR: Database operation failed. Details redacted for security.');
 }

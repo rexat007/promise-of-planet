@@ -10,6 +10,7 @@ import {
 } from './components/content';
 import { AdminAccessGate } from './components/layout/AdminAccessGate';
 import { ViewTransition } from './components/common/ViewTransition';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { ResponsiveGuard } from './components/dev/ResponsiveGuard';
 import { smoothScrollToSection } from './utils/interaction';
 import type { Language } from './types';
@@ -32,7 +33,8 @@ function App() {
   return (
     <div id="app-root-container" dir={isAr ? 'rtl' : 'ltr'} className="min-h-screen w-full">
       <ResponsiveGuard />
-      <ViewTransition viewKey={isAdminOpen ? 'admin-workspace' : 'public-portal'}>
+      <ErrorBoundary isAr={isAr} onRecover={() => window.location.reload()}>
+        <ViewTransition viewKey={isAdminOpen ? 'admin-workspace' : 'public-portal'}>
         {isAdminOpen ? (
           <AdminAccessGate onExitAdmin={() => setIsAdminOpen(false)} />
         ) : (
@@ -104,6 +106,7 @@ function App() {
           </AppShell>
         )}
       </ViewTransition>
+      </ErrorBoundary>
     </div>
   );
 }
