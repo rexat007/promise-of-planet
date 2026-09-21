@@ -440,13 +440,14 @@ export class TrainingCourseServiceClass {
     return await this.repository.getCourseById(id);
   }
 
-  async saveCourse(course: TrainingCourse, user?: AdminUser): Promise<TrainingCourse> {
-    if (user) {
-      const existing = await this.repository.getCourseById(course.id);
-      const requiredPermission = existing ? AdminPermission.Edit : AdminPermission.Create;
-      if (!AdminAccessService.hasPermission(user, requiredPermission)) {
-        throw new TrainingCourseError('UNAUTHORIZED', 'User does not possess administrative permission to save training courses.');
-      }
+  async saveCourse(course: TrainingCourse, user: AdminUser): Promise<TrainingCourse> {
+    if (!user) {
+      throw new TrainingCourseError('UNAUTHORIZED', 'Administrative user authorization context is required to save training courses.');
+    }
+    const existing = await this.repository.getCourseById(course.id);
+    const requiredPermission = existing ? AdminPermission.Edit : AdminPermission.Create;
+    if (!AdminAccessService.hasPermission(user, requiredPermission)) {
+      throw new TrainingCourseError('UNAUTHORIZED', 'User does not possess administrative permission to save training courses.');
     }
     return await this.repository.saveCourse(course);
   }

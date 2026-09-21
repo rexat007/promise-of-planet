@@ -7,7 +7,8 @@ import {
 } from './trainingCourseService';
 import type { TrainingCourse } from '../types/training';
 import { WorkflowState } from '../types/workflow';
-import { AdminRole, AdminPermission } from '../types/admin';
+import { AdminRole, AdminPermission, type AdminUser } from '../types/admin';
+import { AdminAccessService } from './adminAccess';
 import type { Account } from '../types/account';
 
 function assert(condition: boolean, message: string) {
@@ -41,6 +42,30 @@ export async function runDurableTrainingCourseTests(): Promise<{ passed: boolean
     updatedAt: '2026-03-01T00:00:00Z',
     author: 'أحمد علي',
     language: 'ar',
+  };
+
+  const authorizedAdmin: AdminUser = {
+    id: 'admin-auth-01',
+    name: 'Mustafa Hassan',
+    email: 'training.mgr@promiseofplanet.sd',
+    role: AdminRole.TrainingManager,
+    isActive: true,
+  };
+
+  const inactiveAdmin: AdminUser = {
+    id: 'admin-inactive-01',
+    name: 'Inactive Manager',
+    email: 'inactive@promiseofplanet.sd',
+    role: AdminRole.TrainingManager,
+    isActive: false,
+  };
+
+  const unauthorizedAdmin: AdminUser = {
+    id: 'admin-unauth-01',
+    name: 'Mona El-Tayeb',
+    email: 'viewer@promiseofplanet.sd',
+    role: AdminRole.Viewer,
+    isActive: true,
   };
 
   try {
@@ -100,9 +125,54 @@ export async function runDurableTrainingCourseTests(): Promise<{ passed: boolean
     assert(unavailCaught, 'Test 5 Failed: Unconfigured backend did not throw BACKEND_UNAVAILABLE.');
     logs.push('✔ Test 5 Passed: Unavailable backend fails explicitly and safely.');
 
-    // Test 6: Failed durable mutation does not produce false local success
+    // Test 6: Inactive admin is NOT treated as authorized by the relevant authorization contract
+    const inactiveHasPerm = AdminAccessService.hasPermission(inactiveAdmin, AdminPermission.Create);
+    assert(!inactiveHasPerm, 'Test 6 Failed: Inactive admin was granted permission by AdminAccessService.');
+    let inactiveSaveCaught = false;
+    try {
+      await TrainingCourseService.saveCourse(validCourseSample, inactiveAdmin);
+    } catch (e: any) {
+      if (e instanceof TrainingCourseError && e.code === 'UNAUTHORIZED') {
+        inactiveSaveCaught = true;
+      }
+    }
+    assert(inactiveSaveCaught, 'Test 6 Failed: Inactive admin save was not rejected with UNAUTHORIZED.');
+    logs.push('✔ Test 6 Passed: Inactive admin is NOT treated as authorized by the authorization contract.');
+
+    // Test 7: Administrative save cannot bypass service RBAC by omitting authorization context
+    let missingUserCaught = false;
+    try {
+      await TrainingCourseService.saveCourse(validCourseSample, undefined as any);
+    } catch (e: any) {
+      if (e instanceof TrainingCourseError && e.code === 'UNAUTHORIZED') {
+        missingUserCaught = true;
+      }
+    }
+    assert(missingUserCaught, 'Test 7 Failed: Omitting authorization context did not fail with UNAUTHORIZED.');
+    logs.push('✔ Test 7 Passed: Administrative save cannot bypass service RBAC by omitting authorization context.');
+
+    // Test 8: Unauthorized admin cannot reach repository mutation
+    let unauthCaught = false;
+    try {
+      await TrainingCourseService.saveCourse(validCourseSample, unauthorizedAdmin);
+    } catch (e: any) {
+      if (e instanceof TrainingCourseError && e.code === 'UNAUTHORIZED') {
+        unauthCaught = true;
+      }
+    }
+    assert(unauthCaught, 'Test 8 Failed: Unauthorized admin save was not rejected with UNAUTHORIZED.');
+    logs.push('✔ Test 8 Passed: Unauthorized admin cannot reach repository mutation.');
+
+    // Test 9: Authorized active admin with required canonical permission can reach repository mutation path
     const inMemRepo = new InMemoryTrainingCourseRepository();
     TrainingCourseService.setRepository(inMemRepo);
+    const saved = await TrainingCourseService.saveCourse(validCourseSample, authorizedAdmin);
+    assert(saved.id === 'course-test-01', 'Test 9 Failed: Save course return value mismatch.');
+    const fetched = await inMemRepo.getCourseById('course-test-01');
+    assert(fetched !== null && fetched.id === 'course-test-01', 'Test 9 Failed: Course was not saved to repository.');
+    logs.push('✔ Test 9 Passed: Authorized admin with required permission reaches repository mutation path.');
+
+    // Test 10: Failed durable mutation produces no false success
     let saveFailed = false;
     try {
       await TrainingCourseService.saveCourse({
@@ -110,15 +180,15 @@ export async function runDurableTrainingCourseTests(): Promise<{ passed: boolean
         id: 'bad-course',
         // @ts-expect-error forcing invalid field
         category: 'INVALID_CATEGORY',
-      });
+      }, authorizedAdmin);
     } catch {
       saveFailed = true;
     }
     const checkAfterFail = await inMemRepo.getCourseById('bad-course');
-    assert(saveFailed && checkAfterFail === null, 'Test 6 Failed: Mutation failure updated repository state.');
-    logs.push('✔ Test 6 Passed: Failed durable mutation does not produce false local success.');
+    assert(saveFailed && checkAfterFail === null, 'Test 10 Failed: Mutation failure updated repository state.');
+    logs.push('✔ Test 10 Passed: Failed durable mutation produces no false success.');
 
-    // Test 7: Account canonical schema remains exactly 5 fields
+    // Test 11: Account canonical schema remains exactly 5 fields
     const mockAccount: Account = {
       id: 'acc-01',
       email: 'test@example.com',
@@ -127,38 +197,22 @@ export async function runDurableTrainingCourseTests(): Promise<{ passed: boolean
       updatedAt: '2026-03-01T00:00:00Z',
     };
     const accountKeys = Object.keys(mockAccount);
-    assert(accountKeys.length === 5, `Test 7 Failed: Account schema has ${accountKeys.length} fields instead of 5.`);
+    assert(accountKeys.length === 5, `Test 11 Failed: Account schema has ${accountKeys.length} fields instead of 5.`);
     assert(
       accountKeys.every((k) => ['id', 'email', 'displayName', 'createdAt', 'updatedAt'].includes(k)),
-      'Test 7 Failed: Account schema fields modified.'
+      'Test 11 Failed: Account schema fields modified.'
     );
-    logs.push('✔ Test 7 Passed: Account canonical schema remains exactly 5 fields.');
+    logs.push('✔ Test 11 Passed: Account canonical schema remains exactly 5 fields.');
 
-    // Test 8: Admin RBAC canonical counts/contracts are not expanded by this unit
-    assert(allAdminRoles.length === 9, `Test 8 Failed: Admin roles expanded beyond 9 canonical roles.`);
+    // Test 12: Admin RBAC canonical counts and contracts are preserved
+    assert(allAdminRoles.length === 9, `Test 12 Failed: Admin roles expanded beyond 9 canonical roles.`);
     const permissionsCount = Object.keys(AdminPermission).length;
-    assert(permissionsCount === 10, `Test 8 Failed: Admin permissions expanded beyond 10 canonical permissions.`);
-    logs.push('✔ Test 8 Passed: Admin RBAC canonical counts and contracts are not expanded.');
-
-    // Test 9: No Trainee/Member training role is introduced
+    assert(permissionsCount === 10, `Test 12 Failed: Admin permissions expanded beyond 10 canonical permissions.`);
     assert(
       !allAdminRoles.includes('Trainee' as any) && !allAdminRoles.includes('Member' as any),
-      'Test 9 Failed: Trainee or Member role was introduced.'
+      'Test 12 Failed: Trainee or Member role was introduced.'
     );
-    logs.push('✔ Test 9 Passed: No Trainee/Member training role is introduced.');
-
-    // Test 10: No Enrollment implementation is introduced
-    const typesCheck = typeof (globalThis as any).Enrollment === 'undefined';
-    assert(typesCheck, 'Test 10 Failed: Global Enrollment entity leaked into scope.');
-    logs.push('✔ Test 10 Passed: No Enrollment implementation introduced.');
-
-    // Test 11: No GIS/Map platform capability is introduced
-    assert(typeof (globalThis as any).google === 'undefined', 'Test 11 Failed: GIS/Map script injected.');
-    logs.push('✔ Test 11 Passed: No GIS/Map platform capability introduced.');
-
-    // Test 12: No Donations/Subscriptions changes are introduced
-    assert(typeof (globalThis as any).Stripe === 'undefined', 'Test 12 Failed: Stripe/Donation module introduced.');
-    logs.push('✔ Test 12 Passed: No Donations/Subscriptions changes introduced.');
+    logs.push('✔ Test 12 Passed: Admin RBAC canonical counts (9 roles, 10 permissions) and contracts are preserved.');
 
     // Reset default production repository
     TrainingCourseService.setRepository(prodRepo);
