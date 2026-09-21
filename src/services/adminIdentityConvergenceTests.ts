@@ -14,6 +14,11 @@ import {
   AdminGateResolutionController
 } from './adminIdentityService';
 import { validateAccountData } from './accountService';
+import {
+  resolveAuthorizedTab,
+  attemptTabNavigation,
+  CANONICAL_NAVIGATION_ITEMS
+} from '../components/layout/AdminLayout';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -420,6 +425,184 @@ export async function runAdminIdentityConvergenceTests(): Promise<{
     !Object.values(AdminDomain).includes('subscriptions' as any) &&
     !hasDomainResponsibility(AdminRole.Owner, 'subscriptions' as any),
     'Subscriptions must not be an authorized operational domain'
+  );
+
+  // 25. Owner can navigate to all canonical Admin domains
+  const ownerUser: AdminUser = {
+    id: 'owner-test-uid',
+    name: 'Owner User',
+    email: 'owner@test.com',
+    role: AdminRole.Owner,
+    isActive: true,
+  };
+  const ownerNavResults = CANONICAL_NAVIGATION_ITEMS.map(item =>
+    attemptTabNavigation(ownerUser, item.id)
+  );
+  const ownerCanNavAll = ownerNavResults.every(r => r.success && r.targetTabId !== null);
+  assert(
+    'Assertion 25: Owner can navigate to all currently authorized canonical Admin domains',
+    ownerCanNavAll,
+    'Owner role must be authorized for all canonical navigation items'
+  );
+
+  // 26. ContentEditor workspace boundary limits
+  const contentEditorUser: AdminUser = {
+    id: 'editor-test-uid',
+    name: 'Content Editor',
+    email: 'editor@test.com',
+    role: AdminRole.ContentEditor,
+    isActive: true,
+  };
+  const editorNavNews = attemptTabNavigation(contentEditorUser, 'news');
+  const editorNavLibrary = attemptTabNavigation(contentEditorUser, 'library');
+  const editorNavUsers = attemptTabNavigation(contentEditorUser, 'users');
+  assert(
+    'Assertion 26: ContentEditor can access News, but cannot access Library or Users',
+    editorNavNews.success && !editorNavLibrary.success && !editorNavUsers.success,
+    'ContentEditor must be scoped to News and denied Library & Users'
+  );
+
+  // 27. ContentEditor unauthorized navigation request is rejected and current authorized workspace target remains unchanged
+  const editorCurrentTab = 'news';
+  const navAttemptUsers = attemptTabNavigation(contentEditorUser, 'users');
+  const navAttemptLibrary = attemptTabNavigation(contentEditorUser, 'library');
+  let activeTabAfterAttempt = editorCurrentTab;
+  if (navAttemptUsers.success && navAttemptUsers.targetTabId) {
+    activeTabAfterAttempt = navAttemptUsers.targetTabId;
+  }
+  if (navAttemptLibrary.success && navAttemptLibrary.targetTabId) {
+    activeTabAfterAttempt = navAttemptLibrary.targetTabId;
+  }
+  assert(
+    'Assertion 27: ContentEditor unauthorized navigation request is rejected and current authorized workspace target remains unchanged',
+    !navAttemptUsers.success && !navAttemptLibrary.success && activeTabAfterAttempt === editorCurrentTab,
+    'ContentEditor unauthorized navigation request must be rejected and leave current authorized tab unchanged'
+  );
+
+  // 28. LibraryCurator access boundaries
+  const libraryCuratorUser: AdminUser = {
+    id: 'curator-test-uid',
+    name: 'Library Curator',
+    email: 'curator@test.com',
+    role: AdminRole.LibraryCurator,
+    isActive: true,
+  };
+  const curatorNavLibrary = attemptTabNavigation(libraryCuratorUser, 'library');
+  const curatorNavNews = attemptTabNavigation(libraryCuratorUser, 'news');
+  assert(
+    'Assertion 28: LibraryCurator can access Library, but cannot access News',
+    curatorNavLibrary.success && !curatorNavNews.success,
+    'LibraryCurator must be authorized for Library and denied News'
+  );
+
+  // 29. Training roles remain scoped to Training
+  const trainingManagerUser: AdminUser = {
+    id: 'tm-test-uid',
+    name: 'Training Manager',
+    email: 'tm@test.com',
+    role: AdminRole.TrainingManager,
+    isActive: true,
+  };
+  const trainerUser: AdminUser = {
+    id: 'trainer-test-uid',
+    name: 'Trainer',
+    email: 'trainer@test.com',
+    role: AdminRole.Trainer,
+    isActive: true,
+  };
+  assert(
+    'Assertion 29: TrainingManager and Trainer remain scoped to Training domain',
+    attemptTabNavigation(trainingManagerUser, 'training').success &&
+    !attemptTabNavigation(trainingManagerUser, 'news').success &&
+    attemptTabNavigation(trainerUser, 'training').success &&
+    !attemptTabNavigation(trainerUser, 'library').success,
+    'Training roles must be scoped to Training domain only'
+  );
+
+  // 30. CitizenModerator scoped to Community
+  const moderatorUser: AdminUser = {
+    id: 'moderator-test-uid',
+    name: 'Citizen Moderator',
+    email: 'moderator@test.com',
+    role: AdminRole.CitizenModerator,
+    isActive: true,
+  };
+  assert(
+    'Assertion 30: CitizenModerator remains scoped to Community domain',
+    attemptTabNavigation(moderatorUser, 'community').success &&
+    !attemptTabNavigation(moderatorUser, 'users').success &&
+    !attemptTabNavigation(moderatorUser, 'news').success,
+    'CitizenModerator must be scoped to Community domain'
+  );
+
+  // 31. Viewer constrained to Overview and Reports
+  const viewerUser: AdminUser = {
+    id: 'viewer-test-uid',
+    name: 'Viewer',
+    email: 'viewer@test.com',
+    role: AdminRole.Viewer,
+    isActive: true,
+  };
+  assert(
+    'Assertion 31: Viewer can access Overview and Reports, but cannot access operational editing sections',
+    attemptTabNavigation(viewerUser, 'overview').success &&
+    attemptTabNavigation(viewerUser, 'reports').success &&
+    !attemptTabNavigation(viewerUser, 'news').success &&
+    !attemptTabNavigation(viewerUser, 'settings').success,
+    'Viewer role must be constrained to Overview and Reports'
+  );
+
+  // 32. Unknown requested tab is rejected and current authorized workspace target remains unchanged
+  const ownerCurrentTab = 'overview';
+  const unknownNavResult = attemptTabNavigation(ownerUser, 'unknown-tab-id-999');
+  let ownerActiveTab = ownerCurrentTab;
+  if (unknownNavResult.success && unknownNavResult.targetTabId) {
+    ownerActiveTab = unknownNavResult.targetTabId;
+  }
+  assert(
+    'Assertion 32: Unknown requested tab is rejected and current authorized workspace target remains unchanged',
+    !unknownNavResult.success && ownerActiveTab === ownerCurrentTab,
+    'Unknown requested tab must be rejected without altering current active tab'
+  );
+
+  // 33. If the CURRENT activeTab itself is unauthorized/invalid, resolveAuthorizedTab resolves to the first authorized fallback
+  const invalidStateResolution = resolveAuthorizedTab(contentEditorUser, 'users');
+  const unknownStateResolution = resolveAuthorizedTab(contentEditorUser, 'invalid-tab-id');
+  assert(
+    'Assertion 33: If current activeTab is unauthorized or invalid, resolveAuthorizedTab resolves to first authorized fallback',
+    invalidStateResolution === 'overview' && unknownStateResolution === 'overview',
+    'Invalid or unauthorized current activeTab must resolve to first authorized fallback'
+  );
+
+  // 34. If no authorized workspace target exists, resolveAuthorizedTab resolves to null
+  const inactiveUserTest: AdminUser = {
+    id: 'inactive-test-uid',
+    name: 'Inactive Admin',
+    email: 'inactive@test.com',
+    role: AdminRole.Owner,
+    isActive: false,
+  };
+  const noAuthorizedTargetResolution = resolveAuthorizedTab(inactiveUserTest, 'overview');
+  const inactiveNavAttempt = attemptTabNavigation(inactiveUserTest, 'overview');
+  assert(
+    'Assertion 34: If no authorized workspace target exists, resolveAuthorizedTab resolves to null',
+    noAuthorizedTargetResolution === null && !inactiveNavAttempt.success,
+    'Inactive user or user with zero authorized targets must resolve to null and fail navigation'
+  );
+
+  // 35. Internal/programmatic navigation uses canonical authorization boundary
+  const programmaticResult = attemptTabNavigation(contentEditorUser, 'auditLog');
+  assert(
+    'Assertion 35: Internal/programmatic navigation uses canonical authorization boundary',
+    !programmaticResult.success,
+    'Programmatic navigation attempt to unauthorized tab must be rejected'
+  );
+
+  // 36. Exact 9 AdminRoles and 10 AdminPermissions remain intact
+  assert(
+    'Assertion 36: Exact 9 AdminRoles and 10 AdminPermissions remain intact',
+    Object.keys(AdminRole).length === 9 && Object.keys(AdminPermission).length === 10,
+    'Canonical role and permission counts must not be altered'
   );
 
   const passedCount = results.filter(r => r.passed).length;

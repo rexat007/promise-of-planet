@@ -47,6 +47,71 @@ interface AdminLayoutProps {
   onSignOut?: () => void;
 }
 
+export const CANONICAL_NAVIGATION_ITEMS: NavigationItem[] = [
+  { id: 'overview', domain: AdminDomain.Overview, labelAr: 'لوحة التحكم والمؤشرات', labelEn: 'Overview Dashboard', iconName: 'LayoutDashboard', requiredPermission: AdminPermission.View },
+  { id: 'news', domain: AdminDomain.News, labelAr: 'إدارة الأخبار البيئية', labelEn: 'Environmental News', iconName: 'Newspaper', requiredPermission: AdminPermission.Create },
+  { id: 'library', domain: AdminDomain.Library, labelAr: 'المكتبة البيئية والمعرفية', labelEn: 'Knowledge Library', iconName: 'BookOpen', requiredPermission: AdminPermission.Create },
+  { id: 'media', domain: AdminDomain.Media, labelAr: 'إدارة الوسائط والتشغيل', labelEn: 'Media & Videos', iconName: 'Film', requiredPermission: AdminPermission.View },
+  { id: 'training', domain: AdminDomain.Training, labelAr: 'البرامج والمسارات التدريبية', labelEn: 'Training & Courses', iconName: 'GraduationCap', requiredPermission: AdminPermission.Edit },
+  { id: 'community', domain: AdminDomain.Community, labelAr: 'صحافة المواطن والمجتمع', labelEn: 'Community & Moderator', iconName: 'Users', requiredPermission: AdminPermission.Review },
+  { id: 'aiReviews', domain: AdminDomain.AIReviews, labelAr: 'مراجعة الذكاء الاصطناعي (AI)', labelEn: 'AI Content Auditor', iconName: 'Cpu', requiredPermission: AdminPermission.Review },
+  { id: 'users', domain: AdminDomain.Users, labelAr: 'المستخدمون والصلاحيات', labelEn: 'Users & Permissions', iconName: 'ShieldAlert', requiredPermission: AdminPermission.ManageUsers },
+  { id: 'auditLog', domain: AdminDomain.AuditLog, labelAr: 'سجل تدقيق الأنشطة', labelEn: 'Audit Log & History', iconName: 'History', requiredPermission: AdminPermission.ManageSettings },
+  { id: 'reports', domain: AdminDomain.Reports, labelAr: 'التقارير والتحليلات البيئية', labelEn: 'System Reports', iconName: 'BarChart3', requiredPermission: AdminPermission.ViewReports },
+  { id: 'settings', domain: AdminDomain.Settings, labelAr: 'الإعدادات العامة', labelEn: 'Global Settings', iconName: 'Settings', requiredPermission: AdminPermission.ManageSettings },
+];
+
+/**
+ * Resolves the authorized tab to render for a given user and target tab ID.
+ * Returns requestedTabId if authorized, or the first authorized fallback tab ID.
+ * Returns null if the user is inactive/unauthenticated or has zero authorized tabs.
+ */
+export function resolveAuthorizedTab(
+  user: AdminUser | null | undefined,
+  requestedTabId: string,
+  items: NavigationItem[] = CANONICAL_NAVIGATION_ITEMS
+): string | null {
+  if (!user || !user.isActive) {
+    return null;
+  }
+  const authorizedItems = items.filter(item =>
+    isTabAuthorized(user, item.domain, item.requiredPermission)
+  );
+  if (authorizedItems.length === 0) {
+    return null;
+  }
+
+  const requestedItem = items.find(item => item.id === requestedTabId);
+  if (requestedItem && isTabAuthorized(user, requestedItem.domain, requestedItem.requiredPermission)) {
+    return requestedItem.id;
+  }
+
+  // Fallback to first authorized navigation item
+  return authorizedItems[0].id;
+}
+
+/**
+ * Attempts to navigate to a target tab ID.
+ * Returns { success: true, targetTabId } if allowed, or { success: false, targetTabId: null } if unknown or unauthorized.
+ */
+export function attemptTabNavigation(
+  user: AdminUser | null | undefined,
+  requestedTabId: string,
+  items: NavigationItem[] = CANONICAL_NAVIGATION_ITEMS
+): { success: boolean; targetTabId: string | null } {
+  if (!user || !user.isActive) {
+    return { success: false, targetTabId: null };
+  }
+  const requestedItem = items.find(item => item.id === requestedTabId);
+  if (!requestedItem) {
+    return { success: false, targetTabId: null };
+  }
+  if (!isTabAuthorized(user, requestedItem.domain, requestedItem.requiredPermission)) {
+    return { success: false, targetTabId: null };
+  }
+  return { success: true, targetTabId: requestedItem.id };
+}
+
 export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayoutProps) {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
@@ -119,27 +184,28 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
     });
   };
 
-  // Full admin navigation items mapped to canonical domain responsibility and permissions
-  const navigationItems: NavigationItem[] = [
-    { id: 'overview', domain: AdminDomain.Overview, labelAr: 'لوحة التحكم والمؤشرات', labelEn: 'Overview Dashboard', iconName: 'LayoutDashboard', requiredPermission: AdminPermission.View },
-    { id: 'news', domain: AdminDomain.News, labelAr: 'إدارة الأخبار البيئية', labelEn: 'Environmental News', iconName: 'Newspaper', requiredPermission: AdminPermission.Create },
-    { id: 'library', domain: AdminDomain.Library, labelAr: 'المكتبة البيئية والمعرفية', labelEn: 'Knowledge Library', iconName: 'BookOpen', requiredPermission: AdminPermission.Create },
-    { id: 'media', domain: AdminDomain.Media, labelAr: 'إدارة الوسائط والتشغيل', labelEn: 'Media & Videos', iconName: 'Film', requiredPermission: AdminPermission.View },
-    { id: 'training', domain: AdminDomain.Training, labelAr: 'البرامج والمسارات التدريبية', labelEn: 'Training & Courses', iconName: 'GraduationCap', requiredPermission: AdminPermission.Edit },
-    { id: 'community', domain: AdminDomain.Community, labelAr: 'صحافة المواطن والمجتمع', labelEn: 'Community & Moderator', iconName: 'Users', requiredPermission: AdminPermission.Review },
-    { id: 'aiReviews', domain: AdminDomain.AIReviews, labelAr: 'مراجعة الذكاء الاصطناعي (AI)', labelEn: 'AI Content Auditor', iconName: 'Cpu', requiredPermission: AdminPermission.Review },
-    { id: 'users', domain: AdminDomain.Users, labelAr: 'المستخدمون والصلاحيات', labelEn: 'Users & Permissions', iconName: 'ShieldAlert', requiredPermission: AdminPermission.ManageUsers },
-    { id: 'auditLog', domain: AdminDomain.AuditLog, labelAr: 'سجل تدقيق الأنشطة', labelEn: 'Audit Log & History', iconName: 'History', requiredPermission: AdminPermission.ManageSettings },
-    { id: 'reports', domain: AdminDomain.Reports, labelAr: 'التقارير والتحليلات البيئية', labelEn: 'System Reports', iconName: 'BarChart3', requiredPermission: AdminPermission.ViewReports },
-    { id: 'settings', domain: AdminDomain.Settings, labelAr: 'الإعدادات العامة', labelEn: 'Global Settings', iconName: 'Settings', requiredPermission: AdminPermission.ManageSettings },
-  ];
-
   // Filter visible navigation items using domain responsibility + action permission
   const visibleNavItems = useMemo(() => {
-    return navigationItems.filter(item => {
+    return CANONICAL_NAVIGATION_ITEMS.filter(item => {
       return isTabAuthorized(currentUser, item.domain, item.requiredPermission);
     });
   }, [currentUser]);
+
+  // Derive effectiveTab using canonical resolution boundary (returns null if zero authorized tabs or inactive user)
+  const effectiveTab = useMemo(() => {
+    return resolveAuthorizedTab(currentUser, activeTab, CANONICAL_NAVIGATION_ITEMS);
+  }, [activeTab, currentUser]);
+
+  // Single canonical navigation handler
+  const navigateToAuthorizedTab = (tabId: string): boolean => {
+    const navResult = attemptTabNavigation(currentUser, tabId, CANONICAL_NAVIGATION_ITEMS);
+    if (navResult.success && navResult.targetTabId) {
+      setActiveTab(navResult.targetTabId);
+      setIsSidebarOpen(false);
+      return true;
+    }
+    return false;
+  };
 
   const handleLanguageToggle = () => {
     const nextLang = i18n.language === 'ar' ? 'en' : 'ar';
@@ -153,14 +219,6 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
       await AccountService.signOut();
     }
   };
-
-  // Guard active Tab to prevent direct navigation to hidden/unauthorized sections
-  const effectiveTab = useMemo(() => {
-    const targetItem = navigationItems.find(item => item.id === activeTab);
-    if (!targetItem) return 'overview';
-    const isAllowed = isTabAuthorized(currentUser, targetItem.domain, targetItem.requiredPermission);
-    return isAllowed ? activeTab : 'overview';
-  }, [activeTab, currentUser]);
 
   // Helper to resolve icon by string name
   const renderIcon = (iconName: string, className: string) => {
@@ -287,10 +345,7 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
                 return (
                   <button
                     key={item.id}
-                    onClick={() => {
-                      setActiveTab(item.id);
-                      setIsSidebarOpen(false); // close mobile sidebar on navigation
-                    }}
+                    onClick={() => navigateToAuthorizedTab(item.id)}
                     className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-semibold transition-all cursor-pointer ${
                       isActive 
                         ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 shadow-xs' 
@@ -326,8 +381,30 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
 
         {/* C. MAIN WORKSPACE CONTENT AREA */}
         <main className="flex-1 p-3 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full max-w-full min-w-0" id="admin-main-content">
-          <ViewTransition viewKey={effectiveTab}>
-            {effectiveTab === 'overview' ? (
+          <ViewTransition viewKey={effectiveTab || 'none'}>
+            {!effectiveTab ? (
+              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-8 max-w-md mx-auto text-center space-y-4 shadow-lg my-12" dir={isAr ? 'rtl' : 'ltr'}>
+                <div className="h-12 w-12 rounded-full bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 flex items-center justify-center mx-auto">
+                  <Shield className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-base sm:text-lg font-bold text-gray-900 dark:text-gray-100">
+                    {isAr ? 'وصول مقيد - لا توجد أقسام مصرح بها' : 'Access Restricted - No Authorized Sections'}
+                  </h3>
+                  <p className="text-xs text-gray-600 dark:text-gray-400">
+                    {isAr
+                      ? `حسابك الحالي (${currentUser.role}) غير نشط أو لا يملك أي صلاحيات للوصول إلى أقسام لوحة التحكم.`
+                      : `Your current account (${currentUser.role}) is inactive or lacks permissions to access any admin workspace section.`}
+                  </p>
+                </div>
+                <button
+                  onClick={handleSignOutClick}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-xs"
+                >
+                  {isAr ? 'تسجيل الخروج' : 'Sign Out'}
+                </button>
+              </div>
+            ) : effectiveTab === 'overview' ? (
               <AdminOverview currentUser={currentUser} />
             ) : effectiveTab === 'news' ? (
               <AdminNewsManagement currentUser={currentUser} />
@@ -353,7 +430,7 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
             ) : effectiveTab === 'reports' ? (
               <AdminReportsManagement
                 currentUser={currentUser}
-                onNavigate={(tabId: string) => setActiveTab(tabId)}
+                onNavigate={(tabId: string) => navigateToAuthorizedTab(tabId)}
               />
             ) : effectiveTab === 'settings' ? (
               <AdminGlobalSettings currentUser={currentUser} />
