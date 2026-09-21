@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Container } from './Container';
 import { Shield, ChevronDown, BookOpen, FileText, Scale, Package, Sparkles } from 'lucide-react';
-import { smoothScrollToSection } from '../../lib/interaction';
+import { smoothScrollToSection } from '../../utils/interaction';
 
 interface HeaderProps {
   onEnterAdmin?: () => void;

@@ -11,7 +11,7 @@ import {
 import { AdminAccessGate } from './components/layout/AdminAccessGate';
 import { ViewTransition } from './components/common/ViewTransition';
 import { ResponsiveGuard } from './components/dev/ResponsiveGuard';
-import { smoothScrollToSection } from './lib/interaction';
+import { smoothScrollToSection } from './utils/interaction';
 import type { Language } from './types';
 import './App.css';
 

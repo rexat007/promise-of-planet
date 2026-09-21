@@ -190,6 +190,10 @@ export class AdminGateResolutionController {
     };
   }
 
+  public mount(): void {
+    this.isMounted = true;
+  }
+
   public unmount(): void {
     this.isMounted = false;
   }

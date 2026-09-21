@@ -28,6 +28,7 @@ export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentitySe
   // Observe Auth State and resolve admins/{uid} using AdminGateResolutionController
   useEffect(() => {
     const controller = controllerRef.current!;
+    controller.mount();
     const unsubscribeSnapshot = controller.subscribe(setSnapshot);
 
     const unsubscribeAuth = AccountService.observeAuthState((user) => {

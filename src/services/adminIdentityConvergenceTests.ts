@@ -284,6 +284,20 @@ export async function runAdminIdentityConvergenceTests(): Promise<{
     'Unmounted controller must not update snapshot state'
   );
 
+  // Test 12.G: StrictMode lifecycle replay (mount -> unmount -> mount) allows null auth event to reach UNAUTHENTICATED
+  const controllerG = new AdminGateResolutionController();
+  controllerG.mount();
+  controllerG.unmount(); // StrictMode effect cleanup
+  controllerG.mount();   // StrictMode effect re-mount
+  await controllerG.handleAuthEvent(null, async () => null);
+  const stateG = controllerG.getSnapshot().gateState === 'UNAUTHENTICATED';
+
+  assert(
+    'Assertion 12.G: Controller re-mounted after StrictMode cleanup processes auth event to UNAUTHENTICATED',
+    stateG,
+    'Re-mounted controller must transition from AUTH_LOADING to UNAUTHENTICATED on null auth event'
+  );
+
   // 13. ContentEditor does not gain Library responsibility
   assert(
     'Assertion 13: ContentEditor does not gain Library responsibility',
