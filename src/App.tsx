@@ -33,7 +33,7 @@ function App() {
   return (
     <div id="app-root-container" dir={isAr ? 'rtl' : 'ltr'} className="min-h-screen w-full">
       <ResponsiveGuard />
-      <ErrorBoundary isAr={isAr} onRecover={() => window.location.reload()}>
+      <ErrorBoundary isAr={isAr}>
         <ViewTransition viewKey={isAdminOpen ? 'admin-workspace' : 'public-portal'}>
         {isAdminOpen ? (
           <AdminAccessGate onExitAdmin={() => setIsAdminOpen(false)} />

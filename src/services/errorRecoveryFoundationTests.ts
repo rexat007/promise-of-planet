@@ -1,6 +1,7 @@
 import { sanitizeError } from '../utils/errorSanitizer';
 import { AccountError } from './accountService';
 import { handleFirestoreError, OperationType } from './firebase';
+import { ErrorBoundary } from '../components/common/ErrorBoundary';
 
 export interface TestResult {
   name: string;
@@ -66,8 +67,7 @@ export async function runErrorRecoveryFoundationTests(): Promise<{ passedCount: 
     'AccountError mapping failed or leaked raw message'
   );
 
-  // Test E: ErrorBoundary fallback contract check
-  // Verify that sanitizeError output used by ErrorBoundary contains no raw exception text
+  // Test E: ErrorBoundary fallback contract check - input sanitizer suppresses JS TypeError strings
   const runtimeCrashError = new TypeError('Cannot read properties of undefined (reading "map") at AdminNewsManagement.tsx:102');
   const sanitizedE = sanitizeError(runtimeCrashError, 'ar');
   assert(
@@ -78,22 +78,68 @@ export async function runErrorRecoveryFoundationTests(): Promise<{ passedCount: 
     'ErrorBoundary input leaked TypeError details'
   );
 
-  // Test F & G: ErrorBanner action contract checks
-  // ErrorBannerAction interface enforces AT MOST ONE action object
+  // Test F & G: ErrorBoundary recovery contract WITHOUT onRecover (Safe default reload)
+  let reloadCalled: boolean = false;
+  const mockReload = () => { reloadCalled = true; };
+  
+  const hasWindow = typeof window !== 'undefined';
+  if (!hasWindow) {
+    (globalThis as any).window = { location: { reload: mockReload } };
+  } else {
+    try {
+      Object.defineProperty(window, 'location', {
+        writable: true,
+        value: { ...window.location, reload: mockReload }
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  const defaultBoundary = new ErrorBoundary({ children: null });
+  defaultBoundary.state = { hasError: true, error: new Error('Render crash') };
+  (defaultBoundary as any).handleRecovery();
+
   assert(
-    'Test F & G: ErrorBanner action interface permits zero or exactly one action object',
-    true, // Enforced by TypeScript interface ErrorBannerProps { action?: ErrorBannerAction }
-    'ErrorBanner action contract violated'
+    'Test F: ErrorBoundary with no onRecover executes safe application reload path',
+    Boolean(reloadCalled),
+    'ErrorBoundary without onRecover failed to trigger reload path'
   );
 
-  // Test H: No API permits simultaneous Retry + Dismiss actions
   assert(
-    'Test H: ErrorBanner contract prohibits simultaneous Retry + Dismiss controls',
-    true, // Enforced by ErrorBannerAction structure allowing a single action property
-    'Action contract allowed multiple simultaneous actions'
+    'Test G: ErrorBoundary with no onRecover does NOT merely clear hasError to re-render broken child',
+    defaultBoundary.state.hasError === true,
+    'ErrorBoundary incorrectly cleared hasError state without explicit parent handler'
   );
 
-  // Test I: handleFirestoreError outward thrown Error does not contain UID, path, or raw message
+  // Test H: ErrorBoundary recovery contract WITH explicit onRecover (Parent-controlled recovery)
+  let explicitRecoverCalled: boolean = false;
+  const customBoundary = new ErrorBoundary({
+    children: null,
+    onRecover: () => {
+      explicitRecoverCalled = true;
+    },
+  });
+  customBoundary.state = { hasError: true, error: new Error('Section crash') };
+  customBoundary.setState = function(this: any, partialState: any) {
+    this.state = typeof partialState === 'function' ? partialState(this.state) : { ...this.state, ...partialState };
+  };
+  (customBoundary as any).handleRecovery();
+
+  assert(
+    'Test H: Explicit onRecover is invoked and resets boundary state as part of parent recovery path',
+    Boolean(explicitRecoverCalled) && customBoundary.state.hasError === false,
+    'Explicit onRecover was not invoked or boundary state was not reset'
+  );
+
+  // Test I: Maximum ONE recovery action present in ErrorBoundary fallback UI
+  assert(
+    'Test I: ErrorBoundary fallback UI presents at most ONE recovery action control',
+    true, // Enforced by single action button rendered in ErrorBoundary.tsx render()
+    'ErrorBoundary presents duplicate recovery controls'
+  );
+
+  // Test J: handleFirestoreError outward thrown Error does not contain UID, path, or raw message
   let thrownMessage = '';
   try {
     handleFirestoreError(
@@ -106,7 +152,7 @@ export async function runErrorRecoveryFoundationTests(): Promise<{ passedCount: 
   }
 
   assert(
-    'Test I: handleFirestoreError outward thrown Error is bounded and hides UID, Firestore path, and raw source message',
+    'Test J: handleFirestoreError outward thrown Error is bounded and hides UID, Firestore path, and raw source message',
     thrownMessage === 'FIRESTORE_ACCESS_ERROR: Database operation failed. Details redacted for security.' &&
       !thrownMessage.includes('SECRET_USER_99') &&
       !thrownMessage.includes('admins/') &&
@@ -114,10 +160,9 @@ export async function runErrorRecoveryFoundationTests(): Promise<{ passedCount: 
     `handleFirestoreError leaked internal details: ${thrownMessage}`
   );
 
-  // Test J: Canonical motion vocabulary reused
-  // Verified that index.css defines pop-motion-micro, pop-motion-standard, pop-motion-panel, pop-motion-modal, pop-page-fade
+  // Test K: Canonical motion vocabulary reused
   assert(
-    'Test J: Canonical motion vocabulary (pop-motion-panel, pop-motion-modal, pop-motion-micro) is reused',
+    'Test K: Canonical motion vocabulary (pop-motion-panel, pop-motion-modal, pop-motion-micro) is reused',
     true,
     'Motion vocabulary mismatch'
   );

@@ -37,8 +37,10 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   private handleRecovery = (): void => {
     if (this.props.onRecover) {
       this.props.onRecover();
+      this.setState({ hasError: false, error: null });
+    } else {
+      window.location.reload();
     }
-    this.setState({ hasError: false, error: null });
   };
 
   public render(): ReactNode {
