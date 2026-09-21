@@ -7,7 +7,8 @@ import {
   query, 
   where 
 } from 'firebase/firestore';
-import { db, isFirebaseConfigured, handleFirestoreError, OperationType } from './firebase';
+import { auth, db, isFirebaseConfigured, handleFirestoreError, OperationType } from './firebase';
+import { AccountService } from './accountService';
 import type { Enrollment } from '../types/enrollment';
 import { TrainingCourseService } from './trainingCourseService';
 import { WorkflowState } from '../types/workflow';
@@ -182,6 +183,7 @@ export class InMemoryEnrollmentRepository implements EnrollmentRepository {
 
 class EnrollmentServiceImpl {
   private repository: EnrollmentRepository = new FirestoreEnrollmentRepository();
+  private authProvider?: () => string | null;
 
   setRepository(repository: EnrollmentRepository): void {
     this.repository = repository;
@@ -191,12 +193,42 @@ class EnrollmentServiceImpl {
     return this.repository;
   }
 
-  async enrollAccount(accountId: string, courseId: string): Promise<Enrollment> {
-    if (!accountId || !accountId.trim()) {
-      throw new EnrollmentError('AUTH_REQUIRED', 'Authentication is required to enroll in a training course.');
+  /**
+   * Set explicit authentication provider for testing or seam injection.
+   * If unset, defaults to reading auth?.currentUser?.uid from Firebase Auth foundation.
+   */
+  setAuthProvider(provider: (() => string | null) | undefined): void {
+    this.authProvider = provider;
+  }
+
+  private getAuthenticatedUid(): string | null {
+    if (this.authProvider) {
+      return this.authProvider();
     }
+    if (isFirebaseConfigured && auth && auth.currentUser) {
+      return auth.currentUser.uid;
+    }
+    return null;
+  }
+
+  /**
+   * Enroll currently authenticated member in a Published training course.
+   * Derives accountId strictly from authenticated identity. Caller CANNOT supply arbitrary accountId.
+   */
+  async enrollInCourse(courseId: string): Promise<Enrollment> {
+    const uid = this.getAuthenticatedUid();
+    if (!uid || !uid.trim()) {
+      throw new EnrollmentError('AUTH_REQUIRED', 'Authentication is required to perform enrollment operations.');
+    }
+
     if (!courseId || !courseId.trim()) {
       throw new EnrollmentError('COURSE_UNAVAILABLE', 'A valid course ID is required to enroll.');
+    }
+
+    // Verify canonical Account existence in the Account foundation
+    const account = await AccountService.getAccount(uid);
+    if (!account) {
+      throw new EnrollmentError('ACCOUNT_UNAVAILABLE', 'A valid canonical Account record is required before enrolling in a training course.');
     }
 
     // Verify canonical TrainingCourse existence and Published status
@@ -205,15 +237,15 @@ class EnrollmentServiceImpl {
       throw new EnrollmentError('COURSE_UNAVAILABLE', 'The specified training course is not available or eligible for enrollment.');
     }
 
-    const enrollmentId = `${accountId}_${courseId}`;
-    const existing = await this.repository.getEnrollment(accountId, courseId);
+    const enrollmentId = `${uid}_${courseId}`;
+    const existing = await this.repository.getEnrollment(uid, courseId);
     if (existing) {
       throw new EnrollmentError('ALREADY_ENROLLED', 'The account is already enrolled in this training course.');
     }
 
     const newEnrollment: Enrollment = {
       id: enrollmentId,
-      accountId,
+      accountId: uid,
       courseId,
       createdAt: new Date().toISOString(),
     };
@@ -221,18 +253,38 @@ class EnrollmentServiceImpl {
     return await this.repository.saveEnrollment(newEnrollment);
   }
 
-  async getEnrollment(accountId: string, courseId: string): Promise<Enrollment | null> {
-    if (!accountId || !accountId.trim()) {
+  /**
+   * Retrieve enrollment for currently authenticated user in a specific course.
+   * Bound strictly to authenticated UID.
+   */
+  async getMyEnrollment(courseId: string): Promise<Enrollment | null> {
+    const uid = this.getAuthenticatedUid();
+    if (!uid || !uid.trim()) {
       throw new EnrollmentError('AUTH_REQUIRED', 'Authentication is required to query enrollments.');
     }
-    return await this.repository.getEnrollment(accountId, courseId);
+    if (!courseId || !courseId.trim()) {
+      throw new EnrollmentError('COURSE_UNAVAILABLE', 'A valid course ID is required to query enrollment.');
+    }
+    return await this.repository.getEnrollment(uid, courseId);
   }
 
-  async listAccountEnrollments(accountId: string): Promise<Enrollment[]> {
-    if (!accountId || !accountId.trim()) {
+  /**
+   * Alias for getMyEnrollment to support getEnrollment(courseId) contract.
+   */
+  async getEnrollment(courseId: string): Promise<Enrollment | null> {
+    return await this.getMyEnrollment(courseId);
+  }
+
+  /**
+   * List all enrollments for currently authenticated user.
+   * Bound strictly to authenticated UID.
+   */
+  async listMyEnrollments(): Promise<Enrollment[]> {
+    const uid = this.getAuthenticatedUid();
+    if (!uid || !uid.trim()) {
       throw new EnrollmentError('AUTH_REQUIRED', 'Authentication is required to list enrollments.');
     }
-    return await this.repository.listAccountEnrollments(accountId);
+    return await this.repository.listAccountEnrollments(uid);
   }
 }
 

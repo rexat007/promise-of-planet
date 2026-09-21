@@ -10,6 +10,11 @@ import {
   InMemoryTrainingCourseRepository,
   FirestoreTrainingCourseRepository
 } from './trainingCourseService';
+import {
+  AccountService,
+  InMemoryAccountRepository,
+  FirestoreAccountRepository
+} from './accountService';
 import type { Enrollment } from '../types/enrollment';
 import type { TrainingCourse } from '../types/training';
 import { WorkflowState } from '../types/workflow';
@@ -26,6 +31,7 @@ export async function runDurableEnrollmentTests(): Promise<{ passed: boolean; lo
   const logs: string[] = [];
   const prodEnrollmentRepo = new FirestoreEnrollmentRepository();
   const prodTrainingRepo = new FirestoreTrainingCourseRepository();
+  const prodAccountRepo = new FirestoreAccountRepository();
 
   const validEnrollmentSample: Enrollment = {
     id: 'user-123_course-456',
@@ -93,83 +99,114 @@ export async function runDurableEnrollmentTests(): Promise<{ passed: boolean; lo
     assert(mismatchCaught, 'Test 3 Failed: Enrollment.id / document identity mismatch was not caught.');
     logs.push('✔ Test 3 Passed: Enrollment.id / document identity mismatch is rejected.');
 
-    // Test 4: accountId cannot differ from authenticated UID / missing accountId is rejected
+    // Test A: Unauthenticated member enrollment fails AUTH_REQUIRED
+    EnrollmentService.setAuthProvider(() => null);
     let unauthEnrollCaught = false;
     try {
-      await EnrollmentService.enrollAccount('', 'course-456');
+      await EnrollmentService.enrollInCourse('course-published-01');
     } catch (e: any) {
       if (e instanceof EnrollmentError && e.code === 'AUTH_REQUIRED') {
         unauthEnrollCaught = true;
       }
     }
-    assert(unauthEnrollCaught, 'Test 4 Failed: Empty/missing accountId did not fail with AUTH_REQUIRED.');
-    logs.push('✔ Test 4 Passed: Empty or unauthenticated accountId is rejected at service boundary.');
+    assert(unauthEnrollCaught, 'Test A Failed: Unauthenticated enrollment did not fail with AUTH_REQUIRED.');
+    logs.push('✔ Test A Passed: Unauthenticated member enrollment fails AUTH_REQUIRED.');
 
-    // Test 5: Enrollment cannot reference a missing course
+    // Set up in-memory repos for authenticated tests
+    const inMemAccountRepo = new InMemoryAccountRepository();
+    AccountService.setRepository(inMemAccountRepo);
     const inMemCourseRepo = new InMemoryTrainingCourseRepository();
     TrainingCourseService.setRepository(inMemCourseRepo);
     const inMemEnrollRepo = new InMemoryEnrollmentRepository();
     EnrollmentService.setRepository(inMemEnrollRepo);
 
-    let missingCourseCaught = false;
+    // Seed canonical Account for testing
+    await inMemAccountRepo.createAccount({
+      id: 'user-auth-123',
+      email: 'member@promiseofplanet.sd',
+      displayName: 'Authenticated Member',
+      createdAt: '2026-03-01T00:00:00Z',
+      updatedAt: '2026-03-01T00:00:00Z',
+    });
+    await inMemCourseRepo.saveCourse(publishedCourseSample);
+
+    // Test B & C: Authenticated UID becomes Enrollment.accountId automatically; member API cannot supply arbitrary UID
+    EnrollmentService.setAuthProvider(() => 'user-auth-123');
+    const createdEnrollment = await EnrollmentService.enrollInCourse(publishedCourseSample.id);
+    assert(createdEnrollment.accountId === 'user-auth-123', 'Test B/C Failed: Enrollment accountId did not match authenticated UID.');
+    assert(createdEnrollment.id === `user-auth-123_${publishedCourseSample.id}`, 'Test B/C Failed: Enrollment identity mismatch.');
+    logs.push('✔ Test B/C Passed: Authenticated UID becomes Enrollment.accountId automatically and member cannot supply arbitrary UID.');
+
+    // Test D: Member get/list operations are owner-bound to authenticated UID
+    const myEnrollment = await EnrollmentService.getMyEnrollment(publishedCourseSample.id);
+    assert(myEnrollment !== null && myEnrollment.id === `user-auth-123_${publishedCourseSample.id}`, 'Test D Failed: getMyEnrollment failed for owner.');
+    const myEnrollmentsList = await EnrollmentService.listMyEnrollments();
+    assert(myEnrollmentsList.length === 1 && myEnrollmentsList[0].accountId === 'user-auth-123', 'Test D Failed: listMyEnrollments failed for owner.');
+
+    // Switch to another authenticated user to prove isolation
+    EnrollmentService.setAuthProvider(() => 'other-user-999');
+    const foreignList = await EnrollmentService.listMyEnrollments();
+    assert(foreignList.length === 0, 'Test D Failed: Other user was able to access user-auth-123 enrollments.');
+    const foreignGet = await EnrollmentService.getMyEnrollment(publishedCourseSample.id);
+    assert(foreignGet === null, 'Test D Failed: Other user was able to get user-auth-123 enrollment.');
+    logs.push('✔ Test D Passed: Member get/list operations are owner-bound strictly to authenticated UID.');
+
+    // Test E: Missing canonical Account fails safely (ACCOUNT_UNAVAILABLE)
+    EnrollmentService.setAuthProvider(() => 'user-without-account');
+    let missingAccountCaught = false;
     try {
-      await EnrollmentService.enrollAccount('user-123', 'non-existent-course-id');
+      await EnrollmentService.enrollInCourse(publishedCourseSample.id);
     } catch (e: any) {
-      if (e instanceof EnrollmentError && e.code === 'COURSE_UNAVAILABLE') {
-        missingCourseCaught = true;
+      if (e instanceof EnrollmentError && e.code === 'ACCOUNT_UNAVAILABLE') {
+        missingAccountCaught = true;
       }
     }
-    assert(missingCourseCaught, 'Test 5 Failed: Enrollment in non-existent course did not fail with COURSE_UNAVAILABLE.');
-    logs.push('✔ Test 5 Passed: Enrollment cannot reference a missing course.');
+    assert(missingAccountCaught, 'Test E Failed: Enrollment without canonical Account record did not throw ACCOUNT_UNAVAILABLE.');
+    logs.push('✔ Test E Passed: Missing canonical Account fails safely with ACCOUNT_UNAVAILABLE.');
 
-    // Test 6: Ordinary member cannot enroll in a non-Published course
+    // Restore user-auth-123 for remaining enrollment checks
+    EnrollmentService.setAuthProvider(() => 'user-auth-123');
+
+    // Test F1: Ordinary member cannot enroll in a non-Published course
     await inMemCourseRepo.saveCourse(draftCourseSample);
     let draftEnrollCaught = false;
     try {
-      await EnrollmentService.enrollAccount('user-123', draftCourseSample.id);
+      await EnrollmentService.enrollInCourse(draftCourseSample.id);
     } catch (e: any) {
       if (e instanceof EnrollmentError && e.code === 'COURSE_UNAVAILABLE') {
         draftEnrollCaught = true;
       }
     }
-    assert(draftEnrollCaught, 'Test 6 Failed: Enrollment in a Draft course did not fail with COURSE_UNAVAILABLE.');
-    logs.push('✔ Test 6 Passed: Ordinary member cannot enroll in a non-Published course.');
+    assert(draftEnrollCaught, 'Test F1 Failed: Enrollment in a Draft course did not fail with COURSE_UNAVAILABLE.');
+    logs.push('✔ Test F1 Passed: Ordinary member cannot enroll in a non-Published course.');
 
-    // Test 7: Published canonical course is eligible for enrollment
-    await inMemCourseRepo.saveCourse(publishedCourseSample);
-    const createdEnrollment = await EnrollmentService.enrollAccount('user-123', publishedCourseSample.id);
-    assert(createdEnrollment.id === `user-123_${publishedCourseSample.id}`, 'Test 7 Failed: Enrollment ID mismatch.');
-    assert(createdEnrollment.accountId === 'user-123', 'Test 7 Failed: Enrollment accountId mismatch.');
-    assert(createdEnrollment.courseId === publishedCourseSample.id, 'Test 7 Failed: Enrollment courseId mismatch.');
-    logs.push('✔ Test 7 Passed: Published canonical course is eligible for enrollment.');
-
-    // Test 8: Duplicate enrollment for the same account/course cannot create a second canonical relationship
+    // Test F2: Duplicate enrollment for the same account/course is prevented
     let duplicateCaught = false;
     try {
-      await EnrollmentService.enrollAccount('user-123', publishedCourseSample.id);
+      await EnrollmentService.enrollInCourse(publishedCourseSample.id);
     } catch (e: any) {
       if (e instanceof EnrollmentError && e.code === 'ALREADY_ENROLLED') {
         duplicateCaught = true;
       }
     }
-    assert(duplicateCaught, 'Test 8 Failed: Duplicate enrollment did not fail with ALREADY_ENROLLED.');
-    logs.push('✔ Test 8 Passed: Duplicate enrollment for the same account/course is prevented.');
+    assert(duplicateCaught, 'Test F2 Failed: Duplicate enrollment did not fail with ALREADY_ENROLLED.');
+    logs.push('✔ Test F2 Passed: Duplicate enrollment for the same account/course is prevented.');
 
-    // Test 9: Failed durable enrollment creates no false local success
+    // Test F3: Failed durable enrollment creates no false local success
     let saveFailureCaught = false;
     try {
       await inMemEnrollRepo.saveEnrollment({
         id: 'invalid_id_format',
-        accountId: 'user-123',
+        accountId: 'user-auth-123',
         courseId: 'course-published-01',
         createdAt: '2026-03-01T00:00:00Z',
       });
     } catch {
       saveFailureCaught = true;
     }
-    const checkBadEnroll = await inMemEnrollRepo.getEnrollment('user-123', 'course-published-01');
-    assert(saveFailureCaught && checkBadEnroll?.id !== 'invalid_id_format', 'Test 9 Failed: Invalid save corrupted repository state.');
-    logs.push('✔ Test 9 Passed: Failed durable enrollment creates no false local success.');
+    const checkBadEnroll = await inMemEnrollRepo.getEnrollment('user-auth-123', 'course-published-01');
+    assert(saveFailureCaught && checkBadEnroll?.id !== 'invalid_id_format', 'Test F3 Failed: Invalid save corrupted repository state.');
+    logs.push('✔ Test F3 Passed: Failed durable enrollment creates no false local success.');
 
     // Test 10: Production Enrollment repository has no automatic mock or in-memory fallback
     EnrollmentService.setRepository(prodEnrollmentRepo);
@@ -211,16 +248,21 @@ export async function runDurableEnrollmentTests(): Promise<{ passed: boolean; lo
     );
     logs.push('✔ Test 12 Passed: Admin RBAC remains exactly 9 roles / 10 permissions.');
 
-    // Reset default production repositories
+    // Reset default production repositories and auth provider
+    EnrollmentService.setAuthProvider(undefined);
     EnrollmentService.setRepository(prodEnrollmentRepo);
     TrainingCourseService.setRepository(prodTrainingRepo);
+    AccountService.setRepository(prodAccountRepo);
 
     return { passed: true, logs };
   } catch (err: any) {
-    // Reset default production repositories on failure
+    // Reset default production repositories and auth provider on failure
+    EnrollmentService.setAuthProvider(undefined);
     EnrollmentService.setRepository(prodEnrollmentRepo);
     TrainingCourseService.setRepository(prodTrainingRepo);
+    AccountService.setRepository(prodAccountRepo);
     logs.push(`❌ ${err.message}`);
     return { passed: false, logs };
   }
 }
+
