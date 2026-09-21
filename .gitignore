@@ -13,7 +13,7 @@ dist/
 dist-ssr/
 *.local
 functions/lib/
-lib/
+/lib/
 
 # Environment files
 .env
