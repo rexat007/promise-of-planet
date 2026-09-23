@@ -252,6 +252,66 @@ export function validateTrainingCourseData(data: any, expectedId?: string): Trai
   };
 }
 
+/**
+ * Serializes a TrainingCourse to a Firestore-safe plain object,
+ * strictly omitting any keys with undefined values so that Firestore's setDoc does not throw an error.
+ */
+export function serializeTrainingCourseForFirestore(course: TrainingCourse): Record<string, any> {
+  const safePayload: Record<string, any> = {};
+  
+  const fields: (keyof TrainingCourse)[] = [
+    'id',
+    'titleAr',
+    'titleEn',
+    'summaryAr',
+    'summaryEn',
+    'descriptionAr',
+    'descriptionEn',
+    'category',
+    'level',
+    'durationHours',
+    'deliveryMode',
+    'targetAudienceAr',
+    'targetAudienceEn',
+    'instructorNameAr',
+    'instructorNameEn',
+    'instructorBioAr',
+    'instructorBioEn',
+    'workflowState',
+    'createdAt',
+    'updatedAt',
+    'author',
+    'language'
+  ];
+
+  for (const field of fields) {
+    if (course[field] !== undefined) {
+      safePayload[field] = course[field];
+    }
+  }
+
+  // Handle nested workflowHistory array elements securely to avoid nested undefined values (e.g. comment?: string)
+  if (course.workflowHistory !== undefined) {
+    safePayload.workflowHistory = course.workflowHistory.map(record => {
+      const cleanRecord: Record<string, any> = {
+        id: record.id,
+        fromState: record.fromState,
+        toState: record.toState,
+        action: record.action,
+        actorName: record.actorName,
+        actorRole: record.actorRole,
+        timestamp: record.timestamp
+      };
+      if (record.comment !== undefined) {
+        cleanRecord.comment = record.comment;
+      }
+      return cleanRecord;
+    });
+  }
+
+  return safePayload;
+}
+
 export interface TrainingCourseRepository {
   listCourses(classification?: TrainingClassification, includeUnpublished?: boolean): Promise<TrainingCourse[]>;
   getCourseById(id: string): Promise<TrainingCourse | null>;
@@ -356,7 +416,8 @@ export class FirestoreTrainingCourseRepository implements TrainingCourseReposito
 
     try {
       const docRef = doc(db, 'training_courses', validated.id);
-      await setDoc(docRef, validated);
+      const safePayload = serializeTrainingCourseForFirestore(validated);
+      await setDoc(docRef, safePayload);
       return validated;
     } catch (error: any) {
       if (error instanceof TrainingCourseError) {

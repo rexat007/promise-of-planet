@@ -3,7 +3,8 @@ import {
   TrainingCourseError, 
   FirestoreTrainingCourseRepository, 
   InMemoryTrainingCourseRepository, 
-  TrainingCourseService 
+  TrainingCourseService,
+  serializeTrainingCourseForFirestore
 } from './trainingCourseService';
 import type { TrainingCourse } from '../types/training';
 import { WorkflowState } from '../types/workflow';
@@ -17,9 +18,16 @@ function assert(condition: boolean, message: string) {
   }
 }
 
+class UnconfiguredFirestoreTrainingCourseRepository extends FirestoreTrainingCourseRepository {
+  protected override isConfigured(): boolean {
+    return false;
+  }
+}
+
 export async function runDurableTrainingCourseTests(): Promise<{ passed: boolean; logs: string[] }> {
   const logs: string[] = [];
   const prodRepo = new FirestoreTrainingCourseRepository();
+  const unconfiguredProdRepo = new UnconfiguredFirestoreTrainingCourseRepository();
   const allAdminRoles = Object.values(AdminRole);
 
   const validCourseSample: TrainingCourse = {
@@ -104,7 +112,7 @@ export async function runDurableTrainingCourseTests(): Promise<{ passed: boolean
     // Test 4: Production repository does not fall back to mock/in-memory data
     let prodFallbackCaught = false;
     try {
-      await prodRepo.listCourses();
+      await unconfiguredProdRepo.listCourses();
     } catch (e: any) {
       if (e instanceof TrainingCourseError && e.code === 'BACKEND_UNAVAILABLE') {
         prodFallbackCaught = true;
@@ -116,7 +124,7 @@ export async function runDurableTrainingCourseTests(): Promise<{ passed: boolean
     // Test 5: Unavailable backend fails explicitly and safely
     let unavailCaught = false;
     try {
-      await prodRepo.getCourseById('course-test-01');
+      await unconfiguredProdRepo.getCourseById('course-test-01');
     } catch (e: any) {
       if (e instanceof TrainingCourseError && e.code === 'BACKEND_UNAVAILABLE') {
         unavailCaught = true;
@@ -213,6 +221,129 @@ export async function runDurableTrainingCourseTests(): Promise<{ passed: boolean
       'Test 12 Failed: Trainee or Member role was introduced.'
     );
     logs.push('✔ Test 12 Passed: Admin RBAC canonical counts (9 roles, 10 permissions) and contracts are preserved.');
+
+    // Test 13: Validated TrainingCourse can legitimately contain optional undefined values
+    const courseWithOptionalUndefined: TrainingCourse = {
+      ...validCourseSample,
+      id: 'course-test-undef',
+      descriptionAr: undefined,
+      descriptionEn: undefined,
+      instructorNameAr: undefined,
+      instructorNameEn: undefined,
+      instructorBioAr: undefined,
+      instructorBioEn: undefined,
+    };
+    const validatedWithUndef = validateTrainingCourseData(courseWithOptionalUndefined);
+    assert(validatedWithUndef.descriptionAr === undefined, 'Test 13 Failed: descriptionAr was not preserved as undefined.');
+    assert(validatedWithUndef.instructorNameAr === undefined, 'Test 13 Failed: instructorNameAr was not preserved as undefined.');
+    logs.push('✔ Test 13 Passed: Validated TrainingCourse can legitimately contain optional undefined values.');
+
+    // Test 14: Firestore write payload contains NO undefined values
+    const safePayload = serializeTrainingCourseForFirestore(validatedWithUndef);
+    const hasUndefinedValue = Object.values(safePayload).some(v => v === undefined);
+    assert(!hasUndefinedValue, 'Test 14 Failed: Sanitized Firestore payload contains undefined value.');
+    logs.push('✔ Test 14 Passed: Firestore write payload contains NO undefined values.');
+
+    // Test 15: descriptionAr undefined is omitted from Firestore payload
+    assert(!('descriptionAr' in safePayload), 'Test 15 Failed: descriptionAr key was not omitted from payload.');
+    logs.push('✔ Test 15 Passed: descriptionAr undefined is omitted from Firestore payload.');
+
+    // Test 16: descriptionEn undefined is omitted from Firestore payload
+    assert(!('descriptionEn' in safePayload), 'Test 16 Failed: descriptionEn key was not omitted from payload.');
+    logs.push('✔ Test 16 Passed: descriptionEn undefined is omitted from Firestore payload.');
+
+    // Test 17: optional instructor fields undefined are omitted
+    assert(!('instructorNameAr' in safePayload), 'Test 17 Failed: instructorNameAr key was not omitted.');
+    assert(!('instructorNameEn' in safePayload), 'Test 17 Failed: instructorNameEn key was not omitted.');
+    assert(!('instructorBioAr' in safePayload), 'Test 17 Failed: instructorBioAr key was not omitted.');
+    assert(!('instructorBioEn' in safePayload), 'Test 17 Failed: instructorBioEn key was not omitted.');
+    logs.push('✔ Test 17 Passed: optional instructor fields undefined are omitted from Firestore payload.');
+
+    // Test 18: defined optional values are preserved exactly after trimming/canonicalization
+    const courseWithDefinedOptional: TrainingCourse = {
+      ...validCourseSample,
+      id: 'course-test-defined',
+      descriptionAr: '  وصف عربي  ',
+      descriptionEn: '  English Description  ',
+      instructorNameAr: '  د. علي  ',
+      instructorNameEn: '  Dr. Ali  ',
+      instructorBioAr: '  السيرة الذاتية  ',
+      instructorBioEn: '  Instructor Bio  ',
+    };
+    const validatedDefined = validateTrainingCourseData(courseWithDefinedOptional);
+    const safePayloadDefined = serializeTrainingCourseForFirestore(validatedDefined);
+    assert(safePayloadDefined.descriptionAr === 'وصف عربي', 'Test 18 Failed: descriptionAr not trimmed/preserved.');
+    assert(safePayloadDefined.descriptionEn === 'English Description', 'Test 18 Failed: descriptionEn not trimmed/preserved.');
+    assert(safePayloadDefined.instructorNameAr === 'د. علي', 'Test 18 Failed: instructorNameAr not trimmed/preserved.');
+    assert(safePayloadDefined.instructorNameEn === 'Dr. Ali', 'Test 18 Failed: instructorNameEn not trimmed/preserved.');
+    assert(safePayloadDefined.instructorBioAr === 'السيرة الذاتية', 'Test 18 Failed: instructorBioAr not trimmed/preserved.');
+    assert(safePayloadDefined.instructorBioEn === 'Instructor Bio', 'Test 18 Failed: instructorBioEn not trimmed/preserved.');
+    logs.push('✔ Test 18 Passed: defined optional values are preserved exactly after trimming and canonicalization.');
+
+    // Test 19: required fields are never removed from safe payload
+    assert(safePayloadDefined.id === 'course-test-defined', 'Test 19 Failed: id was removed.');
+    assert(safePayloadDefined.titleAr === 'دورة اختبار الأثر البيئي', 'Test 19 Failed: titleAr was removed.');
+    assert(safePayloadDefined.category === 'Climate', 'Test 19 Failed: category was removed.');
+    assert(safePayloadDefined.level === 'Beginner', 'Test 19 Failed: level was removed.');
+    assert(safePayloadDefined.durationHours === 12, 'Test 19 Failed: durationHours was removed.');
+    assert(safePayloadDefined.deliveryMode === 'OnlineSelfPaced', 'Test 19 Failed: deliveryMode was removed.');
+    assert(safePayloadDefined.workflowState === WorkflowState.Published, 'Test 19 Failed: workflowState was removed.');
+    assert(safePayloadDefined.createdAt === '2026-03-01T00:00:00Z', 'Test 19 Failed: createdAt was removed.');
+    assert(safePayloadDefined.author === 'أحمد علي', 'Test 19 Failed: author was removed.');
+    logs.push('✔ Test 19 Passed: required fields are never removed from the sanitized payload.');
+
+    // Test 20: InMemory repository behavior remains compatible
+    const inMemRepoComp = new InMemoryTrainingCourseRepository();
+    TrainingCourseService.setRepository(inMemRepoComp);
+    const savedComp = await TrainingCourseService.saveCourse(courseWithOptionalUndefined, authorizedAdmin);
+    assert(savedComp.descriptionAr === undefined, 'Test 20 Failed: Saved course descriptionAr was not undefined.');
+    const fetchedComp = await inMemRepoComp.getCourseById('course-test-undef');
+    assert(fetchedComp !== null && fetchedComp.descriptionAr === undefined, 'Test 20 Failed: Fetched course descriptionAr was not undefined.');
+    logs.push('✔ Test 20 Passed: InMemory repository behavior remains compatible with undefined optional fields.');
+
+    // Test 21: Nested workflowHistory comments with undefined are omitted
+    const courseWithUndefinedComment: TrainingCourse = {
+      ...validCourseSample,
+      id: 'course-test-comment-undef',
+      workflowHistory: [
+        {
+          id: 'tr-1',
+          fromState: WorkflowState.Draft,
+          toState: WorkflowState.Published,
+          action: 'publish',
+          actorName: 'Admin',
+          actorRole: 'Owner',
+          timestamp: '2026-03-01T00:00:00Z',
+          comment: undefined
+        }
+      ]
+    };
+    const safePayloadCommentUndef = serializeTrainingCourseForFirestore(courseWithUndefinedComment);
+    const firstHistoryRecord = safePayloadCommentUndef.workflowHistory[0];
+    assert(!('comment' in firstHistoryRecord), 'Test 21 Failed: Nested undefined comment key was not omitted.');
+    logs.push('✔ Test 21 Passed: Nested undefined workflowHistory comment is omitted from Firestore payload.');
+
+    // Test 22: Nested workflowHistory comments with string values are preserved
+    const courseWithDefinedComment: TrainingCourse = {
+      ...validCourseSample,
+      id: 'course-test-comment-defined',
+      workflowHistory: [
+        {
+          id: 'tr-1',
+          fromState: WorkflowState.Draft,
+          toState: WorkflowState.Published,
+          action: 'publish',
+          actorName: 'Admin',
+          actorRole: 'Owner',
+          timestamp: '2026-03-01T00:00:00Z',
+          comment: 'Approved!'
+        }
+      ]
+    };
+    const safePayloadCommentDefined = serializeTrainingCourseForFirestore(courseWithDefinedComment);
+    const firstHistoryRecordDefined = safePayloadCommentDefined.workflowHistory[0];
+    assert(firstHistoryRecordDefined.comment === 'Approved!', 'Test 22 Failed: Nested defined comment was not preserved.');
+    logs.push('✔ Test 22 Passed: Nested defined workflowHistory comment is preserved in Firestore payload.');
 
     // Reset default production repository
     TrainingCourseService.setRepository(prodRepo);
