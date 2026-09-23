@@ -120,12 +120,14 @@ export function TrainingCenter() {
           {!loading && !error && courses.length > 0 && (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 sm:gap-8">
               {courses.map((course) => (
-                <article
+                <button
+                  type="button"
                   key={course.id}
                   onClick={() => handleCardClick(course)}
-                  className="flex flex-col justify-between bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 shadow-xs hover:border-emerald-500/80 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group"
+                  className="w-full flex flex-col justify-between bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 shadow-xs hover:border-emerald-500/80 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group text-start focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  aria-label={isArabic ? `عرض تفاصيل ${course.titleAr}` : `View details of ${course.titleEn}`}
                 >
-                  <div className="space-y-4">
+                  <div className="space-y-4 w-full">
                     {/* Header Badges */}
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="inline-flex items-center px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/60">
@@ -148,7 +150,7 @@ export function TrainingCenter() {
                   </div>
 
                   {/* Metadata and Audience Footer */}
-                  <div className="mt-6 pt-4 border-t border-gray-100 dark:border-gray-800 text-xs space-y-3">
+                  <div className="mt-6 pt-4 border-t border-gray-100 dark:border-gray-800 text-xs space-y-3 w-full">
                     <div className="grid grid-cols-2 gap-2 text-gray-500 dark:text-gray-400">
                       <span className="font-semibold text-emerald-800 dark:text-emerald-400 flex items-center gap-1">
                         <Globe className="w-3.5 h-3.5 shrink-0" />
@@ -170,7 +172,7 @@ export function TrainingCenter() {
                       </span>
                     </div>
                   </div>
-                </article>
+                </button>
               ))}
             </div>
           )}

@@ -95,14 +95,14 @@ export async function runMemberTrainingAccessTests(): Promise<{ passed: boolean;
     logs.push('✔ Test 1 Passed: Modal opened unauthenticated resolves unauthenticated.');
 
     // =========================================================================
-    // 2. While same modal remains open: unauthenticated → authenticated UID causes automatic access re-resolution
+    // 2. Changing provider identity enables clean service access state resolution under authenticated UID
     // =========================================================================
     MemberTrainingAccessService.setAuthProvider(() => 'member-user-101');
     EnrollmentService.setAuthProvider(() => 'member-user-101');
     
     const autoReResolvedAccess = await MemberTrainingAccessService.resolveAccessState(publishedCourseSample.id);
-    assert(autoReResolvedAccess.status !== 'unauthenticated', 'Test 2 Failed: Identity change did not trigger automatic state re-resolution.');
-    logs.push('✔ Test 2 Passed: unauthenticated → authenticated UID triggers automatic access re-resolution.');
+    assert(autoReResolvedAccess.status !== 'unauthenticated', 'Test 2 Failed: resolveAccessState on authenticated UID did not resolve access state.');
+    logs.push('✔ Test 2 Passed: resolveAccessState resolves correct access state under changed authenticated UID provider.');
 
     // =========================================================================
     // 3. Authenticated canonical Account with no Enrollment resolves not_enrolled after login
@@ -211,6 +211,35 @@ export async function runMemberTrainingAccessTests(): Promise<{ passed: boolean;
     assert(adminPermissionsCount === 10, `Test 12 Failed: Admin permissions count changed (${adminPermissionsCount}).`);
     assert(Object.keys(ROLE_PERMISSIONS_MAP).length === 9, 'Test 12 Failed: Role permissions map altered.');
     logs.push('✔ Test 12 Passed: Admin RBAC remains exactly 9 roles / 10 permissions.');
+
+    // =========================================================================
+    // 13. Draft / non-Published TrainingCourse cannot become enrollable
+    // =========================================================================
+    const draftCourseSample: TrainingCourse = {
+      ...publishedCourseSample,
+      id: 'course-draft-01',
+      workflowState: WorkflowState.Draft,
+    };
+    await inMemCourseRepo.saveCourse(draftCourseSample);
+
+    // Assert that resolving access state for this draft course resolves as course_unavailable
+    MemberTrainingAccessService.setAuthProvider(() => 'member-user-101');
+    EnrollmentService.setAuthProvider(() => 'member-user-101');
+
+    const draftAccessState = await MemberTrainingAccessService.resolveAccessState(draftCourseSample.id);
+    assert(draftAccessState.status === 'course_unavailable', 'Security Guard Failed: Draft course resolved to an accessible status.');
+
+    // Assert that trying to enroll throws/fails and creates no enrollment record
+    let draftEnrollmentPrevented = false;
+    try {
+      await EnrollmentService.enrollInCourse(draftCourseSample.id);
+    } catch {
+      draftEnrollmentPrevented = true;
+    }
+    assert(draftEnrollmentPrevented, 'Security Guard Failed: Draft course enrollment attempt did not throw an exception.');
+    const draftEnrollmentCheck = await inMemEnrollRepo.getEnrollment('member-user-101', draftCourseSample.id);
+    assert(draftEnrollmentCheck === null, 'Security Guard Failed: Draft course enrollment was stored in database repository.');
+    logs.push('✔ Test 13 Passed: Draft / non-Published TrainingCourse cannot be resolved or enrolled in.');
 
     // Cleanup and reset production repos & auth providers
     MemberTrainingAccessService.setAuthProvider(undefined);
