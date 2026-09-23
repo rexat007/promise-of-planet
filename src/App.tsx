@@ -21,7 +21,18 @@ function App() {
   const { t, i18n } = useTranslation();
   const currentLang = (i18n.language === 'en' ? 'en' : 'ar') as Language;
   const isAr = currentLang === 'ar';
-  const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [isAdminOpen, setIsAdminOpen] = useState(() => {
+    try {
+      const persisted = sessionStorage.getItem('pop_admin_session');
+      if (persisted) {
+        const parsed = JSON.parse(persisted);
+        return parsed.open === true;
+      }
+    } catch (e) {
+      console.error('Failed to parse admin session:', e);
+    }
+    return false;
+  });
   const [activePage, setActivePage] = useState<'home' | 'training-center'>('home');
 
   // Sync root container dir attribute to ensure viewport scrollbar stays anchored on the right (Rule L)
@@ -38,10 +49,26 @@ function App() {
       <ErrorBoundary isAr={isAr}>
         <ViewTransition viewKey={isAdminOpen ? 'admin-workspace' : activePage}>
         {isAdminOpen ? (
-          <AdminAccessGate onExitAdmin={() => setIsAdminOpen(false)} />
+          <AdminAccessGate 
+            onExitAdmin={() => {
+              setIsAdminOpen(false);
+              try {
+                sessionStorage.removeItem('pop_admin_session');
+              } catch (e) {
+                console.error(e);
+              }
+            }} 
+          />
         ) : (
           <AppShell 
-            onEnterAdmin={() => setIsAdminOpen(true)}
+            onEnterAdmin={() => {
+              setIsAdminOpen(true);
+              try {
+                sessionStorage.setItem('pop_admin_session', JSON.stringify({ open: true, tab: 'overview' }));
+              } catch (e) {
+                console.error(e);
+              }
+            }}
             activePage={activePage}
             onNavigate={(page) => setActivePage(page)}
           >

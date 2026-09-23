@@ -109,6 +109,7 @@ export function AdminTrainingManagement({ currentUser }: AdminTrainingManagement
         }
         return [persisted, ...prev];
       });
+      setActiveCourse(persisted);
     } catch (err: any) {
       console.error('Error saving training course:', err);
       throw err;

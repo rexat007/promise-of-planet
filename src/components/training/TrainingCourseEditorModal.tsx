@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { 
   X, 
@@ -45,11 +45,162 @@ export function TrainingCourseEditorModal({
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  const isFormDirty = (): boolean => {
+    if (!course) return false;
+    
+    const keysToCompare: (keyof TrainingCourse)[] = [
+      'titleAr', 'titleEn', 'summaryAr', 'summaryEn', 'category', 'level',
+      'durationHours', 'deliveryMode', 'targetAudienceAr', 'targetAudienceEn',
+      'workflowState', 'language', 'descriptionAr', 'descriptionEn',
+      'instructorNameAr', 'instructorNameEn', 'instructorBioAr', 'instructorBioEn'
+    ];
+
+    for (const key of keysToCompare) {
+      const originalValue = course[key];
+      const currentValue = formData[key];
+      
+      const normOriginal = (originalValue === undefined || originalValue === null) ? '' : String(originalValue);
+      const normCurrent = (currentValue === undefined || currentValue === null) ? '' : String(currentValue);
+      
+      if (normOriginal !== normCurrent) {
+        return true;
+      }
+    }
+
+    const originalHistory = course.workflowHistory || [];
+    const currentHistory = formData.workflowHistory || [];
+    if (originalHistory.length !== currentHistory.length) {
+      return true;
+    }
+
+    return false;
+  };
+
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isFormDirty()) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [formData, course]);
+
+  const handleCloseAttempt = () => {
+    if (isFormDirty()) {
+      const msg = isAr
+        ? "هل أنت متأكد من رغبتك في إغلاق المحرر دون حفظ التغييرات؟ ستفقد جميع التعديلات الحالية."
+        : "Are you sure you want to close the editor without saving? All unsaved changes will be lost.";
+      if (window.confirm(msg)) {
+        onClose();
+      }
+    } else {
+      onClose();
+    }
+  };
+
+  const modalContainerRef = useRef<HTMLDivElement>(null);
+  const previousActiveElement = useRef<HTMLElement | null>(null);
+
+  // Accessible Focus Restoration & Focus Trap initialization
+  useEffect(() => {
+    let timer: NodeJS.Timeout | null = null;
+
+    if (isOpen) {
+      previousActiveElement.current = document.activeElement as HTMLElement;
+
+      timer = setTimeout(() => {
+        const container = modalContainerRef.current;
+        if (container) {
+          const focusables = container.querySelectorAll<HTMLElement>(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          );
+          if (focusables.length > 0) {
+            focusables[0].focus();
+          } else {
+            container.focus();
+          }
+        }
+      }, 50);
+    }
+
+    return () => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      if (previousActiveElement.current && typeof previousActiveElement.current.focus === 'function') {
+        previousActiveElement.current.focus();
+        previousActiveElement.current = null;
+      }
+    };
+  }, [isOpen]);
+
+  // Trap keyboard focus and handle Escape
+  useEffect(() => {
+    if (!isOpen || !course) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleCloseAttempt();
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        const container = modalContainerRef.current;
+        if (!container) return;
+
+        const focusables = Array.from(
+          container.querySelectorAll<HTMLElement>(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+          )
+        ).filter((el) => {
+          if ((el as any).disabled) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+
+        if (focusables.length === 0) {
+          e.preventDefault();
+          return;
+        }
+
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement;
+
+        if (e.shiftKey) {
+          if (active === first || !focusables.includes(active)) {
+            last.focus();
+            e.preventDefault();
+          }
+        } else {
+          if (active === last || !focusables.includes(active)) {
+            first.focus();
+            e.preventDefault();
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [isOpen, course, formData]);
+
   useEffect(() => {
     if (course) {
       setFormData({ ...course });
+      if (!formData.id || formData.id !== course.id) {
+        setActiveTab('metadata');
+      }
       setWorkflowComment('');
-      setActiveTab('metadata');
       setIsSaveSuccess(false);
       setNotificationVisible(false);
       setIsSaving(false);
@@ -161,9 +312,12 @@ export function TrainingCourseEditorModal({
 
   return (
     <div 
+      ref={modalContainerRef}
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-xs overflow-y-auto"
       role="dialog"
       aria-modal="true"
+      aria-labelledby="course-editor-modal-title"
+      tabIndex={-1}
     >
       <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         
@@ -174,7 +328,7 @@ export function TrainingCourseEditorModal({
               <GraduationCap className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-gray-900 dark:text-white">
+              <h2 id="course-editor-modal-title" className="text-base font-bold text-gray-900 dark:text-white">
                 {isAr ? 'إدارة وتعديل برنامج التدريب' : 'Training Course Editor'}
               </h2>
               <p className="text-xs text-gray-500 dark:text-gray-400 font-mono">
@@ -183,7 +337,7 @@ export function TrainingCourseEditorModal({
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleCloseAttempt}
             className="p-2 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer"
             aria-label={isAr ? 'إغلاق' : 'Close'}
           >
@@ -535,7 +689,7 @@ export function TrainingCourseEditorModal({
           <div className="flex items-center justify-end gap-3 pt-6 border-t border-gray-100 dark:border-gray-800 shrink-0">
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleCloseAttempt}
               disabled={isSaving}
               className="px-4 py-2 rounded-xl text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50 transition-colors cursor-pointer"
             >

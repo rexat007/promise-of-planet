@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AdminPermission, AdminDomain, isTabAuthorized } from '../../types/admin';
 import type { AdminUser, NavigationItem } from '../../types/admin';
@@ -123,8 +123,32 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
     return exists ? mocks : [currentUser, ...mocks];
   });
 
-  const [activeTab, setActiveTab] = useState<string>('overview');
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    try {
+      const persisted = sessionStorage.getItem('pop_admin_session');
+      if (persisted) {
+        const parsed = JSON.parse(persisted);
+        if (parsed.tab && typeof parsed.tab === 'string') {
+          return parsed.tab;
+        }
+      }
+    } catch (e) {
+      console.error('Failed to parse admin active tab:', e);
+    }
+    return 'overview';
+  });
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    try {
+      const persisted = sessionStorage.getItem('pop_admin_session');
+      const parsed = persisted ? JSON.parse(persisted) : {};
+      const nextSession = { ...parsed, open: true, tab: activeTab };
+      sessionStorage.setItem('pop_admin_session', JSON.stringify(nextSession));
+    } catch (e) {
+      console.error('Failed to save admin active tab:', e);
+    }
+  }, [activeTab]);
 
   // Handle user identity updates in Users Management demo tab
   const handleUpdateUser = (updatedUser: AdminUser) => {

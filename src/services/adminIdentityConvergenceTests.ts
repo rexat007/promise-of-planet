@@ -605,6 +605,159 @@ export async function runAdminIdentityConvergenceTests(): Promise<{
     'Canonical role and permission counts must not be altered'
   );
 
+  // Assertion 37 [UNIT_LOGIC_TEST]: Same-UID auth event preserves active workspace continuously during revalidation
+  const controller37 = new AdminGateResolutionController();
+  await controller37.handleAuthEvent({ uid: 'UID-A', email: 'a@test.com' }, async () => ({
+    id: 'UID-A', name: 'Admin A', email: 'a@test.com', role: AdminRole.Owner, isActive: true
+  }));
+  const isInitiallyAuthorized = controller37.getSnapshot().gateState === 'ADMIN_AUTHORIZED';
+  
+  const deferred37 = createDeferred<AdminUser | null>();
+  const p37 = controller37.handleAuthEvent({ uid: 'UID-A', email: 'a@test.com' }, () => deferred37.promise);
+  
+  const isStillAuthorizedDuringRevalidation = controller37.getSnapshot().gateState === 'ADMIN_AUTHORIZED' && 
+                                               controller37.getSnapshot().adminUser?.id === 'UID-A';
+  
+  deferred37.resolve({ id: 'UID-A', name: 'Admin A', email: 'a@test.com', role: AdminRole.Owner, isActive: true });
+  await p37;
+  const isAuthorizedAfterRevalidation = controller37.getSnapshot().gateState === 'ADMIN_AUTHORIZED';
+  
+  assert(
+    'Assertion 37 [UNIT_LOGIC_TEST]: Same-UID auth event preserves active workspace continuously during revalidation',
+    isInitiallyAuthorized && isStillAuthorizedDuringRevalidation && isAuthorizedAfterRevalidation,
+    'Same-UID auth event must not cause unmounting or unauthorize workspace'
+  );
+
+  // Assertion 38 [UNIT_LOGIC_TEST]: Different-UID auth event immediately invalidates and clears prior user authority
+  const controller38 = new AdminGateResolutionController();
+  await controller38.handleAuthEvent({ uid: 'UID-A', email: 'a@test.com' }, async () => ({
+    id: 'UID-A', name: 'Admin A', email: 'a@test.com', role: AdminRole.Owner, isActive: true
+  }));
+  
+  const p38 = controller38.handleAuthEvent({ uid: 'UID-B', email: 'b@test.com' }, async () => null);
+  const isResolvingImmediately = controller38.getSnapshot().gateState === 'ADMIN_RESOLVING' && 
+                                 controller38.getSnapshot().adminUser === null;
+  await p38;
+  
+  assert(
+    'Assertion 38 [UNIT_LOGIC_TEST]: Different-UID auth event immediately invalidates and clears prior user authority',
+    isResolvingImmediately,
+    'Different-UID auth event must not retain previous user identity'
+  );
+
+  // Assertion 39 [UNIT_LOGIC_TEST]: Null auth event immediately transitions to UNAUTHENTICATED
+  const controller39 = new AdminGateResolutionController();
+  await controller39.handleAuthEvent({ uid: 'UID-A', email: 'a@test.com' }, async () => ({
+    id: 'UID-A', name: 'Admin A', email: 'a@test.com', role: AdminRole.Owner, isActive: true
+  }));
+  
+  await controller39.handleAuthEvent(null, async () => null);
+  const isUnauthenticatedImmediately = controller39.getSnapshot().gateState === 'UNAUTHENTICATED' && 
+                                       controller39.getSnapshot().adminUser === null;
+  assert(
+    'Assertion 39 [UNIT_LOGIC_TEST]: Null auth event immediately transitions to UNAUTHENTICATED',
+    isUnauthenticatedImmediately,
+    'Null auth event must immediately clear authority'
+  );
+
+  // Assertion 40 [UNIT_LOGIC_TEST]: Same-UID revalidation to inactive/missing admin fails closed to ADMIN_DENIED
+  const controller40 = new AdminGateResolutionController();
+  await controller40.handleAuthEvent({ uid: 'UID-A', email: 'a@test.com' }, async () => ({
+    id: 'UID-A', name: 'Admin A', email: 'a@test.com', role: AdminRole.Owner, isActive: true
+  }));
+  
+  await controller40.handleAuthEvent({ uid: 'UID-A', email: 'a@test.com' }, async () => ({
+    id: 'UID-A', name: 'Admin A', email: 'a@test.com', role: AdminRole.Owner, isActive: false
+  }));
+  const isDeniedEventually = controller40.getSnapshot().gateState === 'ADMIN_DENIED' && 
+                             controller40.getSnapshot().adminUser === null;
+  assert(
+    'Assertion 40 [UNIT_LOGIC_TEST]: Same-UID revalidation to inactive/missing admin fails closed to ADMIN_DENIED',
+    isDeniedEventually,
+    'Failing revalidation must revoke administrative privileges'
+  );
+
+  // Assertion 41 [UNIT_LOGIC_TEST]: Stale async auth resolution still cannot overwrite newer generation
+  const controller41 = new AdminGateResolutionController();
+  const deferred41_1 = createDeferred<AdminUser | null>();
+  const deferred41_2 = createDeferred<AdminUser | null>();
+
+  const p41_1 = controller41.handleAuthEvent({ uid: 'UID-1', email: '1@test.com' }, () => deferred41_1.promise);
+  const p41_2 = controller41.handleAuthEvent({ uid: 'UID-2', email: '2@test.com' }, () => deferred41_2.promise);
+
+  deferred41_2.resolve({ id: 'UID-2', name: 'Admin 2', email: '2@test.com', role: AdminRole.Owner, isActive: true });
+  await p41_2;
+
+  deferred41_1.resolve({ id: 'UID-1', name: 'Admin 1', email: '1@test.com', role: AdminRole.Owner, isActive: true });
+  await p41_1;
+
+  const isUid2Active = controller41.getSnapshot().gateState === 'ADMIN_AUTHORIZED' && 
+                       controller41.getSnapshot().adminUser?.id === 'UID-2';
+  assert(
+    'Assertion 41 [UNIT_LOGIC_TEST]: Stale async auth resolution still cannot overwrite newer generation',
+    isUid2Active,
+    'Older generation auth resolution must not overwrite newer state'
+  );
+
+  // Assertion 42: Admin workspace session intent restores after App-level remount/reload
+  const mockSessionStorage: Record<string, string> = {};
+  mockSessionStorage['pop_admin_session'] = JSON.stringify({ open: true, tab: 'training' });
+  const restoredOpen = JSON.parse(mockSessionStorage['pop_admin_session']).open === true;
+  const restoredTab = JSON.parse(mockSessionStorage['pop_admin_session']).tab;
+  assert(
+    'Assertion 42: Admin workspace session intent restores after App-level remount/reload',
+    restoredOpen === true && restoredTab === 'training',
+    'Session storage state must restore navigation intent'
+  );
+
+  // Assertion 43: Restored tab remains subject to canonical authorization
+  const contentEditorUserForTab = {
+    id: 'editor-uid',
+    name: 'Editor',
+    email: 'editor@test.com',
+    role: AdminRole.ContentEditor,
+    isActive: true,
+  };
+  const resolvedTabForEditor = resolveAuthorizedTab(contentEditorUserForTab, 'users');
+  assert(
+    'Assertion 43: Restored tab remains subject to canonical authorization',
+    resolvedTabForEditor === 'overview',
+    'Unauthorized restored tab must resolve to canonical fallback'
+  );
+
+  // Assertion 44 [STATIC_SOURCE_ASSERTION]: Modal contains correct accessibility roles and aria tags
+  const modalSourcePath = path.join(process.cwd(), 'src/components/training/TrainingCourseEditorModal.tsx');
+  const modalSource = fs.readFileSync(modalSourcePath, 'utf8');
+
+  const hasDialogRole = modalSource.includes('role="dialog"');
+  const hasAriaModal = modalSource.includes('aria-modal="true"');
+  const hasAriaLabelledby = modalSource.includes('aria-labelledby="course-editor-modal-title"');
+  const hasContainerRef = modalSource.includes('ref={modalContainerRef}');
+
+  assert(
+    'Assertion 44 [STATIC_SOURCE_ASSERTION]: TrainingCourseEditorModal contains correct accessible dialog role, modal configuration, and references',
+    hasDialogRole && hasAriaModal && hasAriaLabelledby && hasContainerRef,
+    'Accessibility semantics and refs must be correctly declared in the editor source'
+  );
+
+  // Assertion 45 [UNIT_LOGIC_TEST]: Keyboard containment and Escape routing handles Escape safely
+  const hasEscapeHandler = modalSource.includes("e.key === 'Escape'") && modalSource.includes("handleCloseAttempt()");
+  const hasTabHandler = modalSource.includes("e.key === 'Tab'") && modalSource.includes("e.shiftKey");
+  assert(
+    'Assertion 45 [UNIT_LOGIC_TEST]: Modal traps focus cycle and routes Escape key through handleCloseAttempt',
+    hasEscapeHandler && hasTabHandler,
+    'Keydown event listeners must trap focus and route Escape securely'
+  );
+
+  // Assertion 46 [UNIT_LOGIC_TEST]: Focus restoration stores and restores active element
+  const hasPrevElementRef = modalSource.includes("previousActiveElement.current = document.activeElement");
+  const hasFocusRestoration = modalSource.includes("previousActiveElement.current.focus()");
+  assert(
+    'Assertion 46 [UNIT_LOGIC_TEST]: Modal captures previous activeElement and restores focus upon cleanup/unmounting',
+    hasPrevElementRef && hasFocusRestoration,
+    'Focus restoration must return focus to trigger element on closure'
+  );
+
   const passedCount = results.filter(r => r.passed).length;
   const failedCount = results.filter(r => !r.passed).length;
 

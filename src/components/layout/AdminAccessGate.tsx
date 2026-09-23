@@ -47,6 +47,11 @@ export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentitySe
 
   const handleSignOut = async () => {
     try {
+      try {
+        sessionStorage.removeItem('pop_admin_session');
+      } catch (e) {
+        console.error(e);
+      }
       await AccountService.signOut();
     } catch (err) {
       console.error('Sign out error:', err);
@@ -54,6 +59,17 @@ export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentitySe
   };
 
   const { gateState, firebaseUser, adminUser } = snapshot;
+
+  // Clear session storage if unauthenticated or denied
+  useEffect(() => {
+    if (gateState === 'UNAUTHENTICATED' || gateState === 'ADMIN_DENIED') {
+      try {
+        sessionStorage.removeItem('pop_admin_session');
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  }, [gateState]);
 
   // 1. Loading State
   if (gateState === 'AUTH_LOADING' || gateState === 'ADMIN_RESOLVING') {

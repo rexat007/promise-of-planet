@@ -224,9 +224,17 @@ export class AdminGateResolutionController {
     }
 
     const uid = user.uid;
+    const isSameUidRevalidation =
+      this.snapshot.gateState === 'ADMIN_AUTHORIZED' &&
+      this.snapshot.adminUser &&
+      this.snapshot.adminUser.id === uid;
+
     this.expectedUid = uid;
-    // Clear previous adminUser immediately upon starting resolution for new UID / new event
-    this.emitState('ADMIN_RESOLVING', user, null, currentGen);
+
+    if (!isSameUidRevalidation) {
+      // Clear previous adminUser immediately upon starting resolution for new UID / different state
+      this.emitState('ADMIN_RESOLVING', user, null, currentGen);
+    }
 
     try {
       const resolved = await resolver(uid);
