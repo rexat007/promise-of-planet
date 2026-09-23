@@ -11,7 +11,8 @@ import {
   AdminIdentityServiceClass, 
   InMemoryAdminIdentityRepository, 
   validateAdminUserData,
-  AdminGateResolutionController
+  AdminGateResolutionController,
+  FirestoreAdminIdentityRepository
 } from './adminIdentityService';
 import { validateAccountData } from './accountService';
 import {
@@ -740,22 +741,165 @@ export async function runAdminIdentityConvergenceTests(): Promise<{
     'Accessibility semantics and refs must be correctly declared in the editor source'
   );
 
-  // Assertion 45 [UNIT_LOGIC_TEST]: Keyboard containment and Escape routing handles Escape safely
+  // Assertion 45 [STATIC_SOURCE_ASSERTION]: Keyboard containment and Escape routing handles Escape safely
   const hasEscapeHandler = modalSource.includes("e.key === 'Escape'") && modalSource.includes("handleCloseAttempt()");
   const hasTabHandler = modalSource.includes("e.key === 'Tab'") && modalSource.includes("e.shiftKey");
   assert(
-    'Assertion 45 [UNIT_LOGIC_TEST]: Modal traps focus cycle and routes Escape key through handleCloseAttempt',
+    'Assertion 45 [STATIC_SOURCE_ASSERTION]: Modal traps focus cycle and routes Escape key through handleCloseAttempt',
     hasEscapeHandler && hasTabHandler,
     'Keydown event listeners must trap focus and route Escape securely'
   );
 
-  // Assertion 46 [UNIT_LOGIC_TEST]: Focus restoration stores and restores active element
+  // Assertion 46 [STATIC_SOURCE_ASSERTION]: Focus restoration stores and restores active element
   const hasPrevElementRef = modalSource.includes("previousActiveElement.current = document.activeElement");
   const hasFocusRestoration = modalSource.includes("previousActiveElement.current.focus()");
   assert(
-    'Assertion 46 [UNIT_LOGIC_TEST]: Modal captures previous activeElement and restores focus upon cleanup/unmounting',
+    'Assertion 46 [STATIC_SOURCE_ASSERTION]: Modal captures previous activeElement and restores focus upon cleanup/unmounting',
     hasPrevElementRef && hasFocusRestoration,
     'Focus restoration must return focus to trigger element on closure'
+  );
+
+  // Assertion 47 [UNIT_LOGIC_TEST]: Same UID with successful valid revalidation preserves ADMIN_AUTHORIZED
+  const testController = new AdminGateResolutionController();
+  testController.mount();
+  const repo = new InMemoryAdminIdentityRepository();
+  const activeAdmin: AdminUser = { id: 'uid-reval', name: 'Tester', email: 't@t.com', role: AdminRole.Owner, isActive: true };
+  repo.seed(activeAdmin);
+
+  let lastSnapshot = testController.getSnapshot();
+  testController.subscribe((snap) => { lastSnapshot = snap; });
+
+  // Initial resolve
+  await testController.handleAuthEvent({ uid: 'uid-reval', email: 't@t.com' }, (uid) => repo.getAdminUser(uid));
+  assert(
+    'Assertion 47 [UNIT_LOGIC_TEST]: Same UID with successful valid revalidation preserves ADMIN_AUTHORIZED',
+    lastSnapshot.gateState === 'ADMIN_AUTHORIZED' && lastSnapshot.adminUser?.id === 'uid-reval',
+    'Initial resolve must authorize active administrator'
+  );
+
+  // Revalidate successfully
+  await testController.handleAuthEvent({ uid: 'uid-reval', email: 't@t.com' }, (uid) => repo.getAdminUser(uid));
+  assert(
+    'Assertion 47.B [UNIT_LOGIC_TEST]: Revalidation preserves ADMIN_AUTHORIZED and maintains exact user fields',
+    lastSnapshot.gateState === 'ADMIN_AUTHORIZED' && lastSnapshot.adminUser?.name === 'Tester' && lastSnapshot.revalidationError === null,
+    'Revalidation must preserve authorized state and clear errors'
+  );
+
+  // Assertion 48 [UNIT_LOGIC_TEST]: Authorized same UID + canonical missing/inactive admin resolves to ADMIN_DENIED
+  const inactiveAdminTestReval: AdminUser = { id: 'uid-reval', name: 'Tester', email: 't@t.com', role: AdminRole.Owner, isActive: false };
+  repo.seed(inactiveAdminTestReval);
+  await testController.handleAuthEvent({ uid: 'uid-reval', email: 't@t.com' }, (uid) => repo.getAdminUser(uid));
+  assert(
+    'Assertion 48 [UNIT_LOGIC_TEST]: Transition to inactive state results in ADMIN_DENIED',
+    lastSnapshot.gateState === 'ADMIN_DENIED' && lastSnapshot.adminUser === null,
+    'Inactive profile must be blocked and transitioned to denied'
+  );
+
+  // Re-seed active and re-authorize
+  repo.seed(activeAdmin);
+  await testController.handleAuthEvent({ uid: 'uid-reval', email: 't@t.com' }, (uid) => repo.getAdminUser(uid));
+  assert(
+    'Assertion 49 [UNIT_LOGIC_TEST]: Re-established active profile re-authorizes',
+    lastSnapshot.gateState === 'ADMIN_AUTHORIZED',
+    'Should re-authorize active user'
+  );
+
+  // Assertion 50 [UNIT_LOGIC_TEST]: Authorized same UID + repository read failure preserves prior ADMIN_AUTHORIZED state
+  repo.setShouldFail(true);
+  await testController.handleAuthEvent({ uid: 'uid-reval', email: 't@t.com' }, (uid) => repo.getAdminUser(uid));
+  assert(
+    'Assertion 50 [UNIT_LOGIC_TEST]: Same-UID background read failures do NOT transition to ADMIN_DENIED and preserve existing authorized profile',
+    lastSnapshot.gateState === 'ADMIN_AUTHORIZED' && lastSnapshot.adminUser?.name === 'Tester' && lastSnapshot.revalidationError === 'ADMIN_READ_FAILURE',
+    'Transient database failures must not degrade existing authorized active sessions'
+  );
+
+  // Assertion 51 [UNIT_LOGIC_TEST]: Initial unresolved user + read failure remains fail-closed in ADMIN_DENIED
+  const initialController = new AdminGateResolutionController();
+  initialController.mount();
+  let initialSnap = initialController.getSnapshot();
+  initialController.subscribe((snap) => { initialSnap = snap; });
+
+  const failingRepo = new InMemoryAdminIdentityRepository();
+  failingRepo.setShouldFail(true);
+
+  await initialController.handleAuthEvent({ uid: 'uid-fail-initial', email: 'fail@t.com' }, (uid) => failingRepo.getAdminUser(uid));
+  assert(
+    'Assertion 51 [UNIT_LOGIC_TEST]: Initial unresolved read failure remains strictly fail-closed in ADMIN_DENIED with error descriptor',
+    initialSnap.gateState === 'ADMIN_DENIED' && initialSnap.adminUser === null && initialSnap.revalidationError === 'ADMIN_READ_FAILURE',
+    'Fail closed must forbid workspace rendering for first-time resolutions'
+  );
+
+  // Assertion 52 [UNIT_LOGIC_TEST]: Different UID clears previous authority immediately
+  repo.setShouldFail(false);
+  const differentAdmin: AdminUser = { id: 'uid-different', name: 'Different User', email: 'diff@t.com', role: AdminRole.Viewer, isActive: true };
+  repo.seed(differentAdmin);
+
+  // Trigger auth change to different UID while resolving
+  const p = testController.handleAuthEvent({ uid: 'uid-different', email: 'diff@t.com' }, (uid) => repo.getAdminUser(uid));
+  assert(
+    'Assertion 52 [UNIT_LOGIC_TEST]: Changing to a different UID immediately clears previous administrative authority and snapshot profile',
+    testController.getSnapshot().gateState === 'ADMIN_RESOLVING' && testController.getSnapshot().adminUser === null,
+    'State must reset to resolving and discard previous user'
+  );
+  await p;
+
+  // Assertion 53 [UNIT_LOGIC_TEST]: Null auth event transitions immediately to UNAUTHENTICATED
+  await testController.handleAuthEvent(null, (uid) => repo.getAdminUser(uid));
+  assert(
+    'Assertion 53 [UNIT_LOGIC_TEST]: Null auth event transitions immediately to UNAUTHENTICATED and purges admin metadata',
+    testController.getSnapshot().gateState === 'UNAUTHENTICATED' && testController.getSnapshot().adminUser === null,
+    'Should reset immediately to unauthenticated'
+  );
+
+  // Assertion 54 [UNIT_LOGIC_TEST]: Stale async generation cannot overwrite newer auth state
+  const slowController = new AdminGateResolutionController();
+  slowController.mount();
+  let slowSnap = slowController.getSnapshot();
+  slowController.subscribe((snap) => { slowSnap = snap; });
+
+  let resolveSlowPromise: (value: any) => void = () => {};
+  const slowPromise = new Promise<AdminUser | null>((resolve) => {
+    resolveSlowPromise = resolve;
+  });
+
+  const trigger1 = slowController.handleAuthEvent({ uid: 'uid-slow', email: 's@t.com' }, () => slowPromise);
+  // Before trigger1 finishes, trigger null auth (immediate unauthenticated)
+  const trigger2 = slowController.handleAuthEvent(null, async () => null);
+
+  // Finish slow resolution
+  resolveSlowPromise({ id: 'uid-slow', name: 'Slow', email: 's@t.com', role: AdminRole.Owner, isActive: true });
+  await trigger1;
+  await trigger2;
+
+  assert(
+    'Assertion 54 [UNIT_LOGIC_TEST]: Stale slow async resolution is ignored and cannot overwrite newer active unauthenticated auth state',
+    slowSnap.gateState === 'UNAUTHENTICATED' && slowSnap.adminUser === null,
+    'Stale generation must not overwrite active state'
+  );
+
+  // Assertion 55 [UNIT_LOGIC_TEST]: Unauthorized/unknown persisted tab in session storage is normalized to authorized fallback
+  const contentEditorUserTestReval: AdminUser = { id: 'uid-norm', name: 'Editor', email: 'e@t.com', role: AdminRole.ContentEditor, isActive: true };
+  const normalizedTabResult = resolveAuthorizedTab(contentEditorUserTestReval, 'users');
+  assert(
+    'Assertion 55 [UNIT_LOGIC_TEST]: Unauthorized persisted activeTab (users) for ContentEditor is normalized to overview fallback',
+    normalizedTabResult === 'overview',
+    'Normalization must correct unauthorized tab references to the canonical fallback'
+  );
+
+  // Assertion 56 [UNIT_LOGIC_TEST]: FirestoreAdminIdentityRepository unconfigured backend throws AdminReadError rather than returning null
+  const prodRepo = new FirestoreAdminIdentityRepository();
+  let threwExpected = false;
+  try {
+    await prodRepo.getAdminUser('test-uid-unconfigured');
+  } catch (err: any) {
+    if (err && err.name === 'AdminReadError' && err.message === 'ADMIN_READ_FAILURE') {
+      threwExpected = true;
+    }
+  }
+  assert(
+    'Assertion 56 [UNIT_LOGIC_TEST]: FirestoreAdminIdentityRepository unconfigured backend throws AdminReadError rather than returning null',
+    threwExpected,
+    'Unconfigured backend must throw a dedicated AdminReadError to trigger the correct gate state mapping'
   );
 
   const passedCount = results.filter(r => r.passed).length;

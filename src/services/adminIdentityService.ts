@@ -43,6 +43,17 @@ export function validateAdminUserData(data: any, expectedUid: string): AdminUser
   };
 }
 
+export class AdminReadError extends Error {
+  public readonly originalError?: any;
+
+  constructor(message: string, originalError?: any) {
+    super(message);
+    this.name = 'AdminReadError';
+    this.originalError = originalError;
+    Object.setPrototypeOf(this, AdminReadError.prototype);
+  }
+}
+
 export interface AdminIdentityRepository {
   getAdminUser(uid: string): Promise<AdminUser | null>;
 }
@@ -62,19 +73,19 @@ export class FirestoreAdminIdentityRepository implements AdminIdentityRepository
     }
 
     if (!this.isConfigured()) {
-      return null;
+      throw new AdminReadError('ADMIN_READ_FAILURE', new Error('Firebase/Firestore is not configured'));
     }
 
     try {
       const docRef = doc(db, 'admins', uid);
       const snapshot = await getDoc(docRef);
       if (!snapshot || !snapshot.exists()) {
-        return null;
+        return null; // Authoritative missing
       }
-      return validateAdminUserData(snapshot.data(), uid);
+      return validateAdminUserData(snapshot.data(), uid); // Returns valid or null (Authoritative malformed/invalid)
     } catch (error) {
       console.error('Firestore getAdminUser error:', error);
-      return null;
+      throw new AdminReadError('ADMIN_READ_FAILURE', error);
     }
   }
 }
@@ -85,12 +96,20 @@ export class FirestoreAdminIdentityRepository implements AdminIdentityRepository
  */
 export class InMemoryAdminIdentityRepository implements AdminIdentityRepository {
   private admins = new Map<string, AdminUser>();
+  private shouldFail = false;
 
   async getAdminUser(uid: string): Promise<AdminUser | null> {
+    if (this.shouldFail) {
+      throw new AdminReadError('ADMIN_READ_FAILURE');
+    }
     if (!uid) return null;
     const raw = this.admins.get(uid);
     if (!raw) return null;
     return validateAdminUserData(raw, uid);
+  }
+
+  setShouldFail(fail: boolean) {
+    this.shouldFail = fail;
   }
 
   seed(rawAdmin: any) {
@@ -165,6 +184,7 @@ export interface AdminGateStateSnapshot {
   firebaseUser: { uid: string; email?: string | null } | null;
   adminUser: AdminUser | null;
   generation: number;
+  revalidationError?: string | null;
 }
 
 export class AdminGateResolutionController {
@@ -176,6 +196,7 @@ export class AdminGateResolutionController {
     firebaseUser: null,
     adminUser: null,
     generation: 0,
+    revalidationError: null,
   };
   private listeners = new Set<(snapshot: AdminGateStateSnapshot) => void>();
 
@@ -202,10 +223,11 @@ export class AdminGateResolutionController {
     gateState: AdminGateState, 
     firebaseUser: { uid: string; email?: string | null } | null, 
     adminUser: AdminUser | null, 
-    gen: number
+    gen: number,
+    revalidationError: string | null = null
   ) {
     if (!this.isMounted) return;
-    this.snapshot = { gateState, firebaseUser, adminUser, generation: gen };
+    this.snapshot = { gateState, firebaseUser, adminUser, generation: gen, revalidationError };
     this.listeners.forEach((l) => l(this.snapshot));
   }
 
@@ -219,7 +241,7 @@ export class AdminGateResolutionController {
 
     if (!user) {
       this.expectedUid = null;
-      this.emitState('UNAUTHENTICATED', null, null, currentGen);
+      this.emitState('UNAUTHENTICATED', null, null, currentGen, null);
       return;
     }
 
@@ -233,7 +255,7 @@ export class AdminGateResolutionController {
 
     if (!isSameUidRevalidation) {
       // Clear previous adminUser immediately upon starting resolution for new UID / different state
-      this.emitState('ADMIN_RESOLVING', user, null, currentGen);
+      this.emitState('ADMIN_RESOLVING', user, null, currentGen, null);
     }
 
     try {
@@ -244,16 +266,26 @@ export class AdminGateResolutionController {
       if (this.expectedUid !== uid) return;
 
       if (resolved && resolved.isActive) {
-        this.emitState('ADMIN_AUTHORIZED', user, resolved, currentGen);
+        this.emitState('ADMIN_AUTHORIZED', user, resolved, currentGen, null);
       } else {
-        this.emitState('ADMIN_DENIED', user, null, currentGen);
+        this.emitState('ADMIN_DENIED', user, null, currentGen, null);
       }
     } catch {
       if (!this.isMounted) return;
       if (this.generation !== currentGen) return;
       if (this.expectedUid !== uid) return;
 
-      this.emitState('ADMIN_DENIED', user, null, currentGen);
+      if (isSameUidRevalidation) {
+        // Safe degraded state: preserve ADMIN_AUTHORIZED with existing valid identity, setting the transient read error flag
+        this.snapshot = {
+          ...this.snapshot,
+          revalidationError: 'ADMIN_READ_FAILURE',
+        };
+        this.listeners.forEach((l) => l(this.snapshot));
+      } else {
+        // Initial load failure: Fail Closed (prevent authorization and render denied screen with bounded error)
+        this.emitState('ADMIN_DENIED', user, null, currentGen, 'ADMIN_READ_FAILURE');
+      }
     }
   }
 }

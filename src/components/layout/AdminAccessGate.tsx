@@ -60,16 +60,17 @@ export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentitySe
 
   const { gateState, firebaseUser, adminUser } = snapshot;
 
-  // Clear session storage if unauthenticated or denied
+  // Clear session storage if unauthenticated or authoritatively denied (exclude transient read errors)
   useEffect(() => {
-    if (gateState === 'UNAUTHENTICATED' || gateState === 'ADMIN_DENIED') {
+    const isTransientReadError = snapshot.revalidationError === 'ADMIN_READ_FAILURE';
+    if (gateState === 'UNAUTHENTICATED' || (gateState === 'ADMIN_DENIED' && !isTransientReadError)) {
       try {
         sessionStorage.removeItem('pop_admin_session');
       } catch (e) {
         console.error(e);
       }
     }
-  }, [gateState]);
+  }, [gateState, snapshot.revalidationError]);
 
   // 1. Loading State
   if (gateState === 'AUTH_LOADING' || gateState === 'ADMIN_RESOLVING') {
@@ -137,12 +138,18 @@ export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentitySe
 
           <div className="space-y-2">
             <h2 className="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white">
-              {isAr ? 'صلاحية الوصول غيّر متوفرة' : 'Administrative Access Denied'}
+              {snapshot.revalidationError === 'ADMIN_READ_FAILURE'
+                ? (isAr ? 'الخدمة غير متوفرة مؤقتاً' : 'Administrative Service Unavailable')
+                : (isAr ? 'صلاحية الوصول غيّر متوفرة' : 'Administrative Access Denied')}
             </h2>
             <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
-              {isAr
-                ? 'الحساب الحالي غير مسجل ضمن الهويات الإدارية المعتمدة للمنصة، أو أن حسابك الإداري غير نشط حالياً.'
-                : 'The current platform account is not registered in the canonical admins directory, or your administrative profile is currently inactive.'}
+              {snapshot.revalidationError === 'ADMIN_READ_FAILURE'
+                ? (isAr
+                    ? 'الخدمة الإدارية للمنصة غير متوفرة حالياً بسبب خلل مؤقت في الشبكة أو قاعدة البيانات. يرجى التحقق من الاتصال والمحاولة لاحقاً.'
+                    : 'The administrative platform service is temporarily unavailable due to a connection or database issue. Please verify your network and retry.')
+                : (isAr
+                    ? 'الحساب الحالي غير مسجل ضمن الهويات الإدارية المعتمدة للمنصة، أو أن حسابك الإداري غير نشط حالياً.'
+                    : 'The current platform account is not registered in the canonical admins directory, or your administrative profile is currently inactive.')}
             </p>
           </div>
 

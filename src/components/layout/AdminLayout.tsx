@@ -139,16 +139,29 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
   });
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
 
+  // Derive effectiveTab using canonical resolution boundary (returns null if zero authorized tabs or inactive user)
+  const effectiveTab = useMemo(() => {
+    return resolveAuthorizedTab(currentUser, activeTab, CANONICAL_NAVIGATION_ITEMS);
+  }, [activeTab, currentUser]);
+
+  // Keep activeTab normalized to effectiveTab and write normalized effectiveTab to sessionStorage
   useEffect(() => {
+    if (effectiveTab && activeTab !== effectiveTab) {
+      setActiveTab(effectiveTab);
+    }
+  }, [effectiveTab, activeTab]);
+
+  useEffect(() => {
+    if (!effectiveTab) return;
     try {
       const persisted = sessionStorage.getItem('pop_admin_session');
       const parsed = persisted ? JSON.parse(persisted) : {};
-      const nextSession = { ...parsed, open: true, tab: activeTab };
+      const nextSession = { ...parsed, open: true, tab: effectiveTab };
       sessionStorage.setItem('pop_admin_session', JSON.stringify(nextSession));
     } catch (e) {
       console.error('Failed to save admin active tab:', e);
     }
-  }, [activeTab]);
+  }, [effectiveTab]);
 
   // Handle user identity updates in Users Management demo tab
   const handleUpdateUser = (updatedUser: AdminUser) => {
@@ -214,11 +227,6 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
       return isTabAuthorized(currentUser, item.domain, item.requiredPermission);
     });
   }, [currentUser]);
-
-  // Derive effectiveTab using canonical resolution boundary (returns null if zero authorized tabs or inactive user)
-  const effectiveTab = useMemo(() => {
-    return resolveAuthorizedTab(currentUser, activeTab, CANONICAL_NAVIGATION_ITEMS);
-  }, [activeTab, currentUser]);
 
   // Single canonical navigation handler
   const navigateToAuthorizedTab = (tabId: string): boolean => {
