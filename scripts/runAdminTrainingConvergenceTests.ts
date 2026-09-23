@@ -72,12 +72,12 @@ async function runTests() {
       message: 'Expected BACKEND_UNAVAILABLE or other exception, but call succeeded (Firestore might be configured in this environment)',
     });
   } catch (err: any) {
-    const expectedErrors = ['BACKEND_UNAVAILABLE', 'UNAUTHORIZED', 'permission-denied'];
+    const expectedErrors = ['BACKEND_UNAVAILABLE', 'UNAUTHORIZED', 'permission-denied', 'FIRESTORE_ACCESS_ERROR'];
     const isExpected = expectedErrors.some(e => err.message?.includes(e) || err.code?.includes(e) || err.toString().includes(e));
     results.push({
       name: 'No production fallback to mock data exists on read error',
       classification: 'UNIT_LOGIC_TEST',
-      passed: isExpected || err.message !== undefined,
+      passed: isExpected,
       message: !isExpected ? `Threw unexpected error: ${err.message}` : undefined,
     });
   }
