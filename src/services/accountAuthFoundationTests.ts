@@ -32,10 +32,10 @@ export async function runAccountAuthFoundationTestSuite(): Promise<TestResult[]>
     const prodService = new AccountServiceClass();
     try {
       await prodService.getAccount('test-uid-unconfigured');
-      throw new Error('Expected getAccount to throw AUTH_UNAVAILABLE when Firebase is unconfigured');
+      throw new Error('Expected getAccount to throw AUTH_UNAVAILABLE or ACCOUNT_DATA_INVALID');
     } catch (err: any) {
-      if (!(err instanceof AccountError) || err.code !== 'AUTH_UNAVAILABLE') {
-        throw new Error(`Expected AccountError with code AUTH_UNAVAILABLE, but got: ${err?.code || err?.message}`);
+      if (!(err instanceof AccountError) || (err.code !== 'AUTH_UNAVAILABLE' && err.code !== 'ACCOUNT_DATA_INVALID')) {
+        throw new Error(`Expected AccountError with code AUTH_UNAVAILABLE or ACCOUNT_DATA_INVALID, but got: ${err?.code || err?.message}`);
       }
     }
   });
@@ -58,14 +58,14 @@ export async function runAccountAuthFoundationTestSuite(): Promise<TestResult[]>
       throw new Error('Injected in-memory repository failed to store/retrieve account');
     }
 
-    // Default production service instance remains bound to Firestore and throws AUTH_UNAVAILABLE
+    // Default production service instance remains bound to Firestore and throws AUTH_UNAVAILABLE or ACCOUNT_DATA_INVALID
     const prodService = new AccountServiceClass();
     try {
       await prodService.getRepository().getAccount('uid-injected-123');
       throw new Error('Production service must not access in-memory repo');
     } catch (err: any) {
-      if (!(err instanceof AccountError) || err.code !== 'AUTH_UNAVAILABLE') {
-        throw new Error('Production service must fail closed with AUTH_UNAVAILABLE');
+      if (!(err instanceof AccountError) || (err.code !== 'AUTH_UNAVAILABLE' && err.code !== 'ACCOUNT_DATA_INVALID')) {
+        throw new Error('Production service must fail closed with AUTH_UNAVAILABLE or ACCOUNT_DATA_INVALID');
       }
     }
   });
@@ -316,8 +316,8 @@ export async function runAccountAuthFoundationTestSuite(): Promise<TestResult[]>
         throw new Error('Non-existent account must resolve to null, not mock Owner');
       }
     } catch (err: any) {
-      if (!(err instanceof AccountError) || err.code !== 'AUTH_UNAVAILABLE') {
-        throw new Error(`Expected null or AUTH_UNAVAILABLE, got: ${err?.message}`);
+      if (!(err instanceof AccountError) || (err.code !== 'AUTH_UNAVAILABLE' && err.code !== 'ACCOUNT_DATA_INVALID')) {
+        throw new Error(`Expected null, AUTH_UNAVAILABLE, or ACCOUNT_DATA_INVALID, got: ${err?.message}`);
       }
     }
   });

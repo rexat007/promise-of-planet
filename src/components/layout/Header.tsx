@@ -6,9 +6,11 @@ import { smoothScrollToSection } from '../../utils/interaction';
 
 interface HeaderProps {
   onEnterAdmin?: () => void;
+  activePage?: 'home' | 'training-center';
+  onNavigate?: (page: 'home' | 'training-center') => void;
 }
 
-export function Header({ onEnterAdmin }: HeaderProps) {
+export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: HeaderProps) {
   const { t, i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
   const [isLibraryPanelOpen, setIsLibraryPanelOpen] = useState(false);
@@ -43,11 +45,25 @@ export function Header({ onEnterAdmin }: HeaderProps) {
 
   const handleNavClick = (key: string) => {
     if (key === 'library') {
-      smoothScrollToSection('library-section');
+      if (onNavigate) {
+        onNavigate('home');
+        setTimeout(() => {
+          smoothScrollToSection('library-section');
+        }, 100);
+      } else {
+        smoothScrollToSection('library-section');
+      }
       setIsLibraryPanelOpen(false);
     } else if (key === 'training') {
-      smoothScrollToSection('training-section');
+      if (onNavigate) {
+        onNavigate('training-center');
+      } else {
+        smoothScrollToSection('training-section');
+      }
     } else if (key === 'home') {
+      if (onNavigate) {
+        onNavigate('home');
+      }
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
@@ -110,15 +126,23 @@ export function Header({ onEnterAdmin }: HeaderProps) {
       <Container className="relative w-full max-w-full min-w-0">
         <div className="flex items-center justify-between h-16 sm:h-20 w-full min-w-0 gap-2 sm:gap-4" dir="ltr">
           {/* Brand Logo / Name (Anchored Left in Header Bar) */}
-          <div className="flex items-center gap-2 sm:gap-3 min-w-0" dir={isAr ? 'rtl' : 'ltr'}>
-            <span className="text-base min-[390px]:text-lg sm:text-xl lg:text-2xl font-bold text-emerald-700 dark:text-emerald-400 truncate sm:overflow-visible min-w-0">
+          <button 
+            onClick={() => handleNavClick('home')}
+            className="flex items-center gap-2 sm:gap-3 min-w-0 text-start hover:opacity-90 transition-opacity cursor-pointer focus-visible:outline-none" 
+            dir={isAr ? 'rtl' : 'ltr'}
+          >
+            <span className="text-base min-[390px]:text-lg sm:text-xl lg:text-2xl font-bold text-emerald-700 dark:text-emerald-400 truncate sm:overflow-visible min-w-0 select-none">
               {t('brand.name')}
             </span>
-          </div>
+          </button>
 
           {/* Navigation Links */}
           <nav className="hidden lg:flex items-center gap-6 relative" dir={isAr ? 'rtl' : 'ltr'}>
             {navItems.map((item) => {
+              const isActive = 
+                (item.key === 'home' && activePage === 'home') ||
+                (item.key === 'training' && activePage === 'training-center');
+
               if (item.hasPanel) {
                 return (
                   <div key={item.key} className="relative">
@@ -148,7 +172,11 @@ export function Header({ onEnterAdmin }: HeaderProps) {
                     e.preventDefault();
                     handleNavClick(item.key);
                   }}
-                  className="text-sm font-medium text-gray-700 dark:text-gray-200 hover:text-emerald-600 dark:hover:text-emerald-400 pop-motion-micro cursor-pointer py-2 px-1"
+                  className={`text-sm font-medium pop-motion-micro cursor-pointer py-2 px-1 border-b-2 transition-colors duration-150 ${
+                    isActive
+                      ? 'text-emerald-700 dark:text-emerald-400 font-bold border-emerald-600 dark:border-emerald-400'
+                      : 'text-gray-700 dark:text-gray-200 hover:text-emerald-600 dark:hover:text-emerald-400 border-transparent'
+                  }`}
                 >
                   {item.label}
                 </a>

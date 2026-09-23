@@ -5,7 +5,6 @@ import type { TrainingCourse } from '../../types/training';
 import { TrainingCourseService } from '../../services/trainingCourseService';
 import { CourseAccessModal } from '../training/CourseAccessModal';
 import { ErrorBanner } from '../common/ErrorBanner';
-import { smoothScrollToSection } from '../../utils/interaction';
 
 export type TrainingCoursePreview = TrainingCourse;
 
@@ -66,8 +65,6 @@ export const LatestTraining: React.FC<LatestTrainingProps> = ({
   const handleExploreClick = () => {
     if (onExploreTraining) {
       onExploreTraining();
-    } else {
-      smoothScrollToSection('training-section');
     }
   };
 
@@ -169,16 +166,18 @@ export const LatestTraining: React.FC<LatestTrainingProps> = ({
       )}
 
       {/* Prominent CTA */}
-      <div className="flex justify-center pt-2">
-        <button
-          type="button"
-          onClick={handleExploreClick}
-          className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-medium text-sm transition-colors shadow-sm cursor-pointer"
-        >
-          <span>{isArabic ? 'استكشف مسارات وبرامج مركز التدريب' : 'Explore Training Center Programs'}</span>
-          <span aria-hidden="true">{isArabic ? '←' : '→'}</span>
-        </button>
-      </div>
+      {onExploreTraining && (
+        <div className="flex justify-center pt-2">
+          <button
+            type="button"
+            onClick={handleExploreClick}
+            className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-medium text-sm transition-colors shadow-sm cursor-pointer"
+          >
+            <span>{isArabic ? 'استكشف مسارات وبرامج مركز التدريب' : 'Explore Training Center Programs'}</span>
+            <span aria-hidden="true">{isArabic ? '←' : '→'}</span>
+          </button>
+        </div>
+      )}
 
       {/* Member Training Course Access Modal */}
       <CourseAccessModal

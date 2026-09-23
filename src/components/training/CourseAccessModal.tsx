@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   GraduationCap,
@@ -16,6 +16,8 @@ import {
 import type { TrainingCourse } from '../../types/training';
 import { MemberTrainingAccessService, type DerivedAccessState } from '../../services/memberTrainingAccessService';
 import { AccountAuthWidget } from '../auth/AccountAuthWidget';
+import { AccountService } from '../../services/accountService';
+import { auth, isFirebaseConfigured } from '../../services/firebase';
 import { ErrorBanner } from '../common/ErrorBanner';
 import { getCategoryLabel } from '../content/contentFormatters';
 
@@ -32,6 +34,12 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
   onClose,
   isAr = false,
 }) => {
+  const [currentUserUid, setCurrentUserUid] = useState<string | null>(() => {
+    if (isFirebaseConfigured && auth) {
+      return auth.currentUser?.uid || null;
+    }
+    return null;
+  });
   const [accessState, setAccessState] = useState<DerivedAccessState>({
     status: 'loading',
     course: null,
@@ -54,19 +62,49 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
     FieldCohort: { ar: 'تدريب ميداني تطبيقي', en: 'Field Practicum Cohort' },
   };
 
-  const loadAccessState = useCallback(async () => {
-    if (!course) return;
-    setAccessState((prev) => ({ ...prev, status: 'loading', error: null }));
-    const resolved = await MemberTrainingAccessService.resolveAccessState(course.id, course);
-    setAccessState(resolved);
-  }, [course]);
+  const [retryTrigger, setRetryTrigger] = useState(0);
 
+  const loadAccessState = () => {
+    setRetryTrigger((prev) => prev + 1);
+  };
+
+  // Subscribe to auth state changes when open
   useEffect(() => {
-    if (isOpen && course) {
-      setShowAuthForm(false);
-      loadAccessState();
-    }
-  }, [isOpen, course, loadAccessState]);
+    if (!isOpen) return;
+
+    const unsubscribe = AccountService.observeAuthState((user) => {
+      const uid = user ? user.uid : null;
+      setCurrentUserUid(uid);
+      if (user) {
+        setShowAuthForm(false);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [isOpen]);
+
+  // Load and re-resolve member access state with protection against race conditions
+  useEffect(() => {
+    if (!isOpen || !course) return;
+
+    let active = true;
+
+    const load = async () => {
+      setAccessState((prev) => ({ ...prev, status: 'loading', error: null }));
+      const resolved = await MemberTrainingAccessService.resolveAccessState(course.id, course);
+      if (active) {
+        setAccessState(resolved);
+      }
+    };
+
+    load();
+
+    return () => {
+      active = false;
+    };
+  }, [isOpen, course, currentUserUid, retryTrigger]);
 
   if (!isOpen || !course) return null;
 

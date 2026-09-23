@@ -6,9 +6,11 @@ import { Footer } from './Footer';
 interface AppShellProps {
   children: React.ReactNode;
   onEnterAdmin?: () => void;
+  activePage?: 'home' | 'training-center';
+  onNavigate?: (page: 'home' | 'training-center') => void;
 }
 
-export function AppShell({ children, onEnterAdmin }: AppShellProps) {
+export function AppShell({ children, onEnterAdmin, activePage, onNavigate }: AppShellProps) {
   return (
     <div 
       data-responsive-guard 
@@ -18,7 +20,7 @@ export function AppShell({ children, onEnterAdmin }: AppShellProps) {
       <ClimateClockSlot />
 
       {/* 2. Header */}
-      <Header onEnterAdmin={onEnterAdmin} />
+      <Header onEnterAdmin={onEnterAdmin} activePage={activePage} onNavigate={onNavigate} />
 
       {/* 3. Main Content with full-width structural safety */}
       <main className="flex-grow pop-page-fade w-full max-w-full min-w-0">

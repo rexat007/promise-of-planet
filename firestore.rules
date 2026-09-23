@@ -22,6 +22,14 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.isActive == true;
     }
 
+    function isAuthorizedTrainingAdmin() {
+      return isAdmin() && (
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'Owner' ||
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'TrainingManager' ||
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'Trainer'
+      );
+    }
+
     function isCanonicalAccountShape() {
       return request.resource.data.keys().hasOnly(['id', 'email', 'displayName', 'createdAt', 'updatedAt'])
         && request.resource.data.id is string
@@ -99,16 +107,16 @@ service cloud.firestore {
       allow get, list: if (resource.data.workflowState == 'Published') || isAdmin();
 
       // Administrative write operations require admin identity
-      allow create: if isAdmin()
+      allow create: if isAuthorizedTrainingAdmin()
         && request.resource.data.id == courseId
         && isCanonicalTrainingCourseShape();
 
-      allow update: if isAdmin()
+      allow update: if isAuthorizedTrainingAdmin()
         && request.resource.data.id == courseId
         && request.resource.data.id == resource.data.id
         && isCanonicalTrainingCourseShape();
 
-      allow delete: if isAdmin();
+      allow delete: if false;
     }
 
     // Enrollments Collection Rules Block
@@ -119,6 +127,7 @@ service cloud.firestore {
 
       // Authenticated owner can create their own enrollment ONLY for Published courses
       allow create: if isSignedIn()
+        && exists(/databases/$(database)/documents/accounts/$(request.auth.uid))
         && request.auth.uid == request.resource.data.accountId
         && enrollmentId == request.resource.data.accountId + '_' + request.resource.data.courseId
         && request.resource.data.id == enrollmentId

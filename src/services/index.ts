@@ -9,6 +9,8 @@ export { runDurableTrainingCourseTests } from './durableTrainingCourseTests';
 export { runDurableEnrollmentTests } from './durableEnrollmentTests';
 export { runMemberTrainingAccessTests } from './memberTrainingAccessTests';
 export { runPublicTrainingConvergenceTests } from './publicTrainingConvergenceTests';
+export { runAccountAuthFoundationTestSuite } from './accountAuthFoundationTests';
 export { runGlobalSettingsVerification } from './verification';
 export { runBackendFoundationVerification } from './backendFoundationTests';
+export { runPublicTrainingCenterUnitTests } from './publicTrainingCenterUnitTests';
 
