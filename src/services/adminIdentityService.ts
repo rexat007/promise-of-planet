@@ -270,21 +270,27 @@ export class AdminGateResolutionController {
       } else {
         this.emitState('ADMIN_DENIED', user, null, currentGen, null);
       }
-    } catch {
+    } catch (error) {
       if (!this.isMounted) return;
       if (this.generation !== currentGen) return;
       if (this.expectedUid !== uid) return;
 
-      if (isSameUidRevalidation) {
-        // Safe degraded state: preserve ADMIN_AUTHORIZED with existing valid identity, setting the transient read error flag
-        this.snapshot = {
-          ...this.snapshot,
-          revalidationError: 'ADMIN_READ_FAILURE',
-        };
-        this.listeners.forEach((l) => l(this.snapshot));
+      if (error instanceof AdminReadError) {
+        if (isSameUidRevalidation) {
+          // Safe degraded state: preserve ADMIN_AUTHORIZED with existing valid identity, setting the transient read error flag
+          this.snapshot = {
+            ...this.snapshot,
+            revalidationError: 'ADMIN_READ_FAILURE',
+          };
+          this.listeners.forEach((l) => l(this.snapshot));
+        } else {
+          // Initial load failure: Fail Closed (prevent authorization and render denied screen with bounded error)
+          this.emitState('ADMIN_DENIED', user, null, currentGen, 'ADMIN_READ_FAILURE');
+        }
       } else {
-        // Initial load failure: Fail Closed (prevent authorization and render denied screen with bounded error)
-        this.emitState('ADMIN_DENIED', user, null, currentGen, 'ADMIN_READ_FAILURE');
+        // Unexpected/programming/runtime error: FAIL CLOSED SAFELY immediately
+        // Do NOT label it as ADMIN_READ_FAILURE or preserve the authorized workspace under revalidation
+        this.emitState('ADMIN_DENIED', user, null, currentGen, null);
       }
     }
   }

@@ -12,7 +12,8 @@ import {
   InMemoryAdminIdentityRepository, 
   validateAdminUserData,
   AdminGateResolutionController,
-  FirestoreAdminIdentityRepository
+  FirestoreAdminIdentityRepository,
+  AdminReadError
 } from './adminIdentityService';
 import { validateAccountData } from './accountService';
 import {
@@ -900,6 +901,108 @@ export async function runAdminIdentityConvergenceTests(): Promise<{
     'Assertion 56 [UNIT_LOGIC_TEST]: FirestoreAdminIdentityRepository unconfigured backend throws AdminReadError rather than returning null',
     threwExpected,
     'Unconfigured backend must throw a dedicated AdminReadError to trigger the correct gate state mapping'
+  );
+
+  // Assertion 57 [UNIT_LOGIC_TEST]: same UID + AdminReadError preserves ADMIN_AUTHORIZED + ADMIN_READ_FAILURE
+  const ctrlSameTyped = new AdminGateResolutionController();
+  ctrlSameTyped.mount();
+  let snapSameTyped = ctrlSameTyped.getSnapshot();
+  ctrlSameTyped.subscribe((s) => { snapSameTyped = s; });
+
+  const activeUserSameTyped = { id: 'uid-same-typed', name: 'Authorized', email: 'a@t.com', role: AdminRole.Owner, isActive: true };
+  await ctrlSameTyped.handleAuthEvent({ uid: 'uid-same-typed', email: 'a@t.com' }, async () => activeUserSameTyped);
+
+  // Trigger same-UID revalidation throwing AdminReadError
+  await ctrlSameTyped.handleAuthEvent({ uid: 'uid-same-typed', email: 'a@t.com' }, async () => {
+    throw new AdminReadError('ADMIN_READ_FAILURE');
+  });
+
+  assert(
+    'Assertion 57 [UNIT_LOGIC_TEST]: same UID + AdminReadError preserves ADMIN_AUTHORIZED + ADMIN_READ_FAILURE',
+    snapSameTyped.gateState === 'ADMIN_AUTHORIZED' &&
+    snapSameTyped.adminUser?.id === 'uid-same-typed' &&
+    snapSameTyped.revalidationError === 'ADMIN_READ_FAILURE',
+    'Same-UID AdminReadError must preserve authorized status and current user profile with error flag'
+  );
+
+  // Assertion 58 [UNIT_LOGIC_TEST]: same UID + generic Error does NOT use transient preservation and fails closed
+  const ctrlSameGeneric = new AdminGateResolutionController();
+  ctrlSameGeneric.mount();
+  let snapSameGeneric = ctrlSameGeneric.getSnapshot();
+  ctrlSameGeneric.subscribe((s) => { snapSameGeneric = s; });
+
+  const activeUserSameGeneric = { id: 'uid-same-gen', name: 'Authorized', email: 'a@t.com', role: AdminRole.Owner, isActive: true };
+  await ctrlSameGeneric.handleAuthEvent({ uid: 'uid-same-gen', email: 'a@t.com' }, async () => activeUserSameGeneric);
+
+  // Trigger same-UID revalidation throwing a generic unexpected Error
+  await ctrlSameGeneric.handleAuthEvent({ uid: 'uid-same-gen', email: 'a@t.com' }, async () => {
+    throw new Error('Unexpected runtime DB disconnect');
+  });
+
+  assert(
+    'Assertion 58 [UNIT_LOGIC_TEST]: same UID + generic Error does NOT use transient preservation and fails closed',
+    snapSameGeneric.gateState === 'ADMIN_DENIED' &&
+    snapSameGeneric.adminUser === null &&
+    snapSameGeneric.revalidationError === null,
+    'Generic unexpected errors during revalidation must fail closed and never keep admin workspace authorized'
+  );
+
+  // Assertion 59 [UNIT_LOGIC_TEST]: initial resolution + AdminReadError fails closed
+  const ctrlInitTyped = new AdminGateResolutionController();
+  ctrlInitTyped.mount();
+  let snapInitTyped = ctrlInitTyped.getSnapshot();
+  ctrlInitTyped.subscribe((s) => { snapInitTyped = s; });
+
+  await ctrlInitTyped.handleAuthEvent({ uid: 'uid-init-typed', email: 'a@t.com' }, async () => {
+    throw new AdminReadError('ADMIN_READ_FAILURE');
+  });
+
+  assert(
+    'Assertion 59 [UNIT_LOGIC_TEST]: initial resolution + AdminReadError fails closed',
+    snapInitTyped.gateState === 'ADMIN_DENIED' &&
+    snapInitTyped.adminUser === null &&
+    snapInitTyped.revalidationError === 'ADMIN_READ_FAILURE',
+    'Initial lookup AdminReadError must fail closed and flag the read failure'
+  );
+
+  // Assertion 60 [UNIT_LOGIC_TEST]: initial resolution + generic Error fails closed
+  const ctrlInitGeneric = new AdminGateResolutionController();
+  ctrlInitGeneric.mount();
+  let snapInitGeneric = ctrlInitGeneric.getSnapshot();
+  ctrlInitGeneric.subscribe((s) => { snapInitGeneric = s; });
+
+  await ctrlInitGeneric.handleAuthEvent({ uid: 'uid-init-gen', email: 'a@t.com' }, async () => {
+    throw new Error('Some unexpected compiler bug');
+  });
+
+  assert(
+    'Assertion 60 [UNIT_LOGIC_TEST]: initial resolution + generic Error fails closed',
+    snapInitGeneric.gateState === 'ADMIN_DENIED' &&
+    snapInitGeneric.adminUser === null &&
+    snapInitGeneric.revalidationError === null,
+    'Initial lookup generic Error must fail closed without setting ADMIN_READ_FAILURE'
+  );
+
+  // Assertion 61 [UNIT_LOGIC_TEST]: different UID + generic Error remains discarded
+  const ctrlDiffGeneric = new AdminGateResolutionController();
+  ctrlDiffGeneric.mount();
+  let snapDiffGeneric = ctrlDiffGeneric.getSnapshot();
+  ctrlDiffGeneric.subscribe((s) => { snapDiffGeneric = s; });
+
+  const activeUserDiffGeneric = { id: 'uid-diff-gen-1', name: 'Authorized', email: 'a@t.com', role: AdminRole.Owner, isActive: true };
+  await ctrlDiffGeneric.handleAuthEvent({ uid: 'uid-diff-gen-1', email: 'a@t.com' }, async () => activeUserDiffGeneric);
+
+  // Transition to another UID which throws generic unexpected Error
+  await ctrlDiffGeneric.handleAuthEvent({ uid: 'uid-diff-gen-2', email: 'a@t.com' }, async () => {
+    throw new Error('Database connection issue');
+  });
+
+  assert(
+    'Assertion 61 [UNIT_LOGIC_TEST]: different UID + generic Error remains discarded',
+    snapDiffGeneric.gateState === 'ADMIN_DENIED' &&
+    snapDiffGeneric.adminUser === null &&
+    snapDiffGeneric.revalidationError === null,
+    'Changing UID to one that produces generic error must immediately and permanently clear prior authority'
   );
 
   const passedCount = results.filter(r => r.passed).length;
