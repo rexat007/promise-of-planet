@@ -21,7 +21,7 @@ interface TrainingCourseEditorModalProps {
   course: TrainingCourse | null;
   isOpen: boolean;
   onClose: () => void;
-  onSave: (savedCourse: TrainingCourse) => void;
+  onSave: (savedCourse: TrainingCourse) => Promise<void> | void;
   currentUser: AdminUser;
 }
 
@@ -42,6 +42,8 @@ export function TrainingCourseEditorModal({
   // Save success feedback states
   const [isSaveSuccess, setIsSaveSuccess] = useState(false);
   const [notificationVisible, setNotificationVisible] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     if (course) {
@@ -50,6 +52,8 @@ export function TrainingCourseEditorModal({
       setActiveTab('metadata');
       setIsSaveSuccess(false);
       setNotificationVisible(false);
+      setIsSaving(false);
+      setSaveError(null);
     }
   }, [course]);
 
@@ -86,6 +90,7 @@ export function TrainingCourseEditorModal({
   );
 
   const handleWorkflowTransition = (toState: WorkflowState) => {
+    setSaveError(null);
     try {
       if (!formData.workflowState) return;
       const updatedWorkflow = WorkflowEngine.executeTransition(
@@ -114,21 +119,29 @@ export function TrainingCourseEditorModal({
       }));
       setWorkflowComment('');
     } catch (err: any) {
-      alert(err.message || 'Workflow transition failed');
+      setSaveError(err.message || 'Workflow transition failed');
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canEdit) return;
 
-    const updated: TrainingCourse = {
-      ...(formData as TrainingCourse),
-      updatedAt: new Date().toISOString(),
-    };
+    setSaveError(null);
+    setIsSaving(true);
+    try {
+      const updated: TrainingCourse = {
+        ...(formData as TrainingCourse),
+        updatedAt: new Date().toISOString(),
+      };
 
-    onSave(updated);
-    setIsSaveSuccess(true);
+      await onSave(updated);
+      setIsSaveSuccess(true);
+    } catch (err: any) {
+      setSaveError(err?.message || 'Failed to save training course durably.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const getWorkflowBadge = (state: WorkflowState) => {
@@ -510,22 +523,36 @@ export function TrainingCourseEditorModal({
             </div>
           )}
 
+          {/* Save/Workflow Error Banner */}
+          {saveError && (
+            <div className="p-3.5 mt-4 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-100 dark:border-red-900/60 text-xs text-red-600 dark:text-red-400">
+              <p className="font-bold">{isAr ? 'فشل إتمام العملية:' : 'Operation failed:'}</p>
+              <p className="font-medium text-[11px] mt-1">{saveError}</p>
+            </div>
+          )}
+
           {/* Modal Footer */}
           <div className="flex items-center justify-end gap-3 pt-6 border-t border-gray-100 dark:border-gray-800 shrink-0">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 rounded-xl text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer"
+              disabled={isSaving}
+              className="px-4 py-2 rounded-xl text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50 transition-colors cursor-pointer"
             >
               {isAr ? 'إلغاء' : 'Cancel'}
             </button>
             {canEdit && (
               <button
                 type="submit"
-                className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs sm:text-sm shadow-sm transition-colors cursor-pointer"
+                disabled={isSaving}
+                className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-semibold text-xs sm:text-sm shadow-sm transition-colors cursor-pointer"
               >
-                <Save className="w-4 h-4" />
-                <span>{isAr ? 'حفظ التغييرات' : 'Save Changes'}</span>
+                {isSaving ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                ) : (
+                  <Save className="w-4 h-4" />
+                )}
+                <span>{isSaving ? (isAr ? 'جاري الحفظ...' : 'Saving...') : (isAr ? 'حفظ التغييرات' : 'Save Changes')}</span>
               </button>
             )}
           </div>

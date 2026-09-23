@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { 
   GraduationCap, 
@@ -11,7 +11,7 @@ import { AdminPermission } from '../../types/admin';
 import { WorkflowState } from '../../types/workflow';
 import { AdminAccessService } from '../../services/adminAccess';
 import type { TrainingCourse } from '../../types/training';
-import { MOCK_TRAINING_COURSES } from '../../data/mockTrainingData';
+import { TrainingCourseService } from '../../services/trainingCourseService';
 import { TrainingCourseEditorModal } from './TrainingCourseEditorModal';
 import { getCategoryLabel } from '../content/contentFormatters';
 
@@ -23,7 +23,9 @@ export function AdminTrainingManagement({ currentUser }: AdminTrainingManagement
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
 
-  const [courses, setCourses] = useState<TrainingCourse[]>(MOCK_TRAINING_COURSES);
+  const [courses, setCourses] = useState<TrainingCourse[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Search & Filter States
   const [searchQuery, setSearchQuery] = useState('');
@@ -37,6 +39,24 @@ export function AdminTrainingManagement({ currentUser }: AdminTrainingManagement
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   const canCreate = AdminAccessService.hasPermission(currentUser, AdminPermission.Create);
+
+  const fetchCourses = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const fetched = await TrainingCourseService.listCourses(undefined, true);
+      setCourses(fetched);
+    } catch (err: any) {
+      console.error('Error loading training courses:', err);
+      setLoadError(err?.message || 'Failed to load training courses.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchCourses();
+  }, []);
 
   // Filtered Courses Computation
   const filteredCourses = useMemo(() => {
@@ -79,14 +99,20 @@ export function AdminTrainingManagement({ currentUser }: AdminTrainingManagement
     });
   }, [courses, searchQuery, selectedCategory, selectedLevel, selectedDelivery, selectedWorkflow]);
 
-  const handleSaveCourse = (savedCourse: TrainingCourse) => {
-    setCourses((prev) => {
-      const exists = prev.some((c) => c.id === savedCourse.id);
-      if (exists) {
-        return prev.map((c) => (c.id === savedCourse.id ? savedCourse : c));
-      }
-      return [savedCourse, ...prev];
-    });
+  const handleSaveCourse = async (savedCourse: TrainingCourse): Promise<void> => {
+    try {
+      const persisted = await TrainingCourseService.saveCourse(savedCourse, currentUser);
+      setCourses((prev) => {
+        const exists = prev.some((c) => c.id === persisted.id);
+        if (exists) {
+          return prev.map((c) => (c.id === persisted.id ? persisted : c));
+        }
+        return [persisted, ...prev];
+      });
+    } catch (err: any) {
+      console.error('Error saving training course:', err);
+      throw err;
+    }
   };
 
   const handleCreateNew = () => {
@@ -155,6 +181,49 @@ export function AdminTrainingManagement({ currentUser }: AdminTrainingManagement
     LiveWorkshop: { ar: 'ورشة عمل تفاعلية', en: 'Interactive Workshop' },
     FieldCohort: { ar: 'تدريب ميداني تطبيقي', en: 'Field Practicum Cohort' },
   };
+
+  if (loadError) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-white dark:bg-gray-900 p-5 rounded-2xl border border-gray-200 dark:border-gray-800 shadow-xs">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400">
+              <GraduationCap className="w-6 h-6" />
+            </div>
+            <div>
+              <h1 className="text-xl font-extrabold text-gray-900 dark:text-white tracking-tight">
+                {isAr ? 'إدارة البرامج والتدريب البيئي' : 'Training & Courses Management'}
+              </h1>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-12 text-center space-y-4">
+          <p className="text-red-500 font-medium">
+            {isAr ? 'حدث خطأ أثناء تحميل البرامج التدريبية.' : 'An error occurred while loading training courses.'}
+          </p>
+          <p className="text-xs text-gray-500 dark:text-gray-400 max-w-sm mx-auto">{loadError}</p>
+          <button
+            onClick={fetchCourses}
+            className="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs transition-colors cursor-pointer animate-none"
+          >
+            {isAr ? 'إعادة المحاولة' : 'Retry'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center p-24 space-y-3">
+        <div className="w-10 h-10 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
+          {isAr ? 'جاري تحميل البرامج التدريبية...' : 'Loading training courses...'}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -281,8 +350,20 @@ export function AdminTrainingManagement({ currentUser }: AdminTrainingManagement
         </div>
       </div>
 
-      {/* Main Content Presentation (<1024px Compact Cards, >=1024px Management Table) */}
-      {filteredCourses.length === 0 ? (
+      {/* Main Content Presentation (<1280px Compact Cards, >=1280px Management Table) */}
+      {courses.length === 0 ? (
+        <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-12 text-center space-y-3">
+          <div className="w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-400 flex items-center justify-center mx-auto">
+            <GraduationCap className="w-6 h-6" />
+          </div>
+          <h3 className="text-base font-bold text-gray-800 dark:text-gray-200">
+            {isAr ? 'لا توجد برامج تدريبية مسجلة في النظام' : 'No training courses registered in system'}
+          </h3>
+          <p className="text-xs text-gray-500 dark:text-gray-400 max-w-sm mx-auto">
+            {isAr ? 'لم يتم إضافة أي برامج تدريبية بعد في النظام.' : 'No training courses have been added to the system yet.'}
+          </p>
+        </div>
+      ) : filteredCourses.length === 0 ? (
         <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-12 text-center space-y-3">
           <div className="w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-400 flex items-center justify-center mx-auto">
             <GraduationCap className="w-6 h-6" />
@@ -417,16 +498,18 @@ export function AdminTrainingManagement({ currentUser }: AdminTrainingManagement
       )}
 
       {/* Course Editor Modal */}
-      <TrainingCourseEditorModal
-        course={activeCourse}
-        isOpen={isModalOpen}
-        onClose={() => {
-          setIsModalOpen(false);
-          setActiveCourse(null);
-        }}
-        onSave={handleSaveCourse}
-        currentUser={currentUser}
-      />
+      {isModalOpen && (
+        <TrainingCourseEditorModal
+          course={activeCourse}
+          isOpen={isModalOpen}
+          onClose={() => {
+            setIsModalOpen(false);
+            setActiveCourse(null);
+          }}
+          onSave={handleSaveCourse}
+          currentUser={currentUser}
+        />
+      )}
 
     </div>
   );
