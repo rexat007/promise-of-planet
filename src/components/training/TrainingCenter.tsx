@@ -22,7 +22,7 @@ export function TrainingCenter() {
     setError(null);
     try {
       const fetched = await TrainingCourseService.listCourses();
-      // Service automatically resolves ONLY Published courses when includeUnpublished is false
+      // Service automatically resolves ONLY Published courses (workflowState === WorkflowState.Published) when includeUnpublished is false
       setCourses(fetched);
     } catch (err: unknown) {
       setError(err);

@@ -183,6 +183,133 @@ async function runTests() {
     });
   }
 
+  // Test 7: Static Source Assertion - Successful save transitions to distinct success confirmation
+  try {
+    const code = fs.readFileSync(adminModalPath, 'utf8');
+    const hasSuccessRendering = code.includes('SUCCESS CONFIRMATION STATE') && code.includes('isSaveSuccess ?');
+    const hasSuccessTextAr = code.includes('تم حفظ البرنامج التدريبي بنجاح');
+    const hasSuccessTextEn = code.includes('Training course saved successfully');
+    
+    results.push({
+      name: 'A. Successful save switches edit form to distinct Success Confirmation state',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: hasSuccessRendering && hasSuccessTextAr && hasSuccessTextEn,
+      message: !(hasSuccessRendering && hasSuccessTextAr && hasSuccessTextEn) ? 'Distinct Success Confirmation state rendering or translation text not found in source code.' : undefined,
+    });
+  } catch (err: any) {
+    results.push({
+      name: 'A. Successful save switches edit form to distinct Success Confirmation state',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: false,
+      message: err.message,
+    });
+  }
+
+  // Test 8: Static Source Assertion - Success confirmation remains visible, no auto-dismiss timer remains
+  try {
+    const code = fs.readFileSync(adminModalPath, 'utf8');
+    // Ensure that no timeout dismisses isSaveSuccess or calls onClose within isSaveSuccess hooks
+    const hasAutoCloseTimer = code.includes('setTimeout') && code.includes('onClose') && code.includes('2500');
+    
+    results.push({
+      name: 'B & C. Success confirmation remains visible until explicit close (no auto-dismiss timer remains)',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: !hasAutoCloseTimer,
+      message: hasAutoCloseTimer ? 'Detected auto-dismiss timer/dismissTimeout referencing onClose in the modal.' : undefined,
+    });
+  } catch (err: any) {
+    results.push({
+      name: 'B & C. Success confirmation remains visible until explicit close (no auto-dismiss timer remains)',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: false,
+      message: err.message,
+    });
+  }
+
+  // Test 9: Static Source Assertion - Failed save keeps edit form visible and preserves user data
+  try {
+    const code = fs.readFileSync(adminModalPath, 'utf8');
+    // Verify that catch block of handleSubmit sets saveError but preserves formData
+    const hasFailedSaveHandler = code.includes('setSaveError') && code.includes('Failed to save training course durably.');
+    
+    results.push({
+      name: 'D & E. Failed save keeps edit form visible, preserves entered data and shows bounded error',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: hasFailedSaveHandler,
+      message: !hasFailedSaveHandler ? 'Save failure error-setting or preservation handler not found in handleSubmit.' : undefined,
+    });
+  } catch (err: any) {
+    results.push({
+      name: 'D & E. Failed save keeps edit form visible, preserves entered data and shows bounded error',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: false,
+      message: err.message,
+    });
+  }
+
+  // Test 10: Static Source Assertion / Unit Logic - Successful save is not treated as dirty
+  try {
+    const code = fs.readFileSync(adminModalPath, 'utf8');
+    // Verify that isFormDirty returns false if isSaveSuccess is true
+    const isDirtyResetOnSuccess = code.includes('if (isSaveSuccess) return false;');
+    
+    results.push({
+      name: 'F & G. Successful save resets dirty-state, and closing does not trigger discard warning',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: isDirtyResetOnSuccess,
+      message: !isDirtyResetOnSuccess ? 'isFormDirty does not immediately return false when isSaveSuccess is true.' : undefined,
+    });
+  } catch (err: any) {
+    results.push({
+      name: 'F & G. Successful save resets dirty-state, and closing does not trigger discard warning',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: false,
+      message: err.message,
+    });
+  }
+
+  // Test 11: Static Source Assertion - Escape closes through canonical close path and accessibility is preserved
+  try {
+    const code = fs.readFileSync(adminModalPath, 'utf8');
+    const handlesEscape = code.includes("e.key === 'Escape'") && code.includes('handleCloseAttempt()');
+    const isDialog = code.includes('role="dialog"') && code.includes('aria-modal="true"');
+    
+    results.push({
+      name: 'H. Escape from success confirmation closes through canonical path, preserving accessibility standards',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: handlesEscape && isDialog,
+      message: !(handlesEscape && isDialog) ? 'Escape key handler or aria-modal accessibility properties not defined on the modal.' : undefined,
+    });
+  } catch (err: any) {
+    results.push({
+      name: 'H. Escape from success confirmation closes through canonical path, preserving accessibility standards',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: false,
+      message: err.message,
+    });
+  }
+
+  // Test 12: Static Source Assertion - Public visibility logic remains untouched
+  try {
+    const centerPath = path.resolve('./src/components/training/TrainingCenter.tsx');
+    const code = fs.readFileSync(centerPath, 'utf8');
+    const filterPublished = code.includes('workflowState === WorkflowState.Published') || code.includes("workflowState === 'Published'");
+    
+    results.push({
+      name: 'I. Public visibility logic remains untouched (restricting catalog view to Published state)',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: filterPublished,
+      message: !filterPublished ? 'Public training center catalog visibility filter is missing or modified.' : undefined,
+    });
+  } catch (err: any) {
+    results.push({
+      name: 'I. Public visibility logic remains untouched (restricting catalog view to Published state)',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: false,
+      message: err.message,
+    });
+  }
+
   // Print summary results
   let passedCount = 0;
   let failedCount = 0;

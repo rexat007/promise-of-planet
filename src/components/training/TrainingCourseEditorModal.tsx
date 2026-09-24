@@ -41,11 +41,11 @@ export function TrainingCourseEditorModal({
 
   // Save success feedback states
   const [isSaveSuccess, setIsSaveSuccess] = useState(false);
-  const [notificationVisible, setNotificationVisible] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const isFormDirty = (): boolean => {
+    if (isSaveSuccess) return false;
     if (!course) return false;
     
     const keysToCompare: (keyof TrainingCourse)[] = [
@@ -202,33 +202,20 @@ export function TrainingCourseEditorModal({
       }
       setWorkflowComment('');
       setIsSaveSuccess(false);
-      setNotificationVisible(false);
       setIsSaving(false);
       setSaveError(null);
     }
   }, [course]);
 
+  // Success confirmation state remains visible until the administrator explicitly closes/returns.
+
+  // Move focus to success heading once on success
   useEffect(() => {
     if (isSaveSuccess) {
-      const animFrame = requestAnimationFrame(() => {
-        setNotificationVisible(true);
-      });
-      const dismissTimer = setTimeout(() => {
-        setNotificationVisible(false);
-        const cleanupTimer = setTimeout(() => {
-          setIsSaveSuccess(false);
-          onClose();
-        }, 300);
-        return () => clearTimeout(cleanupTimer);
-      }, 2500);
-      return () => {
-        cancelAnimationFrame(animFrame);
-        clearTimeout(dismissTimer);
-      };
-    } else {
-      setNotificationVisible(false);
+      const heading = document.getElementById('course-editor-modal-title');
+      if (heading) heading.focus();
     }
-  }, [isSaveSuccess, onClose]);
+  }, [isSaveSuccess]);
 
   if (!isOpen || !course || !formData) return null;
 
@@ -321,8 +308,74 @@ export function TrainingCourseEditorModal({
     >
       <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         
-        {/* Modal Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-950/50 shrink-0">
+        {isSaveSuccess ? (
+          /* SUCCESS CONFIRMATION STATE */
+          <div className="flex flex-col flex-1 items-center justify-center p-8 text-center space-y-6 overflow-y-auto bg-white dark:bg-gray-900">
+            <div className="p-4 rounded-full bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400">
+              <CheckCircle2 className="w-12 h-12 animate-bounce" />
+            </div>
+            <div className="space-y-2">
+              <h2 
+                id="course-editor-modal-title" 
+                tabIndex={-1}
+                className="text-2xl font-extrabold text-gray-900 dark:text-white outline-hidden"
+              >
+                {isAr ? 'تم حفظ البرنامج التدريبي بنجاح' : 'Training course saved successfully'}
+              </h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400 font-medium">
+                {isAr 
+                  ? 'تم تحديث سجل البرنامج التدريبي وتخزينه بشكل دائم وآمن.' 
+                  : 'The training course record has been successfully updated and stored securely.'}
+              </p>
+            </div>
+            
+            {/* Saved Course Summary */}
+            <div className="w-full max-w-md p-4 rounded-xl bg-gray-50 dark:bg-gray-950/50 border border-gray-100 dark:border-gray-800 text-left space-y-3">
+              <div className="space-y-1">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-gray-400 dark:text-gray-500">
+                  {isAr ? 'اسم البرنامج' : 'Course Title'}
+                </span>
+                <p className="text-sm font-semibold text-gray-800 dark:text-gray-100">
+                  {isAr ? formData.titleAr : formData.titleEn}
+                </p>
+              </div>
+              
+              <div className="flex justify-between items-center pt-2 border-t border-gray-200/60 dark:border-gray-800/60">
+                <div className="space-y-1">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-gray-400 dark:text-gray-500">
+                    {isAr ? 'حالة سير العمل' : 'Workflow State'}
+                  </span>
+                  <p className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                    {formData.workflowState}
+                  </p>
+                </div>
+                <div className="space-y-1 text-right">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-gray-400 dark:text-gray-500">
+                    {isAr ? 'اللغة' : 'Language'}
+                  </span>
+                  <p className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                    {formData.language === 'ar' ? 'العربية' : 'English'}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Close / Return Button */}
+            <div className="pt-4">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-6 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-sm shadow-sm transition-colors cursor-pointer"
+              >
+                {isAr ? 'العودة إلى إدارة التدريب' : 'Return to Training Management'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          /* EDIT FORM STATE */
+          <>
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-950/50 shrink-0">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-xl bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400">
               <GraduationCap className="w-5 h-5" />
@@ -345,15 +398,7 @@ export function TrainingCourseEditorModal({
           </button>
         </div>
 
-        {/* Success Banner (Within Modal Layer) */}
-        {isSaveSuccess && (
-          <div className={`mx-6 mt-4 p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200 flex items-center gap-3 transition-all duration-300 ${notificationVisible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'}`}>
-            <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-            <span className="text-sm font-semibold">
-              {isAr ? 'تم حفظ التحديثات بنجاح!' : 'Training course saved successfully!'}
-            </span>
-          </div>
-        )}
+        {/* Success Banner is removed since the entire form transitions to success confirmation */}
 
         {/* Tabs */}
         <div className="flex border-b border-gray-100 dark:border-gray-800 px-6 gap-6 bg-white dark:bg-gray-900 shrink-0">
@@ -711,6 +756,8 @@ export function TrainingCourseEditorModal({
             )}
           </div>
         </form>
+      </>
+    )}
 
       </div>
     </div>
