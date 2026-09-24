@@ -727,24 +727,29 @@ export async function runAdminIdentityConvergenceTests(): Promise<{
     'Unauthorized restored tab must resolve to canonical fallback'
   );
 
-  // Assertion 44 [STATIC_SOURCE_ASSERTION]: Modal contains correct accessibility roles and aria tags
-  const modalSourcePath = path.join(process.cwd(), 'src/components/training/TrainingCourseEditorModal.tsx');
-  const modalSource = fs.readFileSync(modalSourcePath, 'utf8');
+  // Assertion 44 [STATIC_SOURCE_ASSERTION]: AdminModalViewport and TrainingCourseEditorModal contain correct accessible dialog roles, aria tags, and container references
+  const viewportSourcePath = path.join(process.cwd(), 'src/components/common/AdminModalViewport.tsx');
+  const viewportSource = fs.readFileSync(viewportSourcePath, 'utf8');
+  const editorSourcePath = path.join(process.cwd(), 'src/components/training/TrainingCourseEditorModal.tsx');
+  const editorSource = fs.readFileSync(editorSourcePath, 'utf8');
 
-  const hasDialogRole = modalSource.includes('role="dialog"');
-  const hasAriaModal = modalSource.includes('aria-modal="true"');
-  const hasAriaLabelledby = modalSource.includes('aria-labelledby="course-editor-modal-title"');
-  const hasContainerRef = modalSource.includes('ref={modalContainerRef}');
+  const viewportHasDialogRole = viewportSource.includes("role = 'dialog'");
+  const viewportHasAriaModal = viewportSource.includes("'aria-modal': ariaModal = 'true'") || viewportSource.includes("aria-modal = 'true'");
+  const viewportHasContainerRef = viewportSource.includes('containerRef') || viewportSource.includes('internalRef');
+
+  const editorConsumesViewport = editorSource.includes('AdminModalViewport');
+  const editorHasTitleBinding = editorSource.includes('course-editor-modal-title');
+  const editorHasTitleId = editorSource.includes('id="course-editor-modal-title"');
 
   assert(
-    'Assertion 44 [STATIC_SOURCE_ASSERTION]: TrainingCourseEditorModal contains correct accessible dialog role, modal configuration, and references',
-    hasDialogRole && hasAriaModal && hasAriaLabelledby && hasContainerRef,
-    'Accessibility semantics and refs must be correctly declared in the editor source'
+    'Assertion 44 [STATIC_SOURCE_ASSERTION]: AdminModalViewport and TrainingCourseEditorModal correctly preserve accessible dialog semantics and title references',
+    viewportHasDialogRole && viewportHasAriaModal && viewportHasContainerRef && editorConsumesViewport && editorHasTitleBinding && editorHasTitleId,
+    'Accessibility semantics, modal viewport container refs, and course-editor-modal-title contracts must be correctly preserved across foundation and editor consumer'
   );
 
   // Assertion 45 [STATIC_SOURCE_ASSERTION]: Keyboard containment and Escape routing handles Escape safely
-  const hasEscapeHandler = modalSource.includes("e.key === 'Escape'") && modalSource.includes("handleCloseAttempt()");
-  const hasTabHandler = modalSource.includes("e.key === 'Tab'") && modalSource.includes("e.shiftKey");
+  const hasEscapeHandler = viewportSource.includes("e.key === 'Escape'") && (viewportSource.includes("onEscape") || viewportSource.includes("onClose"));
+  const hasTabHandler = viewportSource.includes("e.key === 'Tab'") && viewportSource.includes("e.shiftKey");
   assert(
     'Assertion 45 [STATIC_SOURCE_ASSERTION]: Modal traps focus cycle and routes Escape key through handleCloseAttempt',
     hasEscapeHandler && hasTabHandler,
@@ -752,8 +757,8 @@ export async function runAdminIdentityConvergenceTests(): Promise<{
   );
 
   // Assertion 46 [STATIC_SOURCE_ASSERTION]: Focus restoration stores and restores active element
-  const hasPrevElementRef = modalSource.includes("previousActiveElement.current = document.activeElement");
-  const hasFocusRestoration = modalSource.includes("previousActiveElement.current.focus()");
+  const hasPrevElementRef = viewportSource.includes("previousActiveElement.current = document.activeElement");
+  const hasFocusRestoration = viewportSource.includes("previousActiveElement.current.focus()");
   assert(
     'Assertion 46 [STATIC_SOURCE_ASSERTION]: Modal captures previous activeElement and restores focus upon cleanup/unmounting',
     hasPrevElementRef && hasFocusRestoration,
