@@ -172,10 +172,7 @@ export const UserEditorModal: React.FC<UserEditorModalProps> = ({
       aria-modal="true"
       aria-labelledby="user-editor-title"
     >
-      <div 
-        ref={modalContainerRef}
-        className="bg-white dark:bg-gray-900 rounded-2xl w-full border border-gray-200 dark:border-gray-800 shadow-2xl overflow-hidden my-auto pop-motion-dialog max-h-[90vh] flex flex-col"
-      >
+      <div className="flex flex-col flex-1 min-h-0 bg-white dark:bg-gray-900">
         {/* Modal Header */}
         <div className="p-4 sm:p-6 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between bg-gray-50/50 dark:bg-gray-850/50 shrink-0">
           <div className="flex items-center gap-3">

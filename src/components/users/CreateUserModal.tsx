@@ -91,12 +91,9 @@ export const CreateUserModal: React.FC<CreateUserModalProps> = ({
       aria-modal="true"
       aria-labelledby="create-user-title"
     >
-      <div 
-        ref={modalContainerRef}
-        className="bg-white dark:bg-gray-900 rounded-2xl w-full border border-gray-200 dark:border-gray-800 shadow-2xl overflow-hidden my-auto pop-motion-dialog flex flex-col max-h-[calc(100vh-2rem)]"
-      >
+      <div className="flex flex-col flex-1 min-h-0 bg-white dark:bg-gray-900">
         {/* Header */}
-        <div className="p-4 sm:p-6 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between bg-gray-50/50 dark:bg-gray-850/50">
+        <div className="p-4 sm:p-6 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between bg-gray-50/50 dark:bg-gray-850/50 shrink-0">
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 rounded-xl bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-400 flex items-center justify-center shrink-0 border border-emerald-200 dark:border-emerald-800">
               <UserPlus className="w-5 h-5" />
@@ -121,7 +118,7 @@ export const CreateUserModal: React.FC<CreateUserModalProps> = ({
         </div>
 
         {/* Demo Identity Disclaimer */}
-        <div className="px-4 sm:px-6 pt-4 pb-2">
+        <div className="px-4 sm:px-6 pt-4 pb-2 shrink-0">
           <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-850/60 rounded-xl p-3 flex items-start gap-2.5 text-xs text-amber-900 dark:text-amber-300">
             <Info className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
             <p>
@@ -133,7 +130,7 @@ export const CreateUserModal: React.FC<CreateUserModalProps> = ({
         </div>
 
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-4 sm:p-6 space-y-4">
+        <form onSubmit={handleSubmit} className="p-4 sm:p-6 space-y-4 flex-1 min-h-0 overflow-y-auto">
           {error && (
             <div className="bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 p-3 rounded-xl text-xs flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />

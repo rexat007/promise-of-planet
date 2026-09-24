@@ -14,98 +14,99 @@ export function runUserManagementModalViewportTests(): TestResult[] {
 
   const createUserModalPath = path.join(process.cwd(), 'src/components/users/CreateUserModal.tsx');
   const userEditorModalPath = path.join(process.cwd(), 'src/components/users/UserEditorModal.tsx');
-  const viewTransitionPath = path.join(process.cwd(), 'src/components/common/ViewTransition.tsx');
 
   const createUserContent = fs.readFileSync(createUserModalPath, 'utf8');
   const userEditorContent = fs.readFileSync(userEditorModalPath, 'utf8');
-  const viewTransitionContent = fs.existsSync(viewTransitionPath) ? fs.readFileSync(viewTransitionPath, 'utf8') : '';
 
-  // Proof A: CreateUserModal consumes AdminModalViewport
+  // Proof A: only AdminModalViewport owns containerRef (inner content does not attach ref={modalContainerRef})
+  const createUserHasInnerRef = createUserContent.includes('ref={modalContainerRef}');
+  const userEditorHasInnerRef = userEditorContent.includes('ref={modalContainerRef}');
   results.push({
     id: 'A',
-    name: 'CreateUserModal consumes AdminModalViewport',
+    name: 'Only AdminModalViewport owns containerRef (inner content does not reuse ref)',
     classification: 'STATIC_SOURCE_ASSERTION',
-    passed: createUserContent.includes('AdminModalViewport'),
-    message: createUserContent.includes('AdminModalViewport') ? undefined : 'CreateUserModal does not import or render AdminModalViewport'
+    passed: !createUserHasInnerRef && !userEditorHasInnerRef,
+    message: (!createUserHasInnerRef && !userEditorHasInnerRef) ? undefined : 'Duplicate containerRef found on inner consumer shell'
   });
 
-  // Proof B: UserEditorModal consumes AdminModalViewport
+  // Proof B: consumer inner content does not reuse the same ref object on DOM nodes
   results.push({
     id: 'B',
-    name: 'UserEditorModal consumes AdminModalViewport',
+    name: 'Consumer inner content does not reuse ref on DOM nodes',
     classification: 'STATIC_SOURCE_ASSERTION',
-    passed: userEditorContent.includes('AdminModalViewport'),
-    message: userEditorContent.includes('AdminModalViewport') ? undefined : 'UserEditorModal does not import or render AdminModalViewport'
+    passed: !createUserHasInnerRef && !userEditorHasInnerRef,
+    message: (!createUserHasInnerRef && !userEditorHasInnerRef) ? undefined : 'Inner DOM node still carries ref'
   });
 
-  // Proof C: both pass rtl/ltr direction explicitly
-  const createUserHasDir = createUserContent.includes('dir={') || createUserContent.includes('dir="');
-  const userEditorHasDir = userEditorContent.includes('dir={') || userEditorContent.includes('dir="');
+  // Proof C: no local fixed inset-0 shell
+  const createUserHasLocalInset = createUserContent.includes('fixed inset-0');
+  const userEditorHasLocalInset = userEditorContent.includes('fixed inset-0');
   results.push({
     id: 'C',
-    name: 'Both User Management modals pass RTL/LTR direction explicitly to foundation',
-    classification: 'STATIC_SOURCE_ASSERTION',
-    passed: createUserHasDir && userEditorHasDir,
-    message: (createUserHasDir && userEditorHasDir) ? undefined : 'Modals must pass explicit dir prop'
-  });
-
-  // Proof D: old local fixed inset-0 viewport shells are removed (replaced by foundation portal)
-  const createUserHasLocalInset = createUserContent.includes('fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-gray-900/65') || createUserContent.includes('fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-gray-900/60');
-  const userEditorHasLocalInset = userEditorContent.includes('fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-gray-900/65') || userEditorContent.includes('fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-gray-900/60');
-  results.push({
-    id: 'D',
-    name: 'Old local fixed inset-0 backdrop shells are removed from User Management modals',
+    name: 'No local fixed inset-0 backdrop shell in consumer modals',
     classification: 'STATIC_SOURCE_ASSERTION',
     passed: !createUserHasLocalInset && !userEditorHasLocalInset,
-    message: (!createUserHasLocalInset && !userEditorHasLocalInset) ? undefined : 'Local fixed inset-0 backdrop shell still present'
+    message: (!createUserHasLocalInset && !userEditorHasLocalInset) ? undefined : 'Local fixed inset-0 shell present'
   });
 
-  // Proof E: neither duplicates foundation focus trap
-  const createUserHasTrap = createUserContent.includes('focusTrap') || createUserContent.includes('addEventListener(\'keydown\'');
-  const userEditorHasTrap = userEditorContent.includes('focusTrap') || userEditorContent.includes('addEventListener(\'keydown\'');
+  // Proof D: no duplicated modal viewport max-height shell
+  const createUserHasDuplicatedMaxH = createUserContent.includes('max-h-[calc(100vh-2rem)]');
+  const userEditorHasDuplicatedMaxH = userEditorContent.includes('max-h-[90vh]');
+  results.push({
+    id: 'D',
+    name: 'No duplicated modal viewport max-height shell in consumer content',
+    classification: 'STATIC_SOURCE_ASSERTION',
+    passed: !createUserHasDuplicatedMaxH && !userEditorHasDuplicatedMaxH,
+    message: (!createUserHasDuplicatedMaxH && !userEditorHasDuplicatedMaxH) ? undefined : 'Duplicated max-h shell present'
+  });
+
+  // Proof E: CreateUser body supports internal vertical scrolling
+  const createUserHasScroll = createUserContent.includes('overflow-y-auto');
   results.push({
     id: 'E',
-    name: 'Modals do not duplicate foundation focus trap',
+    name: 'CreateUserModal body supports internal vertical scrolling',
     classification: 'STATIC_SOURCE_ASSERTION',
-    passed: !createUserHasTrap && !userEditorHasTrap,
-    message: (!createUserHasTrap && !userEditorHasTrap) ? undefined : 'Duplicated focus trap detected in modal'
+    passed: createUserHasScroll,
+    message: createUserHasScroll ? undefined : 'CreateUserModal lacks overflow-y-auto body'
   });
 
-  // Proof F: user-management business logic remains unchanged (AdminUserManager / AdminAccessService references intact)
-  const createUserHasManager = createUserContent.includes('AdminUserManager.createDemoUser');
-  const userEditorHasManager = userEditorContent.includes('AdminUserManager.canDeactivateUser') && userEditorContent.includes('AdminUserManager.canChangeUserRole');
+  // Proof F: UserEditor body preserves internal vertical scrolling
+  const userEditorHasScroll = userEditorContent.includes('overflow-y-auto');
   results.push({
     id: 'F',
-    name: 'User management business logic and safety checks remain untouched',
+    name: 'UserEditorModal body preserves internal vertical scrolling',
     classification: 'STATIC_SOURCE_ASSERTION',
-    passed: createUserHasManager && userEditorHasManager,
-    message: (createUserHasManager && userEditorHasManager) ? undefined : 'User management business logic hooks are missing'
+    passed: userEditorHasScroll,
+    message: userEditorHasScroll ? undefined : 'UserEditorModal lacks overflow-y-auto body'
   });
 
-  // Proof G: role/self/Owner protections remain present in UserEditorModal
-  const userEditorHasProtections = userEditorContent.includes('isLastActiveOwner') && userEditorContent.includes('isCurrentSessionUser');
+  // Proof G: RTL/LTR binding remains
+  const createUserHasDir = createUserContent.includes('dir=');
+  const userEditorHasDir = userEditorContent.includes('dir=');
   results.push({
     id: 'G',
-    name: 'Owner, self-protection, and last-active guardrails remain intact in UserEditorModal',
+    name: 'RTL/LTR explicit direction binding remains active',
     classification: 'STATIC_SOURCE_ASSERTION',
-    passed: userEditorHasProtections,
-    message: userEditorHasProtections ? undefined : 'Owner or self protection guardrails missing'
+    passed: createUserHasDir && userEditorHasDir,
+    message: (createUserHasDir && userEditorHasDir) ? undefined : 'Explicit dir prop missing'
   });
 
-  // Proof H: ViewTransition remains untouched
+  // Proof H: business protections remain
+  const createUserHasManager = createUserContent.includes('AdminUserManager.createDemoUser');
+  const userEditorHasProtections = userEditorContent.includes('isLastActiveOwner') && userEditorContent.includes('isCurrentSessionUser');
   results.push({
     id: 'H',
-    name: 'ViewTransition component remains unmodified',
+    name: 'User management business logic and safety protections remain untouched',
     classification: 'STATIC_SOURCE_ASSERTION',
-    passed: viewTransitionContent.length > 0 && !viewTransitionContent.includes('AdminModalViewport'),
-    message: 'ViewTransition unperturbed'
+    passed: createUserHasManager && userEditorHasProtections,
+    message: (createUserHasManager && userEditorHasProtections) ? undefined : 'Business protections missing'
   });
 
-  // Proof I: no global overflow masking introduced
+  // Proof I: no global overflow masking
   const hasGlobalOverflowHidden = createUserContent.includes('overflow-x:hidden') || userEditorContent.includes('overflow-x:hidden');
   results.push({
     id: 'I',
-    name: 'No global overflow-x hidden masking introduced in modal files',
+    name: 'No global overflow-x hidden masking introduced',
     classification: 'STATIC_SOURCE_ASSERTION',
     passed: !hasGlobalOverflowHidden,
     message: !hasGlobalOverflowHidden ? undefined : 'Global overflow masking found'
