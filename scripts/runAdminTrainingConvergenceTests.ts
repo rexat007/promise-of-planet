@@ -289,21 +289,29 @@ async function runTests() {
     });
   }
 
-  // Test 12: Static Source Assertion - Public visibility logic remains untouched
+  // Test 12: Static Source Assertion - Public visibility logic remains untouched (TrainingCenter calls listCourses default)
   try {
     const centerPath = path.resolve('./src/components/training/TrainingCenter.tsx');
     const code = fs.readFileSync(centerPath, 'utf8');
-    const filterPublished = code.includes('workflowState === WorkflowState.Published') || code.includes("workflowState === 'Published'");
     
+    // TrainingCenter.tsx must call listCourses without explicitly setting includeUnpublished to true.
+    const callsListCourses = code.includes('TrainingCourseService.listCourses(');
+    const passesTrue = code.includes('TrainingCourseService.listCourses(true)') || code.includes('TrainingCourseService.listCourses(undefined, true)');
+    
+    // Also, verify in trainingCourseService.ts that the default is false
+    const servicePath = path.resolve('./src/services/trainingCourseService.ts');
+    const serviceCode = fs.readFileSync(servicePath, 'utf8');
+    const defaultIsFalse = serviceCode.includes('listCourses(classification?: TrainingClassification, includeUnpublished = false)');
+
     results.push({
-      name: 'I. Public visibility logic remains untouched (restricting catalog view to Published state)',
+      name: 'I. Public visibility logic remains untouched (TrainingCenter calls listCourses without includeUnpublished=true)',
       classification: 'STATIC_SOURCE_ASSERTION',
-      passed: filterPublished,
-      message: !filterPublished ? 'Public training center catalog visibility filter is missing or modified.' : undefined,
+      passed: callsListCourses && !passesTrue && defaultIsFalse,
+      message: !(callsListCourses && !passesTrue && defaultIsFalse) ? 'TrainingCenter calls listCourses incorrectly, or service default is not false' : undefined,
     });
   } catch (err: any) {
     results.push({
-      name: 'I. Public visibility logic remains untouched (restricting catalog view to Published state)',
+      name: 'I. Public visibility logic remains untouched (TrainingCenter calls listCourses without includeUnpublished=true)',
       classification: 'STATIC_SOURCE_ASSERTION',
       passed: false,
       message: err.message,
