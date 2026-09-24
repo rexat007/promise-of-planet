@@ -289,7 +289,7 @@ async function runTests() {
     });
   }
 
-  // Test 12: Static Source Assertion - Public visibility logic remains untouched (TrainingCenter calls listCourses default)
+  // Test 12: Static Source Assertion - Public visibility logic remains untouched (TrainingCenter calls listCourses default and service restricts to Published)
   try {
     const centerPath = path.resolve('./src/components/training/TrainingCenter.tsx');
     const code = fs.readFileSync(centerPath, 'utf8');
@@ -298,20 +298,25 @@ async function runTests() {
     const callsListCourses = code.includes('TrainingCourseService.listCourses(');
     const passesTrue = code.includes('TrainingCourseService.listCourses(true)') || code.includes('TrainingCourseService.listCourses(undefined, true)');
     
-    // Also, verify in trainingCourseService.ts that the default is false
+    // Also, verify in trainingCourseService.ts that the default is false and the executable query restricts to Published
     const servicePath = path.resolve('./src/services/trainingCourseService.ts');
     const serviceCode = fs.readFileSync(servicePath, 'utf8');
     const defaultIsFalse = serviceCode.includes('listCourses(classification?: TrainingClassification, includeUnpublished = false)');
+    const publishedQueryExists =
+      serviceCode.includes('if (!includeUnpublished)') &&
+      serviceCode.includes("where('workflowState', '==', WorkflowState.Published)");
 
     results.push({
-      name: 'I. Public visibility logic remains untouched (TrainingCenter calls listCourses without includeUnpublished=true)',
+      name: 'I. Public visibility logic remains untouched (TrainingCenter calls listCourses without includeUnpublished=true, service defaults to false with Published query)',
       classification: 'STATIC_SOURCE_ASSERTION',
-      passed: callsListCourses && !passesTrue && defaultIsFalse,
-      message: !(callsListCourses && !passesTrue && defaultIsFalse) ? 'TrainingCenter calls listCourses incorrectly, or service default is not false' : undefined,
+      passed: callsListCourses && !passesTrue && defaultIsFalse && publishedQueryExists,
+      message: !(callsListCourses && !passesTrue && defaultIsFalse && publishedQueryExists)
+        ? 'TrainingCenter calls listCourses incorrectly, service default is not false, or Published query is missing/modified'
+        : undefined,
     });
   } catch (err: any) {
     results.push({
-      name: 'I. Public visibility logic remains untouched (TrainingCenter calls listCourses without includeUnpublished=true)',
+      name: 'I. Public visibility logic remains untouched (TrainingCenter calls listCourses without includeUnpublished=true, service defaults to false with Published query)',
       classification: 'STATIC_SOURCE_ASSERTION',
       passed: false,
       message: err.message,
