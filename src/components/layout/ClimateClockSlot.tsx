@@ -1,24 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { GlobalSettingsService } from '../../services/globalSettingsService';
 
-// Patch document.getElementById safely once to catch unmounted climate-clock widgets from widget-v2.js
-if (typeof window !== 'undefined') {
-  const originalGetElementById = document.getElementById.bind(document);
-  document.getElementById = function (id: string) {
-    const el = originalGetElementById(id);
-    if (!el && typeof id === 'string' && id.startsWith('ccw-container-')) {
-      return {
-        clientWidth: 0,
-        clientHeight: 0,
-        style: {},
-        getAttribute: () => null,
-        setAttribute: () => {},
-      } as unknown as HTMLElement;
-    }
-    return el;
-  };
-}
-
 export function ClimateClockSlot() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isEnabled, setIsEnabled] = useState(() => GlobalSettingsService.getSettings().climateClockEnabled);
