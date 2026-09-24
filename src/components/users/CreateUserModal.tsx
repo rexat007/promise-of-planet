@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { 
   X, 
@@ -15,6 +15,7 @@ import { AdminRole } from '../../types/admin';
 import type { AdminUser } from '../../types/admin';
 import { AdminUserManager } from '../../services/adminUserManager';
 import { AdminAccessService } from '../../services/adminAccess';
+import { AdminModalViewport } from '../common/AdminModalViewport';
 import { 
   getRoleLabel, 
   getRoleDescription,
@@ -36,6 +37,7 @@ export const CreateUserModal: React.FC<CreateUserModalProps> = ({
 }) => {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
+  const modalContainerRef = useRef<HTMLDivElement>(null);
 
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -77,15 +79,21 @@ export const CreateUserModal: React.FC<CreateUserModalProps> = ({
   };
 
   return (
-    <div 
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-gray-900/60 backdrop-blur-xs overflow-y-auto"
+    <AdminModalViewport
+      isOpen={isOpen}
+      onClose={onClose}
+      onEscape={onClose}
+      size="md"
+      dir={isAr ? 'rtl' : 'ltr'}
+      titleId="create-user-title"
+      containerRef={modalContainerRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="create-user-title"
     >
       <div 
-        className="bg-white dark:bg-gray-900 rounded-2xl max-w-xl w-full border border-gray-200 dark:border-gray-800 shadow-2xl overflow-hidden my-auto pop-motion-dialog"
-        dir={isAr ? 'rtl' : 'ltr'}
+        ref={modalContainerRef}
+        className="bg-white dark:bg-gray-900 rounded-2xl w-full border border-gray-200 dark:border-gray-800 shadow-2xl overflow-hidden my-auto pop-motion-dialog flex flex-col max-h-[calc(100vh-2rem)]"
       >
         {/* Header */}
         <div className="p-4 sm:p-6 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between bg-gray-50/50 dark:bg-gray-850/50">
@@ -258,6 +266,6 @@ export const CreateUserModal: React.FC<CreateUserModalProps> = ({
           </div>
         </form>
       </div>
-    </div>
+    </AdminModalViewport>
   );
 };

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { 
   X, 
@@ -19,6 +19,7 @@ import { AdminRole } from '../../types/admin';
 import type { AdminUser } from '../../types/admin';
 import { AdminUserManager } from '../../services/adminUserManager';
 import { AdminAccessService } from '../../services/adminAccess';
+import { AdminModalViewport } from '../common/AdminModalViewport';
 import { 
   ROLE_METADATA, 
   getRoleLabel, 
@@ -46,6 +47,7 @@ export const UserEditorModal: React.FC<UserEditorModalProps> = ({
 }) => {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
+  const modalContainerRef = useRef<HTMLDivElement>(null);
 
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -158,15 +160,21 @@ export const UserEditorModal: React.FC<UserEditorModalProps> = ({
   };
 
   return (
-    <div 
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-gray-900/60 backdrop-blur-xs overflow-y-auto"
+    <AdminModalViewport
+      isOpen={isOpen}
+      onClose={onClose}
+      onEscape={onClose}
+      size="editor"
+      dir={isAr ? 'rtl' : 'ltr'}
+      titleId="user-editor-title"
+      containerRef={modalContainerRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="user-editor-title"
     >
       <div 
-        className="bg-white dark:bg-gray-900 rounded-2xl max-w-2xl w-full border border-gray-200 dark:border-gray-800 shadow-2xl overflow-hidden my-auto pop-motion-dialog max-h-[90vh] flex flex-col"
-        dir={isAr ? 'rtl' : 'ltr'}
+        ref={modalContainerRef}
+        className="bg-white dark:bg-gray-900 rounded-2xl w-full border border-gray-200 dark:border-gray-800 shadow-2xl overflow-hidden my-auto pop-motion-dialog max-h-[90vh] flex flex-col"
       >
         {/* Modal Header */}
         <div className="p-4 sm:p-6 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between bg-gray-50/50 dark:bg-gray-850/50 shrink-0">
@@ -447,6 +455,6 @@ export const UserEditorModal: React.FC<UserEditorModalProps> = ({
           </div>
         </div>
       </div>
-    </div>
+    </AdminModalViewport>
   );
 };
