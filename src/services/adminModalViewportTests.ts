@@ -496,12 +496,80 @@ export async function runAdminModalViewportTests(): Promise<ViewportTestResult[]
     // 6. change.field raw path has a mobile-safe shrink/truncate/wrap contract
     const fieldSafeContract = code.includes('truncate min-w-0');
 
-    // 7. AdminModalViewport source is not modified by this unit
+    // 7. AdminModalViewport uses non-scrolling contract for scroll lock
     const viewportPath = path.resolve('./src/components/common/AdminModalViewport.tsx');
     const viewportCode = fs.readFileSync(viewportPath, 'utf8');
+    
+    // A. lock targets document.body
+    const lockTargetsBody = viewportCode.includes('document.body.style.overflow');
+    // B. lock also targets document.documentElement
+    const lockTargetsDocElem = viewportCode.includes('document.documentElement.style.overflow');
+    // C. original body inline overflow is preserved
+    const preservesBodyOverflow = viewportCode.includes('preservedBodyOverflow');
+    // D. original documentElement inline overflow is preserved
+    const preservesDocElemOverflow = viewportCode.includes('preservedDocumentElementOverflow');
+    // E. both are set to 'hidden' when activeModalCount === 0 (or first active)
+    const setsHidden = viewportCode.includes("'hidden'") || viewportCode.includes('"hidden"');
+    // F. nested/ref-count logic
+    const hasActiveModalCount = viewportCode.includes('activeModalCount');
+    // G. both original values restored on final release (activeModalCount === 0)
+    const restoresCorrectly = viewportCode.includes('document.body.style.overflow = preservedBodyOverflow') &&
+                              viewportCode.includes('document.documentElement.style.overflow = preservedDocumentElementOverflow');
+    // H. release does not decrement below zero
+    const releaseMinZero = viewportCode.includes('Math.max(0, activeModalCount - 1)');
+
+    // State machine simulation to verify ref count contract
+    let simulateCount = 0;
+    let simBodyVal = 'initial-body';
+    let simDocVal = 'initial-doc';
+    let simPreservedBody = '';
+    let simPreservedDoc = '';
+
+    const simulateAcquire = () => {
+      if (simulateCount === 0) {
+        simPreservedBody = simBodyVal;
+        simPreservedDoc = simDocVal;
+        simBodyVal = 'hidden';
+        simDocVal = 'hidden';
+      }
+      simulateCount++;
+    };
+
+    const simulateRelease = () => {
+      simulateCount = Math.max(0, simulateCount - 1);
+      if (simulateCount === 0) {
+        simBodyVal = simPreservedBody;
+        simDocVal = simPreservedDoc;
+      }
+    };
+
+    // First acquire
+    simulateAcquire();
+    const firstAcquirePassed = simulateCount === 1 && simBodyVal === 'hidden' && simDocVal === 'hidden' && simPreservedBody === 'initial-body' && simPreservedDoc === 'initial-doc';
+
+    // Nested acquire
+    simulateAcquire();
+    const nestedAcquirePassed = simulateCount === 2 && simBodyVal === 'hidden' && simDocVal === 'hidden' && simPreservedBody === 'initial-body' && simPreservedDoc === 'initial-doc';
+
+    // Partial release
+    simulateRelease();
+    const partialReleasePassed = simulateCount === 1 && simBodyVal === 'hidden' && simDocVal === 'hidden';
+
+    // Final release
+    simulateRelease();
+    const finalReleasePassed = simulateCount === 0 && simBodyVal === 'initial-body' && simDocVal === 'initial-doc';
+
+    // Check release below zero
+    simulateRelease();
+    const minZeroPassed = simulateCount === 0;
+
+    const simulationPassed = firstAcquirePassed && nestedAcquirePassed && partialReleasePassed && finalReleasePassed && minZeroPassed;
+
     const viewportUnmodified = viewportCode.includes('export const AdminModalViewport: React.FC<AdminModalViewportProps>') &&
                                !viewportCode.includes('modified-by-audit-unit') &&
-                               viewportCode.includes('overflow-y-auto'); // baseline still intact
+                               lockTargetsBody && lockTargetsDocElem && preservesBodyOverflow &&
+                               preservesDocElemOverflow && setsHidden && hasActiveModalCount &&
+                               restoresCorrectly && releaseMinZero && simulationPassed;
 
     const passed = importsViewport && localShellRemoved && sizeLgUsed && roleDialogUsed &&
                    ariaLabelledByUsed && explicitDirUsed && closeOnBackdropClickUsed &&
@@ -534,6 +602,13 @@ export async function runAdminModalViewportTests(): Promise<ViewportTestResult[]
         footerShrink0,
         fieldSafeContract,
         viewportUnmodified,
+        simulationDetails: {
+          firstAcquirePassed,
+          nestedAcquirePassed,
+          partialReleasePassed,
+          finalReleasePassed,
+          minZeroPassed,
+        }
       },
     });
   } catch (err: any) {

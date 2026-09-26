@@ -27,12 +27,15 @@ export interface AdminModalViewportProps {
 // Module-level tracking for active modals to handle nested/stacked modals gracefully
 let activeModalCount = 0;
 let preservedBodyOverflow = '';
+let preservedDocumentElementOverflow = '';
 
 function acquireBodyScrollLock(): void {
   if (typeof document === 'undefined') return;
   if (activeModalCount === 0) {
     preservedBodyOverflow = document.body.style.overflow;
+    preservedDocumentElementOverflow = document.documentElement.style.overflow;
     document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
   }
   activeModalCount++;
 }
@@ -42,6 +45,7 @@ function releaseBodyScrollLock(): void {
   activeModalCount = Math.max(0, activeModalCount - 1);
   if (activeModalCount === 0) {
     document.body.style.overflow = preservedBodyOverflow;
+    document.documentElement.style.overflow = preservedDocumentElementOverflow;
   }
 }
 
