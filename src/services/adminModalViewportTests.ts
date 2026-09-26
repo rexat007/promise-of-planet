@@ -476,9 +476,38 @@ export async function runAdminModalViewportTests(): Promise<ViewportTestResult[]
     // J. ID "audit-event-inspector-modal" preserved
     const idPreserved = code.includes('id="audit-event-inspector-modal"') || code.includes("id='audit-event-inspector-modal'");
 
+    // Bounded Scroll/Height Local Contract checks:
+    // 1. AuditEventInspectorModal inner wrapper no longer uses h-full
+    const wrapperNoHFull = !code.includes('className="flex flex-col h-full') && !code.includes("className='flex flex-col h-full'");
+
+    // 2. inner wrapper uses flex-1
+    const wrapperFlex1 = code.includes('flex flex-col flex-1 min-h-0');
+
+    // 3. inner wrapper uses min-h-0
+    const wrapperMinH0 = code.includes('min-h-0');
+
+    // 4. body still uses flex-1 min-h-0 overflow-y-auto
+    const bodyScrolls = code.includes('flex-1 min-h-0 overflow-y-auto');
+
+    // 5. header and footer use shrink-0
+    const headerShrink0 = code.includes('shrink-0');
+    const footerShrink0 = code.includes('shrink-0');
+
+    // 6. change.field raw path has a mobile-safe shrink/truncate/wrap contract
+    const fieldSafeContract = code.includes('truncate min-w-0');
+
+    // 7. AdminModalViewport source is not modified by this unit
+    const viewportPath = path.resolve('./src/components/common/AdminModalViewport.tsx');
+    const viewportCode = fs.readFileSync(viewportPath, 'utf8');
+    const viewportUnmodified = viewportCode.includes('export const AdminModalViewport: React.FC<AdminModalViewportProps>') &&
+                               !viewportCode.includes('modified-by-audit-unit') &&
+                               viewportCode.includes('overflow-y-auto'); // baseline still intact
+
     const passed = importsViewport && localShellRemoved && sizeLgUsed && roleDialogUsed &&
                    ariaLabelledByUsed && explicitDirUsed && closeOnBackdropClickUsed &&
-                   noEscapeListener && noConsumerFocusOrTimer && idPreserved;
+                   noEscapeListener && noConsumerFocusOrTimer && idPreserved &&
+                   wrapperNoHFull && wrapperFlex1 && wrapperMinH0 && bodyScrolls &&
+                   headerShrink0 && footerShrink0 && fieldSafeContract && viewportUnmodified;
 
     results.push({
       id: 'L',
@@ -497,6 +526,14 @@ export async function runAdminModalViewportTests(): Promise<ViewportTestResult[]
         noEscapeListener,
         noConsumerFocusOrTimer,
         idPreserved,
+        wrapperNoHFull,
+        wrapperFlex1,
+        wrapperMinH0,
+        bodyScrolls,
+        headerShrink0,
+        footerShrink0,
+        fieldSafeContract,
+        viewportUnmodified,
       },
     });
   } catch (err: any) {

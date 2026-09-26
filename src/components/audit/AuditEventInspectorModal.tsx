@@ -87,7 +87,7 @@ export const AuditEventInspectorModal: React.FC<AuditEventInspectorModalProps> =
       dir={isAr ? 'rtl' : 'ltr'}
       closeOnBackdropClick={true}
     >
-      <div className="flex flex-col h-full min-w-0" id="audit-event-inspector-modal">
+      <div className="flex flex-col flex-1 min-h-0 min-w-0" id="audit-event-inspector-modal">
         {/* Header */}
         <div className="flex items-center justify-between p-4 sm:p-5 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -207,11 +207,11 @@ export const AuditEventInspectorModal: React.FC<AuditEventInspectorModalProps> =
                       key={`${change.field}-${idx}`}
                       className="bg-white dark:bg-gray-900 border border-gray-200/80 dark:border-gray-800 rounded-xl p-3 space-y-2 shadow-xs"
                     >
-                      <div className="flex items-center justify-between gap-2 border-b border-gray-100 dark:border-gray-800 pb-1.5">
-                        <span className="font-bold text-xs text-gray-900 dark:text-gray-100">
+                      <div className="flex items-center justify-between gap-2 border-b border-gray-100 dark:border-gray-800 pb-1.5 min-w-0">
+                        <span className="font-bold text-xs text-gray-900 dark:text-gray-100 shrink-0">
                           {fieldLabel}
                         </span>
-                        <span className="font-mono text-[10px] text-gray-400 dark:text-gray-500">
+                        <span className="font-mono text-[10px] text-gray-400 dark:text-gray-500 truncate min-w-0" title={change.field}>
                           {change.field}
                         </span>
                       </div>
