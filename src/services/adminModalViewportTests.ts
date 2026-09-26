@@ -621,5 +621,98 @@ export async function runAdminModalViewportTests(): Promise<ViewportTestResult[]
     });
   }
 
+  // M. [STATIC_SOURCE_ASSERTION] AIReviewInspectorModal implements AdminModalViewport correctly and preserves contract
+  try {
+    const aiReviewModalPath = path.resolve('./src/components/aiReview/AIReviewInspectorModal.tsx');
+    const aiCode = fs.readFileSync(aiReviewModalPath, 'utf8');
+
+    // A. AIReviewInspectorModal imports AdminModalViewport
+    const importsViewport = aiCode.includes("import { AdminModalViewport }") || aiCode.includes("import {AdminModalViewport}");
+
+    // B. size="lg" used
+    const sizeLgUsed = aiCode.includes('size="lg"') || aiCode.includes("size='lg'");
+
+    // C. role="dialog" used
+    const roleDialogUsed = aiCode.includes('role="dialog"') || aiCode.includes("role='dialog'");
+
+    // D. preserves: aria-labelledby="review-inspector-title"
+    const ariaLabelledByUsed = aiCode.includes('aria-labelledby="review-inspector-title"') || aiCode.includes("aria-labelledby='review-inspector-title'");
+
+    // E. explicit: dir={isAr ? 'rtl' : 'ltr'}
+    const explicitDirUsed = aiCode.includes("dir={isAr ? 'rtl' : 'ltr'}") || aiCode.includes('dir={isAr ? "rtl" : "ltr"}');
+
+    // F. backdrop-close behavior remains false
+    const backdropCloseFalse = aiCode.includes('closeOnBackdropClick={false}');
+
+    // G. standalone fixed inset-0 shell is removed
+    const localShellRemoved = !aiCode.includes('className="fixed inset-0') && !aiCode.includes("className='fixed inset-0") && !aiCode.includes('fixed inset-0 z-50');
+
+    // H. local max-h-[90vh] modal shell is removed
+    const localMaxHPreserved = !aiCode.includes('max-h-[90vh]');
+
+    // I. local useEffect Escape/body-scroll lifecycle is removed
+    const localUseEffectRemoved = !aiCode.includes('useEffect(') && !aiCode.includes('useEffect (');
+
+    // J. no direct body/documentElement overflow styling, nor local event listeners
+    const noDirectScrollLock = !aiCode.includes('document.body.style.overflow') && 
+                               !aiCode.includes('document.documentElement.style.overflow') &&
+                               !aiCode.includes('window.addEventListener');
+
+    // K. inner wrapper uses flex-1 min-h-0 and does NOT use h-full
+    const wrapperFlex1 = aiCode.includes('flex flex-col flex-1 min-h-0 min-w-0');
+    const wrapperNoHFull = !aiCode.includes('className="flex flex-col h-full') && !aiCode.includes("className='flex flex-col h-full'");
+
+    // L. scrollable findings body uses flex-1 min-h-0 overflow-y-auto
+    const bodyScrolls = aiCode.includes('flex-1 min-h-0 overflow-y-auto');
+
+    // M. header/footer remain shrink-safe with shrink-0
+    const headerFooterShrink0 = aiCode.includes('shrink-0');
+
+    // N. long technical identifiers have narrow-width-safe truncate or min-w-0 contract
+    const overflowSafeIdentifiers = aiCode.includes('truncate') && aiCode.includes('min-w-0');
+
+    // O. AI review data/service/formatting contract remains referenced
+    const aiReviewContractIntact = aiCode.includes('AIReviewArtifact') && aiCode.includes('AIReviewFinding') && aiCode.includes('resolveReviewTarget') && aiCode.includes('AIReviewService') && aiCode.includes('dynamicTranslationService');
+
+    const passed = importsViewport && sizeLgUsed && roleDialogUsed && ariaLabelledByUsed && 
+                   explicitDirUsed && backdropCloseFalse && localShellRemoved && localMaxHPreserved && 
+                   localUseEffectRemoved && noDirectScrollLock && wrapperFlex1 && wrapperNoHFull && 
+                   bodyScrolls && headerFooterShrink0 && overflowSafeIdentifiers && aiReviewContractIntact;
+
+    results.push({
+      id: 'M',
+      name: 'AIReviewInspectorModal consumer migration completely aligns with AdminModalViewport specifications',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed,
+      message: passed ? undefined : 'AIReviewInspectorModal does not fully align with viewport migration specs',
+      details: {
+        importsViewport,
+        sizeLgUsed,
+        roleDialogUsed,
+        ariaLabelledByUsed,
+        explicitDirUsed,
+        backdropCloseFalse,
+        localShellRemoved,
+        localMaxHPreserved,
+        localUseEffectRemoved,
+        noDirectScrollLock,
+        wrapperFlex1,
+        wrapperNoHFull,
+        bodyScrolls,
+        headerFooterShrink0,
+        overflowSafeIdentifiers,
+        aiReviewContractIntact,
+      },
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'M',
+      name: 'AIReviewInspectorModal consumer migration completely aligns with AdminModalViewport specifications',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: false,
+      message: err.message,
+    });
+  }
+
   return results;
 }
