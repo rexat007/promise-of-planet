@@ -30,6 +30,7 @@ import {
   formatAuditTimestamp,
 } from './auditFormatters';
 import { getRoleLabel, getRoleBadgeClass } from '../users/userFormatters';
+import { AdminModalViewport } from '../common/AdminModalViewport';
 
 interface AuditEventInspectorModalProps {
   event: AuditEvent | null;
@@ -77,18 +78,16 @@ export const AuditEventInspectorModal: React.FC<AuditEventInspectorModalProps> =
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs overflow-y-auto"
-      onClick={onClose}
-      aria-labelledby="audit-inspector-title"
+    <AdminModalViewport
+      isOpen={isOpen}
+      onClose={onClose}
+      size="lg"
       role="dialog"
-      aria-modal="true"
+      aria-labelledby="audit-inspector-title"
+      dir={isAr ? 'rtl' : 'ltr'}
+      closeOnBackdropClick={true}
     >
-      <div
-        className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col my-auto overflow-hidden animate-in fade-in zoom-in-95 duration-200 min-w-0"
-        onClick={(e) => e.stopPropagation()}
-        id="audit-event-inspector-modal"
-      >
+      <div className="flex flex-col h-full min-w-0" id="audit-event-inspector-modal">
         {/* Header */}
         <div className="flex items-center justify-between p-4 sm:p-5 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -115,7 +114,7 @@ export const AuditEventInspectorModal: React.FC<AuditEventInspectorModalProps> =
         </div>
 
         {/* Modal Body */}
-        <div className="p-4 sm:p-6 overflow-y-auto space-y-5 min-w-0 text-xs sm:text-sm">
+        <div className="p-4 sm:p-6 flex-1 min-h-0 overflow-y-auto space-y-5 min-w-0 text-xs sm:text-sm">
           {/* 1. Core Summary Banner */}
           <div className="bg-gray-50 dark:bg-gray-800/60 border border-gray-200/80 dark:border-gray-700/80 rounded-xl p-3.5 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -290,6 +289,6 @@ export const AuditEventInspectorModal: React.FC<AuditEventInspectorModalProps> =
           </button>
         </div>
       </div>
-    </div>
+    </AdminModalViewport>
   );
 };

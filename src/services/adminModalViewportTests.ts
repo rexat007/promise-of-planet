@@ -441,5 +441,73 @@ export async function runAdminModalViewportTests(): Promise<ViewportTestResult[]
     });
   }
 
+  // L. [STATIC_SOURCE_ASSERTION] AuditEventInspectorModal implements AdminModalViewport correctly and preserves contract
+  try {
+    const inspectorModalPath = path.resolve('./src/components/audit/AuditEventInspectorModal.tsx');
+    const code = fs.readFileSync(inspectorModalPath, 'utf8');
+
+    // A. AuditEventInspectorModal imports AdminModalViewport
+    const importsViewport = code.includes("import { AdminModalViewport }") || code.includes("import {AdminModalViewport}");
+
+    // B. local fixed inset-0 shell removed
+    const localShellRemoved = !code.includes('className="fixed inset-0') && !code.includes("className='fixed inset-0");
+
+    // C. size="lg" used
+    const sizeLgUsed = code.includes('size="lg"') || code.includes("size='lg'");
+
+    // D. role="dialog" used
+    const roleDialogUsed = code.includes('role="dialog"') || code.includes("role='dialog'");
+
+    // E. aria-labelledby="audit-inspector-title" used
+    const ariaLabelledByUsed = code.includes('aria-labelledby="audit-inspector-title"') || code.includes("aria-labelledby='audit-inspector-title'");
+
+    // F. explicit dir prop used
+    const explicitDirUsed = code.includes("dir={isAr ? 'rtl' : 'ltr'}") || code.includes('dir={isAr ? "rtl" : "ltr"}');
+
+    // G. closeOnBackdropClick={true} used
+    const closeOnBackdropClickUsed = code.includes('closeOnBackdropClick={true}') || code.includes('closeOnBackdropClick={true}');
+
+    // H. no local global Escape listener
+    const noEscapeListener = !code.includes("window.addEventListener('keydown'") && !code.includes('window.addEventListener("keydown"');
+
+    // I. no consumer focus timer/ref
+    const noConsumerFocusOrTimer = !code.includes('setTimeout') && !code.includes('useEffect') && !code.includes('useRef');
+
+    // J. ID "audit-event-inspector-modal" preserved
+    const idPreserved = code.includes('id="audit-event-inspector-modal"') || code.includes("id='audit-event-inspector-modal'");
+
+    const passed = importsViewport && localShellRemoved && sizeLgUsed && roleDialogUsed &&
+                   ariaLabelledByUsed && explicitDirUsed && closeOnBackdropClickUsed &&
+                   noEscapeListener && noConsumerFocusOrTimer && idPreserved;
+
+    results.push({
+      id: 'L',
+      name: 'AuditEventInspectorModal consumer migration completely aligns with AdminModalViewport specifications',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed,
+      message: passed ? undefined : 'AuditEventInspectorModal does not fully align with viewport migration specs',
+      details: {
+        importsViewport,
+        localShellRemoved,
+        sizeLgUsed,
+        roleDialogUsed,
+        ariaLabelledByUsed,
+        explicitDirUsed,
+        closeOnBackdropClickUsed,
+        noEscapeListener,
+        noConsumerFocusOrTimer,
+        idPreserved,
+      },
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'L',
+      name: 'AuditEventInspectorModal consumer migration completely aligns with AdminModalViewport specifications',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: false,
+      message: err.message,
+    });
+  }
+
   return results;
 }
