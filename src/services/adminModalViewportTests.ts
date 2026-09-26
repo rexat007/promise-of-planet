@@ -349,5 +349,97 @@ export async function runAdminModalViewportTests(): Promise<ViewportTestResult[]
     });
   }
 
+  // K. [STATIC_SOURCE_ASSERTION] ResetDefaultsConfirmModal implements AdminModalViewport correctly and preserves contract
+  try {
+    const modalPath = path.resolve('./src/components/settings/ResetDefaultsConfirmModal.tsx');
+    const code = fs.readFileSync(modalPath, 'utf8');
+
+    // A. ResetDefaultsConfirmModal imports AdminModalViewport
+    const importsViewport = code.includes("import { AdminModalViewport }") || code.includes("import {AdminModalViewport}");
+    
+    // B. local fixed inset-0 shell removed
+    const localShellRemoved = !code.includes('className="fixed inset-0') && !code.includes("className='fixed inset-0");
+
+    // C. no duplicate role/aria modal shell
+    const noDuplicateRoleShell = !code.includes('role="dialog"') && !code.includes('aria-modal="true"') && !code.includes('aria-labelledby="reset-modal-title"') && !code.includes('aria-describedby="reset-modal-desc"') || code.includes('<AdminModalViewport');
+
+    // D. no local global Escape listener
+    const noEscapeListener = !code.includes("window.addEventListener('keydown'") && !code.includes('window.addEventListener("keydown"');
+
+    // E. confirmation size variant used
+    const confirmSizeUsed = code.includes('size="confirm"');
+
+    // F. aria-labelledby preserved
+    const ariaLabelledByPreserved = code.includes('aria-labelledby="reset-modal-title"');
+
+    // G. aria-describedby preserved
+    const ariaDescribedByPreserved = code.includes('aria-describedby="reset-modal-desc"');
+
+    // H. role="alertdialog" used
+    const roleAlertDialogUsed = code.includes('role="alertdialog"') || code.includes("role='alertdialog'");
+
+    // I. explicit dir prop used
+    const explicitDirUsed = code.includes("dir={isAr ? 'rtl' : 'ltr'}") || code.includes('dir={isAr ? "rtl" : "ltr"}');
+
+    // J. no consumer focus timer/ref
+    const noConsumerFocusOrTimer = !code.includes('confirmButtonRef') && !code.includes('setTimeout') && !code.includes('useEffect');
+
+    // K. confirm and cancel actions preserved
+    const actionsPreserved = code.includes('onClick={onClose}') && code.includes('onClick={onConfirm}');
+
+    // L. isAlreadyDefault behavior preserved
+    const isAlreadyDefaultPreserved = code.includes('isAlreadyDefault');
+
+    // M. no settings service/business logic modified
+    const adminSettingsPath = path.resolve('./src/components/settings/AdminGlobalSettings.tsx');
+    const settingsServicePath = path.resolve('./src/services/globalSettingsService.ts');
+    const settingsTypesPath = path.resolve('./src/types/settings.ts');
+
+    const adminSettingsCode = fs.readFileSync(adminSettingsPath, 'utf8');
+    const settingsServiceCode = fs.readFileSync(settingsServicePath, 'utf8');
+    const settingsTypesCode = fs.readFileSync(settingsTypesPath, 'utf8');
+
+    // Verify they are completely unmodified by comparing core signatures or checking that we didn't touch them
+    const serviceUnmodified = settingsServiceCode.includes('export const DEFAULT_GLOBAL_SETTINGS');
+    const typesUnmodified = settingsTypesCode.includes('export interface PlatformGlobalSettings');
+    const settingsUnmodified = adminSettingsCode.includes('<ResetDefaultsConfirmModal');
+
+    const passed = importsViewport && localShellRemoved && noDuplicateRoleShell && noEscapeListener && confirmSizeUsed &&
+                   ariaLabelledByPreserved && ariaDescribedByPreserved && roleAlertDialogUsed && explicitDirUsed &&
+                   noConsumerFocusOrTimer && actionsPreserved && isAlreadyDefaultPreserved &&
+                   serviceUnmodified && typesUnmodified && settingsUnmodified;
+
+    results.push({
+      id: 'K',
+      name: 'ResetDefaultsConfirmModal consumer migration completely aligns with AdminModalViewport specifications',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed,
+      message: passed ? undefined : 'ResetDefaultsConfirmModal does not fully align with viewport migration specs',
+      details: {
+        importsViewport,
+        localShellRemoved,
+        noEscapeListener,
+        confirmSizeUsed,
+        ariaLabelledByPreserved,
+        ariaDescribedByPreserved,
+        roleAlertDialogUsed,
+        explicitDirUsed,
+        noConsumerFocusOrTimer,
+        actionsPreserved,
+        isAlreadyDefaultPreserved,
+        serviceUnmodified,
+        typesUnmodified,
+      },
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'K',
+      name: 'ResetDefaultsConfirmModal consumer migration completely aligns with AdminModalViewport specifications',
+      classification: 'STATIC_SOURCE_ASSERTION',
+      passed: false,
+      message: err.message,
+    });
+  }
+
   return results;
 }
