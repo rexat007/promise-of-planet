@@ -323,12 +323,21 @@ registerTest('31. taskGatewayContract.ts remains unchanged', async () => {
   }
 });
 
-// 32. taskGatewayOrchestrator.ts remains unchanged
-registerTest('32. taskGatewayOrchestrator.ts remains unchanged', async () => {
-  const content = fs.readFileSync(path.join(process.cwd(), 'functions/src/peia/taskGatewayOrchestrator.ts'), 'utf8');
-  const prohibited = ['pendingTaskSourceBoundary', 'PendingTaskSource', 'prepareNextPendingTaskFromSource'];
+// 32. pendingTaskSourceBoundary remains transport-neutral and gateway-independent
+registerTest('32. pendingTaskSourceBoundary remains transport-neutral and gateway-independent', async () => {
+  const content = fs.readFileSync(path.join(process.cwd(), 'functions/src/peia/pendingTaskSourceBoundary.ts'), 'utf8');
+  const prohibited = [
+    'taskGatewayContract',
+    'taskGatewayOrchestrator',
+    'PendingTaskGatewayRequest',
+    'PendingTaskGatewaySuccess',
+    'executePendingTaskGatewayRequest',
+    'HTTP',
+    'express',
+    'firebase-functions'
+  ];
   for (const p of prohibited) {
-    if (content.includes(p)) throw new Error(`Prohibited wiring reference found in taskGatewayOrchestrator.ts: ${p}`);
+    if (content.includes(p)) throw new Error(`Prohibited reference ${p} detected in source boundary`);
   }
 });
 

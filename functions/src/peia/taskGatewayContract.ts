@@ -1,14 +1,13 @@
 import { type AIReviewTask } from '../types/aiTask';
-import { type AuthorizedPendingTaskDelivery } from './authorizedTaskDeliveryBoundary';
+import { type VerifiedMachinePrincipal } from './machineAuthorizationBoundary';
 
 export interface PendingTaskGatewayRequest {
   readonly credential: unknown;
-  readonly task: unknown;
 }
 
 export interface PendingTaskGatewaySuccess {
   readonly principalId: string;
-  readonly task: AIReviewTask;
+  readonly task: AIReviewTask | null;
 }
 
 export class TaskGatewayContractError extends Error {
@@ -27,7 +26,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Validates the outer envelope of a PendingTaskGatewayRequest.
  * Enforces strict key control, rejecting unknown or prohibited transport fields.
- * Downstream task internal validation remains separate.
  */
 export function validatePendingTaskGatewayRequest(input: unknown): PendingTaskGatewayRequest {
   if (!isPlainObject(input)) {
@@ -38,10 +36,10 @@ export function validatePendingTaskGatewayRequest(input: unknown): PendingTaskGa
   }
 
   const keys = Object.keys(input);
-  const acceptedKeys = ['credential', 'task'];
+  const acceptedKeys = ['credential'];
 
   const prohibitedFields = [
-    'principalId', 'workerId', 'role', 'permission', 'adminRole', 'adminPermission',
+    'task', 'principalId', 'workerId', 'role', 'permission', 'adminRole', 'adminPermission',
     'approved', 'published', 'autoPublish', 'serviceAccount', 'apiKey', 'machineToken', 'jwt'
   ];
 
@@ -61,7 +59,7 @@ export function validatePendingTaskGatewayRequest(input: unknown): PendingTaskGa
     }
   }
 
-  // Ensure both required fields exist
+  // Ensure required credential exists
   if (!('credential' in input)) {
     throw new TaskGatewayContractError(
       'MISSING_GATEWAY_FIELD',
@@ -69,16 +67,8 @@ export function validatePendingTaskGatewayRequest(input: unknown): PendingTaskGa
     );
   }
 
-  if (!('task' in input)) {
-    throw new TaskGatewayContractError(
-      'MISSING_GATEWAY_FIELD',
-      'Gateway request is missing required field: "task".'
-    );
-  }
-
   return {
     credential: input.credential,
-    task: input.task,
   };
 }
 
@@ -87,10 +77,11 @@ export function validatePendingTaskGatewayRequest(input: unknown): PendingTaskGa
  * Filters out internal machine capabilities, active states, and credentials.
  */
 export function toPendingTaskGatewaySuccess(
-  delivery: AuthorizedPendingTaskDelivery
+  principal: VerifiedMachinePrincipal,
+  task: AIReviewTask | null
 ): PendingTaskGatewaySuccess {
   return {
-    principalId: delivery.principal.principalId,
-    task: delivery.task,
+    principalId: principal.principalId,
+    task,
   };
 }

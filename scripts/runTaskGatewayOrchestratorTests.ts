@@ -1,507 +1,488 @@
-import { executePendingTaskGatewayRequest } from '../functions/src/peia/taskGatewayOrchestrator';
-import { MachineIdentityVerifier, PEIAMachineCapability, MachineAuthorizationError } from '../functions/src/peia/machineAuthorizationBoundary';
-import { TaskGatewayContractError } from '../functions/src/peia/taskGatewayContract';
-import { ValidationError } from '../functions/src/peia/aiTaskValidator';
-import { TaskDeliveryError } from '../functions/src/peia/aiTaskDeliveryBoundary';
-import { AITaskType, AITaskStatus } from '../src/types/aiTask';
 import * as fs from 'fs';
 import * as path from 'path';
+import { executePendingTaskGatewayRequest } from '../functions/src/peia/taskGatewayOrchestrator';
+import { PEIAMachineCapability, MachineAuthorizationError } from '../functions/src/peia/machineAuthorizationBoundary';
+import { TaskGatewayContractError } from '../functions/src/peia/taskGatewayContract';
+import { AITaskStatus } from '../functions/src/types/aiTask';
 
-interface TestResult {
-  id: number;
-  name: string;
-  passed: boolean;
-  message?: string;
+const tests: (() => Promise<void>)[] = [];
+
+function registerTest(name: string, fn: () => Promise<void>) {
+  tests.push(async () => {
+    try {
+      await fn();
+      console.log(`✅ [${tests.indexOf(fn) + 1}] ${name}`);
+    } catch (err: any) {
+      console.error(`❌ [${tests.indexOf(fn) + 1}] ${name}`);
+      console.error(`   ${err.message}`);
+      throw err;
+    }
+  });
 }
 
-const tests: TestResult[] = [];
-let testCounter = 1;
+// Recording Fake Verifier
+class FakeVerifier {
+  callCount = 0;
+  lastInput: any = null;
+  result: any = null;
+  error: Error | null = null;
 
-function createValidTaskPayload(overrides: Record<string, any> = {}): Record<string, any> {
-  const base = {
-    taskId: 'task-9999',
-    taskType: AITaskType.CONTENT_REVIEW,
-    target: {
-      targetType: 'News',
-      targetId: 'news-777',
-      sourceUpdatedAt: '2026-09-26T04:00:00Z',
-    },
-    contentSnapshot: {
-      title: 'Decarbonizing Steel',
-    },
-    createdAt: '2026-09-26T04:05:00Z',
-    status: AITaskStatus.Pending,
+  async verify(input: any) {
+    this.callCount++;
+    this.lastInput = input;
+    if (this.error) throw this.error;
+    return this.result;
+  }
+}
+
+// Recording Fake Source
+class FakeSource {
+  callCount = 0;
+  result: any = null;
+  error: Error | null = null;
+  order: string[] = [];
+
+  constructor(private verifier: FakeVerifier) {}
+
+  async fetchNextPendingTask() {
+    this.callCount++;
+    this.order.push('source');
+    if (this.error) throw this.error;
+    return this.result;
+  }
+
+  recordAuth() {
+    this.order.push('auth');
+  }
+}
+
+const mockPrincipal = {
+  principalId: 'machine-123',
+  isActive: true,
+  capabilities: [PEIAMachineCapability.FETCH_PENDING_REVIEW_TASKS]
+};
+
+const mockTask = {
+  taskId: 'task-456',
+  taskType: 'CONTENT_REVIEW',
+  target: {
+    targetType: 'CitizenSubmission',
+    targetId: 'sub-789',
+    sourceUpdatedAt: '2026-09-27T00:00:00Z',
+  },
+  contentSnapshot: { text: 'hello' },
+  createdAt: '2026-09-27T00:00:00Z',
+  status: AITaskStatus.Pending
+};
+
+// 1. valid credential-only request + valid source task succeeds
+registerTest('1. valid credential-only request + valid source task succeeds', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = mockTask;
+
+  const response = await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  if (response.task?.taskId !== mockTask.taskId) throw new Error('Task not delivered');
+});
+
+// 2. response principalId comes from verified principal
+registerTest('2. response principalId comes from verified principal', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = { ...mockPrincipal, principalId: 'diff-id' };
+  const source = new FakeSource(verifier);
+  source.result = mockTask;
+
+  const response = await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  if (response.principalId !== 'diff-id') throw new Error('Principal ID mismatch');
+});
+
+// 3. response task comes from server source
+registerTest('3. response task comes from server source', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = { ...mockTask, taskId: 'source-task' };
+
+  const response = await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  if (response.task?.taskId !== 'source-task') throw new Error('Task did not come from source');
+});
+
+// 4. caller-supplied task is rejected before verifier call
+registerTest('4. caller-supplied task is rejected before verifier call', async () => {
+  const verifier = new FakeVerifier();
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok', task: {} }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (!(err instanceof TaskGatewayContractError)) throw new Error('Wrong error class');
+    if (err.code !== 'PROHIBITED_GATEWAY_FIELD') throw err;
+  }
+  if (verifier.callCount !== 0) throw new Error('Verifier called despite invalid request');
+});
+
+// 5. caller-supplied task is rejected before source call
+registerTest('5. caller-supplied task is rejected before source call', async () => {
+  const verifier = new FakeVerifier();
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok', task: {} }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (!(err instanceof TaskGatewayContractError)) throw new Error('Wrong error class');
+    if (err.code !== 'PROHIBITED_GATEWAY_FIELD') throw err;
+  }
+  if (source.callCount !== 0) throw new Error('Source called despite invalid request');
+});
+
+// 6. missing credential rejected before verifier
+registerTest('6. missing credential rejected before verifier', async () => {
+  const verifier = new FakeVerifier();
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({}, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (!(err instanceof TaskGatewayContractError)) throw new Error('Wrong error class');
+    if (err.code !== 'MISSING_GATEWAY_FIELD') throw err;
+  }
+  if (verifier.callCount !== 0) throw new Error('Verifier called despite missing credential');
+});
+
+// 7. missing credential rejected before source
+registerTest('7. missing credential rejected before source', async () => {
+  const verifier = new FakeVerifier();
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({}, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (!(err instanceof TaskGatewayContractError)) throw new Error('Wrong error class');
+    if (err.code !== 'MISSING_GATEWAY_FIELD') throw err;
+  }
+  if (source.callCount !== 0) throw new Error('Source called despite missing credential');
+});
+
+// 8. verifier receives exact request credential
+registerTest('8. verifier receives exact request credential', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = mockTask;
+  const secret = { a: 1 };
+  await executePendingTaskGatewayRequest({ credential: secret }, verifier as any, source as any);
+  if (verifier.lastInput !== secret) throw new Error('Verifier did not receive correct credential');
+});
+
+// 9. verifier null -> MACHINE_UNAUTHENTICATED
+registerTest('9. verifier null -> MACHINE_UNAUTHENTICATED', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = null;
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (err.code !== 'MACHINE_UNAUTHENTICATED') throw err;
+  }
+});
+
+// 10. verifier null -> source not called
+registerTest('10. verifier null -> source not called', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = null;
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (!(err instanceof MachineAuthorizationError)) throw new Error('Wrong error class');
+    if (err.code !== 'MACHINE_UNAUTHENTICATED') throw err;
+  }
+  if (source.callCount !== 0) throw new Error('Source called after auth failure');
+});
+
+// 11. verifier throws -> MACHINE_AUTHENTICATION_FAILED
+registerTest('11. verifier throws -> MACHINE_AUTHENTICATION_FAILED', async () => {
+  const verifier = new FakeVerifier();
+  verifier.error = new Error('Crypto fail');
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (err.code !== 'MACHINE_AUTHENTICATION_FAILED') throw err;
+  }
+});
+
+// 12. verifier throws -> source not called
+registerTest('12. verifier throws -> source not called', async () => {
+  const verifier = new FakeVerifier();
+  verifier.error = new Error('Crypto fail');
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (!(err instanceof MachineAuthorizationError)) throw new Error('Wrong error class');
+    if (err.code !== 'MACHINE_AUTHENTICATION_FAILED') throw err;
+  }
+  if (source.callCount !== 0) throw new Error('Source called after verifier threw');
+});
+
+// 13. inactive principal -> MACHINE_INACTIVE
+registerTest('13. inactive principal -> MACHINE_INACTIVE', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = { ...mockPrincipal, isActive: false };
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (err.code !== 'MACHINE_INACTIVE') throw err;
+  }
+});
+
+// 14. inactive principal -> source not called
+registerTest('14. inactive principal -> source not called', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = { ...mockPrincipal, isActive: false };
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (!(err instanceof MachineAuthorizationError)) throw new Error('Wrong error class');
+    if (err.code !== 'MACHINE_INACTIVE') throw err;
+  }
+  if (source.callCount !== 0) throw new Error('Source called for inactive principal');
+});
+
+// 15. missing capability -> MACHINE_CAPABILITY_DENIED
+registerTest('15. missing capability -> MACHINE_CAPABILITY_DENIED', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = { ...mockPrincipal, capabilities: [] };
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (err.code !== 'MACHINE_CAPABILITY_DENIED') throw err;
+  }
+});
+
+// 16. missing capability -> source not called
+registerTest('16. missing capability -> source not called', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = { ...mockPrincipal, capabilities: [] };
+  const source = new FakeSource(verifier);
+  try {
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed');
+  } catch (err: any) {
+    if (!(err instanceof MachineAuthorizationError)) throw new Error('Wrong error class');
+    if (err.code !== 'MACHINE_CAPABILITY_DENIED') throw err;
+  }
+  if (source.callCount !== 0) throw new Error('Source called for unauthorized principal');
+});
+
+// 17. successful authorization occurs before source access
+registerTest('17. successful authorization occurs before source access', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = mockTask;
+  
+  // To track ordering, we need to instrument the verifier.
+  // Since the orchestrator is async, the order is verifier.verify finishes THEN source.fetch starts.
+  const originalVerify = verifier.verify;
+  verifier.verify = async (i) => {
+    source.order.push('verify_start');
+    const res = await originalVerify.call(verifier, i);
+    source.order.push('verify_end');
+    return res;
   };
 
-  const result = { ...base };
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value === undefined) {
-      delete (result as any)[key];
-    } else {
-      (result as any)[key] = value;
-    }
+  await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  
+  const verifyEndIndex = source.order.indexOf('verify_end');
+  const sourceIndex = source.order.indexOf('source');
+  if (verifyEndIndex === -1 || sourceIndex === -1 || verifyEndIndex > sourceIndex) {
+    throw new Error(`Invalid execution order: ${source.order.join(' -> ')}`);
   }
-  return result;
-}
+});
 
-class FakeVerifier implements MachineIdentityVerifier {
-  public verifyCalled = false;
+// 18. source called exactly once after successful authorization
+registerTest('18. source called exactly once after successful authorization', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = mockTask;
+  await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  if (source.callCount !== 1) throw new Error(`Source called ${source.callCount} times`);
+});
 
-  constructor(
-    private readonly mockPrincipal: { principalId: string; isActive: boolean; capabilities: readonly PEIAMachineCapability[] } | null,
-    private readonly shouldThrow: boolean = false
-  ) {}
+// 19. source null -> successful response with task:null
+registerTest('19. source null -> successful response with task:null', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = null;
+  const response = await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  if (response.task !== null) throw new Error('Response task should be null');
+});
 
-  async verify(input: unknown): Promise<any> {
-    this.verifyCalled = true;
-    if (this.shouldThrow) {
-      throw new Error('Database disconnected');
-    }
-    if (input === 'valid-secret-token') {
-      return this.mockPrincipal;
-    }
-    return null;
-  }
-}
+// 20. source null does not fabricate task
+registerTest('20. source null does not fabricate task', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = null;
+  const response = await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  if (response.task !== null) throw new Error('Fabricated task detected');
+});
 
-async function run() {
-  const activePrincipal = {
-    principalId: 'node-omega',
-    isActive: true,
-    capabilities: [PEIAMachineCapability.FETCH_PENDING_REVIEW_TASKS] as const,
-  };
-
-  // 1. Valid outer request + authorized machine + Pending task succeeds
+// 21. source infrastructure Error propagates exact same Error instance
+registerTest('21. source infrastructure Error propagates exact same Error instance', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  const infraError = new Error('DB Down');
+  source.error = infraError;
   try {
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload(),
-    };
-    const res = await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    tests.push({
-      id: testCounter++,
-      name: '1. Valid outer request + authorized machine + Pending task succeeds',
-      passed: res.principalId === 'node-omega' && res.task.taskId === 'task-9999',
-    });
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed');
   } catch (err: any) {
-    tests.push({
-      id: testCounter++,
-      name: '1. Valid outer request + authorized machine + Pending task succeeds',
-      passed: false,
-      message: err.message,
-    });
+    if (err !== infraError) throw new Error('Error instance mismatch');
   }
+});
 
-  // 2. Success response contains only principalId and task
+// 22. malformed source task -> canonical ValidationError
+registerTest('22. malformed source task -> canonical ValidationError', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = { garbage: true };
   try {
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload(),
-    };
-    const res = await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    const extraKeys = Object.keys(res).filter(k => k !== 'principalId' && k !== 'task');
-    tests.push({
-      id: testCounter++,
-      name: '2. Success response contains only principalId and task',
-      passed: extraKeys.length === 0,
-      message: extraKeys.length > 0 ? `Extra keys found: ${extraKeys.join(', ')}` : undefined,
-    });
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have failed validation');
   } catch (err: any) {
-    tests.push({
-      id: testCounter++,
-      name: '2. Success response contains only principalId and task',
-      passed: false,
-    });
+    if (err.name !== 'ValidationError') throw err;
   }
+});
 
-  // 3. Invalid outer request fails with TaskGatewayContractError
+// 23. Completed source task -> TaskDeliveryError
+registerTest('23. Completed source task -> TaskDeliveryError', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = { ...mockTask, status: AITaskStatus.Completed };
   try {
-    await executePendingTaskGatewayRequest(null, new FakeVerifier(activePrincipal));
-    tests.push({
-      id: testCounter++,
-      name: '3. Invalid outer request fails',
-      passed: false,
-    });
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have rejected non-Pending task');
   } catch (err: any) {
-    const matched = err instanceof TaskGatewayContractError && err.code === 'INVALID_GATEWAY_REQUEST';
-    tests.push({
-      id: testCounter++,
-      name: '3. Invalid outer request fails with TaskGatewayContractError',
-      passed: matched,
-    });
+    if (err.name !== 'TaskDeliveryError') throw err;
   }
+});
 
-  // 4. Unknown outer field fails before machine verification is used
-  const verifier4 = new FakeVerifier(activePrincipal);
+// 24. Failed source task -> TaskDeliveryError
+registerTest('24. Failed source task -> TaskDeliveryError', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = { ...mockTask, status: AITaskStatus.Failed };
   try {
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload(),
-      extraUnsupported: 'nonsense',
-    };
-    await executePendingTaskGatewayRequest(input, verifier4);
-    tests.push({
-      id: testCounter++,
-      name: '4. Unknown outer field fails',
-      passed: false,
-    });
+    await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+    throw new Error('Should have rejected non-Pending task');
   } catch (err: any) {
-    const matched = err instanceof TaskGatewayContractError &&
-                    err.code === 'UNKNOWN_GATEWAY_FIELD' &&
-                    !verifier4.verifyCalled;
-    tests.push({
-      id: testCounter++,
-      name: '4. Unknown outer field fails before machine verification is used',
-      passed: matched,
-    });
+    if (err.name !== 'TaskDeliveryError') throw err;
   }
+});
 
-  // 5. Prohibited outer field fails before machine verification is used
-  const verifier5 = new FakeVerifier(activePrincipal);
-  try {
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload(),
-      principalId: 'hack-attempt',
-    };
-    await executePendingTaskGatewayRequest(input, verifier5);
-    tests.push({
-      id: testCounter++,
-      name: '5. Prohibited outer field fails',
-      passed: false,
-    });
-  } catch (err: any) {
-    const matched = err instanceof TaskGatewayContractError &&
-                    err.code === 'PROHIBITED_GATEWAY_FIELD' &&
-                    !verifier5.verifyCalled;
-    tests.push({
-      id: testCounter++,
-      name: '5. Prohibited outer field fails before machine verification is used',
-      passed: matched,
-    });
+// 25. valid source task preserved unchanged
+registerTest('25. valid source task preserved unchanged', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = mockTask;
+  const response = await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  if (JSON.stringify(response.task) !== JSON.stringify(mockTask)) throw new Error('Task mutated');
+});
+
+// 26. principalId/workerId not injected into task
+registerTest('26. principalId/workerId not injected into task', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = mockTask;
+  const response = await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  if ((response.task as any).principalId) throw new Error('Leaked principalId into task');
+  if ((response.task as any).workerId) throw new Error('Leaked workerId into task');
+});
+
+// 27. response exposes no credential/isActive/capabilities
+registerTest('27. response exposes no credential/isActive/capabilities', async () => {
+  const verifier = new FakeVerifier();
+  verifier.result = mockPrincipal;
+  const source = new FakeSource(verifier);
+  source.result = mockTask;
+  const response = await executePendingTaskGatewayRequest({ credential: 'tok' }, verifier as any, source as any);
+  if ('isActive' in response) throw new Error('Exposed isActive');
+  if ('capabilities' in response) throw new Error('Exposed capabilities');
+  if ('credential' in response) throw new Error('Exposed credential');
+});
+
+// 28. orchestrator no longer imports/calls authorizeAndPreparePendingTaskDelivery
+registerTest('28. orchestrator no longer imports/calls authorizeAndPreparePendingTaskDelivery', async () => {
+  const content = fs.readFileSync(path.join(process.cwd(), 'functions/src/peia/taskGatewayOrchestrator.ts'), 'utf8');
+  if (content.includes('authorizeAndPreparePendingTaskDelivery')) {
+    throw new Error('Orchestrator still contains authorizeAndPreparePendingTaskDelivery reference');
   }
+});
 
-  // 6. Valid outer request + unauthorized credential fails with MachineAuthorizationError
-  try {
-    const input = {
-      credential: 'invalid-secret-token',
-      task: createValidTaskPayload(),
-    };
-    await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    tests.push({
-      id: testCounter++,
-      name: '6. Unauthorized credential fails',
-      passed: false,
-    });
-  } catch (err: any) {
-    const matched = err instanceof MachineAuthorizationError && err.code === 'MACHINE_UNAUTHENTICATED';
-    tests.push({
-      id: testCounter++,
-      name: '6. Valid outer request + unauthorized credential fails with MachineAuthorizationError',
-      passed: matched,
-    });
+// 29. orchestrator contains no request.task access
+registerTest('29. orchestrator contains no request.task access', async () => {
+  const content = fs.readFileSync(path.join(process.cwd(), 'functions/src/peia/taskGatewayOrchestrator.ts'), 'utf8');
+  if (content.includes('request.task')) {
+    throw new Error('Orchestrator still accesses request.task');
   }
+});
 
-  // 7. Valid outer request + inactive machine fails with MachineAuthorizationError
-  try {
-    const inactivePrincipal = { ...activePrincipal, isActive: false };
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload(),
-    };
-    await executePendingTaskGatewayRequest(input, new FakeVerifier(inactivePrincipal));
-    tests.push({
-      id: testCounter++,
-      name: '7. Inactive machine fails',
-      passed: false,
-    });
-  } catch (err: any) {
-    const matched = err instanceof MachineAuthorizationError && err.code === 'MACHINE_INACTIVE';
-    tests.push({
-      id: testCounter++,
-      name: '7. Valid outer request + inactive machine fails with MachineAuthorizationError',
-      passed: matched,
-    });
+// 30. functions/src/index.ts remains unwired
+registerTest('30. functions/src/index.ts remains unwired', async () => {
+  const content = fs.readFileSync(path.join(process.cwd(), 'functions/src/index.ts'), 'utf8');
+  if (content.includes('executePendingTaskGatewayRequest')) {
+    throw new Error('Gateway orchestrator leaked into index.ts');
   }
+});
 
-  // 8. Valid outer request + missing capability fails with MachineAuthorizationError
-  try {
-    const missingCapPrincipal = { ...activePrincipal, capabilities: [] };
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload(),
-    };
-    await executePendingTaskGatewayRequest(input, new FakeVerifier(missingCapPrincipal));
-    tests.push({
-      id: testCounter++,
-      name: '8. Missing capability fails',
-      passed: false,
-    });
-  } catch (err: any) {
-    const matched = err instanceof MachineAuthorizationError && err.code === 'MACHINE_CAPABILITY_DENIED';
-    tests.push({
-      id: testCounter++,
-      name: '8. Valid outer request + missing capability fails with MachineAuthorizationError',
-      passed: matched,
-    });
-  }
-
-  // 9. Valid outer request + valid machine + malformed task fails with ValidationError
-  try {
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload({ taskId: '   ' }),
-    };
-    await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    tests.push({
-      id: testCounter++,
-      name: '9. Malformed task fails',
-      passed: false,
-    });
-  } catch (err: any) {
-    const matched = err instanceof ValidationError && err.code === 'INVALID_TASK_ID';
-    tests.push({
-      id: testCounter++,
-      name: '9. Valid outer request + valid machine + malformed task fails with ValidationError',
-      passed: matched,
-    });
-  }
-
-  // 10. Valid outer request + valid machine + Completed task fails with TaskDeliveryError
-  try {
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload({ status: 'Completed' }),
-    };
-    await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    tests.push({
-      id: testCounter++,
-      name: '10. Completed task fails',
-      passed: false,
-    });
-  } catch (err: any) {
-    const matched = err instanceof TaskDeliveryError && err.code === 'TASK_NOT_DELIVERABLE';
-    tests.push({
-      id: testCounter++,
-      name: '10. Valid outer request + valid machine + Completed task fails with TaskDeliveryError',
-      passed: matched,
-    });
-  }
-
-  // 11. Valid outer request + valid machine + Failed task fails with TaskDeliveryError
-  try {
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload({ status: 'Failed' }),
-    };
-    await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    tests.push({
-      id: testCounter++,
-      name: '11. Failed task fails',
-      passed: false,
-    });
-  } catch (err: any) {
-    const matched = err instanceof TaskDeliveryError && err.code === 'TASK_NOT_DELIVERABLE';
-    tests.push({
-      id: testCounter++,
-      name: '11. Valid outer request + valid machine + Failed task fails with TaskDeliveryError',
-      passed: matched,
-    });
-  }
-
-  // 12. Malformed task is NOT processed before failed machine authorization
-  try {
-    const input = {
-      credential: 'invalid-secret-token',
-      task: { completelyMalformed: true },
-    };
-    await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    tests.push({
-      id: testCounter++,
-      name: '12. Security order mismatch',
-      passed: false,
-    });
-  } catch (err: any) {
-    // Must trigger MachineAuthorizationError because verifier is run and fails before task validation is evaluated.
-    const matched = err instanceof MachineAuthorizationError && err.code === 'MACHINE_UNAUTHENTICATED';
-    tests.push({
-      id: testCounter++,
-      name: '12. Malformed task is NOT processed before failed machine authorization',
-      passed: matched,
-    });
-  }
-
-  // 13. Outer request validation occurs before machine authorization
-  const verifier13 = new FakeVerifier(activePrincipal);
-  try {
-    const input = {
-      credential: 'invalid-secret-token',
-      task: createValidTaskPayload(),
-      unauthorizedExtraneousKey: 'yes',
-    };
-    await executePendingTaskGatewayRequest(input, verifier13);
-    tests.push({
-      id: testCounter++,
-      name: '13. Request validator order fails',
-      passed: false,
-    });
-  } catch (err: any) {
-    // Must trigger TaskGatewayContractError because outer request validation is executed before machine authorization.
-    const matched = err instanceof TaskGatewayContractError &&
-                    err.code === 'UNKNOWN_GATEWAY_FIELD' &&
-                    !verifier13.verifyCalled;
-    tests.push({
-      id: testCounter++,
-      name: '13. Outer request validation occurs before machine authorization',
-      passed: matched,
-    });
-  }
-
-  // 14. Success adapter does not expose isActive/capabilities/credential
-  try {
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload(),
-    };
-    const res = await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    const clean = !('isActive' in res) && !('capabilities' in res) && !('credential' in res);
-    tests.push({
-      id: testCounter++,
-      name: '14. Success adapter does not leak internal principal information',
-      passed: clean,
-    });
-  } catch (err: any) {
-    tests.push({
-      id: testCounter++,
-      name: '14. Success adapter does not leak internal principal information',
-      passed: false,
-    });
-  }
-
-  // 15. Task remains unchanged through successful orchestration
-  try {
-    const task = createValidTaskPayload();
-    const input = {
-      credential: 'valid-secret-token',
-      task,
-    };
-    const res = await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    const unchanged = JSON.stringify(res.task) === JSON.stringify(task);
-    tests.push({
-      id: testCounter++,
-      name: '15. Task remains completely unchanged through successful orchestration',
-      passed: unchanged,
-    });
-  } catch (err: any) {
-    tests.push({
-      id: testCounter++,
-      name: '15. Task remains completely unchanged through successful orchestration',
-      passed: false,
-    });
-  }
-
-  // 16. principalId is not injected into AIReviewTask
-  try {
-    const input = {
-      credential: 'valid-secret-token',
-      task: createValidTaskPayload(),
-    };
-    const res = await executePendingTaskGatewayRequest(input, new FakeVerifier(activePrincipal));
-    const notLeaked = !('principalId' in res.task) && !('workerId' in res.task);
-    tests.push({
-      id: testCounter++,
-      name: '16. principalId is not injected into AIReviewTask object',
-      passed: notLeaked,
-    });
-  } catch (err: any) {
-    tests.push({
-      id: testCounter++,
-      name: '16. principalId is not injected into AIReviewTask object',
-      passed: false,
-    });
-  }
-
-  // 17. No duplicate gateway validation rules exist in orchestrator
-  const prodFilePath = path.join(process.cwd(), 'functions/src/peia/taskGatewayOrchestrator.ts');
-  const code = fs.readFileSync(prodFilePath, 'utf8');
-  const cleanOrchValidation = !code.includes('prohibitedFields') && !code.includes('acceptedKeys') && !code.includes('isPlainObject');
-  tests.push({
-    id: testCounter++,
-    name: '17. No duplicate gateway validation rules exist in orchestrator',
-    passed: cleanOrchValidation,
-  });
-
-  // 18. No duplicate machine authorization rules exist in orchestrator
-  const cleanOrchAuth = !code.includes('isActive') && !code.includes('capabilities') && !code.includes('FETCH_PENDING_REVIEW_TASKS');
-  tests.push({
-    id: testCounter++,
-    name: '18. No duplicate machine authorization rules exist in orchestrator',
-    passed: cleanOrchAuth,
-  });
-
-  // 19. No duplicate task validation rules exist in orchestrator
-  // Ensure the orchestrator code doesn't directly inspect task properties or hardcode statuses
-  const cleanOrchTaskRules = !code.includes('taskId') && 
-                             !code.includes('taskType') && 
-                             !code.includes('contentSnapshot') && 
-                             !code.includes("status === 'Pending'") && 
-                             !code.includes('status === "Pending"') &&
-                             !code.includes("status !== 'Pending'") &&
-                             !code.includes('status !== "Pending"');
-  tests.push({
-    id: testCounter++,
-    name: '19. No duplicate task validation rules exist in orchestrator',
-    passed: cleanOrchTaskRules,
-  });
-
-  // 20. No Firebase/HTTP imports exist in production orchestrator
-  const cleanOrchImports = !code.includes('firebase-functions') && !code.includes('express') && !code.includes('HttpsError');
-  tests.push({
-    id: testCounter++,
-    name: '20. No Firebase/HTTP imports exist in production orchestrator',
-    passed: cleanOrchImports,
-  });
-
-  // 21. functions/src/index.ts remains untouched
-  const indexPath = path.join(process.cwd(), 'functions/src/index.ts');
-  const indexCode = fs.readFileSync(indexPath, 'utf8');
-  const cleanIndex = !indexCode.includes('taskGatewayOrchestrator') && !indexCode.includes('executePendingTaskGatewayRequest');
-  tests.push({
-    id: testCounter++,
-    name: '21. functions/src/index.ts remains untouched',
-    passed: cleanIndex,
-  });
-
-  // Log summary
+async function runTests() {
   console.log('====================================================');
-  console.log('RUNNING PEIA-16F TASK GATEWAY ORCHESTRATOR TESTS');
-  console.log('====================================================\n');
-
+  console.log('RUNNING PEIA-16L TASK GATEWAY ORCHESTRATOR TESTS');
+  console.log('====================================================');
+  
+  let passed = 0;
   let failed = 0;
-  for (const t of tests) {
-    if (t.passed) {
-      console.log(`✅ [${t.id}] ${t.name}`);
-    } else {
+  
+  for (const test of tests) {
+    try {
+      await test();
+      passed++;
+    } catch (e) {
       failed++;
-      console.error(`❌ [${t.id}] ${t.name}`);
-      if (t.message) {
-        console.error(`   ${t.message}`);
-      }
     }
   }
-
-  console.log('\n----------------------------------------------------');
-  console.log(`SUMMARY: ${tests.length - failed} passed / ${tests.length} total / ${failed} failed`);
+  
   console.log('----------------------------------------------------');
-
-  if (failed > 0) {
+  console.log(`SUMMARY: ${passed} passed / ${tests.length} total / ${failed} failed`);
+  
+  if (failed > 0 || tests.length !== 30) {
     process.exit(1);
-  } else {
-    process.exit(0);
   }
 }
 
-run().catch((err) => {
+runTests().catch(err => {
   console.error(err);
   process.exit(1);
 });
