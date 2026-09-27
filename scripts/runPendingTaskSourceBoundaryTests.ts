@@ -65,7 +65,12 @@ registerTest('3. source method takes no credential argument', async () => {
 
 // 4. source method takes no principal argument
 registerTest('4. source method takes no principal argument', async () => {
-  // Verified by test 3
+  const content = fs.readFileSync(path.join(process.cwd(), 'functions/src/peia/pendingTaskSourceBoundary.ts'), 'utf8');
+  const methodMatch = content.match(/fetchNextPendingTask\(([^)]*)\)/);
+  if (!methodMatch) throw new Error('fetchNextPendingTask method signature not found');
+  if (methodMatch[1].trim() !== '') {
+    throw new Error(`fetchNextPendingTask must have zero parameters, but found: (${methodMatch[1]})`);
+  }
 });
 
 // 5. null source result returns null
@@ -352,7 +357,7 @@ async function runTests() {
     }
   }
   console.log(`\nSUMMARY: ${passed} passed / ${tests.length} total / ${failed} failed`);
-  if (failed > 0 || tests.length < 33) {
+  if (failed > 0 || tests.length !== 33) {
     process.exit(1);
   }
 }
