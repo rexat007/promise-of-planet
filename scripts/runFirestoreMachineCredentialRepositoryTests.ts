@@ -506,9 +506,11 @@ registerTest('31. infrastructure error is not converted to null', async () => {
   });
   const repo = new FirestoreMachineCredentialBindingRepository(db);
   try {
-    await repo.findByCredentialDigest(VALID_DIGEST);
-  } catch (e) {}
-  // If it didn't throw, it might have returned null. The previous test checks it throws.
+    const result = await repo.findByCredentialDigest(VALID_DIGEST);
+    throw new Error(`Expected throw, but returned ${result}`);
+  } catch (err: any) {
+    if (err !== infraError) throw new Error('Error not propagated unchanged');
+  }
 });
 
 // 32. repository public input boundary is digest only
@@ -581,10 +583,9 @@ registerTest('39. no query/scan methods', async () => {
 });
 
 registerTest('40. no crypto/hash implementation', async () => {
-  if (repoSource.includes('crypto.createHash') || repoSource.includes('sha256')) {
-    if (!repoSource.includes("'SHA-256'")) { // string constant is allowed
-       throw new Error('Prohibited hash implementation detected');
-    }
+  const prohibited = ['createHash(', 'node:crypto', 'crypto.createHash', '.subtle.digest', 'hashOpaqueMachineCredential'];
+  for (const p of prohibited) {
+    if (repoSource.includes(p)) throw new Error(`Prohibited hash implementation detected: ${p}`);
   }
 });
 
@@ -630,13 +631,24 @@ registerTest('44. repository returns structurally valid principal with empty cap
 
 // 45. repository error message does not expose requested digest
 registerTest('45. repository error message does not expose requested digest', async () => {
-  const db = new RecordingDatabase({});
+  const otherDigestValue = 'b'.repeat(64);
+  const record = { ...VALID_PERSISTENCE_RECORD, credentialDigest: { algorithm: 'SHA-256', value: otherDigestValue } };
+  const db = new RecordingDatabase({
+    peiaMachineCredentials: new RecordingCollection({
+      [VALID_DIGEST_VALUE]: new RecordingDocument(new RecordingSnapshot(true, record)),
+    }),
+  });
   const repo = new FirestoreMachineCredentialBindingRepository(db);
   try {
-    await repo.findByCredentialDigest({ algorithm: 'SHA-256', value: '12345678' + 'a'.repeat(56) });
+    await repo.findByCredentialDigest(VALID_DIGEST);
     throw new Error('Expected throw');
   } catch (err: any) {
-    if (err.message.includes('12345678')) throw new Error('Digest leaked in error message');
+    if (!(err instanceof FirestoreMachineCredentialRepositoryError) || err.code !== 'MACHINE_CREDENTIAL_DIGEST_MISMATCH') {
+      throw err;
+    }
+    if (err.message.includes(VALID_DIGEST_VALUE)) {
+      throw new Error('Requested digest leaked in error message');
+    }
   }
 });
 
@@ -779,12 +791,19 @@ registerTest('54. empty capabilities -> MACHINE_CAPABILITY_DENIED', async () => 
 registerTest('55. functions/src/index.ts remains untouched by PEIA-16J', async () => {
   const indexPath = path.join(process.cwd(), 'functions/src/index.ts');
   const indexSource = fs.readFileSync(indexPath, 'utf8');
-  // Check for some expected content or just that it hasn't been modified to include test logic
-  if (indexSource.includes('FirestoreMachineCredentialBindingRepository')) {
-     // Repository should be exported if wired up, but the task says "untouched"
-     // Usually means no changes *inside* the file if we haven't reached wiring yet.
-     // But if it's already wired, it might contain the reference.
-     // Let's assume it's okay as long as it's structurally index.ts
+  
+  const prohibited = [
+    'FirestoreMachineCredentialBindingRepository',
+    'PEIA_MACHINE_CREDENTIAL_COLLECTION',
+    'firestoreMachineCredentialRepository',
+    'machineCredentialVerifier',
+    'OpaqueMachineIdentityVerifier'
+  ];
+
+  for (const p of prohibited) {
+    if (indexSource.includes(p)) {
+      throw new Error(`Prohibited PEIA wiring reference found in index.ts: ${p}`);
+    }
   }
 });
 
