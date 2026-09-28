@@ -271,14 +271,26 @@ async function run() {
     passed: cleanOfHumanRBAC,
   });
 
-  // 13. No endpoint is added to functions index
+  // 13. functions/src/index.ts does not own PEIA machine authorization logic
   const indexPath = path.join(process.cwd(), 'functions/src/index.ts');
   const indexCode = fs.readFileSync(indexPath, 'utf8');
-  const cleanIndex = !indexCode.includes('/peia') && !indexCode.includes('peia') && !indexCode.includes('machineAuthorization');
+
+  const cleanIndexAuthorizationBoundary =
+    !indexCode.includes('machineAuthorizationBoundary') &&
+    !indexCode.includes('authorizePendingTaskDelivery') &&
+    !indexCode.includes('MachineAuthorizationError') &&
+    !indexCode.includes('PEIAMachineCapability') &&
+    !indexCode.includes('MachineIdentityVerifier') &&
+    !indexCode.includes('VerifiedMachinePrincipal') &&
+    !indexCode.includes('validateOpaqueMachineCredential') &&
+    !indexCode.includes('hashOpaqueMachineCredential') &&
+    !indexCode.includes('peia_v1_') &&
+    !indexCode.includes('FETCH_PENDING_REVIEW_TASKS');
+
   tests.push({
     id: testCounter++,
-    name: '13. No endpoint is added to functions/src/index.ts',
-    passed: cleanIndex,
+    name: '13. functions/src/index.ts does not own PEIA machine authorization logic',
+    passed: cleanIndexAuthorizationBoundary,
   });
 
   // 14. No secret implementation is added

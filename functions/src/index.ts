@@ -8,6 +8,7 @@ initializeApp();
 export { syncYouTubeUploads } from "./youtube/manualSyncHandler";
 export { manageYouTubeIntegration, reviewYouTubeCandidate } from "./youtube/youtubeAdminHandlers";
 export { manageMedia } from "./media/mediaAdminHandlers";
+export { peiaPendingTaskGateway } from "./peia/firebasePendingTaskHttpEndpoint";
 
 /**
  * Basic HTTPS onRequest skeleton conforming to 2nd-gen specifications.
