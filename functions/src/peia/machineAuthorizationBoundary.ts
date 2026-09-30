@@ -8,6 +8,7 @@
 
 export const PEIAMachineCapability = {
   FETCH_PENDING_REVIEW_TASKS: 'FETCH_PENDING_REVIEW_TASKS',
+  SUBMIT_ADVISORY_RESULT: 'SUBMIT_ADVISORY_RESULT',
 } as const;
 
 export type PEIAMachineCapability = typeof PEIAMachineCapability[keyof typeof PEIAMachineCapability];
@@ -31,19 +32,15 @@ export class MachineAuthorizationError extends Error {
   }
 }
 
-/**
- * Authorizes a machine principal for Pending task delivery eligibility.
- * Fails closed on any authentication or permission check failure.
- */
-export async function authorizePendingTaskDelivery(
+async function authorizeWithCapability(
   credentialInput: unknown,
-  verifier: MachineIdentityVerifier
+  verifier: MachineIdentityVerifier,
+  requiredCapability: PEIAMachineCapability,
+  capabilityDeniedMessage: string
 ): Promise<VerifiedMachinePrincipal> {
   let principal: VerifiedMachinePrincipal | null = null;
 
   try {
-    // The credentials/token validation is fully encapsulated in the verifier.
-    // The authorization boundary never directly trusts/inspects caller-supplied principal fields.
     principal = await verifier.verify(credentialInput);
   } catch (err: any) {
     throw new MachineAuthorizationError(
@@ -52,7 +49,6 @@ export async function authorizePendingTaskDelivery(
     );
   }
 
-  // B. If verifier returns null, fail closed with machine unauthenticated
   if (principal === null) {
     throw new MachineAuthorizationError(
       'MACHINE_UNAUTHENTICATED',
@@ -60,7 +56,6 @@ export async function authorizePendingTaskDelivery(
     );
   }
 
-  // C. If principalId is missing or blank, fail closed
   if (typeof principal.principalId !== 'string' || principal.principalId.trim() === '') {
     throw new MachineAuthorizationError(
       'MACHINE_PRINCIPAL_INVALID',
@@ -68,7 +63,6 @@ export async function authorizePendingTaskDelivery(
     );
   }
 
-  // D. If principal is inactive, fail closed
   if (principal.isActive !== true) {
     throw new MachineAuthorizationError(
       'MACHINE_INACTIVE',
@@ -76,14 +70,44 @@ export async function authorizePendingTaskDelivery(
     );
   }
 
-  // E. If principal lacks FETCH_PENDING_REVIEW_TASKS, fail closed
-  if (!principal.capabilities || !principal.capabilities.includes(PEIAMachineCapability.FETCH_PENDING_REVIEW_TASKS)) {
+  if (!principal.capabilities || !principal.capabilities.includes(requiredCapability)) {
     throw new MachineAuthorizationError(
       'MACHINE_CAPABILITY_DENIED',
-      'Machine principal is not authorized for pending task delivery.'
+      capabilityDeniedMessage
     );
   }
 
-  // F. Return verified and authorized principal
   return principal;
+}
+
+/**
+ * Authorizes a machine principal for Pending task delivery eligibility.
+ * Fails closed on any authentication or permission check failure.
+ */
+export async function authorizePendingTaskDelivery(
+  credentialInput: unknown,
+  verifier: MachineIdentityVerifier
+): Promise<VerifiedMachinePrincipal> {
+  return authorizeWithCapability(
+    credentialInput,
+    verifier,
+    PEIAMachineCapability.FETCH_PENDING_REVIEW_TASKS,
+    'Machine principal is not authorized for pending task delivery.'
+  );
+}
+
+/**
+ * Authorizes a machine principal for advisory result submission eligibility.
+ * Fails closed on any authentication or permission check failure.
+ */
+export async function authorizeAdvisoryResultSubmission(
+  credentialInput: unknown,
+  verifier: MachineIdentityVerifier
+): Promise<VerifiedMachinePrincipal> {
+  return authorizeWithCapability(
+    credentialInput,
+    verifier,
+    PEIAMachineCapability.SUBMIT_ADVISORY_RESULT,
+    'Machine principal is not authorized for advisory result submission.'
+  );
 }
