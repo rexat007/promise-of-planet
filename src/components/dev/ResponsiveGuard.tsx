@@ -99,6 +99,8 @@ export function ResponsiveGuard() {
         if (
           el.hasAttribute('data-responsive-guard-ignore') ||
           el.closest('[data-responsive-guard-ignore]') ||
+          el.tagName === 'CLIMATE-CLOCK' ||
+          el.closest('climate-clock') ||
           el.offsetParent === null ||
           el.tagName === 'SCRIPT' ||
           el.tagName === 'STYLE' ||

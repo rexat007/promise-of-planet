@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   X,
   GraduationCap,
@@ -106,6 +107,20 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
     };
   }, [isOpen, course, currentUserUid, retryTrigger]);
 
+  // Lock body scroll when open to prevent background scrolling and layout shifts
+  useEffect(() => {
+    if (isOpen) {
+      const originalBodyOverflow = document.body.style.overflow;
+      const originalDocOverflow = document.documentElement.style.overflow;
+      document.body.style.overflow = 'hidden';
+      document.documentElement.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = originalBodyOverflow;
+        document.documentElement.style.overflow = originalDocOverflow;
+      };
+    }
+  }, [isOpen]);
+
   if (!isOpen || !course) return null;
 
   const handleEnrollClick = async () => {
@@ -116,7 +131,7 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
     setSubmitting(false);
   };
 
-  return (
+  const modalNode = (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-950/70 backdrop-blur-xs overflow-y-auto pop-motion-panel"
       dir={isAr ? 'rtl' : 'ltr'}
@@ -229,8 +244,8 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
               <span>{isAr ? 'حالة المشاركة والتسجيل في التدريب' : 'Training Access & Enrollment Status'}</span>
             </h3>
 
-            {/* Error Banner if error exists */}
-            {accessState.error && (
+            {/* Error Banner if error exists (and is not handled by a status-specific error layout like account_unavailable) */}
+            {accessState.error && accessState.status !== 'account_unavailable' && (
               <ErrorBanner
                 error={accessState.error}
                 isAr={isAr}
@@ -392,4 +407,6 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
       </div>
     </div>
   );
+
+  return createPortal(modalNode, document.body);
 };
