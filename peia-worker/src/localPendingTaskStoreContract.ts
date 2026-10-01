@@ -133,6 +133,15 @@ function validateJsonCompatibility(
   throw new Error('Unsupported JSON value');
 }
 
+function isAIReviewTargetType(
+  value: unknown
+): value is AIReviewTargetType {
+  return (
+    typeof value === 'string' &&
+    (Object.values(AIReviewTargetType) as readonly string[]).includes(value)
+  );
+}
+
 function assertValidTarget(
   target: unknown,
   errorFactory: () => LocalPendingTaskStoreContractError
@@ -161,13 +170,8 @@ function assertValidTarget(
     sourceUpdatedAt: unknown;
   };
 
-  const validTargetTypes = Object.values(AIReviewTargetType) as readonly string[];
-  const isKnownTargetType =
-    typeof targetType === 'string' &&
-    validTargetTypes.includes(targetType);
-
   if (
-    !isKnownTargetType ||
+    !isAIReviewTargetType(targetType) ||
     !isNonEmptyTrimmedString(targetId) ||
     !isNonEmptyTrimmedString(sourceUpdatedAt)
   ) {
