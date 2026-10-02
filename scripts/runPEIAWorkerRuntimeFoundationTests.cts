@@ -743,15 +743,14 @@ async function runAllTests() {
     }
   });
 
-  // Test 23: Unexpected internal error
-  await runTestCase("23. Unexpected internal error", async () => {
+  // Test 22: Unexpected internal error
+  await runTestCase("22. Unexpected internal error", async () => {
     const stderrLines: string[] = [];
     const exitCode = await runSingleDownloadCycleCliWithDependencies({
       loadConfig: () => ({ databasePath: '/tmp/db', endpointUrl: 'http://127.0.0.1:1', credential: 'creds' }),
       runCycle: async () => { throw new Error("Synthetic unexpected error SECRET_SENTINEL"); },
       writeStdout: () => {},
-      writeStderr: (data) => { stderrLines.push(data); },
-      exit: () => {}
+      writeStderr: (data) => { stderrLines.push(data); }
     });
 
     if (exitCode !== 5) {
@@ -768,8 +767,8 @@ async function runAllTests() {
     }
   });
 
-  // Test 24: Exact test-count gate
-  await runTestCase("24. Exact test-count gate", async () => {
+  // Test 23: Exact test-count gate
+  await runTestCase("23. Exact test-count gate", async () => {
     const totalExpected = 23;
     if (totalTestsRun !== totalExpected) {
       throw new Error(`Expected exactly ${totalExpected} tests to have run, but got ${totalTestsRun}`);

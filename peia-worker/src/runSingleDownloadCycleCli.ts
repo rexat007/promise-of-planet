@@ -10,7 +10,6 @@ export interface SingleDownloadCycleCliDependencies {
   runCycle: typeof runSingleDownloadCycle;
   writeStdout: (data: string) => void;
   writeStderr: (data: string) => void;
-  exit: (code: number) => void;
 }
 
 export async function runSingleDownloadCycleCliWithDependencies(
@@ -85,7 +84,6 @@ async function main() {
     runCycle: runSingleDownloadCycle,
     writeStdout: console.log,
     writeStderr: console.error,
-    exit: process.exit,
   });
   process.exit(exitCode);
 }
