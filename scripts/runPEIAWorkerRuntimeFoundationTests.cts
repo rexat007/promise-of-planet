@@ -104,10 +104,14 @@ let mockPort = 0;
 let mockRequestCount = 0;
 let mockResponseBody: any = {};
 let mockResponseStatus = 200;
+let nonLoopbackRequestDetected = false;
 
 function setupServer() {
   mockServer = http.createServer((req, res) => {
     mockRequestCount++;
+    if (req.socket.remoteAddress !== '127.0.0.1' && req.socket.remoteAddress !== '::1' && req.socket.remoteAddress !== '::ffff:127.0.0.1') {
+      nonLoopbackRequestDetected = true;
+    }
     
     // Consume request body to ensure proper socket flushing
     req.on('data', () => {});
@@ -707,7 +711,9 @@ async function runAllTests() {
 
   // Test 20: Only loopback requests occurred
   await runTestCase("20. Only loopback requests occurred", async () => {
-    // Verified by setupServer binding specifically to '127.0.0.1' and checking requests received on that dynamic port.
+    if (nonLoopbackRequestDetected) {
+      throw new Error("Security breach: Non-loopback request received.");
+    }
   });
 
   // Test 21: One request per reached download cycle
@@ -736,9 +742,37 @@ async function runAllTests() {
     }
   });
 
-  // Test 22: Exact test-count gate
-  await runTestCase("22. Exact test-count gate", async () => {
-    const totalExpected = 22;
+  // Test 23: Unexpected internal error
+  await runTestCase("23. Unexpected internal error", async () => {
+    const dbPath = createTempDbPath();
+    const res = await runCliAsync({
+      PEIA_TASK_ENDPOINT_URL: `http://127.0.0.1:${mockPort}`,
+      PEIA_LOCAL_DATABASE_PATH: dbPath,
+      PEIA_MACHINE_CREDENTIAL: secretCredential,
+      PEIA_TRIGGER_UNEXPECTED_ERROR: "true"
+    });
+
+    if (res.status !== 5) {
+      throw new Error(`Expected exit code 5, got ${res.status}`);
+    }
+
+    const parsedStderr = parseJsonFromOutput(res.stderr);
+    if (parsedStderr.category !== 'UNEXPECTED' || parsedStderr.code !== 'UNEXPECTED_ERROR' || parsedStderr.message !== 'An unexpected error occurred.') {
+      throw new Error(`Unexpected stderr payload: ${res.stderr}`);
+    }
+
+    if (res.stderr.includes("Synthetic unexpected error") || res.stderr.includes("Error:")) {
+      throw new Error("Raw error or stack was leaked in stderr.");
+    }
+
+    if (fs.existsSync(dbPath)) {
+      fs.unlinkSync(dbPath);
+    }
+  });
+
+  // Test 24: Exact test-count gate
+  await runTestCase("24. Exact test-count gate", async () => {
+    const totalExpected = 23;
     if (totalTestsRun !== totalExpected) {
       throw new Error(`Expected exactly ${totalExpected} tests to have run, but got ${totalTestsRun}`);
     }

@@ -7,6 +7,9 @@ import { LocalPendingTaskStoreContractError } from './localPendingTaskStoreContr
 
 async function main() {
   try {
+    if (process.env.PEIA_TRIGGER_UNEXPECTED_ERROR) {
+      throw new Error("Synthetic unexpected error");
+    }
     const config = loadProductionConfig();
     const result = await runSingleDownloadCycle({
       databasePath: config.databasePath,
@@ -65,10 +68,6 @@ async function main() {
     };
 
     console.error(JSON.stringify(errorRecord));
-
-    if (exitCode === 5) {
-      console.error(error);
-    }
 
     process.exit(exitCode);
   }
