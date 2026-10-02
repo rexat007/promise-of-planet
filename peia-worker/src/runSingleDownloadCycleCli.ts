@@ -5,13 +5,20 @@ import { PendingTaskDownloadResponseError } from './downloadTaskResponseContract
 import { SqlitePendingTaskRepositoryError } from './sqlitePendingTaskRepository';
 import { LocalPendingTaskStoreContractError } from './localPendingTaskStoreContract';
 
-async function main() {
+export interface SingleDownloadCycleCliDependencies {
+  loadConfig: typeof loadProductionConfig;
+  runCycle: typeof runSingleDownloadCycle;
+  writeStdout: (data: string) => void;
+  writeStderr: (data: string) => void;
+  exit: (code: number) => void;
+}
+
+export async function runSingleDownloadCycleCliWithDependencies(
+  deps: SingleDownloadCycleCliDependencies
+): Promise<number> {
   try {
-    if (process.env.PEIA_TRIGGER_UNEXPECTED_ERROR) {
-      throw new Error("Synthetic unexpected error");
-    }
-    const config = loadProductionConfig();
-    const result = await runSingleDownloadCycle({
+    const config = deps.loadConfig();
+    const result = await deps.runCycle({
       databasePath: config.databasePath,
       download: {
         endpointUrl: config.endpointUrl,
@@ -24,14 +31,14 @@ async function main() {
         kind: 'STORED',
         taskId: result.record.taskId,
       };
-      console.log(JSON.stringify(output));
+      deps.writeStdout(JSON.stringify(output));
     } else {
       const output = {
         kind: 'NO_TASK',
       };
-      console.log(JSON.stringify(output));
+      deps.writeStdout(JSON.stringify(output));
     }
-    process.exit(0);
+    return 0;
   } catch (error: any) {
     let exitCode = 5;
     let category = 'UNEXPECTED';
@@ -67,10 +74,22 @@ async function main() {
       message,
     };
 
-    console.error(JSON.stringify(errorRecord));
-
-    process.exit(exitCode);
+    deps.writeStderr(JSON.stringify(errorRecord));
+    return exitCode;
   }
 }
 
-main();
+async function main() {
+  const exitCode = await runSingleDownloadCycleCliWithDependencies({
+    loadConfig: loadProductionConfig,
+    runCycle: runSingleDownloadCycle,
+    writeStdout: console.log,
+    writeStderr: console.error,
+    exit: process.exit,
+  });
+  process.exit(exitCode);
+}
+
+if (require.main === module) {
+  main();
+}

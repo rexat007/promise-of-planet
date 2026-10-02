@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { runSingleDownloadCycleCliWithDependencies } from '../peia-worker/src/runSingleDownloadCycleCli';
 
 const VALID_TASK_AVAILABLE_BODY = {
   ok: true,
@@ -744,29 +745,26 @@ async function runAllTests() {
 
   // Test 23: Unexpected internal error
   await runTestCase("23. Unexpected internal error", async () => {
-    const dbPath = createTempDbPath();
-    const res = await runCliAsync({
-      PEIA_TASK_ENDPOINT_URL: `http://127.0.0.1:${mockPort}`,
-      PEIA_LOCAL_DATABASE_PATH: dbPath,
-      PEIA_MACHINE_CREDENTIAL: secretCredential,
-      PEIA_TRIGGER_UNEXPECTED_ERROR: "true"
+    const stderrLines: string[] = [];
+    const exitCode = await runSingleDownloadCycleCliWithDependencies({
+      loadConfig: () => ({ databasePath: '/tmp/db', endpointUrl: 'http://127.0.0.1:1', credential: 'creds' }),
+      runCycle: async () => { throw new Error("Synthetic unexpected error SECRET_SENTINEL"); },
+      writeStdout: () => {},
+      writeStderr: (data) => { stderrLines.push(data); },
+      exit: () => {}
     });
 
-    if (res.status !== 5) {
-      throw new Error(`Expected exit code 5, got ${res.status}`);
+    if (exitCode !== 5) {
+      throw new Error(`Expected exit code 5, got ${exitCode}`);
     }
 
-    const parsedStderr = parseJsonFromOutput(res.stderr);
+    const parsedStderr = parseJsonFromOutput(stderrLines.join(''));
     if (parsedStderr.category !== 'UNEXPECTED' || parsedStderr.code !== 'UNEXPECTED_ERROR' || parsedStderr.message !== 'An unexpected error occurred.') {
-      throw new Error(`Unexpected stderr payload: ${res.stderr}`);
+      throw new Error(`Unexpected stderr payload: ${stderrLines.join('')}`);
     }
 
-    if (res.stderr.includes("Synthetic unexpected error") || res.stderr.includes("Error:")) {
-      throw new Error("Raw error or stack was leaked in stderr.");
-    }
-
-    if (fs.existsSync(dbPath)) {
-      fs.unlinkSync(dbPath);
+    if (stderrLines.join('').includes("Synthetic unexpected error") || stderrLines.join('').includes("SECRET_SENTINEL")) {
+      throw new Error("Raw error or secret leaked in stderr.");
     }
   });
 
