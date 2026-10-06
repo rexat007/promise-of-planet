@@ -733,6 +733,8 @@ export async function analyzeTaskLocally(
   const cliArgs: string[] = [
     '-m',
     config.modelPath,
+    '--device',
+    'none',
     '-ngl',
     '0',
     '-c',

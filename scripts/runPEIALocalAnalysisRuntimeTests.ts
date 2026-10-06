@@ -645,7 +645,7 @@ async function runAllTests() {
     assert(pIdx !== -1 && pIdx < capturedArgs.length - 1, 'Prompt passed as separate argv argument');
   });
 
-  await test('33. process arguments include CPU mode (-ngl 0) and configurable context/temp', async () => {
+  await test('33. process arguments include CPU mode (--device none, -ngl 0) and configurable context/temp', async () => {
     let capturedArgs: readonly string[] = [];
     const runner: QwenProcessRunner = async (req) => {
       capturedArgs = req.args;
@@ -677,7 +677,11 @@ async function runAllTests() {
       runner
     );
 
+    const devIdx = capturedArgs.indexOf('--device');
+    assert(devIdx !== -1, 'Contains --device');
+    assert(capturedArgs[devIdx + 1] === 'none', 'device is none');
     const nglIdx = capturedArgs.indexOf('-ngl');
+    assert(nglIdx !== -1, 'Contains -ngl');
     assert(capturedArgs[nglIdx + 1] === '0', 'ngl is 0');
     const cIdx = capturedArgs.indexOf('-c');
     assert(capturedArgs[cIdx + 1] === '2048', 'contextSize is 2048');
