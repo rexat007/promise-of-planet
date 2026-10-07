@@ -30,6 +30,9 @@ import {
   parseAndValidateRawModelOutput,
   validateTaskInput,
   defaultSpawnProcessRunner,
+  extractAssistantResponseFromLlamaTranscript,
+  PROMPT_AUDIT_RESPONSE_HEADER,
+  DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS,
   type LocalAnalysisRuntimeConfig,
   type QwenProcessRunner,
   type QwenProcessInvocationRequest,
@@ -182,7 +185,7 @@ function makeFakeRunner(
 }
 
 async function runAllTests() {
-  console.log('--- RUNNING PEIA LOCAL ANALYSIS RUNTIME TEST SUITE (91 TESTS) ---');
+  console.log('--- RUNNING PEIA LOCAL ANALYSIS RUNTIME TEST SUITE (98 TESTS) ---');
 
   // ==========================================
   // CONTRACT (1 - 10)
@@ -645,7 +648,7 @@ async function runAllTests() {
     assert(pIdx !== -1 && pIdx < capturedArgs.length - 1, 'Prompt passed as separate argv argument');
   });
 
-  await test('33. process arguments include CPU mode (--device none, -ngl 0) and configurable context/temp', async () => {
+  await test('33. process arguments include CPU mode (--device none, -ngl 0, --single-turn) and configurable context/temp', async () => {
     let capturedArgs: readonly string[] = [];
     const runner: QwenProcessRunner = async (req) => {
       capturedArgs = req.args;
@@ -683,6 +686,7 @@ async function runAllTests() {
     const nglIdx = capturedArgs.indexOf('-ngl');
     assert(nglIdx !== -1, 'Contains -ngl');
     assert(capturedArgs[nglIdx + 1] === '0', 'ngl is 0');
+    assert(capturedArgs.includes('--single-turn'), 'Contains --single-turn');
     const cIdx = capturedArgs.indexOf('-c');
     assert(capturedArgs[cIdx + 1] === '2048', 'contextSize is 2048');
     const tempIdx = capturedArgs.indexOf('--temp');
@@ -1821,6 +1825,133 @@ async function runAllTests() {
     });
     assert(res.timedOut === true, 'Runner flagged as timedOut');
     assert(res.exitCode === null || typeof res.exitCode === 'number', 'Exit code handled');
+  });
+
+  // ==========================================
+  // TRANSCRIPT BOUNDARY & TIMEOUT REMEDIATIONS (92 - 98)
+  // ==========================================
+
+  await test('92. extractAssistantResponseFromLlamaTranscript separates assistant payload from realistic llama-cli transcript with banner, prompt echo, [Start thinking]...[End thinking] reasoning block, and trailer statistics', async () => {
+    const rawTranscript =
+      'Loading model...\n' +
+      'llama_init_from_file: model loaded\n' +
+      '=== TASK TO AUDIT ===\n' +
+      'Task ID: task-101\n' +
+      '=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n' +
+      '[Start thinking]\n' +
+      'Analyzing evidence epa-cwa-1...\n' +
+      '[End thinking]\n' +
+      '{\n' +
+      '  "status": "READY",\n' +
+      '  "summary": "Assessment completed.",\n' +
+      '  "findings": [\n' +
+      '    {\n' +
+      '      "claim": "Runoff observed.",\n' +
+      '      "evidenceIds": ["EPA::epa-cwa-1"]\n' +
+      '    }\n' +
+      '  ],\n' +
+      '  "recommendations": [],\n' +
+      '  "uncertainties": []\n' +
+      '}\n\n' +
+      '[ Prompt: 1500 tokens | Generation: 200 tokens ]\n' +
+      'Exiting...\n';
+
+    const extraction = extractAssistantResponseFromLlamaTranscript(rawTranscript);
+    assert(extraction.success === true, 'Extraction should succeed');
+    assert(extraction.content.startsWith('{'), 'Payload starts with JSON {');
+    assert(extraction.content.endsWith('}'), 'Payload ends with JSON }');
+    assert(!extraction.content.includes('[Start thinking]'), 'Does not contain [Start thinking]');
+    assert(!extraction.content.includes('[End thinking]'), 'Does not contain [End thinking]');
+    assert(!extraction.content.includes('[ Prompt:'), 'Does not contain [ Prompt:');
+    assert(!extraction.content.includes('Loading model'), 'Does not contain banner');
+  });
+
+  await test('93. extractAssistantResponseFromLlamaTranscript fails closed on unclosed [Start thinking] tag', async () => {
+    const corrupted =
+      '=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n' +
+      '[Start thinking]\n' +
+      'Generation interrupted before closing think tag...\n' +
+      '{\n  "status": "READY"\n}';
+    const extraction = extractAssistantResponseFromLlamaTranscript(corrupted);
+    assert(extraction.success === false, 'Extraction must fail');
+    assert(extraction.errorDetail?.includes('Unclosed [Start thinking]'), 'Mentions unclosed think tag');
+  });
+
+  await test('94. extractAssistantResponseFromLlamaTranscript fails closed on orphan [End thinking] tag without matching [Start thinking]', async () => {
+    const corrupted =
+      '=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n' +
+      'orphan closing tag text[End thinking]\n' +
+      '{\n  "status": "READY"\n}';
+    const extraction = extractAssistantResponseFromLlamaTranscript(corrupted);
+    assert(extraction.success === false, 'Extraction must fail');
+    assert(extraction.errorDetail?.includes('Orphan [End thinking]'), 'Mentions orphan closing tag');
+  });
+
+  await test('95. extractAssistantResponseFromLlamaTranscript fails closed on ambiguous multiple [Start thinking] tags', async () => {
+    const corrupted =
+      '=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n' +
+      '[Start thinking]thought 1[End thinking]\n' +
+      '[Start thinking]thought 2[End thinking]\n' +
+      '{\n  "status": "READY"\n}';
+    const extraction = extractAssistantResponseFromLlamaTranscript(corrupted);
+    assert(extraction.success === false, 'Extraction must fail');
+    assert(extraction.errorDetail?.includes('Ambiguous multiple [Start thinking]'), 'Mentions multiple think tags');
+  });
+
+  await test('96. analyzeTaskLocally produces ADVISORY_READY from full realistic llama-cli process stdout with banners, [Start thinking]...[End thinking] reasoning block, and [ Prompt: ... ] performance timings', async () => {
+    const fullTranscript =
+      'llama_cli: loading model...\n' +
+      '=== TASK TO AUDIT ===\n' +
+      'Task ID: task-audit-101\n' +
+      '=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n' +
+      '[Start thinking]\n' +
+      'Verifying municipal storm sewer guidance.\n' +
+      '[End thinking]\n' +
+      JSON.stringify({
+        status: 'READY',
+        summary: 'Full transcript assessment succeeded.',
+        findings: [{ claim: 'Discharge confirmed.', evidenceIds: ['EPA::epa-cwa-1'] }],
+        recommendations: ['Apply BMPs.'],
+        uncertainties: [],
+      }) +
+      '\n\n[ Prompt: 2048 tokens | Generation: 150 tokens ]\n' +
+      'Exiting...\n';
+
+    const runner = makeFakeRunner({ stdout: fullTranscript });
+    const result = await analyzeTaskLocally(
+      makeSampleTask(),
+      makeEvidenceResult([makeSampleEPAItem('1')]),
+      defaultConfig,
+      runner
+    );
+    assert(result.kind === 'ADVISORY_READY', 'Result must be ADVISORY_READY');
+    if (result.kind === 'ADVISORY_READY') {
+      assert(result.advisory.findings.length === 1, 'Finding extracted');
+      assert(result.advisory.findings[0].claim === 'Discharge confirmed.', 'Claim verified');
+      assert(result.usedEvidenceIds.includes('EPA::epa-cwa-1'), 'Evidence ID cited');
+    }
+  });
+
+  await test('97. analyzeTaskLocally fails closed to ABSTAINED with INVALID_MODEL_OUTPUT when model output inside transcript contains unclosed thinking block', async () => {
+    const corruptedTranscript =
+      '=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n' +
+      '[Start thinking]\n' +
+      'Incomplete thought...\n';
+    const runner = makeFakeRunner({ stdout: corruptedTranscript });
+    const result = await analyzeTaskLocally(
+      makeSampleTask(),
+      makeEvidenceResult([makeSampleEPAItem('1')]),
+      defaultConfig,
+      runner
+    );
+    assert(result.kind === 'ABSTAINED', 'Must fail closed into ABSTAINED');
+    if (result.kind === 'ABSTAINED') {
+      assert(result.reason === 'INVALID_MODEL_OUTPUT', 'Reason must be INVALID_MODEL_OUTPUT');
+    }
+  });
+
+  await test('98. DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS is 300000ms to accommodate measured Windows CPU execution', async () => {
+    assert(DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS === 300000, 'DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS is 300000');
   });
 
   console.log('------------------------------------------------------------');

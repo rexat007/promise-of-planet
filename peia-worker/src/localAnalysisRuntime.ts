@@ -19,7 +19,7 @@ import {
 export const DEFAULT_LOCAL_QWEN_CONTEXT_SIZE = 4096;
 export const DEFAULT_LOCAL_QWEN_TEMPERATURE = 0.1;
 export const DEFAULT_LOCAL_QWEN_MAX_TOKENS = 1024;
-export const DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS = 60000;
+export const DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS = 300000;
 export const DEFAULT_LOCAL_CONTEXT_MAX_CHARS = 8000;
 
 export interface LocalAnalysisTaskInput {
@@ -585,6 +585,103 @@ export function parseAndValidateRawModelOutput(
   };
 }
 
+export const PROMPT_AUDIT_RESPONSE_HEADER = '=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===';
+export const REASONING_START_MARKER = '[Start thinking]';
+export const REASONING_END_MARKER = '[End thinking]';
+
+export const LLAMA_CLI_TRAILER_MARKERS: readonly string[] = Object.freeze([
+  '\nllama_perf_sampler_print:',
+  '\nllama_perf_context_print:',
+  '\nllama_print_timings:',
+  '\nllama_memory_breakdown:',
+  '\nExiting...',
+  '\n[Exiting...]',
+  '\nmain: exiting',
+  '\n[ Prompt:',
+  '\nsampler chain:',
+]);
+
+export interface LlamaTranscriptExtractionResult {
+  readonly success: boolean;
+  readonly content: string;
+  readonly errorDetail?: string;
+}
+
+export function extractAssistantResponseFromLlamaTranscript(
+  rawStdout: string
+): LlamaTranscriptExtractionResult {
+  if (typeof rawStdout !== 'string' || rawStdout.trim().length === 0) {
+    return {
+      success: false,
+      content: '',
+      errorDetail: 'Standard output is empty or whitespace only.',
+    };
+  }
+
+  let text = rawStdout;
+
+  // 1. Separate from echoed prompt / banner if prompt header is present
+  const headerIdx = text.lastIndexOf(PROMPT_AUDIT_RESPONSE_HEADER);
+  if (headerIdx !== -1) {
+    text = text.slice(headerIdx + PROMPT_AUDIT_RESPONSE_HEADER.length);
+  }
+
+  // 2. Separate verified reasoning block ([Start thinking]...[End thinking]) if present
+  const thinkOpenIdx = text.indexOf(REASONING_START_MARKER);
+  if (thinkOpenIdx !== -1) {
+    const thinkCloseIdx = text.indexOf(
+      REASONING_END_MARKER,
+      thinkOpenIdx + REASONING_START_MARKER.length
+    );
+    if (thinkCloseIdx === -1) {
+      return {
+        success: false,
+        content: '',
+        errorDetail: 'Unclosed [Start thinking] block in model transcript.',
+      };
+    }
+    if (
+      text.indexOf(
+        REASONING_START_MARKER,
+        thinkCloseIdx + REASONING_END_MARKER.length
+      ) !== -1
+    ) {
+      return {
+        success: false,
+        content: '',
+        errorDetail: 'Ambiguous multiple [Start thinking] blocks in model transcript.',
+      };
+    }
+    text = text.slice(thinkCloseIdx + REASONING_END_MARKER.length);
+  } else if (text.includes(REASONING_END_MARKER)) {
+    return {
+      success: false,
+      content: '',
+      errorDetail: 'Orphan [End thinking] tag in model transcript without matching [Start thinking].',
+    };
+  }
+
+  // 3. Separate from known llama-cli process trailers if present
+  let earliestTrailerIdx = -1;
+  for (const marker of LLAMA_CLI_TRAILER_MARKERS) {
+    const idx = text.indexOf(marker);
+    if (idx !== -1) {
+      if (earliestTrailerIdx === -1 || idx < earliestTrailerIdx) {
+        earliestTrailerIdx = idx;
+      }
+    }
+  }
+
+  if (earliestTrailerIdx !== -1) {
+    text = text.slice(0, earliestTrailerIdx);
+  }
+
+  return {
+    success: true,
+    content: text.trim(),
+  };
+}
+
 export const defaultSpawnProcessRunner: QwenProcessRunner = async (
   req: QwenProcessInvocationRequest
 ): Promise<QwenProcessInvocationResult> => {
@@ -743,6 +840,7 @@ export async function analyzeTaskLocally(
     String(temperature),
     '-n',
     String(maxTokens),
+    '--single-turn',
     '-p',
     prompt,
   ];
@@ -827,8 +925,36 @@ export async function analyzeTaskLocally(
     });
   }
 
+  const extraction = extractAssistantResponseFromLlamaTranscript(processResult.stdout);
+  if (!extraction.success) {
+    return Object.freeze({
+      kind: 'ABSTAINED' as const,
+      taskRef,
+      reason: 'INVALID_MODEL_OUTPUT' as const,
+      detail: extraction.errorDetail ?? 'Failed to extract assistant response from model transcript.',
+      limitations: Object.freeze([
+        'Local analysis abstained because model transcript framing was ambiguous or corrupted.',
+        ...contextAssembly.limitations,
+      ]),
+      humanReviewRequired: true as const,
+      modelTrace: modelTraceBase,
+    });
+  }
+
+  if (extraction.content.length === 0) {
+    return Object.freeze({
+      kind: 'MODEL_FAILURE' as const,
+      taskRef,
+      code: 'UNUSABLE_PROCESS_OUTPUT' as const,
+      message: 'Local model process returned empty assistant payload.',
+      exitCode: processResult.exitCode,
+      humanReviewRequired: true as const,
+      modelTrace: modelTraceBase,
+    });
+  }
+
   const parsedValidation = parseAndValidateRawModelOutput(
-    processResult.stdout,
+    extraction.content,
     contextAssembly.retainedEvidenceRefs
   );
 
