@@ -145,7 +145,6 @@ async function runWindowsIntegration() {
     contextSize: 4096,
     temperature: 0.1,
     maxTokens: 1024,
-    timeoutMs: 60000,
     maxContextChars: 8000,
   };
 
