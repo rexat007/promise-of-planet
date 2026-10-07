@@ -19,7 +19,7 @@ import {
 export const DEFAULT_LOCAL_QWEN_CONTEXT_SIZE = 4096;
 export const DEFAULT_LOCAL_QWEN_TEMPERATURE = 0.1;
 export const DEFAULT_LOCAL_QWEN_MAX_TOKENS = 1024;
-export const DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS = 300000;
+export const DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS = 600000;
 export const DEFAULT_LOCAL_CONTEXT_MAX_CHARS = 8000;
 
 export interface LocalAnalysisTaskInput {

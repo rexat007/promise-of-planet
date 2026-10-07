@@ -1950,8 +1950,8 @@ async function runAllTests() {
     }
   });
 
-  await test('98. DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS is 300000ms to accommodate measured Windows CPU execution', async () => {
-    assert(DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS === 300000, 'DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS is 300000');
+  await test('98. DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS is 600000ms to accommodate measured Windows CPU execution', async () => {
+    assert(DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS === 600000, 'DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS is 600000');
   });
 
   console.log('------------------------------------------------------------');
