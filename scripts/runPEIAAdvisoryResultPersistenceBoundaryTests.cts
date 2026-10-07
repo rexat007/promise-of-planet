@@ -27,8 +27,13 @@ const createMockPrincipal = (principalId: string = 'm1', caps: PEIAMachineCapabi
 });
 
 const createMockResult = (taskId: string, targetId: string = 't1'): AdvisoryResultIntakeResult => ({
+  schemaVersion: 1,
   task: { taskId, taskType: AITaskType.CONTENT_REVIEW, target: { targetType: AIReviewTargetType.News, targetId, sourceUpdatedAt: '2026-10-01T00:00:00Z' } },
-  assessment: { summary: 's1', findings: [{ code: 'C1', severity: AIReviewSeverity.Info, message: 'm1' }] },
+  humanReviewRequired: true,
+  assessment: { summary: 's1', findings: [{ code: 'PEIA_FINDING_001', severity: AIReviewSeverity.Info, message: 'm1', evidenceIds: ['ev-1'] }] },
+  recommendations: ['r1'],
+  uncertainties: ['u1'],
+  limitations: ['l1'],
 });
 
 const createMockIntake = (taskId: string, targetId: string = 't1', principal: VerifiedMachinePrincipal = createMockPrincipal()): ReconciledAdvisoryResultIntake => ({
@@ -129,7 +134,28 @@ const checkRecursiveForForbiddenKeys = (obj: unknown, forbidden: string[]) => {
     await persistReconciledAdvisoryResult(intake, repo);
     const stored = repo.stored as ReconciledAdvisoryResultPersistenceRecord;
     const s = stored.advisoryResult;
-    if (s.task.taskId !== '1' || s.task.taskType !== AITaskType.CONTENT_REVIEW || s.task.target.targetType !== AIReviewTargetType.News || s.task.target.targetId !== 't1' || s.task.target.sourceUpdatedAt !== '2026-10-01T00:00:00Z' || s.assessment.summary !== 's1' || s.assessment.findings.length !== 1 || s.assessment.findings[0].code !== 'C1' || s.assessment.findings[0].severity !== AIReviewSeverity.Info || s.assessment.findings[0].message !== 'm1') throw new Error('Mismatch');
+    if (
+      s.schemaVersion !== 1 ||
+      s.humanReviewRequired !== true ||
+      s.task.taskId !== '1' ||
+      s.task.taskType !== AITaskType.CONTENT_REVIEW ||
+      s.task.target.targetType !== AIReviewTargetType.News ||
+      s.task.target.targetId !== 't1' ||
+      s.task.target.sourceUpdatedAt !== '2026-10-01T00:00:00Z' ||
+      s.assessment.summary !== 's1' ||
+      s.assessment.findings.length !== 1 ||
+      s.assessment.findings[0].code !== 'PEIA_FINDING_001' ||
+      s.assessment.findings[0].severity !== AIReviewSeverity.Info ||
+      s.assessment.findings[0].message !== 'm1' ||
+      s.assessment.findings[0].evidenceIds.length !== 1 ||
+      s.assessment.findings[0].evidenceIds[0] !== 'ev-1' ||
+      s.recommendations.length !== 1 ||
+      s.recommendations[0] !== 'r1' ||
+      s.uncertainties.length !== 1 ||
+      s.uncertainties[0] !== 'u1' ||
+      s.limitations.length !== 1 ||
+      s.limitations[0] !== 'l1'
+    ) throw new Error('Mismatch');
   });
   await runTest('7. findByTaskId called with exact canonical taskId', async () => {
     const repo = createMockRepository();
@@ -182,7 +208,7 @@ const checkRecursiveForForbiddenKeys = (obj: unknown, forbidden: string[]) => {
         taskId: '1',
         reconciledTask: intake.task,
         principal: intake.authorizedIntake.principal,
-        advisoryResult: { ...createMockResult('1'), assessment: { ...createMockResult('1').assessment, findings: [{ code: 'C2', severity: AIReviewSeverity.Warning, message: 'm2' }] } },
+        advisoryResult: { ...createMockResult('1'), assessment: { ...createMockResult('1').assessment, findings: [{ code: 'PEIA_FINDING_002', severity: AIReviewSeverity.Warning, message: 'm2', evidenceIds: ['ev-2'] }] } },
     };
     const repo = createMockRepository(record);
     await expectPersistenceErrorCode(() => persistReconciledAdvisoryResult(intake, repo), 'RESULT_CONFLICT');

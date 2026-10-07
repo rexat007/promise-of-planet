@@ -18,16 +18,22 @@ export interface AdvisoryResultIntakeTaskReference {
 
 export interface AdvisoryResultIntakeFinding {
   readonly code: string;
-  readonly severity: AIReviewSeverity;
   readonly message: string;
+  readonly evidenceIds: readonly string[];
+  readonly severity?: AIReviewSeverity;
 }
 
 export interface AdvisoryResultIntakeResult {
+  readonly schemaVersion: 1;
   readonly task: AdvisoryResultIntakeTaskReference;
+  readonly humanReviewRequired: true;
   readonly assessment: {
     readonly summary: string;
     readonly findings: readonly AdvisoryResultIntakeFinding[];
   };
+  readonly recommendations: readonly string[];
+  readonly uncertainties: readonly string[];
+  readonly limitations: readonly string[];
 }
 
 export interface AdvisoryResultIntakeRequest {
@@ -75,6 +81,13 @@ function isTrimmedString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() === value;
 }
 
+function isStringArray(value: unknown): value is readonly string[] {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  return value.every((item) => isNonEmptyTrimmedString(item));
+}
+
 export function validateAdvisoryResultIntakeRequest(
   input: unknown
 ): AdvisoryResultIntakeRequest {
@@ -92,11 +105,37 @@ export function validateAdvisoryResultIntakeRequest(
     throw new AdvisoryResultIntakeContractError();
   }
 
-  if (!hasExactKeys(result, ['task', 'assessment'])) {
+  if (
+    !hasExactKeys(result, [
+      'schemaVersion',
+      'task',
+      'humanReviewRequired',
+      'assessment',
+      'recommendations',
+      'uncertainties',
+      'limitations',
+    ])
+  ) {
     throw new AdvisoryResultIntakeContractError();
   }
 
-  const { task, assessment } = result;
+  const {
+    schemaVersion,
+    task,
+    humanReviewRequired,
+    assessment,
+    recommendations,
+    uncertainties,
+    limitations,
+  } = result;
+
+  if (schemaVersion !== 1) {
+    throw new AdvisoryResultIntakeContractError();
+  }
+
+  if (humanReviewRequired !== true) {
+    throw new AdvisoryResultIntakeContractError();
+  }
 
   if (!isPlainObject(task)) {
     throw new AdvisoryResultIntakeContractError();
@@ -164,8 +203,30 @@ export function validateAdvisoryResultIntakeRequest(
       throw new AdvisoryResultIntakeContractError();
     }
 
-    if (!hasExactKeys(finding, ['code', 'severity', 'message'])) {
-      throw new AdvisoryResultIntakeContractError();
+    const findingKeys = Object.keys(finding);
+    const hasSeverity = Object.prototype.hasOwnProperty.call(finding, 'severity');
+
+    if (hasSeverity) {
+      if (
+        findingKeys.length !== 4 ||
+        !hasExactKeys(finding, ['code', 'message', 'evidenceIds', 'severity'])
+      ) {
+        throw new AdvisoryResultIntakeContractError();
+      }
+
+      if (
+        typeof finding.severity !== 'string' ||
+        !ALLOWED_SEVERITIES.has(finding.severity)
+      ) {
+        throw new AdvisoryResultIntakeContractError();
+      }
+    } else {
+      if (
+        findingKeys.length !== 3 ||
+        !hasExactKeys(finding, ['code', 'message', 'evidenceIds'])
+      ) {
+        throw new AdvisoryResultIntakeContractError();
+      }
     }
 
     if (
@@ -180,16 +241,25 @@ export function validateAdvisoryResultIntakeRequest(
     }
     seenCodes.add(finding.code);
 
-    if (
-      typeof finding.severity !== 'string' ||
-      !ALLOWED_SEVERITIES.has(finding.severity)
-    ) {
-      throw new AdvisoryResultIntakeContractError();
-    }
-
     if (!isNonEmptyTrimmedString(finding.message)) {
       throw new AdvisoryResultIntakeContractError();
     }
+
+    if (!isStringArray(finding.evidenceIds)) {
+      throw new AdvisoryResultIntakeContractError();
+    }
+  }
+
+  if (!isStringArray(recommendations)) {
+    throw new AdvisoryResultIntakeContractError();
+  }
+
+  if (!isStringArray(uncertainties)) {
+    throw new AdvisoryResultIntakeContractError();
+  }
+
+  if (!isStringArray(limitations)) {
+    throw new AdvisoryResultIntakeContractError();
   }
 
   return input as unknown as AdvisoryResultIntakeRequest;

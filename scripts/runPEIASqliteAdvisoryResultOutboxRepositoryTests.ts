@@ -119,20 +119,24 @@ const canonicalFindings: readonly PEIAAdvisoryFinding[] = [
     code: 'METRIC_VERIFICATION_NEEDED',
     severity: AIReviewSeverity.Info,
     message: 'Rainfall metrics require human verification against official records.',
+    evidenceIds: ['EPA::rain-metrics-2026'],
   },
   {
     code: 'CITATION_SOURCE_OUTDATED',
     severity: AIReviewSeverity.Warning,
     message: 'Referenced policy guideline was revised in 2025.',
+    evidenceIds: ['EPA::cwa-guideline-2025'],
   },
   {
     code: 'POTENTIAL_INCONSISTENCY_DETECTED',
     severity: AIReviewSeverity.ReviewRecommended,
     message: 'Section 3 directly contradicts Section 1 figures.',
+    evidenceIds: ['EPA::cwa-sec-1', 'EPA::cwa-sec-3'],
   },
 ];
 
 const canonicalValidResult: PEIAAdvisoryResult = {
+  schemaVersion: 1,
   task: {
     taskId: 'task-canonical-202',
     taskType: AITaskType.CONTENT_REVIEW,
@@ -142,10 +146,14 @@ const canonicalValidResult: PEIAAdvisoryResult = {
       sourceUpdatedAt: '2026-09-28T00:00:00.000Z',
     },
   },
+  humanReviewRequired: true,
   assessment: {
     summary: 'Comprehensive review completed. Three advisory findings recorded.',
     findings: canonicalFindings,
   },
+  recommendations: ['Update citations to 2026 standards.'],
+  uncertainties: ['Preliminary rainfall metrics.'],
+  limitations: ['Limited to public EPA data.'],
 };
 
 async function runSuite() {
@@ -298,7 +306,7 @@ async function runSuite() {
     db.close();
     cleanupDb(dbPath);
 
-    assert(columns.length === 8, `Expected exactly 8 columns, got ${columns.length}`);
+    assert(columns.length === 13, `Expected exactly 13 columns, got ${columns.length}`);
 
     const expectedColumns = [
       'task_id',
@@ -309,6 +317,11 @@ async function runSuite() {
       'assessment_summary',
       'findings_json',
       'local_state',
+      'schema_version',
+      'human_review_required',
+      'recommendations_json',
+      'uncertainties_json',
+      'limitations_json',
     ];
 
     const actualNames = columns.map((c) => c.name).sort();
@@ -318,7 +331,18 @@ async function runSuite() {
       `Columns mismatch: ${JSON.stringify(actualNames)}`
     );
 
-    for (const col of columns) {
+    const baseColumns = [
+      'task_id',
+      'task_type',
+      'target_type',
+      'target_id',
+      'source_updated_at',
+      'assessment_summary',
+      'findings_json',
+      'local_state',
+    ];
+    for (const name of baseColumns) {
+      const col = columns.find((c) => c.name === name)!;
       assert(col.type === 'TEXT', `Column ${col.name} must have type TEXT, got ${col.type}`);
       assert(col.notnull === 1, `Column ${col.name} must have notnull === 1, got ${col.notnull}`);
     }
@@ -511,6 +535,7 @@ async function runSuite() {
 
     const recordA = createStoredAdvisoryResultRecord(canonicalValidResult);
     const recordB = createStoredAdvisoryResultRecord({
+      schemaVersion: 1,
       task: {
         taskId: 'task-canonical-202',
         taskType: AITaskType.CONTENT_REVIEW,
@@ -520,6 +545,7 @@ async function runSuite() {
           sourceUpdatedAt: '2026-09-28T00:00:00.000Z',
         },
       },
+      humanReviewRequired: true,
       assessment: {
         summary: 'Comprehensive review completed. Three advisory findings recorded.',
         findings: [
@@ -527,19 +553,25 @@ async function runSuite() {
             code: 'METRIC_VERIFICATION_NEEDED',
             severity: AIReviewSeverity.Info,
             message: 'Rainfall metrics require human verification against official records.',
+            evidenceIds: ['EPA::rain-metrics-2026'],
           },
           {
             code: 'CITATION_SOURCE_OUTDATED',
             severity: AIReviewSeverity.Warning,
             message: 'Referenced policy guideline was revised in 2025.',
+            evidenceIds: ['EPA::cwa-guideline-2025'],
           },
           {
             code: 'POTENTIAL_INCONSISTENCY_DETECTED',
             severity: AIReviewSeverity.ReviewRecommended,
             message: 'Section 3 directly contradicts Section 1 figures.',
+            evidenceIds: ['EPA::cwa-sec-1', 'EPA::cwa-sec-3'],
           },
         ],
       },
+      recommendations: ['Update citations to 2026 standards.'],
+      uncertainties: ['Preliminary rainfall metrics.'],
+      limitations: ['Limited to public EPA data.'],
     });
 
     await repo.save(recordA);
@@ -635,6 +667,7 @@ async function runSuite() {
             code: 'DIFFERENT_CODE',
             severity: AIReviewSeverity.Info,
             message: 'Different message',
+            evidenceIds: ['EPA::diff-evidence-001'],
           },
         ],
       },
@@ -707,6 +740,7 @@ async function runSuite() {
         code: 'METRIC_VERIFICATION_NEEDED',
         severity: AIReviewSeverity.Info,
         message: 'Rainfall metrics require human verification against official records.',
+        evidenceIds: ['EPA::rain-metrics-2026'],
       },
     ];
 
@@ -718,14 +752,10 @@ async function runSuite() {
     });
 
     const hostileRecord = createStoredAdvisoryResultRecord({
+      ...canonicalValidResult,
       task: {
+        ...canonicalValidResult.task,
         taskId: 'task-hostile-serialization',
-        taskType: AITaskType.CONTENT_REVIEW,
-        target: {
-          targetType: AIReviewTargetType.News,
-          targetId: 'news-987',
-          sourceUpdatedAt: '2026-09-28T00:00:00.000Z',
-        },
       },
       assessment: {
         summary: 'Summary with serialization hostile findings.',
@@ -1187,7 +1217,7 @@ async function runSuite() {
 
     // Structurally verify try/catch surrounding findings serialization in save(...)
     const serializationBlockRegex =
-      /try\s*\{\s*findingsJson\s*=\s*JSON\.stringify\(record\.result\.assessment\.findings\);\s*\}\s*catch\s*\{\s*throw\s+new\s+SqliteAdvisoryResultOutboxRepositoryError\(\s*'DATABASE_WRITE_FAILED'\s*\);?\s*\}/;
+      /try\s*\{[\s\S]*?findingsJson\s*=\s*JSON\.stringify\(record\.result\.assessment\.findings\);[\s\S]*?\}\s*catch\s*\{\s*throw\s+new\s+SqliteAdvisoryResultOutboxRepositoryError\(\s*'DATABASE_WRITE_FAILED'\s*\);?\s*\}/;
     assert(
       serializationBlockRegex.test(source),
       'Must contain try/catch surrounding findings serialization throwing DATABASE_WRITE_FAILED'
@@ -1298,7 +1328,7 @@ async function runSuite() {
 
     // F. NARROW SERIALIZATION
     const serializationBlockRegex =
-      /try\s*\{\s*findingsJson\s*=\s*JSON\.stringify\(record\.result\.assessment\.findings\);\s*\}\s*catch\s*\{\s*throw\s+new\s+SqliteAdvisoryResultOutboxRepositoryError\(\s*'DATABASE_WRITE_FAILED'\s*\);?\s*\}/;
+      /try\s*\{[\s\S]*?findingsJson\s*=\s*JSON\.stringify\(record\.result\.assessment\.findings\);[\s\S]*?\}\s*catch\s*\{\s*throw\s+new\s+SqliteAdvisoryResultOutboxRepositoryError\(\s*'DATABASE_WRITE_FAILED'\s*\);?\s*\}/;
     assert(serializationBlockRegex.test(source), 'Must contain try/catch serialization block');
     assert(!source.includes('JSON.stringify(record)'), 'Must not stringify whole record');
     assert(!source.includes('JSON.stringify(record.result)'), 'Must not stringify whole result');

@@ -7,6 +7,8 @@ import {
   type ReviewTargetIdentity,
 } from '../../src/types/aiReview';
 
+export const PEIA_ADVISORY_RESULT_SCHEMA_VERSION = 1;
+
 export interface AdvisoryResultTaskReference {
   readonly taskId: string;
   readonly taskType: typeof AITaskType.CONTENT_REVIEW;
@@ -15,16 +17,22 @@ export interface AdvisoryResultTaskReference {
 
 export interface PEIAAdvisoryFinding {
   readonly code: string;
-  readonly severity: AIReviewSeverity;
   readonly message: string;
+  readonly evidenceIds: readonly string[];
+  readonly severity?: AIReviewSeverity;
 }
 
 export interface PEIAAdvisoryResult {
+  readonly schemaVersion: typeof PEIA_ADVISORY_RESULT_SCHEMA_VERSION;
   readonly task: AdvisoryResultTaskReference;
+  readonly humanReviewRequired: true;
   readonly assessment: {
     readonly summary: string;
     readonly findings: readonly PEIAAdvisoryFinding[];
   };
+  readonly recommendations: readonly string[];
+  readonly uncertainties: readonly string[];
+  readonly limitations: readonly string[];
 }
 
 export type PEIAAdvisoryResultContractErrorCode =
@@ -68,16 +76,49 @@ function isTrimmedString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() === value;
 }
 
+function isStringArray(value: unknown): value is readonly string[] {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+  return value.every((item) => isNonEmptyTrimmedString(item));
+}
+
 export function validatePEIAAdvisoryResult(input: unknown): PEIAAdvisoryResult {
   if (!isPlainObject(input)) {
     throw new PEIAAdvisoryResultContractError();
   }
 
-  if (!hasExactKeys(input, ['task', 'assessment'])) {
+  if (
+    !hasExactKeys(input, [
+      'schemaVersion',
+      'task',
+      'humanReviewRequired',
+      'assessment',
+      'recommendations',
+      'uncertainties',
+      'limitations',
+    ])
+  ) {
     throw new PEIAAdvisoryResultContractError();
   }
 
-  const { task, assessment } = input;
+  const {
+    schemaVersion,
+    task,
+    humanReviewRequired,
+    assessment,
+    recommendations,
+    uncertainties,
+    limitations,
+  } = input;
+
+  if (schemaVersion !== PEIA_ADVISORY_RESULT_SCHEMA_VERSION) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  if (humanReviewRequired !== true) {
+    throw new PEIAAdvisoryResultContractError();
+  }
 
   if (!isPlainObject(task)) {
     throw new PEIAAdvisoryResultContractError();
@@ -145,8 +186,30 @@ export function validatePEIAAdvisoryResult(input: unknown): PEIAAdvisoryResult {
       throw new PEIAAdvisoryResultContractError();
     }
 
-    if (!hasExactKeys(finding, ['code', 'severity', 'message'])) {
-      throw new PEIAAdvisoryResultContractError();
+    const findingKeys = Object.keys(finding);
+    const hasSeverity = Object.prototype.hasOwnProperty.call(finding, 'severity');
+
+    if (hasSeverity) {
+      if (
+        findingKeys.length !== 4 ||
+        !hasExactKeys(finding, ['code', 'message', 'evidenceIds', 'severity'])
+      ) {
+        throw new PEIAAdvisoryResultContractError();
+      }
+
+      if (
+        typeof finding.severity !== 'string' ||
+        !ALLOWED_SEVERITIES.has(finding.severity)
+      ) {
+        throw new PEIAAdvisoryResultContractError();
+      }
+    } else {
+      if (
+        findingKeys.length !== 3 ||
+        !hasExactKeys(finding, ['code', 'message', 'evidenceIds'])
+      ) {
+        throw new PEIAAdvisoryResultContractError();
+      }
     }
 
     if (
@@ -161,16 +224,25 @@ export function validatePEIAAdvisoryResult(input: unknown): PEIAAdvisoryResult {
     }
     seenCodes.add(finding.code);
 
-    if (
-      typeof finding.severity !== 'string' ||
-      !ALLOWED_SEVERITIES.has(finding.severity)
-    ) {
-      throw new PEIAAdvisoryResultContractError();
-    }
-
     if (!isNonEmptyTrimmedString(finding.message)) {
       throw new PEIAAdvisoryResultContractError();
     }
+
+    if (!isStringArray(finding.evidenceIds)) {
+      throw new PEIAAdvisoryResultContractError();
+    }
+  }
+
+  if (!isStringArray(recommendations)) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  if (!isStringArray(uncertainties)) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  if (!isStringArray(limitations)) {
+    throw new PEIAAdvisoryResultContractError();
   }
 
   return input as PEIAAdvisoryResult;

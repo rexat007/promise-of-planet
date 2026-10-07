@@ -48,15 +48,18 @@ const canonicalFindings: readonly PEIAAdvisoryFinding[] = [
     code: 'METRIC_VERIFICATION_NEEDED',
     severity: AIReviewSeverity.Info,
     message: 'Rainfall metrics require human verification against official records.',
+    evidenceIds: ['EPA::rain-metrics-2026'],
   },
   {
     code: 'CITATION_SOURCE_OUTDATED',
     severity: AIReviewSeverity.Warning,
     message: 'Referenced policy guideline was revised in 2025.',
+    evidenceIds: ['EPA::cwa-guideline-2025'],
   },
 ];
 
 const canonicalValidResult: PEIAAdvisoryResult = {
+  schemaVersion: 1,
   task: {
     taskId: 'task-canonical-404',
     taskType: AITaskType.CONTENT_REVIEW,
@@ -66,10 +69,14 @@ const canonicalValidResult: PEIAAdvisoryResult = {
       sourceUpdatedAt: '2026-09-28T00:00:00.000Z',
     },
   },
+  humanReviewRequired: true,
   assessment: {
     summary: 'Comprehensive review completed.',
     findings: canonicalFindings,
   },
+  recommendations: ['Update citations to 2026 standards.'],
+  uncertainties: ['Preliminary rainfall metrics.'],
+  limitations: ['Limited to public EPA data.'],
 };
 
 async function runSuite() {

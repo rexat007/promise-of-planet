@@ -23,6 +23,7 @@ let testCounter = 1;
 function createValidRequest(overrides: Record<string, any> = {}): Record<string, any> {
   const base: any = {
     result: {
+      schemaVersion: 1,
       task: {
         taskId: 'task-100',
         taskType: AITaskType.CONTENT_REVIEW,
@@ -32,6 +33,7 @@ function createValidRequest(overrides: Record<string, any> = {}): Record<string,
           sourceUpdatedAt: '2026-09-29T12:00:00Z',
         },
       },
+      humanReviewRequired: true,
       assessment: {
         summary: 'All checks passed cleanly.',
         findings: [
@@ -39,9 +41,13 @@ function createValidRequest(overrides: Record<string, any> = {}): Record<string,
             code: 'SOURCE_CHECK',
             severity: AIReviewSeverity.Info,
             message: 'Source is verified.',
+            evidenceIds: ['EPA::source-check-2026'],
           },
         ],
       },
+      recommendations: ['Follow standard operating procedures.'],
+      uncertainties: ['Preliminary observational data.'],
+      limitations: ['Limited to public EPA data.'],
     },
   };
 
@@ -507,7 +513,7 @@ async function run() {
       result: {
         assessment: {
           summary: '',
-          findings: [{ code: 'CHK', severity: AIReviewSeverity.Info, message: 'msg' }],
+          findings: [{ code: 'CHK', severity: AIReviewSeverity.Info, message: 'msg', evidenceIds: ['EPA::source-check-2026'] }],
         },
       },
     });
@@ -569,7 +575,7 @@ async function run() {
         result: {
           assessment: {
             summary: 's',
-            findings: [{ code, severity: AIReviewSeverity.Info, message: 'm' }],
+            findings: [{ code, severity: AIReviewSeverity.Info, message: 'm', evidenceIds: ['EPA::source-check-2026'] }],
           },
         },
       });
@@ -590,8 +596,8 @@ async function run() {
         assessment: {
           summary: 's',
           findings: [
-            { code: 'DUP', severity: AIReviewSeverity.Info, message: 'm1' },
-            { code: 'DUP', severity: AIReviewSeverity.Warning, message: 'm2' },
+            { code: 'DUP', severity: AIReviewSeverity.Info, message: 'm1', evidenceIds: ['EPA::source-check-2026'] },
+            { code: 'DUP', severity: AIReviewSeverity.Warning, message: 'm2', evidenceIds: ['EPA::source-check-2026'] },
           ],
         },
       },
@@ -613,7 +619,7 @@ async function run() {
         result: {
           assessment: {
             summary: 's',
-            findings: [{ code: 'CODE', severity: severity as any, message: 'valid msg' }],
+            findings: [{ code: 'CODE', severity: severity as any, message: 'valid msg', evidenceIds: ['EPA::source-check-2026'] }],
           },
         },
       });
@@ -628,7 +634,7 @@ async function run() {
         result: {
           assessment: {
             summary: 's',
-            findings: [{ code: 'CODE', severity: AIReviewSeverity.Info, message: message as any }],
+            findings: [{ code: 'CODE', severity: AIReviewSeverity.Info, message: message as any, evidenceIds: ['EPA::source-check-2026'] }],
           },
         },
       });
@@ -685,8 +691,12 @@ async function run() {
     // F. Outer request exact keys: ['result']
     const fMatch = code.includes("hasExactKeys(input, ['result'])");
 
-    // G. Result exact keys: ['task', 'assessment']
-    const gMatch = code.includes("hasExactKeys(result, ['task', 'assessment'])");
+    // G. Result exact keys: schemaVersion, task, humanReviewRequired, assessment, recommendations, uncertainties, limitations
+    const gMatch = code.includes("'schemaVersion'") &&
+                   code.includes("'humanReviewRequired'") &&
+                   code.includes("'recommendations'") &&
+                   code.includes("'uncertainties'") &&
+                   code.includes("'limitations'");
 
     // H. Task exact keys: ['taskId', 'taskType', 'target']
     const hMatch = code.includes("hasExactKeys(task, ['taskId', 'taskType', 'target'])");
@@ -707,8 +717,9 @@ async function run() {
     const mMatch = code.includes('isTrimmedString(assessment.summary)') &&
                    code.includes("assessment.summary === '' && assessment.findings.length === 0");
 
-    // N. Finding exact keys: ['code', 'severity', 'message']
-    const nMatch = code.includes("hasExactKeys(finding, ['code', 'severity', 'message'])");
+    // N. Finding exact keys: ['code', 'message', 'evidenceIds'] with optional 'severity'
+    const nMatch = code.includes("['code', 'message', 'evidenceIds', 'severity']") &&
+                   code.includes("['code', 'message', 'evidenceIds']");
 
     // O. Finding code regex
     const oMatch = code.includes('/^[A-Z][A-Z0-9_]*$/');
@@ -806,7 +817,7 @@ async function run() {
       // 1. normal valid result
       { id: 1, type: 'RESULT', expectedPass: true, getPayload: () => createValidRequest().result },
       // 2. empty summary + one valid finding
-      { id: 2, type: 'RESULT', expectedPass: true, getPayload: () => createValidRequest({ result: { assessment: { summary: '', findings: [{ code: 'CHK', severity: AIReviewSeverity.Info, message: 'msg' }] } } }).result },
+      { id: 2, type: 'RESULT', expectedPass: true, getPayload: () => createValidRequest({ result: { assessment: { summary: '', findings: [{ code: 'CHK', severity: AIReviewSeverity.Info, message: 'msg', evidenceIds: ['EPA::source-check-2026'] }] } } }).result },
       // 3. non-empty summary + empty findings
       { id: 3, type: 'RESULT', expectedPass: true, getPayload: () => createValidRequest({ result: { assessment: { summary: 'Looks good.', findings: [] } } }).result },
       // 4. non-ISO but non-empty trimmed sourceUpdatedAt
@@ -820,7 +831,7 @@ async function run() {
       // 8. extra assessment key
       { id: 8, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [], extraKey: 1 } } }).result },
       // 9. extra finding key
-      { id: 9, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'CODE', severity: AIReviewSeverity.Info, message: 'm', extraKey: 1 }] } } }).result },
+      { id: 9, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'CODE', severity: AIReviewSeverity.Info, message: 'm', evidenceIds: ['EPA::source-check-2026'], extraKey: 1 }] } } }).result },
       // 10. blank taskId
       { id: 10, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { task: { taskId: '   ', taskType: AITaskType.CONTENT_REVIEW, target: { targetType: AIReviewTargetType.News, targetId: 'news-55', sourceUpdatedAt: '2026-09-29T12:00:00Z' } } } }).result },
       // 11. padded taskId
@@ -842,15 +853,15 @@ async function run() {
       // 19. empty summary + zero findings
       { id: 19, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: '', findings: [] } } }).result },
       // 20. invalid finding code
-      { id: 20, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'invalid_code', severity: AIReviewSeverity.Info, message: 'm' }] } } }).result },
+      { id: 20, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'invalid_code', severity: AIReviewSeverity.Info, message: 'm', evidenceIds: ['EPA::source-check-2026'] }] } } }).result },
       // 21. duplicate finding code
-      { id: 21, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'DUP', severity: AIReviewSeverity.Info, message: 'm1' }, { code: 'DUP', severity: AIReviewSeverity.Warning, message: 'm2' }] } } }).result },
+      { id: 21, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'DUP', severity: AIReviewSeverity.Info, message: 'm1', evidenceIds: ['EPA::source-check-2026'] }, { code: 'DUP', severity: AIReviewSeverity.Warning, message: 'm2', evidenceIds: ['EPA::source-check-2026'] }] } } }).result },
       // 22. invalid severity
-      { id: 22, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'CODE', severity: 'InvalidSeverity' as any, message: 'm' }] } } }).result },
+      { id: 22, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'CODE', severity: 'InvalidSeverity' as any, message: 'm', evidenceIds: ['EPA::source-check-2026'] }] } } }).result },
       // 23. blank message
-      { id: 23, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'CODE', severity: AIReviewSeverity.Info, message: '' }] } } }).result },
+      { id: 23, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'CODE', severity: AIReviewSeverity.Info, message: '', evidenceIds: ['EPA::source-check-2026'] }] } } }).result },
       // 24. padded message
-      { id: 24, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'CODE', severity: AIReviewSeverity.Info, message: ' message ' }] } } }).result },
+      { id: 24, type: 'RESULT', expectedPass: false, getPayload: () => createValidRequest({ result: { assessment: { summary: 's', findings: [{ code: 'CODE', severity: AIReviewSeverity.Info, message: ' message ', evidenceIds: ['EPA::source-check-2026'] }] } } }).result },
       // 25. valid upload envelope
       { id: 25, type: 'ENVELOPE', expectedPass: true, getPayload: () => createValidRequest() },
       // 26. extra outer key

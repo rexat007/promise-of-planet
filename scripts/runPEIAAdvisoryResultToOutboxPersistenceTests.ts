@@ -74,20 +74,24 @@ const canonicalFindings: readonly PEIAAdvisoryFinding[] = [
     code: 'METRIC_VERIFICATION_NEEDED',
     severity: AIReviewSeverity.Info,
     message: 'Rainfall metrics require human verification against official records.',
+    evidenceIds: ['EPA::rain-metrics-2026'],
   },
   {
     code: 'CITATION_SOURCE_OUTDATED',
     severity: AIReviewSeverity.Warning,
     message: 'Referenced policy guideline was revised in 2025.',
+    evidenceIds: ['EPA::cwa-guideline-2025'],
   },
   {
     code: 'POTENTIAL_INCONSISTENCY_DETECTED',
     severity: AIReviewSeverity.ReviewRecommended,
     message: 'Section 3 directly contradicts Section 1 figures.',
+    evidenceIds: ['EPA::cwa-sec-1', 'EPA::cwa-sec-3'],
   },
 ];
 
 const canonicalValidResult: PEIAAdvisoryResult = {
+  schemaVersion: 1,
   task: {
     taskId: 'task-canonical-202',
     taskType: AITaskType.CONTENT_REVIEW,
@@ -97,10 +101,14 @@ const canonicalValidResult: PEIAAdvisoryResult = {
       sourceUpdatedAt: '2026-09-28T00:00:00.000Z',
     },
   },
+  humanReviewRequired: true,
   assessment: {
     summary: 'Comprehensive review completed. Three advisory findings recorded.',
     findings: canonicalFindings,
   },
+  recommendations: ['Update citations to 2026 standards.'],
+  uncertainties: ['Preliminary rainfall metrics.'],
+  limitations: ['Limited to public EPA data.'],
 };
 
 async function runSuite() {
@@ -472,6 +480,7 @@ async function runSuite() {
     const repo = new InMemoryTestRepository();
 
     const inputA: PEIAAdvisoryResult = {
+      schemaVersion: 1,
       task: {
         taskId: 'task-same-id',
         taskType: AITaskType.CONTENT_REVIEW,
@@ -481,13 +490,18 @@ async function runSuite() {
           sourceUpdatedAt: '2026-09-28T00:00:00.000Z',
         },
       },
+      humanReviewRequired: true,
       assessment: {
         summary: 'Summary A',
         findings: canonicalFindings,
       },
+      recommendations: ['Update citations to 2026 standards.'],
+      uncertainties: ['Preliminary rainfall metrics.'],
+      limitations: ['Limited to public EPA data.'],
     };
 
     const inputB: PEIAAdvisoryResult = {
+      schemaVersion: 1,
       task: {
         taskId: 'task-same-id',
         taskType: AITaskType.CONTENT_REVIEW,
@@ -497,10 +511,14 @@ async function runSuite() {
           sourceUpdatedAt: '2026-09-28T00:00:00.000Z',
         },
       },
+      humanReviewRequired: true,
       assessment: {
         summary: 'Summary A',
         findings: canonicalFindings,
       },
+      recommendations: ['Update citations to 2026 standards.'],
+      uncertainties: ['Preliminary rainfall metrics.'],
+      limitations: ['Limited to public EPA data.'],
     };
 
     const outcomeA = await persistAdvisoryResultToOutbox(inputA, repo);

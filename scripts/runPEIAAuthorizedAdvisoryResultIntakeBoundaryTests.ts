@@ -52,6 +52,7 @@ function createValidVerifier(principal: VerifiedMachinePrincipal | null = create
 function createValidIntakeRequest(overrides: Record<string, any> = {}): Record<string, any> {
   const base: any = {
     result: {
+      schemaVersion: 1,
       task: {
         taskId: 'task-100',
         taskType: AITaskType.CONTENT_REVIEW,
@@ -61,16 +62,21 @@ function createValidIntakeRequest(overrides: Record<string, any> = {}): Record<s
           sourceUpdatedAt: '2026-09-29T12:00:00Z',
         },
       },
+      humanReviewRequired: true,
       assessment: {
         summary: 'All checks passed cleanly.',
         findings: [
           {
-            code: 'SOURCE_CHECK',
+            code: 'PEIA_FINDING_001',
             severity: AIReviewSeverity.Info,
             message: 'Source is verified.',
+            evidenceIds: ['ev-1'],
           },
         ],
       },
+      recommendations: ['Follow editorial guidelines.'],
+      uncertainties: ['Confidence level 95%.'],
+      limitations: ['Static text analysis only.'],
     },
   };
 
@@ -397,7 +403,7 @@ async function run() {
       result: {
         assessment: {
           summary: '',
-          findings: [{ code: 'CHK', severity: AIReviewSeverity.Info, message: 'msg' }],
+          findings: [{ code: 'PEIA_FINDING_001', severity: AIReviewSeverity.Info, message: 'msg', evidenceIds: ['ev-1'] }],
         },
       },
     });

@@ -67,20 +67,24 @@ const canonicalFindings: readonly PEIAAdvisoryFinding[] = [
     code: 'METRIC_VERIFICATION_NEEDED',
     severity: AIReviewSeverity.Info,
     message: 'Rainfall metrics require human verification against official records.',
+    evidenceIds: ['EPA::rain-metrics-2026'],
   },
   {
     code: 'CITATION_SOURCE_OUTDATED',
     severity: AIReviewSeverity.Warning,
     message: 'Referenced policy guideline was revised in 2025.',
+    evidenceIds: ['EPA::cwa-guideline-2025'],
   },
   {
     code: 'POTENTIAL_INCONSISTENCY_DETECTED',
     severity: AIReviewSeverity.ReviewRecommended,
     message: 'Section 3 directly contradicts Section 1 figures.',
+    evidenceIds: ['EPA::cwa-sec-1', 'EPA::cwa-sec-3'],
   },
 ];
 
 const canonicalValidResult: PEIAAdvisoryResult = {
+  schemaVersion: 1,
   task: {
     taskId: 'task-canonical-202',
     taskType: AITaskType.CONTENT_REVIEW,
@@ -90,10 +94,14 @@ const canonicalValidResult: PEIAAdvisoryResult = {
       sourceUpdatedAt: '2026-09-28T00:00:00.000Z',
     },
   },
+  humanReviewRequired: true,
   assessment: {
     summary: 'Comprehensive review completed. Three advisory findings recorded.',
     findings: canonicalFindings,
   },
+  recommendations: ['Update citations to 2026 standards.'],
+  uncertainties: ['Preliminary rainfall metrics.'],
+  limitations: ['Limited to public EPA data.'],
 };
 
 async function runSuite() {
@@ -153,16 +161,16 @@ async function runSuite() {
 
   // 7. missing top-level task rejected
   await test('7. missing top-level task rejected', () => {
-    assertThrowsContractError(() => validatePEIAAdvisoryResult({
-      assessment: canonicalValidResult.assessment,
-    }));
+    const candidate = { ...canonicalValidResult } as Record<string, unknown>;
+    delete candidate.task;
+    assertThrowsContractError(() => validatePEIAAdvisoryResult(candidate));
   });
 
   // 8. missing assessment rejected
   await test('8. missing assessment rejected', () => {
-    assertThrowsContractError(() => validatePEIAAdvisoryResult({
-      task: canonicalValidResult.task,
-    }));
+    const candidate = { ...canonicalValidResult } as Record<string, unknown>;
+    delete candidate.assessment;
+    assertThrowsContractError(() => validatePEIAAdvisoryResult(candidate));
   });
 
   // 9. extra top-level field rejected
@@ -419,6 +427,7 @@ async function runSuite() {
           {
             severity: AIReviewSeverity.Info,
             message: 'Message without code',
+            evidenceIds: ['EPA::test-ref'],
           } as unknown as PEIAAdvisoryFinding,
         ],
       },
@@ -438,6 +447,7 @@ async function runSuite() {
               code,
               severity: AIReviewSeverity.Info,
               message: 'Invalid code format',
+              evidenceIds: ['EPA::test-ref'],
             },
           ],
         },
@@ -456,6 +466,7 @@ async function runSuite() {
             code: ' METRIC_CODE ',
             severity: AIReviewSeverity.Info,
             message: 'Padded code',
+            evidenceIds: ['EPA::test-ref'],
           },
         ],
       },
@@ -473,11 +484,13 @@ async function runSuite() {
             code: 'DUPLICATE_CODE',
             severity: AIReviewSeverity.Info,
             message: 'First finding',
+            evidenceIds: ['EPA::test-ref'],
           },
           {
             code: 'DUPLICATE_CODE',
             severity: AIReviewSeverity.Warning,
             message: 'Second finding with identical code',
+            evidenceIds: ['EPA::test-ref'],
           },
         ],
       },
@@ -497,6 +510,7 @@ async function runSuite() {
               code: 'VALID_CODE',
               severity: severity as unknown as AIReviewSeverity,
               message: 'Invalid severity value',
+              evidenceIds: ['EPA::test-ref'],
             },
           ],
         },
@@ -515,6 +529,7 @@ async function runSuite() {
             code: 'VALID_CODE',
             severity: AIReviewSeverity.Info,
             message: '',
+            evidenceIds: ['EPA::test-ref'],
           },
         ],
       },
@@ -532,6 +547,7 @@ async function runSuite() {
             code: 'VALID_CODE',
             severity: AIReviewSeverity.Info,
             message: ' Padded message content ',
+            evidenceIds: ['EPA::test-ref'],
           },
         ],
       },
@@ -549,6 +565,7 @@ async function runSuite() {
             code: 'VALID_CODE',
             severity: AIReviewSeverity.Info,
             message: 'Valid message',
+            evidenceIds: ['EPA::test-ref'],
             extraFindingField: 123,
           } as unknown as PEIAAdvisoryFinding,
         ],
@@ -614,6 +631,7 @@ async function runSuite() {
               code: 'VALID_CODE',
               severity: AIReviewSeverity.Info,
               message: 'Message',
+              evidenceIds: ['EPA::test-ref'],
               [field]: 'prohibited-value',
             } as unknown as PEIAAdvisoryFinding,
           ],

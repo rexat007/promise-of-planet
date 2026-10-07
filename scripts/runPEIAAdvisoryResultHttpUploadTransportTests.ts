@@ -107,10 +107,12 @@ const canonicalFindings: readonly PEIAAdvisoryFinding[] = [
     code: 'METRIC_VERIFICATION_NEEDED',
     severity: AIReviewSeverity.Info,
     message: 'Rainfall metrics require human verification.',
+    evidenceIds: ['EPA::rain-metrics-2026'],
   },
 ];
 
 const canonicalValidResult: PEIAAdvisoryResult = {
+  schemaVersion: 1,
   task: {
     taskId: 'task-canonical-upload-1',
     taskType: AITaskType.CONTENT_REVIEW,
@@ -120,10 +122,14 @@ const canonicalValidResult: PEIAAdvisoryResult = {
       sourceUpdatedAt: '2026-09-28T00:00:00.000Z',
     },
   },
+  humanReviewRequired: true,
   assessment: {
     summary: 'Upload review complete.',
     findings: canonicalFindings,
   },
+  recommendations: ['Update citations to 2026 standards.'],
+  uncertainties: ['Preliminary rainfall metrics.'],
+  limitations: ['Limited to public EPA data.'],
 };
 
 async function runSuite() {
@@ -906,6 +912,7 @@ async function runSuite() {
         code: { value: 'VALID_CODE', enumerable: true, writable: true, configurable: true },
         severity: { value: AIReviewSeverity.Info, enumerable: true, writable: true, configurable: true },
         message: { value: 'Valid message content', enumerable: true, writable: true, configurable: true },
+        evidenceIds: { value: ['EPA::ev-1'], enumerable: true, writable: true, configurable: true },
       }
     );
 
@@ -959,6 +966,7 @@ async function runSuite() {
         code: { value: 'VALID_CODE', enumerable: true, writable: true, configurable: true },
         severity: { value: AIReviewSeverity.Info, enumerable: true, writable: true, configurable: true },
         message: { value: 'Valid message content', enumerable: true, writable: true, configurable: true },
+        evidenceIds: { value: ['EPA::ev-1'], enumerable: true, writable: true, configurable: true },
       }
     );
 

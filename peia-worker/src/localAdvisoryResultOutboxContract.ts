@@ -99,6 +99,14 @@ export function isSameStoredAdvisoryResultRecord(
     return false;
   }
 
+  if (a.result.schemaVersion !== b.result.schemaVersion) {
+    return false;
+  }
+
+  if (a.result.humanReviewRequired !== b.result.humanReviewRequired) {
+    return false;
+  }
+
   const taskA = a.result.task;
   const taskB = b.result.task;
 
@@ -129,9 +137,45 @@ export function isSameStoredAdvisoryResultRecord(
 
     if (
       fA.code !== fB.code ||
-      fA.severity !== fB.severity ||
-      fA.message !== fB.message
+      fA.message !== fB.message ||
+      fA.severity !== fB.severity
     ) {
+      return false;
+    }
+
+    if (fA.evidenceIds.length !== fB.evidenceIds.length) {
+      return false;
+    }
+    for (let j = 0; j < fA.evidenceIds.length; j++) {
+      if (fA.evidenceIds[j] !== fB.evidenceIds[j]) {
+        return false;
+      }
+    }
+  }
+
+  if (a.result.recommendations.length !== b.result.recommendations.length) {
+    return false;
+  }
+  for (let i = 0; i < a.result.recommendations.length; i++) {
+    if (a.result.recommendations[i] !== b.result.recommendations[i]) {
+      return false;
+    }
+  }
+
+  if (a.result.uncertainties.length !== b.result.uncertainties.length) {
+    return false;
+  }
+  for (let i = 0; i < a.result.uncertainties.length; i++) {
+    if (a.result.uncertainties[i] !== b.result.uncertainties[i]) {
+      return false;
+    }
+  }
+
+  if (a.result.limitations.length !== b.result.limitations.length) {
+    return false;
+  }
+  for (let i = 0; i < a.result.limitations.length; i++) {
+    if (a.result.limitations[i] !== b.result.limitations[i]) {
       return false;
     }
   }

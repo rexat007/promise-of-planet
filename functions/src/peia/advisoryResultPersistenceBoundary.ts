@@ -51,6 +51,14 @@ function isAdvisoryResultEqual(
   a: AdvisoryResultIntakeResult,
   b: AdvisoryResultIntakeResult
 ): boolean {
+  if (a.schemaVersion !== b.schemaVersion) {
+    return false;
+  }
+
+  if (a.humanReviewRequired !== b.humanReviewRequired) {
+    return false;
+  }
+
   if (
     a.task.taskId !== b.task.taskId ||
     a.task.taskType !== b.task.taskType ||
@@ -75,9 +83,45 @@ function isAdvisoryResultEqual(
 
     if (
       fA.code !== fB.code ||
-      fA.severity !== fB.severity ||
-      fA.message !== fB.message
+      fA.message !== fB.message ||
+      fA.severity !== fB.severity
     ) {
+      return false;
+    }
+
+    if (fA.evidenceIds.length !== fB.evidenceIds.length) {
+      return false;
+    }
+    for (let j = 0; j < fA.evidenceIds.length; j++) {
+      if (fA.evidenceIds[j] !== fB.evidenceIds[j]) {
+        return false;
+      }
+    }
+  }
+
+  if (a.recommendations.length !== b.recommendations.length) {
+    return false;
+  }
+  for (let i = 0; i < a.recommendations.length; i++) {
+    if (a.recommendations[i] !== b.recommendations[i]) {
+      return false;
+    }
+  }
+
+  if (a.uncertainties.length !== b.uncertainties.length) {
+    return false;
+  }
+  for (let i = 0; i < a.uncertainties.length; i++) {
+    if (a.uncertainties[i] !== b.uncertainties[i]) {
+      return false;
+    }
+  }
+
+  if (a.limitations.length !== b.limitations.length) {
+    return false;
+  }
+  for (let i = 0; i < a.limitations.length; i++) {
+    if (a.limitations[i] !== b.limitations[i]) {
       return false;
     }
   }
@@ -230,7 +274,7 @@ function validateExistingRecord(
     );
   }
   
-  const advisoryResult = r.advisoryResult as AdvisoryResultIntakeResult;
+  const advisoryResult = r.advisoryResult as unknown as AdvisoryResultIntakeResult;
 
   // Internal Task identity consistency check (stored task vs stored result task)
   if (
