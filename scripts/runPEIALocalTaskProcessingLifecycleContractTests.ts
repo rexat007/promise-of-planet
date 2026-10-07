@@ -164,28 +164,57 @@ function assert(condition: boolean, message: string) {
   });
 
   // 9. Valid NON_ADVISORY_PENDING_REPORT records
-  await test('9. valid NON_ADVISORY_PENDING_REPORT with ABSTAINED and MODEL_FAILURE accepted', () => {
-    const recAbstained = validateTaskProcessingRecord({
+  await test('9. valid NON_ADVISORY_PENDING_REPORT with ABSTAINED (attempts 0, 1, 2) and MODEL_FAILURE (attempts 1, 2) accepted', () => {
+    const recAbstained0 = validateTaskProcessingRecord({
+      taskId: 'task-101',
+      state: TaskProcessingState.NON_ADVISORY_PENDING_REPORT,
+      modelAttempts: 0,
+      terminalOutcome: TaskProcessingTerminalOutcome.ABSTAINED,
+      updatedAt: '2026-10-01T00:00:00.000Z',
+    });
+    assert(recAbstained0.modelAttempts === 0, 'Attempts 0 match');
+    assert(recAbstained0.terminalOutcome === TaskProcessingTerminalOutcome.ABSTAINED, 'Outcome match');
+
+    const recAbstained1 = validateTaskProcessingRecord({
       taskId: 'task-101',
       state: TaskProcessingState.NON_ADVISORY_PENDING_REPORT,
       modelAttempts: 1,
       terminalOutcome: TaskProcessingTerminalOutcome.ABSTAINED,
       updatedAt: '2026-10-01T00:00:00.000Z',
     });
-    assert(recAbstained.terminalOutcome === TaskProcessingTerminalOutcome.ABSTAINED, 'Outcome match');
+    assert(recAbstained1.modelAttempts === 1, 'Attempts 1 match');
 
-    const recModelFailure = validateTaskProcessingRecord({
+    const recAbstained2 = validateTaskProcessingRecord({
+      taskId: 'task-101',
+      state: TaskProcessingState.NON_ADVISORY_PENDING_REPORT,
+      modelAttempts: 2,
+      terminalOutcome: TaskProcessingTerminalOutcome.ABSTAINED,
+      updatedAt: '2026-10-01T00:00:00.000Z',
+    });
+    assert(recAbstained2.modelAttempts === 2, 'Attempts 2 match');
+
+    const recModelFailure1 = validateTaskProcessingRecord({
+      taskId: 'task-101',
+      state: TaskProcessingState.NON_ADVISORY_PENDING_REPORT,
+      modelAttempts: 1,
+      terminalOutcome: TaskProcessingTerminalOutcome.MODEL_FAILURE,
+      updatedAt: '2026-10-01T00:00:00.000Z',
+    });
+    assert(recModelFailure1.modelAttempts === 1, 'Attempts 1 match');
+
+    const recModelFailure2 = validateTaskProcessingRecord({
       taskId: 'task-101',
       state: TaskProcessingState.NON_ADVISORY_PENDING_REPORT,
       modelAttempts: 2,
       terminalOutcome: TaskProcessingTerminalOutcome.MODEL_FAILURE,
       updatedAt: '2026-10-01T00:00:00.000Z',
     });
-    assert(recModelFailure.terminalOutcome === TaskProcessingTerminalOutcome.MODEL_FAILURE, 'Outcome match');
+    assert(recModelFailure2.modelAttempts === 2, 'Attempts 2 match');
   });
 
-  // 10. NON_ADVISORY_PENDING_REPORT without terminal outcome rejected
-  await test('10. NON_ADVISORY_PENDING_REPORT with null terminalOutcome rejected', () => {
+  // 10. NON_ADVISORY_PENDING_REPORT invalid combinations rejected
+  await test('10. NON_ADVISORY_PENDING_REPORT with null outcome or MODEL_FAILURE with attempts=0 rejected', () => {
+    // null outcome
     try {
       validateTaskProcessingRecord({
         taskId: 'task-101',
@@ -194,35 +223,112 @@ function assert(condition: boolean, message: string) {
         terminalOutcome: null,
         updatedAt: '2026-10-01T00:00:00.000Z',
       });
-      assert(false, 'Should have failed');
+      assert(false, 'Should have failed with null terminalOutcome');
+    } catch (err) {
+      assert((err as LocalTaskProcessingLifecycleContractError).code === 'STATE_INVARIANT_VIOLATION', 'Code mismatch');
+    }
+
+    // MODEL_FAILURE with attempts 0
+    try {
+      validateTaskProcessingRecord({
+        taskId: 'task-101',
+        state: TaskProcessingState.NON_ADVISORY_PENDING_REPORT,
+        modelAttempts: 0,
+        terminalOutcome: TaskProcessingTerminalOutcome.MODEL_FAILURE,
+        updatedAt: '2026-10-01T00:00:00.000Z',
+      });
+      assert(false, 'Should have failed with MODEL_FAILURE and attempts 0');
     } catch (err) {
       assert((err as LocalTaskProcessingLifecycleContractError).code === 'STATE_INVARIANT_VIOLATION', 'Code mismatch');
     }
   });
 
-  // 11. Valid COMPLETED terminal record
-  await test('11. valid COMPLETED record accepted', () => {
-    const rec1 = validateTaskProcessingRecord({
+  // 11. Valid COMPLETED terminal records
+  await test('11. valid COMPLETED records accepted (advisory attempts 1-2, ABSTAINED attempts 0-2, MODEL_FAILURE attempts 1-2)', () => {
+    // Advisory (null outcome) with attempts 1 and 2
+    const recAdvisory1 = validateTaskProcessingRecord({
       taskId: 'task-101',
       state: TaskProcessingState.COMPLETED,
       modelAttempts: 1,
       terminalOutcome: null,
       updatedAt: '2026-10-01T00:00:00.000Z',
     });
-    assert(rec1.state === TaskProcessingState.COMPLETED, 'State match');
+    assert(recAdvisory1.state === TaskProcessingState.COMPLETED, 'State match');
+    assert(recAdvisory1.terminalOutcome === null, 'Outcome match');
 
-    const rec2 = validateTaskProcessingRecord({
-      taskId: 'task-102',
+    const recAdvisory2 = validateTaskProcessingRecord({
+      taskId: 'task-101',
       state: TaskProcessingState.COMPLETED,
       modelAttempts: 2,
+      terminalOutcome: null,
+      updatedAt: '2026-10-01T00:00:00.000Z',
+    });
+    assert(recAdvisory2.modelAttempts === 2, 'Attempts match');
+
+    // ABSTAINED with attempts 0, 1, 2
+    const recAbstained0 = validateTaskProcessingRecord({
+      taskId: 'task-102',
+      state: TaskProcessingState.COMPLETED,
+      modelAttempts: 0,
       terminalOutcome: TaskProcessingTerminalOutcome.ABSTAINED,
       updatedAt: '2026-10-01T00:00:00.000Z',
     });
-    assert(rec2.terminalOutcome === TaskProcessingTerminalOutcome.ABSTAINED, 'Outcome match');
+    assert(recAbstained0.modelAttempts === 0, 'Attempts 0 match');
+    assert(recAbstained0.terminalOutcome === TaskProcessingTerminalOutcome.ABSTAINED, 'Outcome match');
+
+    const recAbstained1 = validateTaskProcessingRecord({
+      taskId: 'task-102',
+      state: TaskProcessingState.COMPLETED,
+      modelAttempts: 1,
+      terminalOutcome: TaskProcessingTerminalOutcome.ABSTAINED,
+      updatedAt: '2026-10-01T00:00:00.000Z',
+    });
+    assert(recAbstained1.modelAttempts === 1, 'Attempts 1 match');
+
+    // MODEL_FAILURE with attempts 1, 2
+    const recModelFailure1 = validateTaskProcessingRecord({
+      taskId: 'task-103',
+      state: TaskProcessingState.COMPLETED,
+      modelAttempts: 1,
+      terminalOutcome: TaskProcessingTerminalOutcome.MODEL_FAILURE,
+      updatedAt: '2026-10-01T00:00:00.000Z',
+    });
+    assert(recModelFailure1.modelAttempts === 1, 'Attempts 1 match');
   });
 
-  // 12. Extra / unknown fields rejected
-  await test('12. extra forbidden / unknown fields rejected with INVALID_PROCESSING_RECORD', () => {
+  // 12. Invalid COMPLETED combinations rejected
+  await test('12. COMPLETED with attempts=0 and null or MODEL_FAILURE outcome rejected', () => {
+    // attempts 0 + null
+    try {
+      validateTaskProcessingRecord({
+        taskId: 'task-101',
+        state: TaskProcessingState.COMPLETED,
+        modelAttempts: 0,
+        terminalOutcome: null,
+        updatedAt: '2026-10-01T00:00:00.000Z',
+      });
+      assert(false, 'COMPLETED + attempts 0 + null should fail');
+    } catch (err) {
+      assert((err as LocalTaskProcessingLifecycleContractError).code === 'STATE_INVARIANT_VIOLATION', 'Code mismatch');
+    }
+
+    // attempts 0 + MODEL_FAILURE
+    try {
+      validateTaskProcessingRecord({
+        taskId: 'task-101',
+        state: TaskProcessingState.COMPLETED,
+        modelAttempts: 0,
+        terminalOutcome: TaskProcessingTerminalOutcome.MODEL_FAILURE,
+        updatedAt: '2026-10-01T00:00:00.000Z',
+      });
+      assert(false, 'COMPLETED + attempts 0 + MODEL_FAILURE should fail');
+    } catch (err) {
+      assert((err as LocalTaskProcessingLifecycleContractError).code === 'STATE_INVARIANT_VIOLATION', 'Code mismatch');
+    }
+  });
+
+  // 13. Extra / unknown fields rejected
+  await test('13. extra forbidden / unknown fields rejected with INVALID_PROCESSING_RECORD', () => {
     try {
       validateTaskProcessingRecord({
         taskId: 'task-101',
@@ -238,10 +344,11 @@ function assert(condition: boolean, message: string) {
     }
   });
 
-  // 13. State transitions validation
-  await test('13. allowed and prohibited state transitions enforce state machine', () => {
+  // 14. State transitions validation
+  await test('14. allowed and prohibited state transitions enforce state machine', () => {
     // READY transitions
     validateStateTransition(TaskProcessingState.READY, TaskProcessingState.PROCESSING);
+    validateStateTransition(TaskProcessingState.READY, TaskProcessingState.NON_ADVISORY_PENDING_REPORT);
 
     // PROCESSING transitions
     validateStateTransition(TaskProcessingState.PROCESSING, TaskProcessingState.PROCESSING);
@@ -291,8 +398,8 @@ function assert(condition: boolean, message: string) {
     }
   });
 
-  // 14. areTaskProcessingRecordsIdentical structural equality
-  await test('14. areTaskProcessingRecordsIdentical compares full semantic state', () => {
+  // 15. areTaskProcessingRecordsIdentical structural equality
+  await test('15. areTaskProcessingRecordsIdentical compares full semantic state', () => {
     const a: TaskProcessingRecord = {
       taskId: 't-1',
       state: TaskProcessingState.READY,

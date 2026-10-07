@@ -353,13 +353,21 @@ export class SqliteTaskProcessingLifecycleRepository
         : existing.terminalOutcome;
 
     const now = new Date().toISOString();
-    const candidate = validateTaskProcessingRecord({
-      taskId,
-      state: targetState,
-      modelAttempts: existing.modelAttempts,
-      terminalOutcome: effectiveOutcome,
-      updatedAt: now,
-    });
+    let candidate: TaskProcessingRecord;
+    try {
+      candidate = validateTaskProcessingRecord({
+        taskId,
+        state: targetState,
+        modelAttempts: existing.modelAttempts,
+        terminalOutcome: effectiveOutcome,
+        updatedAt: now,
+      });
+    } catch (err: unknown) {
+      throw new SqliteTaskProcessingLifecycleRepositoryError(
+        'INVALID_TRANSITION',
+        err instanceof Error ? err.message : String(err)
+      );
+    }
 
     try {
       const stmt = this.db.prepare(

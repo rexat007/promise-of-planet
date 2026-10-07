@@ -211,16 +211,21 @@ export function validateTaskProcessingRecord(
       break;
 
     case TaskProcessingState.NON_ADVISORY_PENDING_REPORT:
-      if (modelAttempts < 1 || modelAttempts > PEIA_MAX_MODEL_ATTEMPTS) {
-        throw new LocalTaskProcessingLifecycleContractError(
-          'STATE_INVARIANT_VIOLATION',
-          `NON_ADVISORY_PENDING_REPORT state requires modelAttempts to be between 1 and ${PEIA_MAX_MODEL_ATTEMPTS}.`
-        );
-      }
-      if (
-        typedOutcome !== TaskProcessingTerminalOutcome.ABSTAINED &&
-        typedOutcome !== TaskProcessingTerminalOutcome.MODEL_FAILURE
-      ) {
+      if (typedOutcome === TaskProcessingTerminalOutcome.ABSTAINED) {
+        if (modelAttempts < 0 || modelAttempts > PEIA_MAX_MODEL_ATTEMPTS) {
+          throw new LocalTaskProcessingLifecycleContractError(
+            'STATE_INVARIANT_VIOLATION',
+            `NON_ADVISORY_PENDING_REPORT state with ABSTAINED outcome requires modelAttempts to be between 0 and ${PEIA_MAX_MODEL_ATTEMPTS}.`
+          );
+        }
+      } else if (typedOutcome === TaskProcessingTerminalOutcome.MODEL_FAILURE) {
+        if (modelAttempts < 1 || modelAttempts > PEIA_MAX_MODEL_ATTEMPTS) {
+          throw new LocalTaskProcessingLifecycleContractError(
+            'STATE_INVARIANT_VIOLATION',
+            `NON_ADVISORY_PENDING_REPORT state with MODEL_FAILURE outcome requires modelAttempts to be between 1 and ${PEIA_MAX_MODEL_ATTEMPTS}.`
+          );
+        }
+      } else {
         throw new LocalTaskProcessingLifecycleContractError(
           'STATE_INVARIANT_VIOLATION',
           'NON_ADVISORY_PENDING_REPORT state requires terminalOutcome to be ABSTAINED or MODEL_FAILURE.'
@@ -229,10 +234,31 @@ export function validateTaskProcessingRecord(
       break;
 
     case TaskProcessingState.COMPLETED:
-      if (modelAttempts < 1 || modelAttempts > PEIA_MAX_MODEL_ATTEMPTS) {
+      if (typedOutcome === null) {
+        if (modelAttempts < 1 || modelAttempts > PEIA_MAX_MODEL_ATTEMPTS) {
+          throw new LocalTaskProcessingLifecycleContractError(
+            'STATE_INVARIANT_VIOLATION',
+            `COMPLETED state with null outcome requires modelAttempts to be between 1 and ${PEIA_MAX_MODEL_ATTEMPTS}.`
+          );
+        }
+      } else if (typedOutcome === TaskProcessingTerminalOutcome.ABSTAINED) {
+        if (modelAttempts < 0 || modelAttempts > PEIA_MAX_MODEL_ATTEMPTS) {
+          throw new LocalTaskProcessingLifecycleContractError(
+            'STATE_INVARIANT_VIOLATION',
+            `COMPLETED state with ABSTAINED outcome requires modelAttempts to be between 0 and ${PEIA_MAX_MODEL_ATTEMPTS}.`
+          );
+        }
+      } else if (typedOutcome === TaskProcessingTerminalOutcome.MODEL_FAILURE) {
+        if (modelAttempts < 1 || modelAttempts > PEIA_MAX_MODEL_ATTEMPTS) {
+          throw new LocalTaskProcessingLifecycleContractError(
+            'STATE_INVARIANT_VIOLATION',
+            `COMPLETED state with MODEL_FAILURE outcome requires modelAttempts to be between 1 and ${PEIA_MAX_MODEL_ATTEMPTS}.`
+          );
+        }
+      } else {
         throw new LocalTaskProcessingLifecycleContractError(
           'STATE_INVARIANT_VIOLATION',
-          `COMPLETED state requires modelAttempts to be between 1 and ${PEIA_MAX_MODEL_ATTEMPTS}.`
+          'COMPLETED state requires terminalOutcome to be null, ABSTAINED, or MODEL_FAILURE.'
         );
       }
       break;
@@ -257,6 +283,7 @@ export function validateStateTransition(
   const allowedTransitions: Record<TaskProcessingState, readonly TaskProcessingState[]> = {
     [TaskProcessingState.READY]: [
       TaskProcessingState.PROCESSING,
+      TaskProcessingState.NON_ADVISORY_PENDING_REPORT,
     ],
     [TaskProcessingState.PROCESSING]: [
       TaskProcessingState.PROCESSING, // Retry

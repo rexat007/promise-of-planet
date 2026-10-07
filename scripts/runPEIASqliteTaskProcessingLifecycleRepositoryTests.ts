@@ -187,15 +187,58 @@ function cleanupDb() {
       }
     });
 
-    // 10. Prohibited transition throws INVALID_TRANSITION
-    await test('10. prohibited state transition throws INVALID_TRANSITION', async () => {
+    // 10. Prohibited transitions throw INVALID_TRANSITION
+    await test('10. prohibited state transitions throw INVALID_TRANSITION', async () => {
       const repo = new SqliteTaskProcessingLifecycleRepository(TEST_DB_PATH);
       try {
+        // COMPLETED -> READY prohibited
         try {
-          await repo.transitionState('task-1', TaskProcessingState.READY); // COMPLETED -> READY prohibited
+          await repo.transitionState('task-1', TaskProcessingState.READY);
           assert(false, 'Should have failed with INVALID_TRANSITION');
         } catch (err) {
           assert(err instanceof SqliteTaskProcessingLifecycleRepositoryError, 'Must be repo error');
+          assert((err as SqliteTaskProcessingLifecycleRepositoryError).code === 'INVALID_TRANSITION', 'Code mismatch');
+        }
+
+        // Create a new task in READY to test forbidden transitions from READY
+        await repo.createInitialRecord('task-forbidden-ready');
+
+        // READY -> COMPLETED prohibited
+        try {
+          await repo.transitionState('task-forbidden-ready', TaskProcessingState.COMPLETED);
+          assert(false, 'READY -> COMPLETED should have failed');
+        } catch (err) {
+          assert((err as SqliteTaskProcessingLifecycleRepositoryError).code === 'INVALID_TRANSITION', 'Code mismatch');
+        }
+
+        // READY -> ADVISORY_PENDING_UPLOAD prohibited
+        try {
+          await repo.transitionState('task-forbidden-ready', TaskProcessingState.ADVISORY_PENDING_UPLOAD);
+          assert(false, 'READY -> ADVISORY_PENDING_UPLOAD should have failed');
+        } catch (err) {
+          assert((err as SqliteTaskProcessingLifecycleRepositoryError).code === 'INVALID_TRANSITION', 'Code mismatch');
+        }
+
+        // READY -> NON_ADVISORY_PENDING_REPORT with MODEL_FAILURE prohibited (attempts = 0)
+        try {
+          await repo.transitionState(
+            'task-forbidden-ready',
+            TaskProcessingState.NON_ADVISORY_PENDING_REPORT,
+            TaskProcessingTerminalOutcome.MODEL_FAILURE
+          );
+          assert(false, 'READY -> NON_ADVISORY_PENDING_REPORT + MODEL_FAILURE should have failed');
+        } catch (err) {
+          assert((err as SqliteTaskProcessingLifecycleRepositoryError).code === 'INVALID_TRANSITION', 'Code mismatch');
+        }
+
+        // Move task to PROCESSING to test forbidden transitions from PROCESSING
+        await repo.recordModelAttempt('task-forbidden-ready');
+
+        // PROCESSING -> COMPLETED prohibited
+        try {
+          await repo.transitionState('task-forbidden-ready', TaskProcessingState.COMPLETED);
+          assert(false, 'PROCESSING -> COMPLETED should have failed');
+        } catch (err) {
           assert((err as SqliteTaskProcessingLifecycleRepositoryError).code === 'INVALID_TRANSITION', 'Code mismatch');
         }
       } finally {
@@ -203,8 +246,35 @@ function cleanupDb() {
       }
     });
 
-    // 11. Persistence survives reopen / process restart
-    await test('11. state and attempts survive database reopen', async () => {
+    // 11. READY -> NON_ADVISORY_PENDING_REPORT (ABSTAINED) with modelAttempts = 0
+    await test('11. direct transition from READY to NON_ADVISORY_PENDING_REPORT with ABSTAINED keeps modelAttempts=0 and completes', async () => {
+      const repo = new SqliteTaskProcessingLifecycleRepository(TEST_DB_PATH);
+      try {
+        await repo.createInitialRecord('task-abstained-zero-attempts');
+        const transitioned = await repo.transitionState(
+          'task-abstained-zero-attempts',
+          TaskProcessingState.NON_ADVISORY_PENDING_REPORT,
+          TaskProcessingTerminalOutcome.ABSTAINED
+        );
+        assert(transitioned.state === TaskProcessingState.NON_ADVISORY_PENDING_REPORT, 'State must be NON_ADVISORY_PENDING_REPORT');
+        assert(transitioned.modelAttempts === 0, 'modelAttempts must remain 0');
+        assert(transitioned.terminalOutcome === TaskProcessingTerminalOutcome.ABSTAINED, 'Outcome must be ABSTAINED');
+
+        // Complete the task
+        const completed = await repo.transitionState(
+          'task-abstained-zero-attempts',
+          TaskProcessingState.COMPLETED
+        );
+        assert(completed.state === TaskProcessingState.COMPLETED, 'State must be COMPLETED');
+        assert(completed.modelAttempts === 0, 'modelAttempts must remain 0 on COMPLETED');
+        assert(completed.terminalOutcome === TaskProcessingTerminalOutcome.ABSTAINED, 'Outcome must remain ABSTAINED on COMPLETED');
+      } finally {
+        repo.close();
+      }
+    });
+
+    // 12. Persistence survives reopen / process restart
+    await test('12. state and attempts survive database reopen', async () => {
       const repo1 = new SqliteTaskProcessingLifecycleRepository(TEST_DB_PATH);
       repo1.close();
 
@@ -220,19 +290,26 @@ function cleanupDb() {
         assert(task2.state === TaskProcessingState.NON_ADVISORY_PENDING_REPORT, 'task-2 state preserved');
         assert(task2.modelAttempts === 2, 'task-2 attempts preserved');
         assert(task2.terminalOutcome === TaskProcessingTerminalOutcome.ABSTAINED, 'task-2 outcome preserved');
+
+        const taskAbstained = await repo2.findByTaskId('task-abstained-zero-attempts');
+        assert(taskAbstained !== null, 'task-abstained must exist');
+        assert(taskAbstained.state === TaskProcessingState.COMPLETED, 'State preserved');
+        assert(taskAbstained.modelAttempts === 0, 'Attempts = 0 preserved');
+        assert(taskAbstained.terminalOutcome === TaskProcessingTerminalOutcome.ABSTAINED, 'Outcome preserved');
       } finally {
         repo2.close();
       }
     });
 
-    // 12. listResumableRecords lists active non-completed tasks
-    await test('12. listResumableRecords lists only non-completed active tasks', async () => {
+    // 13. listResumableRecords lists active non-completed tasks
+    await test('13. listResumableRecords lists only non-completed active tasks', async () => {
       const repo = new SqliteTaskProcessingLifecycleRepository(TEST_DB_PATH);
       try {
         await repo.createInitialRecord('task-3'); // READY
         const resumable = await repo.listResumableRecords();
         const ids = resumable.map((r) => r.taskId);
         assert(!ids.includes('task-1'), 'Completed task-1 must not be resumable');
+        assert(!ids.includes('task-abstained-zero-attempts'), 'Completed task-abstained must not be resumable');
         assert(ids.includes('task-2'), 'Pending report task-2 must be resumable');
         assert(ids.includes('task-3'), 'Ready task-3 must be resumable');
       } finally {
@@ -240,8 +317,8 @@ function cleanupDb() {
       }
     });
 
-    // 13. Nonexistent task throws TASK_NOT_FOUND on transition or record attempt
-    await test('13. nonexistent task throws TASK_NOT_FOUND on recordModelAttempt or transitionState', async () => {
+    // 14. Nonexistent task throws TASK_NOT_FOUND on transition or record attempt
+    await test('14. nonexistent task throws TASK_NOT_FOUND on recordModelAttempt or transitionState', async () => {
       const repo = new SqliteTaskProcessingLifecycleRepository(TEST_DB_PATH);
       try {
         try {
@@ -262,8 +339,8 @@ function cleanupDb() {
       }
     });
 
-    // 14. Two-connection concurrent attempt reservation produces distinct attempts 1 and 2, blocks attempt 3
-    await test('14. two independent repository connections reserve distinct model attempts and enforce max attempts', async () => {
+    // 15. Two-connection concurrent attempt reservation produces distinct attempts 1 and 2, blocks attempt 3
+    await test('15. two independent repository connections reserve distinct model attempts and enforce max attempts', async () => {
       const initRepo = new SqliteTaskProcessingLifecycleRepository(TEST_DB_PATH);
       try {
         await initRepo.createInitialRecord('task-concurrent');
