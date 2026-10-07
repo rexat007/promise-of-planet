@@ -56,7 +56,8 @@ export interface ModelFailureNonAdvisoryOutcome {
     | 'TIMEOUT'
     | 'NON_ZERO_EXIT'
     | 'UNUSABLE_PROCESS_OUTPUT'
-    | 'PROCESS_ERROR';
+    | 'PROCESS_ERROR'
+    | 'INTERRUPTED_MODEL_ATTEMPT';
   readonly modelAttempts: number;
   readonly exitCode?: number | null;
   readonly detail?: string;
@@ -190,8 +191,9 @@ export function validateDurableNonAdvisoryOutcomeRecord(
       'MISSING_RETRIEVAL_QUERY',
       'INVALID_RETRIEVAL_QUERY',
       'INVALID_TASK_PAYLOAD',
+      'INTERRUPTED_MODEL_ATTEMPT',
     ];
-    if (!validReasons.includes(reason)) {
+    if (!validReasons.includes(reason) || reason === 'INTERRUPTED_MODEL_ATTEMPT') {
       throw new LocalNonAdvisoryOutcomeContractError(
         'INVALID_REASON',
         'Invalid reason for INPUT_FAILURE.'
@@ -229,8 +231,9 @@ export function validateDurableNonAdvisoryOutcomeRecord(
       'INSUFFICIENT_EVIDENCE',
       'INVALID_MODEL_OUTPUT',
       'UNGROUNDED_MODEL_OUTPUT',
+      'INTERRUPTED_MODEL_ATTEMPT',
     ];
-    if (!validReasons.includes(reason)) {
+    if (!validReasons.includes(reason) || reason === 'INTERRUPTED_MODEL_ATTEMPT') {
       throw new LocalNonAdvisoryOutcomeContractError(
         'INVALID_REASON',
         'Invalid reason for ABSTAINED.'
@@ -350,6 +353,7 @@ export function validateDurableNonAdvisoryOutcomeRecord(
       'NON_ZERO_EXIT',
       'UNUSABLE_PROCESS_OUTPUT',
       'PROCESS_ERROR',
+      'INTERRUPTED_MODEL_ATTEMPT',
     ];
     if (!validReasons.includes(reason)) {
       throw new LocalNonAdvisoryOutcomeContractError(
@@ -357,11 +361,34 @@ export function validateDurableNonAdvisoryOutcomeRecord(
         'Invalid reason for MODEL_FAILURE.'
       );
     }
-    if (modelAttempts !== 1 && modelAttempts !== 2) {
-      throw new LocalNonAdvisoryOutcomeContractError(
-        'VARIANT_INVARIANT_VIOLATION',
-        'MODEL_FAILURE modelAttempts must be 1 or 2.'
-      );
+    if (reason === 'INTERRUPTED_MODEL_ATTEMPT') {
+      if (modelAttempts !== 2) {
+        throw new LocalNonAdvisoryOutcomeContractError(
+          'VARIANT_INVARIANT_VIOLATION',
+          'INTERRUPTED_MODEL_ATTEMPT modelAttempts must be 2.'
+        );
+      }
+      if (exitCode !== undefined) {
+        throw new LocalNonAdvisoryOutcomeContractError(
+          'INVALID_EXIT_CODE',
+          'exitCode is not allowed for INTERRUPTED_MODEL_ATTEMPT.'
+        );
+      }
+    } else {
+      if (modelAttempts !== 1 && modelAttempts !== 2) {
+        throw new LocalNonAdvisoryOutcomeContractError(
+          'VARIANT_INVARIANT_VIOLATION',
+          'MODEL_FAILURE modelAttempts must be 1 or 2.'
+        );
+      }
+      if (exitCode !== undefined && exitCode !== null) {
+        if (typeof exitCode !== 'number' || !Number.isInteger(exitCode)) {
+          throw new LocalNonAdvisoryOutcomeContractError(
+            'INVALID_EXIT_CODE',
+            'exitCode must be an integer or null if present.'
+          );
+        }
+      }
     }
     if (sourceFailures !== undefined) {
       throw new LocalNonAdvisoryOutcomeContractError(
@@ -369,15 +396,15 @@ export function validateDurableNonAdvisoryOutcomeRecord(
         'sourceFailures is not allowed for MODEL_FAILURE.'
       );
     }
-    if (exitCode !== undefined && exitCode !== null) {
-      if (typeof exitCode !== 'number' || !Number.isInteger(exitCode)) {
-        throw new LocalNonAdvisoryOutcomeContractError(
-          'INVALID_EXIT_CODE',
-          'exitCode must be an integer or null if present.'
-        );
-      }
-    }
-    const expectedKeys = ['taskId', 'kind', 'reason', 'modelAttempts', 'createdAt', ...(exitCode !== undefined ? ['exitCode'] : []), ...(detail !== undefined ? ['detail'] : [])];
+    const expectedKeys = [
+      'taskId',
+      'kind',
+      'reason',
+      'modelAttempts',
+      'createdAt',
+      ...(exitCode !== undefined ? ['exitCode'] : []),
+      ...(detail !== undefined ? ['detail'] : []),
+    ];
     const actualKeys = Object.keys(input);
     if (actualKeys.length !== expectedKeys.length || !expectedKeys.every(k => actualKeys.includes(k))) {
       throw new LocalNonAdvisoryOutcomeContractError(

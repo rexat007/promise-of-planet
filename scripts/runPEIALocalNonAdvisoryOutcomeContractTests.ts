@@ -374,6 +374,30 @@ function assert(condition: boolean, message: string) {
     assert(record.reason === 'TIMEOUT', 'reason');
   });
 
+  // 22b. TIMEOUT attempts 2 valid
+  await test('22b. TIMEOUT attempts 2 valid', () => {
+    const record = validateDurableNonAdvisoryOutcomeRecord({
+      taskId: 'task-1',
+      kind: NonAdvisoryOutcomeKind.MODEL_FAILURE,
+      reason: 'TIMEOUT',
+      modelAttempts: 2,
+      createdAt: '2026-10-07T00:00:00.000Z',
+    });
+    assert(record.modelAttempts === 2, 'attempts');
+  });
+
+  // 22c. PROCESS_LAUNCH_FAILURE attempts 1 valid
+  await test('22c. PROCESS_LAUNCH_FAILURE attempts 1 valid', () => {
+    const record = validateDurableNonAdvisoryOutcomeRecord({
+      taskId: 'task-1',
+      kind: NonAdvisoryOutcomeKind.MODEL_FAILURE,
+      reason: 'PROCESS_LAUNCH_FAILURE',
+      modelAttempts: 1,
+      createdAt: '2026-10-07T00:00:00.000Z',
+    });
+    assert(record.reason === 'PROCESS_LAUNCH_FAILURE', 'reason');
+  });
+
   // 23. MODEL_FAILURE attempts 2 valid
   await test('23. MODEL_FAILURE attempts 2 valid', () => {
     const record = validateDurableNonAdvisoryOutcomeRecord({
@@ -527,6 +551,140 @@ function assert(condition: boolean, message: string) {
         reason: 'MISSING_RETRIEVAL_QUERY',
         modelAttempts: 0,
         detail: '   ',
+        createdAt: '2026-10-07T00:00:00.000Z',
+      });
+      assert(false, 'Should have failed');
+    } catch (err) {
+      assert(err instanceof LocalNonAdvisoryOutcomeContractError, 'error type');
+    }
+  });
+
+  // --- INTERRUPTED_MODEL_ATTEMPT SPECIFIC TESTS ---
+
+  // 34. INTERRUPTED_MODEL_ATTEMPT + attempts 2 -> accepted
+  await test('34. INTERRUPTED_MODEL_ATTEMPT + attempts 2 -> accepted', () => {
+    const record = validateDurableNonAdvisoryOutcomeRecord({
+      taskId: 'task-1',
+      kind: NonAdvisoryOutcomeKind.MODEL_FAILURE,
+      reason: 'INTERRUPTED_MODEL_ATTEMPT',
+      modelAttempts: 2,
+      detail: 'Recovered PROCESSING task at maximum model attempts with no durable model result.',
+      createdAt: '2026-10-07T00:00:00.000Z',
+    });
+    assert(record.reason === 'INTERRUPTED_MODEL_ATTEMPT', 'reason');
+    assert(record.modelAttempts === 2, 'attempts');
+  });
+
+  // 35. INTERRUPTED_MODEL_ATTEMPT + attempts 1 -> rejected
+  await test('35. INTERRUPTED_MODEL_ATTEMPT + attempts 1 -> rejected', () => {
+    try {
+      validateDurableNonAdvisoryOutcomeRecord({
+        taskId: 'task-1',
+        kind: NonAdvisoryOutcomeKind.MODEL_FAILURE,
+        reason: 'INTERRUPTED_MODEL_ATTEMPT',
+        modelAttempts: 1,
+        createdAt: '2026-10-07T00:00:00.000Z',
+      });
+      assert(false, 'Should have failed');
+    } catch (err) {
+      assert(err instanceof LocalNonAdvisoryOutcomeContractError, 'error type');
+    }
+  });
+
+  // 36. INTERRUPTED_MODEL_ATTEMPT + attempts 0 -> rejected
+  await test('36. INTERRUPTED_MODEL_ATTEMPT + attempts 0 -> rejected', () => {
+    try {
+      validateDurableNonAdvisoryOutcomeRecord({
+        taskId: 'task-1',
+        kind: NonAdvisoryOutcomeKind.MODEL_FAILURE,
+        reason: 'INTERRUPTED_MODEL_ATTEMPT',
+        modelAttempts: 0,
+        createdAt: '2026-10-07T00:00:00.000Z',
+      });
+      assert(false, 'Should have failed');
+    } catch (err) {
+      assert(err instanceof LocalNonAdvisoryOutcomeContractError, 'error type');
+    }
+  });
+
+  // 37. INTERRUPTED_MODEL_ATTEMPT + explicit exitCode 0 -> rejected
+  await test('37. INTERRUPTED_MODEL_ATTEMPT + explicit exitCode 0 -> rejected', () => {
+    try {
+      validateDurableNonAdvisoryOutcomeRecord({
+        taskId: 'task-1',
+        kind: NonAdvisoryOutcomeKind.MODEL_FAILURE,
+        reason: 'INTERRUPTED_MODEL_ATTEMPT',
+        modelAttempts: 2,
+        exitCode: 0,
+        createdAt: '2026-10-07T00:00:00.000Z',
+      });
+      assert(false, 'Should have failed');
+    } catch (err) {
+      assert(err instanceof LocalNonAdvisoryOutcomeContractError, 'error type');
+    }
+  });
+
+  // 38. INTERRUPTED_MODEL_ATTEMPT + explicit exitCode null -> rejected
+  await test('38. INTERRUPTED_MODEL_ATTEMPT + explicit exitCode null -> rejected', () => {
+    try {
+      validateDurableNonAdvisoryOutcomeRecord({
+        taskId: 'task-1',
+        kind: NonAdvisoryOutcomeKind.MODEL_FAILURE,
+        reason: 'INTERRUPTED_MODEL_ATTEMPT',
+        modelAttempts: 2,
+        exitCode: null,
+        createdAt: '2026-10-07T00:00:00.000Z',
+      });
+      assert(false, 'Should have failed');
+    } catch (err) {
+      assert(err instanceof LocalNonAdvisoryOutcomeContractError, 'error type');
+    }
+  });
+
+  // 39. INTERRUPTED_MODEL_ATTEMPT cannot be INPUT_FAILURE
+  await test('39. INTERRUPTED_MODEL_ATTEMPT cannot be INPUT_FAILURE', () => {
+    try {
+      validateDurableNonAdvisoryOutcomeRecord({
+        taskId: 'task-1',
+        kind: NonAdvisoryOutcomeKind.INPUT_FAILURE,
+        reason: 'INTERRUPTED_MODEL_ATTEMPT' as any,
+        modelAttempts: 0,
+        createdAt: '2026-10-07T00:00:00.000Z',
+      });
+      assert(false, 'Should have failed');
+    } catch (err) {
+      assert(err instanceof LocalNonAdvisoryOutcomeContractError, 'error type');
+    }
+  });
+
+  // 40. INTERRUPTED_MODEL_ATTEMPT cannot be ABSTAINED
+  await test('40. INTERRUPTED_MODEL_ATTEMPT cannot be ABSTAINED', () => {
+    try {
+      validateDurableNonAdvisoryOutcomeRecord({
+        taskId: 'task-1',
+        kind: NonAdvisoryOutcomeKind.ABSTAINED,
+        reason: 'INTERRUPTED_MODEL_ATTEMPT' as any,
+        modelAttempts: 2,
+        createdAt: '2026-10-07T00:00:00.000Z',
+      });
+      assert(false, 'Should have failed');
+    } catch (err) {
+      assert(err instanceof LocalNonAdvisoryOutcomeContractError, 'error type');
+    }
+  });
+
+  // 41. INTERRUPTED_MODEL_ATTEMPT cannot be RETRIEVAL_FAILURE
+  await test('41. INTERRUPTED_MODEL_ATTEMPT cannot be RETRIEVAL_FAILURE', () => {
+    try {
+      validateDurableNonAdvisoryOutcomeRecord({
+        taskId: 'task-1',
+        kind: NonAdvisoryOutcomeKind.RETRIEVAL_FAILURE,
+        reason: 'INTERRUPTED_MODEL_ATTEMPT' as any,
+        modelAttempts: 0,
+        sourceFailures: [
+          { sourceId: 'EPA', errorCode: 'TRANSPORT_FAILURE' },
+          { sourceId: 'NOAA', errorCode: 'TRANSPORT_FAILURE' },
+        ],
         createdAt: '2026-10-07T00:00:00.000Z',
       });
       assert(false, 'Should have failed');
