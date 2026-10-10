@@ -146,7 +146,7 @@ export function createNOAAHttpKnowledgeTransport(
             }),
           ]);
           clearTimeout(timeoutId);
-          return result;
+          return parseNCEIDatasetsResponse(result, validated.query);
         } catch (err: unknown) {
           clearTimeout(timeoutId);
           if (err instanceof Error && (err.name === 'AbortError' || err.message.includes('timed out'))) {

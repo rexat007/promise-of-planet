@@ -510,10 +510,12 @@ function assert(condition: boolean, message: string) {
     const rawPayload = {
       results: [
         {
-          id: 'noaa-test-1',
+          fileId: 'gov.noaa.ncei:test-item-1',
           name: 'NOAA Climate Dataset',
           description: 'Comprehensive climate observations.',
-          links: { access: [{ url: 'https://noaa.gov/climate' }] },
+          links: {
+            access: [{ url: 'https://www.ncei.noaa.gov/access/test' }],
+          },
         },
       ],
     };
@@ -522,7 +524,7 @@ function assert(condition: boolean, message: string) {
       fetchFn: async () => ({
         status: 200,
         async json() {
-          return parseNCEIDatasetsResponse(rawPayload, 'climate');
+          return rawPayload;
         },
       }),
     });
@@ -535,7 +537,14 @@ function assert(condition: boolean, message: string) {
     assert(boundaryResult.kind === 'VALID_RESULTS', 'Boundary must accept payload as VALID_RESULTS');
     if (boundaryResult.kind === 'VALID_RESULTS') {
       assert(boundaryResult.value.items.length === 1, 'Item count 1');
-      assert(boundaryResult.value.items[0].itemId === 'noaa-test-1', 'ItemId match');
+      const item = boundaryResult.value.items[0];
+      assert(item.itemId === 'gov.noaa.ncei:test-item-1', 'itemId matches upstream fileId');
+      assert(item.title === 'NOAA Climate Dataset', 'title matches upstream name');
+      assert(item.excerpt === 'Comprehensive climate observations.', 'excerpt matches upstream description');
+      assert(item.sourceUrl === 'https://www.ncei.noaa.gov/access/test', 'sourceUrl is authentic NOAA URL');
+      assert(item.provenance.canonicalItemId === 'gov.noaa.ncei:test-item-1', 'canonicalItemId matches upstream fileId');
+      assert(!('publishedAt' in item), 'publishedAt must be absent');
+      assert(!('updatedAt' in item), 'updatedAt must be absent');
     }
   });
 
@@ -556,7 +565,7 @@ function assert(condition: boolean, message: string) {
       fetchFn: async () => ({
         status: 200,
         async json() {
-          return parseNCEIDatasetsResponse(rawPayload, 'query');
+          return rawPayload;
         },
       }),
     });
@@ -574,6 +583,46 @@ function assert(condition: boolean, message: string) {
       assert(typeof prov.retrievedAt === 'string' && prov.retrievedAt.length > 0, 'retrievedAt ISO string');
       assert(prov.canonicalItemId === 'noaa-prov-1', 'canonicalItemId match');
       assert(prov.sourceUrl === 'https://www.noaa.gov/prov', 'sourceUrl match');
+    }
+  });
+
+  // 28. malformed successful NCEI body produces INVALID_SOURCE_RESPONSE via boundary
+  await test('28. malformed successful NCEI body produces INVALID_SOURCE_RESPONSE via boundary', async () => {
+    const malformedPayloads = [null, 'string', 123, [], { results: 'not-an-array' }, { unexpected: true }];
+    for (const p of malformedPayloads) {
+      const transport = createNOAAHttpKnowledgeTransport({
+        fetchFn: async () => ({
+          status: 200,
+          async json() { return p; },
+        }),
+      });
+      let thrown = false;
+      try {
+        await retrieveFromNOAASource({ query: 'climate' }, transport);
+      } catch (err) {
+        thrown = true;
+        assert(err instanceof NOAARetrievalError, 'Must be NOAARetrievalError');
+        assert(err.code === 'INVALID_SOURCE_RESPONSE', 'Must be INVALID_SOURCE_RESPONSE');
+      }
+      assert(thrown, 'Malformed payload must throw INVALID_SOURCE_RESPONSE');
+    }
+  });
+
+  // 29. zero valid NCEI results produces NO_RESULTS via boundary
+  await test('29. zero valid NCEI results produces NO_RESULTS via boundary', async () => {
+    const emptyPayloads = [
+      { results: [] },
+      { results: [{ id: 'bad-url', name: 'Bad', description: 'Desc', links: { access: [{ url: 'https://evil.com/data' }] } }] },
+    ];
+    for (const p of emptyPayloads) {
+      const transport = createNOAAHttpKnowledgeTransport({
+        fetchFn: async () => ({
+          status: 200,
+          async json() { return p; },
+        }),
+      });
+      const res = await retrieveFromNOAASource({ query: 'climate' }, transport);
+      assert(res.kind === 'NO_RESULTS', 'Must be NO_RESULTS');
     }
   });
 
