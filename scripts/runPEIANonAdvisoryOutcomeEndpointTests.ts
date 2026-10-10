@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   executeNonAdvisoryOutcomeSubmission,
   mapNonAdvisoryOutcomeHttpSuccess,
@@ -375,12 +377,22 @@ async function testHttpRealCompositionLostResponseReplay() {
   assert(storedOutcome2.convergedAt === originalConvergedAt, 'Request 2: original convergedAt preserved');
 }
 
+async function testIndexExport() {
+  const indexPath = path.join(process.cwd(), 'functions/src/index.ts');
+  const indexContent = fs.readFileSync(indexPath, 'utf8');
+  assert(
+    indexContent.includes('export { peiaNonAdvisoryOutcomeSubmission }'),
+    'peiaNonAdvisoryOutcomeSubmission must be exported in functions/src/index.ts'
+  );
+}
+
 async function run() {
   await testHttpSuccess();
   await testHttpUnauthenticated();
   await testHttpAlreadyIdentical();
   await testHttpResultConflict();
   await testHttpRealCompositionLostResponseReplay();
+  await testIndexExport();
   console.log('PASSED: All PEIA Non-Advisory Outcome Endpoint tests passed.');
 }
 

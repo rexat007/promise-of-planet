@@ -10,6 +10,7 @@ export { manageYouTubeIntegration, reviewYouTubeCandidate } from "./youtube/yout
 export { manageMedia } from "./media/mediaAdminHandlers";
 export { peiaPendingTaskGateway } from "./peia/firebasePendingTaskHttpEndpoint";
 export { peiaAdvisoryResultSubmission } from "./peia/firebaseAdvisoryResultSubmissionEndpoint";
+export { peiaNonAdvisoryOutcomeSubmission } from "./peia/firebaseNonAdvisoryOutcomeSubmissionEndpoint";
 
 /**
  * Basic HTTPS onRequest skeleton conforming to 2nd-gen specifications.
