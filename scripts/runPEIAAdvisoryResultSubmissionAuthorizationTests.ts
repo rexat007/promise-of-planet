@@ -90,20 +90,21 @@ async function run() {
     tests.push({ id: testCounter++, name: '2. PEIAMachineCapability contains SUBMIT_ADVISORY_RESULT', passed: false, message: err.message });
   }
 
-  // 3. machine capability vocabulary contains exactly TWO values
+  // 3. machine capability vocabulary contains exactly THREE values
   try {
     const keys = Object.keys(PEIAMachineCapability);
-    const passed = keys.length === 2 &&
+    const passed = keys.length === 3 &&
                    keys.includes('FETCH_PENDING_REVIEW_TASKS') &&
-                   keys.includes('SUBMIT_ADVISORY_RESULT');
+                   keys.includes('SUBMIT_ADVISORY_RESULT') &&
+                   keys.includes('SUBMIT_TASK_PROCESSING_OUTCOME');
     tests.push({
       id: testCounter++,
-      name: '3. machine capability vocabulary contains exactly TWO values',
+      name: '3. machine capability vocabulary contains exactly THREE values',
       passed,
       message: passed ? undefined : `Found keys: ${keys.join(', ')}`,
     });
   } catch (err: any) {
-    tests.push({ id: testCounter++, name: '3. machine capability vocabulary contains exactly TWO values', passed: false, message: err.message });
+    tests.push({ id: testCounter++, name: '3. machine capability vocabulary contains exactly THREE values', passed: false, message: err.message });
   }
 
   // 4. authorizeAdvisoryResultSubmission exists
@@ -444,8 +445,9 @@ async function run() {
     const capBody = code.slice(capObjStart, capObjEnd);
     const hasFetchCap = capBody.includes('FETCH_PENDING_REVIEW_TASKS: \'FETCH_PENDING_REVIEW_TASKS\'');
     const hasSubmitCap = capBody.includes('SUBMIT_ADVISORY_RESULT: \'SUBMIT_ADVISORY_RESULT\'');
+    const hasOutcomeCap = capBody.includes('SUBMIT_TASK_PROCESSING_OUTCOME: \'SUBMIT_TASK_PROCESSING_OUTCOME\'');
     const capLines = capBody.split('\n').filter(l => l.includes(':'));
-    const aMatch = hasFetchCap && hasSubmitCap && capLines.length === 2;
+    const aMatch = hasFetchCap && hasSubmitCap && hasOutcomeCap && capLines.length === 3;
 
     // B. EXISTING CAPABILITY PRESERVED
     const bMatch = code.includes('FETCH_PENDING_REVIEW_TASKS');

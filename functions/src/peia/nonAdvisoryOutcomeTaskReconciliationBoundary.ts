@@ -1,6 +1,6 @@
 import { AuthorizedNonAdvisoryOutcomeIntake } from './authorizedNonAdvisoryOutcomeIntakeBoundary';
 import { validateAIReviewTask } from './aiTaskValidator';
-import { AITaskStatus, type AIReviewTask } from '../types/aiTask';
+import { type AIReviewTask } from '../types/aiTask';
 
 export interface NonAdvisoryOutcomeTaskSource {
   fetchTaskById(taskId: string): Promise<unknown | null>;
@@ -41,13 +41,6 @@ export async function reconcileNonAdvisoryOutcomeTask(
   }
 
   const task = validateAIReviewTask(rawTask);
-
-  if (task.status !== AITaskStatus.Pending) {
-    throw new NonAdvisoryOutcomeTaskReconciliationError(
-      'TASK_NOT_PENDING',
-      'Authoritative review task is not pending.'
-    );
-  }
 
   if (task.taskId !== submittedTaskId) {
     throw new NonAdvisoryOutcomeTaskReconciliationError(

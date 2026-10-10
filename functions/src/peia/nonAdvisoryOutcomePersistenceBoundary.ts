@@ -239,35 +239,6 @@ export async function persistNonAdvisoryOutcome(
   }
 
   const convergedStatus = computeConvergedTaskStatus(outcome.kind);
-
-  const rawExisting = await repository.findByTaskId(taskId);
-
-  if (rawExisting !== null) {
-    const existing = validateExistingRecord(taskId, rawExisting);
-
-    if (existing.reconciledTask.taskId !== authoritativeTask.taskId) {
-      throw new NonAdvisoryOutcomePersistenceError(
-        'TASK_IDENTITY_MISMATCH',
-        'Stored task reference does not match current authoritative task.'
-      );
-    }
-
-    const isOutcomeIdentical = isOutcomeEqual(existing.nonAdvisoryOutcome, outcome);
-
-    if (isOutcomeIdentical) {
-      return {
-        taskId,
-        disposition: 'ALREADY_IDENTICAL',
-        convergedStatus,
-      };
-    }
-
-    throw new NonAdvisoryOutcomePersistenceError(
-      'RESULT_CONFLICT',
-      'Divergent outcome for taskId.'
-    );
-  }
-
   const convergedAt = new Date().toISOString();
 
   const record: ReconciledNonAdvisoryOutcomePersistenceRecord = {

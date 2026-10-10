@@ -7,6 +7,7 @@ import { reconcileNonAdvisoryOutcomeTask } from './nonAdvisoryOutcomeTaskReconci
 import {
   FirestoreNonAdvisoryOutcomeRepository,
   PEIA_PENDING_TASK_COLLECTION,
+  NonAdvisoryOutcomeRepositoryError,
 } from './firestoreNonAdvisoryOutcomeRepository';
 
 export type FirestoreNonAdvisoryOutcomePersistenceHandler = (
@@ -42,7 +43,10 @@ export function createFirestoreNonAdvisoryOutcomePersistenceRuntime(
           return null;
         }
         if (snap.docs.length > 1) {
-          throw new Error('TASK_QUERY_CARDINALITY_INVALID: Multiple tasks matched query.');
+          throw new NonAdvisoryOutcomeRepositoryError(
+            'TASK_QUERY_CARDINALITY_INVALID',
+            'TASK_QUERY_CARDINALITY_INVALID: Multiple tasks matched query.'
+          );
         }
 
         return snap.docs[0].data();

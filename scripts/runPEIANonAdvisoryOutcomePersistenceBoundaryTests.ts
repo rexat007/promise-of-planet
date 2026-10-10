@@ -96,7 +96,17 @@ class MockRepo {
   }
 
   async saveWithTaskConvergence(record: ReconciledNonAdvisoryOutcomePersistenceRecord) {
+    if (this.storedRecord) {
+      if (this.storedRecord.taskId !== record.taskId) {
+        throw new NonAdvisoryOutcomePersistenceError('TASK_IDENTITY_MISMATCH', 'TaskId mismatch.');
+      }
+      if (isOutcomeEqual(this.storedRecord.nonAdvisoryOutcome, record.nonAdvisoryOutcome)) {
+        return { disposition: 'ALREADY_IDENTICAL' as const };
+      }
+      throw new NonAdvisoryOutcomePersistenceError('RESULT_CONFLICT', 'Divergent outcome for taskId.');
+    }
     this.storedRecord = record;
+    return { disposition: 'STORED' as const };
   }
 }
 
