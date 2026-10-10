@@ -206,7 +206,11 @@ export function validateMachineCredentialPersistenceRecord(
   }
 
   const seenCaps = new Set<string>();
-  const validCapabilities = new Set<string>([PEIAMachineCapability.FETCH_PENDING_REVIEW_TASKS]);
+  const validCapabilities = new Set<string>([
+    PEIAMachineCapability.FETCH_PENDING_REVIEW_TASKS,
+    PEIAMachineCapability.SUBMIT_ADVISORY_RESULT,
+    PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME,
+  ]);
 
   for (const cap of capabilities) {
     if (typeof cap !== 'string') {

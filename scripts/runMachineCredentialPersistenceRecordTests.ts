@@ -879,6 +879,34 @@ async function run() {
     passed: cleanIndex,
   });
 
+  // 51. accepts SUBMIT_ADVISORY_RESULT and SUBMIT_TASK_PROCESSING_OUTCOME capabilities
+  try {
+    const record = createValidRecord({
+      principal: {
+        principalId: 'node-epsilon',
+        isActive: true,
+        capabilities: [
+          PEIAMachineCapability.FETCH_PENDING_REVIEW_TASKS,
+          PEIAMachineCapability.SUBMIT_ADVISORY_RESULT,
+          PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME,
+        ],
+      },
+    });
+    const res = validateMachineCredentialPersistenceRecord(record);
+    tests.push({
+      id: testCounter++,
+      name: '51. accepts SUBMIT_ADVISORY_RESULT and SUBMIT_TASK_PROCESSING_OUTCOME capabilities',
+      passed: res.principal.capabilities.includes(PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME),
+    });
+  } catch (err: any) {
+    tests.push({
+      id: testCounter++,
+      name: '51. accepts SUBMIT_ADVISORY_RESULT and SUBMIT_TASK_PROCESSING_OUTCOME capabilities',
+      passed: false,
+      message: err.message,
+    });
+  }
+
   // Log results
   console.log('====================================================');
   console.log('RUNNING PEIA-16I MACHINE CREDENTIAL PERSISTENCE RECORD TESTS');

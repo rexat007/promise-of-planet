@@ -303,6 +303,29 @@ async function run() {
     passed: cleanSecrets,
   });
 
+  // 15. authorizeTaskProcessingOutcomeSubmission authorizes SUBMIT_TASK_PROCESSING_OUTCOME
+  try {
+    const { authorizeTaskProcessingOutcomeSubmission } = await import('../functions/src/peia/machineAuthorizationBoundary');
+    const p: VerifiedMachinePrincipal = {
+      principalId: 'worker-node-outcome-1',
+      isActive: true,
+      capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+    };
+    const result = await authorizeTaskProcessingOutcomeSubmission('valid-token', new FakeVerifier(p));
+    tests.push({
+      id: testCounter++,
+      name: '15. authorizeTaskProcessingOutcomeSubmission authorizes SUBMIT_TASK_PROCESSING_OUTCOME',
+      passed: result.principalId === 'worker-node-outcome-1',
+    });
+  } catch (err: any) {
+    tests.push({
+      id: testCounter++,
+      name: '15. authorizeTaskProcessingOutcomeSubmission authorizes SUBMIT_TASK_PROCESSING_OUTCOME',
+      passed: false,
+      message: err.message,
+    });
+  }
+
   // Log summary
   console.log('====================================================');
   console.log('RUNNING PEIA-16C MACHINE AUTHORIZATION TESTS');

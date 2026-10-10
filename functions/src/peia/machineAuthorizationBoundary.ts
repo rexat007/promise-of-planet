@@ -9,6 +9,7 @@
 export const PEIAMachineCapability = {
   FETCH_PENDING_REVIEW_TASKS: 'FETCH_PENDING_REVIEW_TASKS',
   SUBMIT_ADVISORY_RESULT: 'SUBMIT_ADVISORY_RESULT',
+  SUBMIT_TASK_PROCESSING_OUTCOME: 'SUBMIT_TASK_PROCESSING_OUTCOME',
 } as const;
 
 export type PEIAMachineCapability = typeof PEIAMachineCapability[keyof typeof PEIAMachineCapability];
@@ -109,5 +110,21 @@ export async function authorizeAdvisoryResultSubmission(
     verifier,
     PEIAMachineCapability.SUBMIT_ADVISORY_RESULT,
     'Machine principal is not authorized for advisory result submission.'
+  );
+}
+
+/**
+ * Authorizes a machine principal for non-advisory task processing outcome submission eligibility.
+ * Fails closed on any authentication or permission check failure.
+ */
+export async function authorizeTaskProcessingOutcomeSubmission(
+  credentialInput: unknown,
+  verifier: MachineIdentityVerifier
+): Promise<VerifiedMachinePrincipal> {
+  return authorizeWithCapability(
+    credentialInput,
+    verifier,
+    PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME,
+    'Machine principal is not authorized for task processing outcome submission.'
   );
 }
