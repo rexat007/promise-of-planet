@@ -13,7 +13,6 @@ export interface ReconciledAdvisoryResultIntake {
 
 export type AdvisoryResultTaskReconciliationErrorCode =
   | 'TASK_NOT_FOUND'
-  | 'TASK_NOT_PENDING'
   | 'TASK_REFERENCE_MISMATCH';
 
 export class AdvisoryResultTaskReconciliationError extends Error {
@@ -46,13 +45,6 @@ export async function reconcileAdvisoryResultTask(
   }
 
   const task = validateAIReviewTask(rawTask);
-
-  if (task.status !== AITaskStatus.Pending) {
-    throw new AdvisoryResultTaskReconciliationError(
-      'TASK_NOT_PENDING',
-      'Authoritative advisory review task is not pending.'
-    );
-  }
 
   const rawAuthoritativeTask = rawTask as AIReviewTask;
 

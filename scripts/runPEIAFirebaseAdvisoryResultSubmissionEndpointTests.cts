@@ -22,6 +22,7 @@ import {
 import {
   FirestoreAdvisoryResultRepository,
   deriveAdvisoryResultDocumentId,
+  PEIA_PENDING_TASK_COLLECTION,
   type FirestoreDatabase,
 } from '../functions/src/peia/firestoreAdvisoryResultRepository';
 import {
@@ -35,7 +36,7 @@ import {
   type AdvisoryResultHttpFetchInit,
   type AdvisoryResultHttpFetchResponse,
 } from '../peia-worker/src/advisoryResultHttpUploadTransport';
-import { type PEIAAdvisoryResult } from '../peia-worker/src/advisoryResultContract';
+import { type PEIAAdvisoryResult, validatePEIAAdvisoryResult } from '../peia-worker/src/advisoryResultContract';
 
 const tests: { name: string; run: () => Promise<void> }[] = [];
 let passedCount = 0;
@@ -141,6 +142,7 @@ function getDeps(persistenceMock?: (intake: AuthorizedAdvisoryResultIntake) => P
 function createValidResult() {
     return {
         result: {
+            schemaVersion: 1,
             task: {
                 taskId: 't1',
                 taskType: AITaskType.CONTENT_REVIEW,
@@ -150,10 +152,14 @@ function createValidResult() {
                     sourceUpdatedAt: '2024-01-01T12:00:00Z'
                 }
             },
+            humanReviewRequired: true,
             assessment: {
                 summary: 'OK',
                 findings: []
-            }
+            },
+            recommendations: [],
+            uncertainties: [],
+            limitations: []
         }
     };
 }
@@ -484,7 +490,14 @@ registerTest('Integration: full cycle', async () => {
         where: (field: string, _op: string, value: unknown) => {
           const matching = Object.values(tasksStorage)
             .filter((t) => t[field] === value)
-            .map((data) => ({ data: () => data }));
+            .map((data) => ({
+              data: () => data,
+              ref: {
+                update: async (updates: any) => {
+                  Object.assign(data, updates);
+                },
+              },
+            }));
           const filteredQuery: AdvisoryResultFirestoreQuery = {
             where: () => filteredQuery,
             limit: () => filteredQuery,
@@ -500,21 +513,26 @@ registerTest('Integration: full cycle', async () => {
   };
 
   const fakeResultWriteDb: FirestoreDatabase = {
-    collection: (_name: string) => ({
-      doc: (docId: string) => ({
-        get: async () => ({
-          exists: docId in resultsStorage,
-          data: () => resultsStorage[docId],
+    collection: (name: string) => {
+      if (name === PEIA_PENDING_TASK_COLLECTION) {
+        return fakeTaskReadDb.collection(name);
+      }
+      return {
+        doc: (docId: string) => ({
+          get: async () => ({
+            exists: docId in resultsStorage,
+            data: () => resultsStorage[docId],
+          }),
+          create: async (data: unknown) => {
+            if (docId in resultsStorage) {
+              throw new FirestoreAlreadyExistsError();
+            }
+            resultsStorage[docId] = data;
+            return {};
+          },
         }),
-        create: async (data: unknown) => {
-          if (docId in resultsStorage) {
-            throw new FirestoreAlreadyExistsError();
-          }
-          resultsStorage[docId] = data;
-          return {};
-        },
-      }),
-    }),
+      };
+    },
   };
 
   const credentialRepo = new FakeMachineCredentialRepository();
@@ -551,6 +569,7 @@ registerTest('Worker Compatibility Assertion', async () => {
 
   const submittedTaskId = 'worker-compat-task-1';
   const workerResult: PEIAAdvisoryResult = {
+    schemaVersion: 1,
     task: {
       taskId: submittedTaskId,
       taskType: AITaskType.CONTENT_REVIEW,
@@ -560,10 +579,14 @@ registerTest('Worker Compatibility Assertion', async () => {
         sourceUpdatedAt: '2024-01-01T12:00:00Z',
       },
     },
+    humanReviewRequired: true,
     assessment: {
       summary: 'Worker verified content successfully.',
       findings: [],
     },
+    recommendations: [],
+    uncertainties: [],
+    limitations: [],
   };
 
   let capturedMethod = '';

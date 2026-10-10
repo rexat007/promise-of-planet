@@ -15,7 +15,8 @@ import { validateAIReviewTask } from './aiTaskValidator';
 export type AdvisoryResultPersistenceErrorCode =
   | 'INVALID_EXISTING_RECORD'
   | 'TASK_IDENTITY_MISMATCH'
-  | 'RESULT_CONFLICT';
+  | 'RESULT_CONFLICT'
+  | 'TASK_STATUS_INCONSISTENT';
 
 export interface ReconciledAdvisoryResultPersistenceRecord {
   readonly taskId: string;
@@ -24,9 +25,18 @@ export interface ReconciledAdvisoryResultPersistenceRecord {
   readonly advisoryResult: AdvisoryResultIntakeResult;
 }
 
+export type AdvisoryResultPersistenceDisposition = 'STORED' | 'ALREADY_IDENTICAL';
+
+export interface AdvisoryResultSaveResult {
+  readonly disposition: AdvisoryResultPersistenceDisposition;
+}
+
 export interface AdvisoryResultRepository {
   findByTaskId(taskId: string): Promise<unknown | null>;
   save(record: ReconciledAdvisoryResultPersistenceRecord): Promise<void>;
+  saveWithTaskConvergence(
+    record: ReconciledAdvisoryResultPersistenceRecord
+  ): Promise<AdvisoryResultSaveResult>;
 }
 
 export class AdvisoryResultPersistenceError extends Error {
@@ -40,14 +50,12 @@ export class AdvisoryResultPersistenceError extends Error {
   }
 }
 
-export type AdvisoryResultPersistenceDisposition = 'STORED' | 'ALREADY_IDENTICAL';
-
 export interface AdvisoryResultPersistenceResult {
   readonly taskId: string;
   readonly disposition: AdvisoryResultPersistenceDisposition;
 }
 
-function isAdvisoryResultEqual(
+export function isAdvisoryResultEqual(
   a: AdvisoryResultIntakeResult,
   b: AdvisoryResultIntakeResult
 ): boolean {
@@ -218,7 +226,7 @@ function validateExistingPrincipal(principal: unknown): VerifiedMachinePrincipal
   return principal as VerifiedMachinePrincipal;
 }
 
-function validateExistingRecord(
+export function validateExistingRecord(
   taskId: string,
   record: unknown
 ): ReconciledAdvisoryResultPersistenceRecord {
@@ -267,7 +275,7 @@ function validateExistingRecord(
   
   try {
     validateAdvisoryResultIntakeRequest({ result: r.advisoryResult });
-  } catch (e) {
+  } catch {
     throw new AdvisoryResultPersistenceError(
       'INVALID_EXISTING_RECORD',
       'Existing advisory result is malformed.'
@@ -276,7 +284,6 @@ function validateExistingRecord(
   
   const advisoryResult = r.advisoryResult as unknown as AdvisoryResultIntakeResult;
 
-  // Internal Task identity consistency check (stored task vs stored result task)
   if (
     reconciledTask.taskId !== taskId ||
     reconciledTask.taskId !== advisoryResult.task.taskId ||
@@ -296,7 +303,7 @@ function validateExistingRecord(
   };
 }
 
-function isTaskReferenceEqual(a: { taskId: string; taskType: string; target: { targetType: string; targetId: string; sourceUpdatedAt: string } }, b: { taskId: string; taskType: string; target: { targetType: string; targetId: string; sourceUpdatedAt: string } }): boolean {
+export function isTaskReferenceEqual(a: { taskId: string; taskType: string; target: { targetType: string; targetId: string; sourceUpdatedAt: string } }, b: { taskId: string; taskType: string; target: { targetType: string; targetId: string; sourceUpdatedAt: string } }): boolean {
   return (
     a.taskId === b.taskId &&
     a.taskType === b.taskType &&
@@ -306,7 +313,7 @@ function isTaskReferenceEqual(a: { taskId: string; taskType: string; target: { t
   );
 }
 
-function isTaskEqual(a: AIReviewTask, b: AIReviewTask): boolean {
+export function isTaskEqual(a: AIReviewTask, b: AIReviewTask): boolean {
   if (!isTaskReferenceEqual(a, b) || a.status !== b.status || a.createdAt !== b.createdAt) {
     return false;
   }
@@ -334,41 +341,9 @@ export async function persistReconciledAdvisoryResult(
     advisoryResult: intake.authorizedIntake.request.result,
   };
 
-  const rawExisting = await repository.findByTaskId(record.taskId);
-
-  if (rawExisting !== null) {
-    const existing = validateExistingRecord(record.taskId, rawExisting);
-
-    // Identity verification against CURRENT canonical task
-    if (
-      !isTaskReferenceEqual(existing.reconciledTask, intake.task) ||
-      !isTaskReferenceEqual(existing.advisoryResult.task, intake.task)
-    ) {
-      throw new AdvisoryResultPersistenceError(
-        'TASK_IDENTITY_MISMATCH',
-        'Stored task reference does not match current authoritative task.'
-      );
-    }
-
-    // Structural Equality Check
-    const isPrincipalEqual = 
-      existing.principal.principalId === record.principal.principalId &&
-      existing.principal.isActive === record.principal.isActive &&
-      areCapabilitiesEqual(existing.principal.capabilities, record.principal.capabilities);
-
-    const isTaskEqualResult = isTaskEqual(existing.reconciledTask, record.reconciledTask);
-    const isResultEqual = isAdvisoryResultEqual(existing.advisoryResult, record.advisoryResult);
-
-    if (isPrincipalEqual && isTaskEqualResult && isResultEqual) {
-      return { taskId: record.taskId, disposition: 'ALREADY_IDENTICAL' };
-    }
-    
-    throw new AdvisoryResultPersistenceError(
-      'RESULT_CONFLICT',
-      'Divergent advisory result for taskId.'
-    );
-  }
-
-  await repository.save(record);
-  return { taskId: record.taskId, disposition: 'STORED' };
+  const saveResult = await repository.saveWithTaskConvergence(record);
+  return {
+    taskId: record.taskId,
+    disposition: saveResult.disposition,
+  };
 }

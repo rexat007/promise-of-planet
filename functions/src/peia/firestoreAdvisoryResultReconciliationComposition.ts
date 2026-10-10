@@ -1,4 +1,3 @@
-import { getFirestore } from 'firebase-admin/firestore';
 import {
   FirestoreAdvisoryResultTaskSource,
   AdvisoryResultFirestoreReadDatabase,
@@ -37,6 +36,8 @@ export function createFirestoreAdvisoryResultReconciliationRuntime(
  * and composes the transport-neutral reconciliation gateway.
  */
 export function createProductionAdvisoryResultReconciliationRuntime(): FirestoreAdvisoryResultReconciliationHandler {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { getFirestore } = require('firebase-admin/firestore');
   const db = getFirestore() as unknown as AdvisoryResultFirestoreReadDatabase;
   return createFirestoreAdvisoryResultReconciliationRuntime(db);
 }

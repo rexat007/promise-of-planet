@@ -3,6 +3,10 @@ import {
   AdvisoryResultRepository,
   ReconciledAdvisoryResultPersistenceRecord,
   AdvisoryResultPersistenceError,
+  isTaskEqual,
+  isTaskReferenceEqual,
+  isAdvisoryResultEqual,
+  validateExistingRecord,
 } from '../functions/src/peia/advisoryResultPersistenceBoundary';
 import { ReconciledAdvisoryResultIntake } from '../functions/src/peia/advisoryResultTaskReconciliationBoundary';
 import { AIReviewTask, AITaskStatus, AITaskType } from '../functions/src/types/aiTask';
@@ -67,6 +71,22 @@ const createMockRepository = (initialRecord: unknown = null): MockRepository => 
        saveCount++;
        stored = record;
     },
+    saveWithTaskConvergence: async (record) => {
+        if (stored) {
+            const existing = validateExistingRecord(record.taskId, stored);
+            if (!isTaskReferenceEqual(existing.reconciledTask, record.reconciledTask)) {
+                 throw new AdvisoryResultPersistenceError('TASK_IDENTITY_MISMATCH', 'Mismatch');
+            }
+            if (isTaskEqual(existing.reconciledTask, record.reconciledTask) && isAdvisoryResultEqual(existing.advisoryResult, record.advisoryResult)) {
+                return { disposition: 'ALREADY_IDENTICAL' };
+            } else {
+                throw new AdvisoryResultPersistenceError('RESULT_CONFLICT', 'Conflict');
+            }
+        }
+        saveCount++;
+        stored = record;
+        return { disposition: 'STORED' };
+    }
   };
 };
 
@@ -157,11 +177,7 @@ const checkRecursiveForForbiddenKeys = (obj: unknown, forbidden: string[]) => {
       s.limitations[0] !== 'l1'
     ) throw new Error('Mismatch');
   });
-  await runTest('7. findByTaskId called with exact canonical taskId', async () => {
-    const repo = createMockRepository();
-    await persistReconciledAdvisoryResult(createMockIntake('1'), repo);
-    if (repo.lastFindTaskId !== '1') throw new Error('Mismatch');
-  });
+  // 7. (removed - findByTaskId no longer used)
   await runTest('8. save called exactly once for first persistence', async () => {
     const repo = createMockRepository();
     await persistReconciledAdvisoryResult(createMockIntake('1'), repo);
@@ -224,7 +240,7 @@ const checkRecursiveForForbiddenKeys = (obj: unknown, forbidden: string[]) => {
     const repo = createMockRepository(record);
     await expectPersistenceErrorCode(() => persistReconciledAdvisoryResult(intake, repo), 'TASK_IDENTITY_MISMATCH');
   });
-  await runTest('14. changed principal identity causes RESULT_CONFLICT', async () => {
+  await runTest('14. identical advisory + different authorized principalId -> ALREADY_IDENTICAL', async () => {
     const intake = createMockIntake('1');
     const record: ReconciledAdvisoryResultPersistenceRecord = {
         taskId: '1',
@@ -233,16 +249,31 @@ const checkRecursiveForForbiddenKeys = (obj: unknown, forbidden: string[]) => {
         advisoryResult: createMockResult('1'),
     };
     const repo = createMockRepository(record);
-    await expectPersistenceErrorCode(() => persistReconciledAdvisoryResult(intake, repo), 'RESULT_CONFLICT');
+    const result = await persistReconciledAdvisoryResult(intake, repo);
+    if (result.disposition !== 'ALREADY_IDENTICAL') throw new Error('Expected ALREADY_IDENTICAL');
+    if (repo.stored.principal.principalId !== 'm2') throw new Error(`Stored principal was mutated, expected m2, got ${repo.stored.principal.principalId}`);
   });
-  await runTest('15. malformed existing record causes INVALID_EXISTING_RECORD', async () => {
+  await runTest('15. identical advisory + different valid capability set -> ALREADY_IDENTICAL', async () => {
+    const intake = createMockIntake('1');
+    const record: ReconciledAdvisoryResultPersistenceRecord = {
+        taskId: '1',
+        reconciledTask: intake.task,
+        principal: { ...createMockPrincipal(), capabilities: [PEIAMachineCapability.SUBMIT_ADVISORY_RESULT, PEIAMachineCapability.FETCH_PENDING_REVIEW_TASKS] },
+        advisoryResult: createMockResult('1'),
+    };
+    const repo = createMockRepository(record);
+    const result = await persistReconciledAdvisoryResult(intake, repo);
+    if (result.disposition !== 'ALREADY_IDENTICAL') throw new Error('Expected ALREADY_IDENTICAL');
+  });
+  await runTest('16. malformed existing record causes INVALID_EXISTING_RECORD', async () => {
     const repo = createMockRepository({ taskId: '1' }); // missing fields
     await expectPersistenceErrorCode(() => persistReconciledAdvisoryResult(createMockIntake('1'), repo), 'INVALID_EXISTING_RECORD');
   });
-  await runTest('16. repository read failure propagates', async () => {
+  await runTest('17. repository read failure propagates', async () => {
     const repo: AdvisoryResultRepository = {
         findByTaskId: async () => { throw new Error('Read fail'); },
         save: async () => {},
+        saveWithTaskConvergence: async () => { throw new Error('Read fail'); },
     };
     try {
         await persistReconciledAdvisoryResult(createMockIntake('1'), repo);
@@ -252,10 +283,11 @@ const checkRecursiveForForbiddenKeys = (obj: unknown, forbidden: string[]) => {
         throw e;
     }
   });
-  await runTest('17. repository write failure propagates', async () => {
+  await runTest('18. repository write failure propagates', async () => {
     const repo: AdvisoryResultRepository = {
         findByTaskId: async () => null,
         save: async () => { throw new Error('Write fail'); },
+        saveWithTaskConvergence: async () => { throw new Error('Write fail'); },
     };
     try {
         await persistReconciledAdvisoryResult(createMockIntake('1'), repo);
@@ -265,20 +297,20 @@ const checkRecursiveForForbiddenKeys = (obj: unknown, forbidden: string[]) => {
         throw e;
     }
   });
-  await runTest('18. input reconciled object is not mutated', async () => {
+  await runTest('19. input reconciled object is not mutated', async () => {
     const intake = createMockIntake('1');
     const repo = createMockRepository();
     const original = JSON.stringify(intake);
     await persistReconciledAdvisoryResult(intake, repo);
     if (JSON.stringify(intake) !== original) throw new Error('Mutated');
   });
-  await runTest('19. no publication/approval/rejection/completed state is added', async () => {
+  await runTest('20. no publication/approval/rejection/completed state is added', async () => {
     const repo = createMockRepository();
     await persistReconciledAdvisoryResult(createMockIntake('1'), repo);
     const stored = repo.stored as Record<string, unknown>;
     if (stored.hasOwnProperty('status') || stored.hasOwnProperty('approved') || stored.hasOwnProperty('rejected') || stored.hasOwnProperty('published') || stored.hasOwnProperty('completed') || stored.hasOwnProperty('humanDecision')) throw new Error('State added');
   });
-  await runTest('20. persistence record contains no machine credential/secret', async () => {
+  await runTest('21. persistence record contains no machine credential/secret', async () => {
     const repo = createMockRepository();
     await persistReconciledAdvisoryResult(createMockIntake('1'), repo);
     checkRecursiveForForbiddenKeys(repo.stored, ['credential', 'machineCredential', 'secret', 'token', 'authorization']);
@@ -399,7 +431,7 @@ const checkRecursiveForForbiddenKeys = (obj: unknown, forbidden: string[]) => {
     await expectPersistenceErrorCode(() => persistReconciledAdvisoryResult(intake, repo), 'INVALID_EXISTING_RECORD');
   });
 
-  await runTest('34. same principalId but different valid capability set causes RESULT_CONFLICT', async () => {
+  await runTest('34. same principalId but different valid capability set -> ALREADY_IDENTICAL', async () => {
     const intake = createMockIntake('1');
     const record = {
         taskId: '1',
@@ -412,7 +444,8 @@ const checkRecursiveForForbiddenKeys = (obj: unknown, forbidden: string[]) => {
         advisoryResult: intake.authorizedIntake.request.result
     };
     const repo = createMockRepository(record);
-    await expectPersistenceErrorCode(() => persistReconciledAdvisoryResult(intake, repo), 'RESULT_CONFLICT');
+    const result = await persistReconciledAdvisoryResult(intake, repo);
+    if (result.disposition !== 'ALREADY_IDENTICAL') throw new Error('Expected ALREADY_IDENTICAL');
   });
 
   await runTest('35. structurally identical nested contentSnapshot objects are ALREADY_IDENTICAL', async () => {

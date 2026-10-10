@@ -366,15 +366,15 @@ registerTest('18. adapter never calls set', async () => {
   if (source.includes('.doc(') && source.includes('.set(')) throw new Error('set() call found');
 });
 
-// 19. adapter never calls update
-registerTest('19. adapter never calls update', async () => {
+// 19. adapter only updates authoritative task status via transaction during convergence
+registerTest('19. adapter only updates authoritative task status via transaction during convergence', async () => {
   const filePath = path.join(process.cwd(), 'functions/src/peia/firestoreAdvisoryResultRepository.ts');
   const source = fs.readFileSync(filePath, 'utf8');
   // Avoid false positive with createHash().update()
   const lines = source.split('\n');
   for (const line of lines) {
-      if (line.includes('.update(') && !line.includes('createHash')) {
-          throw new Error(`update() call found: ${line}`);
+      if (line.includes('.update(') && !line.includes('createHash') && !line.includes('transaction.update(taskDoc.ref')) {
+          throw new Error(`Unexpected update() call found: ${line}`);
       }
   }
 });

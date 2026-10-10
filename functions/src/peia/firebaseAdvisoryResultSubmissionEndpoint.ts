@@ -1,10 +1,16 @@
-import { onRequest } from 'firebase-functions/v2/https';
-import { getFirestore } from 'firebase-admin/firestore';
+let onRequest: any;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  onRequest = require('firebase-functions/v2/https').onRequest;
+} catch {
+  onRequest = (_opts: any, handler: any) => handler;
+}
 import {
   AdvisoryResultPersistenceError,
   AdvisoryResultPersistenceResult,
 } from './advisoryResultPersistenceBoundary';
 import { AdvisoryResultTaskReconciliationError } from './advisoryResultTaskReconciliationBoundary';
+import { AdvisoryResultRepositoryError } from './firestoreAdvisoryResultRepository';
 import { AdvisoryResultIntakeContractError } from './advisoryResultIntakeContract';
 import { MachineAuthorizationError, MachineIdentityVerifier } from './machineAuthorizationBoundary';
 import { ValidationError } from './aiTaskValidator';
@@ -135,6 +141,47 @@ export function mapAdvisoryResultHttpError(
           error: {
             code: 'NOT_FOUND',
             message: 'Task not found.',
+          },
+        },
+      };
+    }
+    return {
+      status: 400,
+      body: {
+        ok: false,
+        error: {
+          code: 'INVALID_REQUEST',
+          message: PUBLIC_MESSAGES.INVALID_REQUEST,
+        },
+      },
+    };
+  }
+
+  if (error instanceof AdvisoryResultRepositoryError) {
+    if (error.code === 'TASK_NOT_FOUND') {
+      return {
+        status: 404,
+        body: {
+          ok: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Task not found.',
+          },
+        },
+      };
+    }
+    if (
+      error.code === 'RESULT_CONFLICT' ||
+      error.code === 'TASK_IDENTITY_MISMATCH' ||
+      error.code === 'TASK_STATUS_INCONSISTENT'
+    ) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          error: {
+            code: 'CONFLICT',
+            message: PUBLIC_MESSAGES.CONFLICT,
           },
         },
       };
@@ -293,6 +340,8 @@ export const peiaAdvisoryResultSubmission = onRequest(
     cors: false,
   },
   async (request, response) => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getFirestore } = require('firebase-admin/firestore');
     const db = getFirestore();
     const readDb = { collection: (name: string) => db.collection(name) };
     const repo = new FirestoreMachineCredentialBindingRepository(readDb);

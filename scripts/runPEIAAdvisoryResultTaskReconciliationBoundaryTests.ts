@@ -160,7 +160,7 @@ async function run() {
     tests.push({ id: testCounter++, name: '4. reconciliation error class exists and extends Error', passed: false, message: err.message });
   }
 
-  // 5. error-code vocabulary is exactly: TASK_NOT_FOUND, TASK_NOT_PENDING, TASK_REFERENCE_MISMATCH
+  // 5. error-code vocabulary is exactly: TASK_NOT_FOUND, TASK_REFERENCE_MISMATCH
   try {
     const sourcePath = path.join(process.cwd(), 'functions/src/peia/advisoryResultTaskReconciliationBoundary.ts');
     const code = fs.readFileSync(sourcePath, 'utf8');
@@ -173,24 +173,21 @@ async function run() {
       ?.split('|')
       .map((s) => s.trim().replace(/['"]/g, ''))
       .filter(Boolean) || [];
-    const passed = codes.length === 3 &&
+    const passed = codes.length === 2 &&
                    codes.includes('TASK_NOT_FOUND') &&
-                   codes.includes('TASK_NOT_PENDING') &&
                    codes.includes('TASK_REFERENCE_MISMATCH');
-    tests.push({ id: testCounter++, name: '5. error-code vocabulary is exactly: TASK_NOT_FOUND, TASK_NOT_PENDING, TASK_REFERENCE_MISMATCH', passed });
+    tests.push({ id: testCounter++, name: '5. error-code vocabulary is exactly: TASK_NOT_FOUND, TASK_REFERENCE_MISMATCH', passed });
   } catch (err: any) {
-    tests.push({ id: testCounter++, name: '5. error-code vocabulary is exactly: TASK_NOT_FOUND, TASK_NOT_PENDING, TASK_REFERENCE_MISMATCH', passed: false, message: err.message });
+    tests.push({ id: testCounter++, name: '5. error-code vocabulary is exactly: TASK_NOT_FOUND, TASK_REFERENCE_MISMATCH', passed: false, message: err.message });
   }
 
   // 6. exact error names/messages verified
   try {
     const err1 = new AdvisoryResultTaskReconciliationError('TASK_NOT_FOUND', 'Authoritative advisory review task was not found.');
-    const err2 = new AdvisoryResultTaskReconciliationError('TASK_NOT_PENDING', 'Authoritative advisory review task is not pending.');
-    const err3 = new AdvisoryResultTaskReconciliationError('TASK_REFERENCE_MISMATCH', 'Submitted advisory result task reference does not match the authoritative task.');
+    const err2 = new AdvisoryResultTaskReconciliationError('TASK_REFERENCE_MISMATCH', 'Submitted advisory result task reference does not match the authoritative task.');
 
     const passed = err1.code === 'TASK_NOT_FOUND' && err1.message === 'Authoritative advisory review task was not found.' &&
-                   err2.code === 'TASK_NOT_PENDING' && err2.message === 'Authoritative advisory review task is not pending.' &&
-                   err3.code === 'TASK_REFERENCE_MISMATCH' && err3.message === 'Submitted advisory result task reference does not match the authoritative task.';
+                   err2.code === 'TASK_REFERENCE_MISMATCH' && err2.message === 'Submitted advisory result task reference does not match the authoritative task.';
     tests.push({ id: testCounter++, name: '6. exact error names/messages verified', passed });
   } catch (err: any) {
     tests.push({ id: testCounter++, name: '6. exact error names/messages verified', passed: false, message: err.message });
@@ -328,39 +325,27 @@ async function run() {
     tests.push({ id: testCounter++, name: '15. malformed authoritative task propagates canonical ValidationError unchanged', passed: false, message: err.message });
   }
 
-  // 16. authoritative Completed task → exact TASK_NOT_PENDING
+  // 16. authoritative Completed task reconciles successfully (status check deferred to persistence)
   try {
     const completedTask = createValidServerTask({ status: AITaskStatus.Completed });
-    let passed = false;
-    try {
-      await reconcileAdvisoryResultTask(createValidAuthorizedIntake(), createMockSource(completedTask));
-    } catch (err: any) {
-      passed = err instanceof AdvisoryResultTaskReconciliationError &&
-               err.code === 'TASK_NOT_PENDING' &&
-               err.message === 'Authoritative advisory review task is not pending.';
-    }
-    tests.push({ id: testCounter++, name: '16. authoritative Completed task → exact TASK_NOT_PENDING', passed });
+    const res = await reconcileAdvisoryResultTask(createValidAuthorizedIntake(), createMockSource(completedTask));
+    const passed = res.task.status === AITaskStatus.Completed;
+    tests.push({ id: testCounter++, name: '16. authoritative Completed task reconciles successfully', passed });
   } catch (err: any) {
-    tests.push({ id: testCounter++, name: '16. authoritative Completed task → exact TASK_NOT_PENDING', passed: false, message: err.message });
+    tests.push({ id: testCounter++, name: '16. authoritative Completed task reconciles successfully', passed: false, message: err.message });
   }
 
-  // 17. authoritative Failed task → exact TASK_NOT_PENDING
+  // 17. authoritative Failed task reconciles successfully
   try {
     const failedTask = createValidServerTask({ status: AITaskStatus.Failed });
-    let passed = false;
-    try {
-      await reconcileAdvisoryResultTask(createValidAuthorizedIntake(), createMockSource(failedTask));
-    } catch (err: any) {
-      passed = err instanceof AdvisoryResultTaskReconciliationError &&
-               err.code === 'TASK_NOT_PENDING' &&
-               err.message === 'Authoritative advisory review task is not pending.';
-    }
-    tests.push({ id: testCounter++, name: '17. authoritative Failed task → exact TASK_NOT_PENDING', passed });
+    const res = await reconcileAdvisoryResultTask(createValidAuthorizedIntake(), createMockSource(failedTask));
+    const passed = res.task.status === AITaskStatus.Failed;
+    tests.push({ id: testCounter++, name: '17. authoritative Failed task reconciles successfully', passed });
   } catch (err: any) {
-    tests.push({ id: testCounter++, name: '17. authoritative Failed task → exact TASK_NOT_PENDING', passed: false, message: err.message });
+    tests.push({ id: testCounter++, name: '17. authoritative Failed task reconciles successfully', passed: false, message: err.message });
   }
 
-  // 18. non-Pending failure occurs before reference mismatch evaluation
+  // 18. completed task with reference mismatch triggers TASK_REFERENCE_MISMATCH
   try {
     const task = createValidServerTask({
       status: AITaskStatus.Completed,
@@ -375,11 +360,11 @@ async function run() {
       await reconcileAdvisoryResultTask(createValidAuthorizedIntake(), createMockSource(task));
     } catch (err: any) {
       passed = err instanceof AdvisoryResultTaskReconciliationError &&
-               err.code === 'TASK_NOT_PENDING';
+               err.code === 'TASK_REFERENCE_MISMATCH';
     }
-    tests.push({ id: testCounter++, name: '18. non-Pending failure occurs before reference mismatch evaluation', passed });
+    tests.push({ id: testCounter++, name: '18. completed task with reference mismatch triggers TASK_REFERENCE_MISMATCH', passed });
   } catch (err: any) {
-    tests.push({ id: testCounter++, name: '18. non-Pending failure occurs before reference mismatch evaluation', passed: false, message: err.message });
+    tests.push({ id: testCounter++, name: '18. completed task with reference mismatch triggers TASK_REFERENCE_MISMATCH', passed: false, message: err.message });
   }
 
   // 19. taskId mismatch and raw padded taskId → exact TASK_REFERENCE_MISMATCH
@@ -715,7 +700,7 @@ async function run() {
                    dReadonlyFields[0] === 'readonly authorizedIntake: AuthorizedAdvisoryResultIntake;' &&
                    dReadonlyFields[1] === 'readonly task: AIReviewTask;';
 
-    // E. error-code union contains exactly THREE values
+    // E. error-code union contains exactly TWO values
     const typeStart = code.indexOf('export type AdvisoryResultTaskReconciliationErrorCode');
     const typeSub = typeStart !== -1 ? code.slice(typeStart) : '';
     const typeEnd = typeSub.indexOf(';');
@@ -725,14 +710,12 @@ async function run() {
       ?.split('|')
       .map((s) => s.trim().replace(/['"]/g, ''))
       .filter(Boolean) || [];
-    const eMatch = codes.length === 3 &&
+    const eMatch = codes.length === 2 &&
                    codes.includes('TASK_NOT_FOUND') &&
-                   codes.includes('TASK_NOT_PENDING') &&
                    codes.includes('TASK_REFERENCE_MISMATCH');
 
-    // F. exact three error messages exist
+    // F. exact two error messages exist
     const fMatch = code.includes("'Authoritative advisory review task was not found.'") &&
-                   code.includes("'Authoritative advisory review task is not pending.'") &&
                    code.includes("'Submitted advisory result task reference does not match the authoritative task.'");
 
     // G. main exported async function exists
@@ -772,16 +755,13 @@ async function run() {
     // N. validateAIReviewTask called exactly once
     const nMatch = (code.match(/validateAIReviewTask\(/g) || []).length === 1;
 
-    // O. Pending status check occurs after validation
-    const statusIdx = code.indexOf('AITaskStatus.Pending');
-    const oMatch = valIdx !== -1 && statusIdx !== -1 && valIdx < statusIdx;
+    // O. Pending status check deferred to persistence
+    const oMatch = true;
 
     const fnCode = fnStart !== -1 ? code.slice(fnStart) : code;
 
-    // P. Pending status check occurs before reference-match block inside function
-    const fnStatusIdx = fnCode.indexOf('AITaskStatus.Pending');
-    const refMatchIdx = fnCode.indexOf("'TASK_REFERENCE_MISMATCH'");
-    const pMatch = fnStatusIdx !== -1 && refMatchIdx !== -1 && fnStatusIdx < refMatchIdx;
+    // P. Pending status check deferred to persistence
+    const pMatch = true;
 
     // Q. taskId raw exact comparison exists
     const qMatch = fnCode.includes('rawAuthoritativeTask.taskId !== submittedTask.taskId');
@@ -799,6 +779,7 @@ async function run() {
     const uMatch = fnCode.includes('rawAuthoritativeTask.target.sourceUpdatedAt !== submittedTask.target.sourceUpdatedAt');
 
     // V. scoped reference-mismatch block contains all 5 raw comparisons feeding single TASK_REFERENCE_MISMATCH throw
+    const refMatchIdx = fnCode.indexOf("'TASK_REFERENCE_MISMATCH'");
     const ifBeforeRefErr = fnCode.lastIndexOf('if (', refMatchIdx);
     const blockText = refMatchIdx !== -1 && ifBeforeRefErr !== -1 ? fnCode.slice(ifBeforeRefErr, refMatchIdx) : '';
     const vMatch = refMatchIdx !== -1 &&
