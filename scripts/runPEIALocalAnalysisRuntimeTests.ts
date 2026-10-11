@@ -185,7 +185,7 @@ function makeFakeRunner(
 }
 
 async function runAllTests() {
-  console.log('--- RUNNING PEIA LOCAL ANALYSIS RUNTIME TEST SUITE (98 TESTS) ---');
+  console.log('--- RUNNING PEIA LOCAL ANALYSIS RUNTIME TEST SUITE (100 TESTS) ---');
 
   // ==========================================
   // CONTRACT (1 - 10)
@@ -1952,6 +1952,74 @@ async function runAllTests() {
 
   await test('98. DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS is 600000ms to accommodate measured Windows CPU execution', async () => {
     assert(DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS === 600000, 'DEFAULT_LOCAL_ANALYSIS_TIMEOUT_MS is 600000');
+  });
+
+  await test('99. buildModelPrompt places /no_think directive and direct JSON instruction at the final response boundary', async () => {
+    const task = makeSampleTask();
+    const epaItem = makeSampleEPAItem('1');
+    const contextAssembly = assembleBoundedEvidenceContext([epaItem]);
+    const prompt = buildModelPrompt(task, contextAssembly);
+
+    assert(!prompt.startsWith('/no_think'), 'Prompt must NOT start with /no_think');
+    const noThinkMatches = prompt.match(/\/no_think/g) ?? [];
+    assert(noThinkMatches.length === 1, '/no_think must appear exactly once');
+
+    assert(
+      prompt.includes('=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n/no_think'),
+      'Prompt must place /no_think right after YOUR AUDIT RESPONSE header'
+    );
+    assert(
+      prompt.includes('Return the required raw JSON immediately without reasoning prose.'),
+      'Prompt must include direct JSON instruction'
+    );
+    assert(
+      prompt.indexOf('You are the PEIA Local Content Auditor.') < prompt.indexOf('/no_think'),
+      'Operational instructions must precede /no_think'
+    );
+    assert(
+      prompt.indexOf('=== TASK TO AUDIT ===') < prompt.indexOf('=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ==='),
+      'Task section must occur before response boundary'
+    );
+    assert(
+      prompt.indexOf('=== PROVIDED EVIDENCE CONTEXT ===') < prompt.indexOf('=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ==='),
+      'Evidence context section must occur before response boundary'
+    );
+  });
+
+  await test('100. extractAssistantResponseFromLlamaTranscript extracts valid JSON directly when model emits zero thinking tags', async () => {
+    const directOutput =
+      'Loading model...\n' +
+      '=== TASK TO AUDIT ===\n' +
+      'Task ID: task-101\n' +
+      '=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n' +
+      '{\n' +
+      '  "status": "READY",\n' +
+      '  "summary": "Direct non-thinking assessment succeeded.",\n' +
+      '  "findings": [\n' +
+      '    {\n' +
+      '      "claim": "Direct finding without think blocks.",\n' +
+      '      "evidenceIds": ["EPA::epa-cwa-1"]\n' +
+      '    }\n' +
+      '  ],\n' +
+      '  "recommendations": [],\n' +
+      '  "uncertainties": []\n' +
+      '}\n\n' +
+      'Exiting...\n';
+
+    const extraction = extractAssistantResponseFromLlamaTranscript(directOutput);
+    assert(extraction.success === true, 'Extraction should succeed for direct output');
+    assert(extraction.content.startsWith('{'), 'Payload starts with JSON {');
+    assert(extraction.content.endsWith('}'), 'Payload ends with JSON }');
+    assert(!extraction.content.includes('[Start thinking]'), 'Does not contain [Start thinking]');
+
+    const runner = makeFakeRunner({ stdout: directOutput });
+    const result = await analyzeTaskLocally(
+      makeSampleTask(),
+      makeEvidenceResult([makeSampleEPAItem('1')]),
+      defaultConfig,
+      runner
+    );
+    assert(result.kind === 'ADVISORY_READY', 'Direct output produces ADVISORY_READY');
   });
 
   console.log('------------------------------------------------------------');

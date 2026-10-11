@@ -303,6 +303,10 @@ export function buildModelPrompt(
 ): string {
   const allowedRefsList = Array.from(contextAssembly.retainedEvidenceRefs).join(', ');
 
+  const thinkingSuppression =
+    `/no_think\n` +
+    `Return the required raw JSON immediately without reasoning prose.\n`;
+
   const systemInstructions =
     `You are the PEIA Local Content Auditor.\n` +
     `CRITICAL OPERATIONAL RULES:\n` +
@@ -341,7 +345,8 @@ export function buildModelPrompt(
     `Content Payload:\n${taskPayload}\n\n` +
     `=== PROVIDED EVIDENCE CONTEXT ===\n` +
     `${contextAssembly.formattedContext}\n\n` +
-    `=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n`
+    `=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n` +
+    `${thinkingSuppression}`
   );
 }
 
