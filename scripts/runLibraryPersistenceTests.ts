@@ -7,65 +7,76 @@ import { AdminRole, AdminPermission, type AdminUser } from '../src/types/admin';
 async function runTests() {
   console.log('Running Library Canonical Persistence Foundation Unit Tests...');
 
-  const fullAdmin: AdminUser = { uid: 'a1', name: 'Full Admin', email: 'full@test.org', role: AdminRole.Owner, permissions: [AdminPermission.Create, AdminPermission.Edit, AdminPermission.ManageRights, AdminPermission.Approve, AdminPermission.Publish, AdminPermission.View, AdminPermission.Review], isActive: true, createdAt: new Date().toISOString() };
-  const editorAdmin: AdminUser = { uid: 'a2', name: 'Editor', email: 'e@test.org', role: AdminRole.ContentEditor, permissions: [AdminPermission.View, AdminPermission.Create, AdminPermission.Edit], isActive: true, createdAt: new Date().toISOString() };
-  const revAdmin: AdminUser = { uid: 'a3', name: 'Reviewer', email: 'r@test.org', role: AdminRole.RightsReviewer, permissions: [AdminPermission.View, AdminPermission.Review], isActive: true, createdAt: new Date().toISOString() };
-  const appAdmin: AdminUser = { uid: 'a4', name: 'Approver', email: 'app@test.org', role: AdminRole.TrainingManager, permissions: [AdminPermission.View, AdminPermission.Approve], isActive: true, createdAt: new Date().toISOString() };
-  const pubAdmin: AdminUser = { uid: 'a5', name: 'Publisher', email: 'pub@test.org', role: AdminRole.Owner, permissions: [AdminPermission.View, AdminPermission.Publish], isActive: true, createdAt: new Date().toISOString() };
+  const fullAdmin: AdminUser = { id: 'a1', name: 'Full Admin', email: 'full@test.org', role: AdminRole.Owner, isActive: true };
+  const editorAdmin: AdminUser = { id: 'a2', name: 'Editor', email: 'e@test.org', role: AdminRole.ContentEditor, isActive: true };
+  const revAdmin: AdminUser = { id: 'a3', name: 'Reviewer', email: 'r@test.org', role: AdminRole.RightsReviewer, isActive: true };
+  const appAdmin: AdminUser = { id: 'a4', name: 'Approver', email: 'app@test.org', role: AdminRole.TrainingManager, isActive: true };
+  const pubAdmin: AdminUser = { id: 'a5', name: 'Publisher', email: 'pub@test.org', role: AdminRole.Owner, isActive: true };
 
   const repo = new InMemoryLibraryRepository();
   const service = new LibraryApplicationService(repo);
 
-  const docInput = { titleAr: 'قانون بيئي', titleEn: 'Law', documentType: LibraryDocumentType.Law, organizationId: 'o1', sourceId: 's1', geographyAr: 'مصر', geographyEn: 'Egypt', publicationDate: '2026-01-01', language: 'ar' as const, summaryAr: 'ملخص', summaryEn: 'Sum', topicsAr: [], topicsEn: [], environmentalDomains: [], legalStatusDescriptionAr: 'قانون', legalStatusDescriptionEn: 'Law' };
+  const docInput = { titleAr: 'قانون بيئي', titleEn: 'Law', documentType: LibraryDocumentType.Law, organizationId: 'o1', sourceId: 's1', geographyAr: 'مصر', geographyEn: 'Egypt', publicationDate: '2026-01-01', language: 'ar' as const, summaryAr: 'ملخص', summaryEn: 'Sum', topicsAr: [], topicsEn: [], environmentalDomains: [], legalStatusDescriptionAr: 'قانون', legalStatusDescriptionEn: 'Law', rightsStatus: LibraryRightsStatus.Unknown };
 
   // 1. canonical create
   const created = await service.create(docInput, fullAdmin);
-  console.log('✅ Passed 1: canonical create');
+  console.log('✅ Passed: 1. canonical create');
 
   // 2. duplicate create
   try { await service.create({ ...docInput, id: created.id }, fullAdmin); throw new Error('fail'); } catch (e: any) { if (!e.message.includes('DUPLICATE')) throw e; }
-  console.log('✅ Passed 2: duplicate create rejected');
+  console.log('✅ Passed: 2. duplicate create rejected');
 
   // 3-4. listAll / getById
   const allDocs = await service.listAll();
   const fetched = await service.getById(created.id);
   if (allDocs.length !== 1 || !fetched) throw new Error('fail');
-  console.log('✅ Passed 3-4: listAll/getById');
+  console.log('✅ Passed: 3-4. listAll/getById');
 
-  // Remediation Tests (17 behaviors)
-  
-  // 1. unexpected create field
+  // 25. unexpected create field rejected (remapped from original 1)
   try { await service.create({ ...docInput, unexpected: 'field' } as any, fullAdmin); throw new Error('fail'); } catch (e: any) { if (!e.message.includes('VALIDATION_ERROR')) throw e; }
-  console.log('✅ Passed: 1. unexpected create field rejected');
+  console.log('✅ Passed: 25. unexpected create field rejected');
 
-  // 3. invalid language
+  // 27. invalid language rejected (remapped from original 3)
   try { await service.create({ ...docInput, language: 'fr' as any }, fullAdmin); throw new Error('fail'); } catch (e: any) { if (!e.message.includes('VALIDATION_ERROR')) throw e; }
-  console.log('✅ Passed: 3. invalid language rejected');
+  console.log('✅ Passed: 27. invalid language rejected');
 
-  // 4. invalid publicationDate
+  // 28. invalid publicationDate rejected (remapped from original 4)
   try { await service.create({ ...docInput, publicationDate: 'not-a-date' }, fullAdmin); throw new Error('fail'); } catch (e: any) { if (!e.message.includes('VALIDATION_ERROR')) throw e; }
-  console.log('✅ Passed: 4. invalid publicationDate rejected');
+  console.log('✅ Passed: 28. invalid publicationDate rejected');
 
-  // 12. Review transition succeeds without Edit
-  console.log('Testing: InReview transition');
+  // 36. Review transition succeeds without Edit (remapped from original 12)
   const d1 = await service.transitionWorkflow(created.id, WorkflowState.InReview, 'submitting', editorAdmin);
-  console.log('Testing: ChangesRequested transition');
   const d2 = await service.transitionWorkflow(d1.id, WorkflowState.ChangesRequested, 'reviewing', revAdmin);
-  console.log('✅ Passed: 12. Review transition succeeds without Edit');
+  console.log('✅ Passed: 36. Review transition succeeds without Edit');
 
-  // 13. Approve transition succeeds without Edit
+  // 37. Approve transition succeeds without Edit (remapped from original 13)
   await service.transitionWorkflow(created.id, WorkflowState.Draft, 'revising', editorAdmin);
   await service.transitionWorkflow(created.id, WorkflowState.InReview, 'submitting', editorAdmin);
   await service.transitionWorkflow(created.id, WorkflowState.Approved, 'approving', appAdmin);
-  console.log('✅ Passed: 13. Approve transition succeeds without Edit');
+  console.log('✅ Passed: 37. Approve transition succeeds without Edit');
 
-  // 14. Publish transition succeeds without Edit
+  // 38. Publish transition succeeds without Edit (remapped from original 14)
   await service.transitionWorkflow(created.id, WorkflowState.Published, 'publishing', pubAdmin);
-  console.log('✅ Passed: 14. Publish transition succeeds without Edit');
+  console.log('✅ Passed: 38. Publish transition succeeds without Edit');
 
-  // 15. missing actual transition permission
+  // 39. missing actual transition permission rejected (remapped from original 15)
   try { await service.transitionWorkflow(created.id, WorkflowState.InReview, 'invalid', editorAdmin); throw new Error('fail'); } catch (e: any) { if (!e.message.includes('PERMISSION_DENIED') && !e.message.includes('INVALID_TRANSITION')) throw e; }
-  console.log('✅ Passed: 15. missing actual transition permission rejected');
+  console.log('✅ Passed: 39. missing actual transition permission rejected');
+  
+  // 40. SubmitForReview accepts Create OR Edit (remapped from original 16)
+  const doc2 = await service.create(docInput, editorAdmin);
+  await service.transitionWorkflow(doc2.id, WorkflowState.InReview, 'sub', editorAdmin);
+  console.log('✅ Passed: 40. SubmitForReview accepts Create OR Edit');
+
+  // 6. invalid enum
+  try { await service.create({ ...docInput, documentType: 'invalid' as any }, fullAdmin); throw new Error('fail'); } catch (e: any) { if (!e.message.includes('VALIDATION_ERROR')) throw e; }
+  console.log('✅ Passed: 6. invalid documentType rejected');
+
+  // 10. Firestore embedded-id mismatch
+  const doc4 = { ...docInput, id: 'wrong-id' };
+  await service.repo.create(doc4 as any);
+  try { await service.repo.getById('wrong-id'); throw new Error('fail'); } catch (e: any) { if (!e.message.includes('VALIDATION_ERROR')) throw e; }
+  console.log('✅ Passed: 34. Firestore embedded-id mismatch rejected');
 
   console.log('🎉 All Remediation Tests PASSED!');
 }

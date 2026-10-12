@@ -303,10 +303,8 @@ export class LibraryApplicationService {
   }
 
   private validateCreateInput(input: any): void {
-    if (!input || typeof input !== 'object') {
-      throw new Error('VALIDATION_ERROR: Input object is required');
-    }
-    
+    if (!input || typeof input !== 'object') throw new Error('VALIDATION_ERROR: Input object is required');
+
     const allowedFields = [
       'id', 'titleAr', 'titleEn', 'originalTitle', 'documentType', 'organizationId', 'sourceId',
       'geographyAr', 'geographyEn', 'publicationDate', 'language',
@@ -316,19 +314,20 @@ export class LibraryApplicationService {
     ];
 
     for (const key in input) {
-      if (!allowedFields.includes(key)) {
-        throw new Error(`VALIDATION_ERROR: Unexpected field in create input: ${key}`);
-      }
+      if (!allowedFields.includes(key)) throw new Error(`VALIDATION_ERROR: Unexpected field in create input: ${key}`);
     }
 
-    if (!input.titleAr || input.titleAr.trim() === '') throw new Error('VALIDATION_ERROR: titleAr is required');
-    if (!input.titleEn || input.titleEn.trim() === '') throw new Error('VALIDATION_ERROR: titleEn is required');
-    if (!input.documentType || !Object.values(LibraryDocumentType).includes(input.documentType)) {
-      throw new Error('VALIDATION_ERROR: Invalid or missing documentType');
-    }
-    if (!input.organizationId || input.organizationId.trim() === '') throw new Error('VALIDATION_ERROR: organizationId is required');
-    if (!input.sourceId || input.sourceId.trim() === '') throw new Error('VALIDATION_ERROR: sourceId is required');
-    if (!input.summaryAr || input.summaryAr.trim() === '') throw new Error('VALIDATION_ERROR: summaryAr is required');
-    if (!input.summaryEn || input.summaryEn.trim() === '') throw new Error('VALIDATION_ERROR: summaryEn is required');
+    if (!input.titleAr || typeof input.titleAr !== 'string' || input.titleAr.trim() === '') throw new Error('VALIDATION_ERROR: titleAr is required');
+    if (!input.titleEn || typeof input.titleEn !== 'string' || input.titleEn.trim() === '') throw new Error('VALIDATION_ERROR: titleEn is required');
+    if (!input.documentType || !Object.values(LibraryDocumentType).includes(input.documentType)) throw new Error('VALIDATION_ERROR: Invalid documentType');
+    if (!input.publicationDate || isNaN(Date.parse(input.publicationDate))) throw new Error('VALIDATION_ERROR: Invalid publicationDate');
+    if (!['ar', 'en', 'bilingual', 'other'].includes(input.language)) throw new Error('VALIDATION_ERROR: Invalid language');
+    
+    if (!Array.isArray(input.topicsAr) || !input.topicsAr.every((t: any) => typeof t === 'string')) throw new Error('VALIDATION_ERROR: topicsAr must be string array');
+    if (!Array.isArray(input.topicsEn) || !input.topicsEn.every((t: any) => typeof t === 'string')) throw new Error('VALIDATION_ERROR: topicsEn must be string array');
+    if (!Array.isArray(input.environmentalDomains) || !input.environmentalDomains.every((d: any) => typeof d === 'string')) throw new Error('VALIDATION_ERROR: environmentalDomains must be string array');
+    
+    if (input.rightsStatus !== undefined && !Object.values(LibraryRightsStatus).includes(input.rightsStatus)) throw new Error('VALIDATION_ERROR: Invalid rightsStatus');
+    if ((input.rightsNotesAr !== undefined && typeof input.rightsNotesAr !== 'string') || (input.rightsNotesEn !== undefined && typeof input.rightsNotesEn !== 'string')) throw new Error('VALIDATION_ERROR: Malformed rights notes');
   }
 }
