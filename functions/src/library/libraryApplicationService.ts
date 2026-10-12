@@ -5,6 +5,7 @@ import { WorkflowState, WorkflowAction, type WorkflowTransitionRecord } from '..
 import type { AdminUser } from '../../../src/types/admin';
 import { AdminPermission } from '../../../src/types/admin';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
+import { LibraryValidator } from './libraryValidator';
 
 export interface CreateLibraryDocumentInput {
   id?: string;
@@ -118,7 +119,7 @@ export class LibraryApplicationService {
       ],
     };
 
-    this.validateDocument(newDoc);
+    LibraryValidator.validateDocument(newDoc);
     return this.repo.create(newDoc);
   }
 
@@ -160,7 +161,7 @@ export class LibraryApplicationService {
     updated.workflowHistory = doc.workflowHistory;
     updated.versions = doc.versions;
 
-    this.validateDocument(updated);
+    LibraryValidator.validateDocument(updated);
     return this.repo.update(updated);
   }
 
@@ -186,7 +187,7 @@ export class LibraryApplicationService {
     updated.workflowState = doc.workflowState;
     updated.workflowHistory = doc.workflowHistory;
 
-    this.validateDocument(updated);
+    LibraryValidator.validateDocument(updated);
     return this.repo.update(updated);
   }
 
@@ -231,7 +232,7 @@ export class LibraryApplicationService {
       updatedAt: now,
     };
 
-    this.validateDocument(updated);
+    LibraryValidator.validateDocument(updated);
     return this.repo.update(updated);
   }
 
@@ -261,7 +262,7 @@ export class LibraryApplicationService {
       updatedAt: new Date().toISOString(),
     };
 
-    this.validateDocument(updated);
+    LibraryValidator.validateDocument(updated);
     return this.repo.update(updated);
   }
 
@@ -301,10 +302,25 @@ export class LibraryApplicationService {
     return false;
   }
 
-  private validateCreateInput(input: CreateLibraryDocumentInput): void {
+  private validateCreateInput(input: any): void {
     if (!input || typeof input !== 'object') {
       throw new Error('VALIDATION_ERROR: Input object is required');
     }
+    
+    const allowedFields = [
+      'id', 'titleAr', 'titleEn', 'originalTitle', 'documentType', 'organizationId', 'sourceId',
+      'geographyAr', 'geographyEn', 'publicationDate', 'language',
+      'summaryAr', 'summaryEn', 'topicsAr', 'topicsEn', 'environmentalDomains',
+      'rightsStatus', 'rightsNotesAr', 'rightsNotesEn', 'legalStatusDescriptionAr',
+      'legalStatusDescriptionEn', 'authorMetadataAr', 'authorMetadataEn'
+    ];
+
+    for (const key in input) {
+      if (!allowedFields.includes(key)) {
+        throw new Error(`VALIDATION_ERROR: Unexpected field in create input: ${key}`);
+      }
+    }
+
     if (!input.titleAr || input.titleAr.trim() === '') throw new Error('VALIDATION_ERROR: titleAr is required');
     if (!input.titleEn || input.titleEn.trim() === '') throw new Error('VALIDATION_ERROR: titleEn is required');
     if (!input.documentType || !Object.values(LibraryDocumentType).includes(input.documentType)) {
@@ -314,28 +330,5 @@ export class LibraryApplicationService {
     if (!input.sourceId || input.sourceId.trim() === '') throw new Error('VALIDATION_ERROR: sourceId is required');
     if (!input.summaryAr || input.summaryAr.trim() === '') throw new Error('VALIDATION_ERROR: summaryAr is required');
     if (!input.summaryEn || input.summaryEn.trim() === '') throw new Error('VALIDATION_ERROR: summaryEn is required');
-  }
-
-  private validateDocument(doc: LibraryDocument): void {
-    if (!doc || typeof doc !== 'object') {
-      throw new Error('VALIDATION_ERROR: Document object is required');
-    }
-    if (!doc.id || doc.id.trim() === '') throw new Error('VALIDATION_ERROR: id is required');
-    if (!doc.titleAr || doc.titleAr.trim() === '') throw new Error('VALIDATION_ERROR: titleAr is required');
-    if (!doc.titleEn || doc.titleEn.trim() === '') throw new Error('VALIDATION_ERROR: titleEn is required');
-    if (!Object.values(LibraryDocumentType).includes(doc.documentType)) {
-      throw new Error(`VALIDATION_ERROR: Invalid documentType: ${doc.documentType}`);
-    }
-    if (!Object.values(LibraryRightsStatus).includes(doc.rightsStatus)) {
-      throw new Error(`VALIDATION_ERROR: Invalid rightsStatus: ${doc.rightsStatus}`);
-    }
-    if (!Object.values(WorkflowState).includes(doc.workflowState)) {
-      throw new Error(`VALIDATION_ERROR: Invalid workflowState: ${doc.workflowState}`);
-    }
-    if (!Array.isArray(doc.topicsAr)) throw new Error('VALIDATION_ERROR: topicsAr must be an array');
-    if (!Array.isArray(doc.topicsEn)) throw new Error('VALIDATION_ERROR: topicsEn must be an array');
-    if (!Array.isArray(doc.environmentalDomains)) throw new Error('VALIDATION_ERROR: environmentalDomains must be an array');
-    if (!Array.isArray(doc.workflowHistory)) throw new Error('VALIDATION_ERROR: workflowHistory must be an array');
-    if (!Array.isArray(doc.versions)) throw new Error('VALIDATION_ERROR: versions must be an array');
   }
 }

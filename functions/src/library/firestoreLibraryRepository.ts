@@ -1,6 +1,7 @@
 import { getFirestore } from 'firebase-admin/firestore';
 import type { LibraryRepository } from './libraryRepository';
 import type { LibraryDocument } from '../../../src/types/library';
+import { LibraryValidator } from './libraryValidator';
 
 export class FirestoreLibraryRepository implements LibraryRepository {
   public static readonly COLLECTION = 'library_documents' as const;
@@ -14,7 +15,7 @@ export class FirestoreLibraryRepository implements LibraryRepository {
     if (!docSnap.exists) return null;
     const data = docSnap.data();
     if (!data) return null;
-    return this.deserializeDocument(data);
+    return this.deserializeDocument(data, id);
   }
 
   async create(doc: LibraryDocument): Promise<LibraryDocument> {
@@ -49,7 +50,7 @@ export class FirestoreLibraryRepository implements LibraryRepository {
 
   async listAll(): Promise<LibraryDocument[]> {
     const snapshot = await this.db.collection(FirestoreLibraryRepository.COLLECTION).get();
-    return snapshot.docs.map(doc => this.deserializeDocument(doc.data()));
+    return snapshot.docs.map(doc => this.deserializeDocument(doc.data(), doc.id));
   }
 
   private serializeDocument(doc: LibraryDocument): Record<string, any> {
@@ -57,7 +58,11 @@ export class FirestoreLibraryRepository implements LibraryRepository {
     return JSON.parse(JSON.stringify(doc));
   }
 
-  private deserializeDocument(data: any): LibraryDocument {
-    return data as LibraryDocument;
+  private deserializeDocument(data: any, expectedId: string): LibraryDocument {
+    const doc = LibraryValidator.validateDocument(data);
+    if (doc.id !== expectedId) {
+      throw new Error(`VALIDATION_ERROR: ID mismatch: ${doc.id} !== ${expectedId}`);
+    }
+    return doc;
   }
 }
