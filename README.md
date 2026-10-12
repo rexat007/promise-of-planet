@@ -1,32 +1,49 @@
-# React + TypeScript + Vite
+# Promise of Planet & PEIA V1
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+**Promise of Planet** is an advanced environmental monitoring, intelligence, and advisory platform featuring the **Planet Earth Intelligence Agency (PEIA V1)** local analysis and advisory pipeline.
 
-Currently, two official plugins are available:
+## Overview
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+PEIA V1 is a robust local intelligence pipeline that ingests environmental evidence (such as real NOAA datasets), executes Qwen local model audits with Qwen thinking-suppression prompt instructions (`/no_think`), processes structured audit outputs into canonical `PEIAAdvisoryResult` objects, persists records locally (outbox / server sync), and executes comprehensive end-to-end acceptance tests.
 
-## React Compiler
+PEIA is strictly advisory-only. AI cannot autonomously publish, approve, or reject records; human review and authority remain mandatory where applicable. Advisory and durable non-advisory outcomes represent separate valid paths.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Key Capabilities
 
-## Expanding the Oxlint configuration
+- **PEIA Local Analysis Runtime**: Local model invocation utilizing Qwen thinking-suppression prompt instructions (`/no_think`) to suppress extended thinking and request immediate raw JSON.
+- **Advisory Result & Outbox Pipeline**: Automated transformation of model audits into persistent advisory results, local outbox staging, and resilient synchronization cycles.
+- **Full E2E Runtime & Acceptance**: Automated orchestration harnesses verifying real NOAA retrieval, Qwen SHA verification, local model execution, non-advisory reporting, and replay verification.
+- **Rigorous Testing**: Comprehensive unit and integration test suites (`runPEIALocalAnalysisRuntimeTests.ts`, `runPEIALocalTaskProcessingOrchestratorTests.ts`, `runPEIAFinalRealE2EAcceptance.ts`).
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+## Getting Started
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+### Prerequisites
+
+- Node.js (v18+)
+- npm
+
+### Installation & Development
+
+```bash
+npm install
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+### Building
+
+```bash
+npm run build
+```
+
+### Type Checking
+```bash
+npm --prefix peia-worker run typecheck
+```
+
+### Running PEIA Test Suites
+
+```bash
+npx tsx scripts/runPEIALocalAnalysisRuntimeTests.ts
+npx tsx scripts/runPEIALocalTaskProcessingOrchestratorTests.ts
+npx tsx scripts/runPEIAFinalRealE2EAcceptance.ts
+```

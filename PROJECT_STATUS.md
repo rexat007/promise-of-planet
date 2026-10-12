@@ -1,58 +1,33 @@
-# Promise of Planet — حالة المشروع
+# Promise of Planet — Project Status
 
-## الحالة الحالية: Admin Media — YouTube Review & Manual Sync Integration ✅
+## Status: PEIA V1 Closed & Accepted ✅ (`ACCEPTANCE_PASSED`)
 
-### المراحل المغلقة والمعتمدة (Closed & Accepted Blocks)
-1. Media Foundation ✅
-2. Admin Media Management UI ✅
-3. Firebase Backend Foundation ✅
-4. Existing Firebase Project Connection ✅
-5. YouTube Persistent Foundation ✅
-6. YouTube Secure Fetch Foundation ✅
-7. Authenticated Admin YouTube Manual Sync Boundary ✅
-8. Admin Media — YouTube Review & Manual Sync Integration ✅
+- **Accepted Reference HEAD**: `336c2cf4a713118f53e6c0507bf7ed2770c0d471`
+- **Advisory Status**: Strict advisory-only. AI cannot autonomously publish, approve, or reject. Human review and authority remain mandatory.
 
-### ما تم إنجازه في هذه المرحلة (YouTube Review & Manual Sync Integration)
-- [x] ربط مساحة إدارة الوسائط بلوحة تحكم يوتيوب ومراجعة المرشحين (YouTube Candidates & Sync Panel)
-- [x] زر التزامن اليدوي الآمن (Sync YouTube Videos) المقيد بصلاحية `ManageSettings` مع عداد وإحصاءات
-- [x] جدول مراجعة المرشحين مع مرشحات الحالة (PendingReview, Accepted, Rejected)
-- [x] نافذة مراجعة وتدقيق المرشح المتقدمة (YouTubeCandidateReviewModal) مع فحص عدم تنازع الإصدارات (Stale Review Prevention)
-- [x] التحقق الإلزامي من التصنيف المعتمد (Canonical Categories) قبل قبول أي مرشح
-- [x] فصل كامل بين بيانات المصدر الخام غير القابلة للتعديل والمسودة التحريرية (Editorial Draft)
-- [x] توفير دوال سحابية آمنة ومحمية بالصلاحيات: `manageYouTubeIntegration` و `reviewYouTubeCandidate`
-- [x] اختبارات تكامل وتدقيق أمني شاملة (86 اختباراً نجحت بنسبة 100%) بدون أي تسريب لمفاتيح أو اتصالات غير مصرحة
+### Completed Units & Acceptance Blocks
+1. **PEIA Local Analysis Runtime Integration** ✅
+   - Secure prompt construction (`buildModelPrompt`) with Qwen thinking-suppression prompt instructions (`/no_think`) and immediate raw JSON enforcement at the final response boundary.
+   - Comprehensive test assertions (`runPEIALocalAnalysisRuntimeTests.ts`).
+2. **Analysis Result → PEIAAdvisoryResult → Local Outbox** ✅
+   - Automated structuring of model audit outputs into canonical advisory records with local SQLite persistence and resilient submission/sync cycles.
+3. **Full PEIA E2E Runtime & Acceptance** ✅
+   - Complete end-to-end orchestrator (`runPEIALocalTaskProcessingOrchestratorTests.ts` & `runPEIAFinalRealE2EAcceptance.ts`).
+   - Verified real NOAA data ingestion, Qwen SHA validation, model execution, non-advisory reporting, and replay verification.
 
-## ملاحظات هامة
+### Real Windows Acceptance Summary
+- **Real NOAA Retrieval**: PASSED
+- **Real Qwen SHA Verification**: PASSED
+- **Real Qwen Execution**: PASSED (Duration: ~396s)
+- **Outcome**: `NON_ADVISORY_PENDING_REPORT`
+- **Durable Local Result**: PASSED
+- **Run Result Submission Cycle**: COMPLETED
+- **Server Persistence**: Non-advisory persisted successfully
+- **Authoritative Task Status**: Completed
+- **Replay HTTP Call**: `{"ok":true,"taskId":"task-final-real-e2e-001"}`
+- **Overall Classification**: `ACCEPTANCE_PASSED — PEIA V1 CLOSED & ACCEPTED`
 
-### GitHub
-
-**لم يتم ربط هذا المشروع بمستودع GitHub من خلال بيئة Qwen.**
-
-السبب: بيئة Qwen السحابية لا تملك صلاحيات مصادقة للكتابة إلى مستودعات GitHub (لا SSH keys، لا Personal Access Token).
-
-**الحل**: سيتم ربط المشروع بمستودع GitHub من الجهاز المحلي للمستخدم باستخدام:
-
-```bash
-cd promise-of-planet
-git init
-git remote add origin https://github.com/rexat007/promise-of-planet.git
-git add .
-git commit -m "Initial commit: Project setup"
-git push -u origin main
-```
-
-### التنزيل من المتصفح
-
-**مهم**: ملفات المشروع موجودة حاليًا في بيئة Qwen السحابية فقط. يجب تنزيلها يدويًا من خلال واجهة المستخدم إذا كانت متاحة، أو نسخ الكود يدويًا.
-
-### الإصدار الحالي
-
-- **الإصدار**: 0.1.0
-- **الحالة**: تجريبي (Setup Phase)
-- **التاريخ**: 2026-09-14
-
-## الخطوات التالية
-
-1. تنزيل ملفات المشروع من بيئة Qwen
-2. ربط المشروع بمستودع GitHub محليًا
-3. البدء في مرحلة التصميم والتطوير
+### Version Information
+- **PEIA Release**: V1 — Functionally Closed & Accepted
+- **Status**: Functionally Closed and Accepted
+- **Date**: October 2026
