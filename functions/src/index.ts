@@ -8,6 +8,7 @@ initializeApp();
 export { syncYouTubeUploads } from "./youtube/manualSyncHandler";
 export { manageYouTubeIntegration, reviewYouTubeCandidate } from "./youtube/youtubeAdminHandlers";
 export { manageMedia } from "./media/mediaAdminHandlers";
+export { manageLibraryDocuments } from "./library/libraryAdminHandlers";
 export { peiaPendingTaskGateway } from "./peia/firebasePendingTaskHttpEndpoint";
 export { peiaAdvisoryResultSubmission } from "./peia/firebaseAdvisoryResultSubmissionEndpoint";
 export { peiaNonAdvisoryOutcomeSubmission } from "./peia/firebaseNonAdvisoryOutcomeSubmissionEndpoint";

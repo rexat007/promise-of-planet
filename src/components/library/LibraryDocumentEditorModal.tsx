@@ -29,6 +29,7 @@ import type {
   LibrarySource,
   LibraryDocumentVersion 
 } from '../../types/library';
+import { LibraryAdminClient } from '../../services/libraryAdminClient';
 
 interface LibraryDocumentEditorModalProps {
   document: LibraryDocument | null;
@@ -122,75 +123,140 @@ export function LibraryDocumentEditorModal({
     currentUser
   );
 
-  const handleWorkflowTransition = (toState: WorkflowState) => {
+  const handleWorkflowTransition = async (toState: WorkflowState) => {
     try {
-      if (!formData.workflowState) return;
-      const updatedItem = WorkflowEngine.executeTransition(
-        {
-          id: formData.id || '',
-          titleAr: formData.titleAr || '',
-          titleEn: formData.titleEn || '',
-          contentType: 'LibraryItem',
-          currentState: formData.workflowState,
-          authorName: currentUser.name,
-          createdAt: formData.createdAt || new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          category: formData.documentType || 'Law',
-          history: formData.workflowHistory || []
-        },
-        toState,
-        currentUser,
-        workflowComment
-      );
+      if (!formData.id || !formData.workflowState) return;
+      let updatedDoc: LibraryDocument;
+      if (LibraryAdminClient.isBackendAvailable() && LibraryAdminClient.isAuthenticated()) {
+        updatedDoc = await LibraryAdminClient.transitionWorkflow(formData.id, toState, workflowComment);
+      } else {
+        // Fallback local simulation if backend unconfigured
+        const updatedItem = WorkflowEngine.executeTransition(
+          {
+            id: formData.id,
+            titleAr: formData.titleAr || '',
+            titleEn: formData.titleEn || '',
+            contentType: 'LibraryItem',
+            currentState: formData.workflowState,
+            authorName: currentUser.name,
+            createdAt: formData.createdAt || new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            category: formData.documentType || 'Law',
+            history: formData.workflowHistory || []
+          },
+          toState,
+          currentUser,
+          workflowComment
+        );
+        updatedDoc = {
+          ...(formData as LibraryDocument),
+          workflowState: updatedItem.currentState,
+          workflowHistory: updatedItem.history,
+          updatedAt: new Date().toISOString()
+        };
+      }
 
-      const nextDoc: LibraryDocument = {
-        ...(formData as LibraryDocument),
-        workflowState: updatedItem.currentState,
-        workflowHistory: updatedItem.history,
-        updatedAt: new Date().toISOString()
-      };
-
-      setFormData(nextDoc);
-      onSave(nextDoc);
+      setFormData(updatedDoc);
+      onSave(updatedDoc);
       setWorkflowComment('');
+      setSuccessNotification(isAr ? 'تم تنفيذ انتقال حالة التحرير بنجاح' : 'Workflow transition executed successfully');
+      setIsSaveSuccess(true);
     } catch (err: any) {
       alert(err.message || 'Transition error');
     }
   };
 
-  const handleSaveMetadata = () => {
-    const updatedDoc: LibraryDocument = {
-      ...(formData as LibraryDocument),
-      updatedAt: new Date().toISOString()
-    };
-    onSave(updatedDoc);
-    setSuccessNotification(
-      isAr ? 'تم حفظ بيانات الوثيقة البيئية بنجاح' : 'Environmental document saved successfully'
-    );
-    setIsSaveSuccess(true);
+  const handleSaveMetadata = async () => {
+    try {
+      if (!formData.id) return;
+      let updatedDoc: LibraryDocument;
+      if (LibraryAdminClient.isBackendAvailable() && LibraryAdminClient.isAuthenticated()) {
+        updatedDoc = await LibraryAdminClient.updateMetadata(formData.id, {
+          titleAr: formData.titleAr,
+          titleEn: formData.titleEn,
+          originalTitle: formData.originalTitle,
+          documentType: formData.documentType,
+          organizationId: formData.organizationId,
+          sourceId: formData.sourceId,
+          geographyAr: formData.geographyAr,
+          geographyEn: formData.geographyEn,
+          publicationDate: formData.publicationDate,
+          language: formData.language,
+          summaryAr: formData.summaryAr,
+          summaryEn: formData.summaryEn,
+          topicsAr: formData.topicsAr,
+          topicsEn: formData.topicsEn,
+          environmentalDomains: formData.environmentalDomains,
+          legalStatusDescriptionAr: formData.legalStatusDescriptionAr,
+          legalStatusDescriptionEn: formData.legalStatusDescriptionEn,
+          authorMetadataAr: formData.authorMetadataAr,
+          authorMetadataEn: formData.authorMetadataEn,
+        });
+
+        // If rights status was also modified locally, update rights via dedicated endpoint
+        if (formData.rightsStatus && formData.rightsStatus !== document.rightsStatus) {
+          updatedDoc = await LibraryAdminClient.updateRights(
+            formData.id, 
+            formData.rightsStatus, 
+            formData.rightsNotesAr, 
+            formData.rightsNotesEn
+          );
+        }
+      } else {
+        updatedDoc = {
+          ...(formData as LibraryDocument),
+          updatedAt: new Date().toISOString()
+        };
+      }
+
+      setFormData(updatedDoc);
+      onSave(updatedDoc);
+      setSuccessNotification(
+        isAr ? 'تم حفظ بيانات الوثيقة البيئية بنجاح' : 'Environmental document saved successfully'
+      );
+      setIsSaveSuccess(true);
+    } catch (err: any) {
+      alert(err.message || 'Failed to save document');
+    }
   };
 
-  const handleAddVersion = () => {
-    if (!newVersionNum.trim()) return;
-    const newVer: LibraryDocumentVersion = {
-      id: `ver-${Date.now()}`,
-      documentId: formData.id || '',
-      versionNumber: newVersionNum.trim(),
-      publishedDate: new Date().toISOString().split('T')[0],
-      changeDescriptionAr: newVersionDescAr.trim() || 'تحديث وثائقي إضافي',
-      changeDescriptionEn: newVersionDescEn.trim() || 'Document version update'
-    };
-    const updatedVersions = [...(formData.versions || []), newVer];
-    const updatedDoc: LibraryDocument = {
-      ...(formData as LibraryDocument),
-      versions: updatedVersions,
-      updatedAt: new Date().toISOString()
-    };
-    setFormData(updatedDoc);
-    onSave(updatedDoc);
-    setNewVersionNum('');
-    setNewVersionDescAr('');
-    setNewVersionDescEn('');
+  const handleAddVersion = async () => {
+    if (!newVersionNum.trim() || !formData.id) return;
+    try {
+      const versionInput = {
+        versionNumber: newVersionNum.trim(),
+        changeDescriptionAr: newVersionDescAr.trim() || 'تحديث وثائقي إضافي',
+        changeDescriptionEn: newVersionDescEn.trim() || 'Document version update',
+        publishedDate: new Date().toISOString().split('T')[0]
+      };
+
+      let updatedDoc: LibraryDocument;
+      if (LibraryAdminClient.isBackendAvailable() && LibraryAdminClient.isAuthenticated()) {
+        updatedDoc = await LibraryAdminClient.addVersion(formData.id, versionInput);
+      } else {
+        const newVer: LibraryDocumentVersion = {
+          id: `ver-${Date.now()}`,
+          documentId: formData.id,
+          versionNumber: versionInput.versionNumber,
+          publishedDate: versionInput.publishedDate,
+          changeDescriptionAr: versionInput.changeDescriptionAr,
+          changeDescriptionEn: versionInput.changeDescriptionEn
+        };
+        updatedDoc = {
+          ...(formData as LibraryDocument),
+          versions: [newVer, ...(formData.versions || [])],
+          updatedAt: new Date().toISOString()
+        };
+      }
+
+      setFormData(updatedDoc);
+      onSave(updatedDoc);
+      setNewVersionNum('');
+      setNewVersionDescAr('');
+      setNewVersionDescEn('');
+    } catch (err: any) {
+      alert(err.message || 'Failed to add version');
+    }
   };
 
   const getRightsBadgeColor = (status?: LibraryRightsStatus) => {
@@ -672,7 +738,7 @@ export function LibraryDocumentEditorModal({
                         <button
                           key={tr.toState}
                           onClick={() => handleWorkflowTransition(tr.toState)}
-                          className="px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold transition-all shadow-xs flex items-center gap-2"
+                          className="px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold transition-all shadow-xs flex items-center gap-2 cursor-pointer"
                         >
                           <CheckCircle2 className="h-4 w-4" />
                           <span>{isAr ? tr.labelAr : tr.labelEn}</span>
@@ -752,7 +818,7 @@ export function LibraryDocumentEditorModal({
                 </div>
                 <button
                   onClick={handleAddVersion}
-                  className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold transition-all shadow-xs"
+                  className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold transition-all shadow-xs cursor-pointer"
                 >
                   {isAr ? 'إضافة الإصدار لسجل الوثيقة' : 'Add Version Entry'}
                 </button>

@@ -1,0 +1,341 @@
+import type { LibraryRepository } from './libraryRepository';
+import type { LibraryDocument, LibraryDocumentVersion } from '../../../src/types/library';
+import { LibraryDocumentType, LibraryRightsStatus } from '../../../src/types/library';
+import { WorkflowState, WorkflowAction, type WorkflowTransitionRecord } from '../../../src/types/workflow';
+import type { AdminUser } from '../../../src/types/admin';
+import { AdminPermission } from '../../../src/types/admin';
+import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
+
+export interface CreateLibraryDocumentInput {
+  id?: string;
+  titleAr: string;
+  titleEn: string;
+  originalTitle?: string;
+  documentType: LibraryDocumentType;
+  organizationId: string;
+  sourceId: string;
+  geographyAr: string;
+  geographyEn: string;
+  publicationDate: string;
+  language: 'ar' | 'en' | 'bilingual' | 'other';
+  summaryAr: string;
+  summaryEn: string;
+  topicsAr: string[];
+  topicsEn: string[];
+  environmentalDomains: string[];
+  rightsStatus?: LibraryRightsStatus;
+  rightsNotesAr?: string;
+  rightsNotesEn?: string;
+  legalStatusDescriptionAr: string;
+  legalStatusDescriptionEn: string;
+  authorMetadataAr?: string;
+  authorMetadataEn?: string;
+}
+
+export interface UpdateLibraryMetadataInput {
+  titleAr?: string;
+  titleEn?: string;
+  originalTitle?: string;
+  documentType?: LibraryDocumentType;
+  organizationId?: string;
+  sourceId?: string;
+  geographyAr?: string;
+  geographyEn?: string;
+  publicationDate?: string;
+  language?: 'ar' | 'en' | 'bilingual' | 'other';
+  summaryAr?: string;
+  summaryEn?: string;
+  topicsAr?: string[];
+  topicsEn?: string[];
+  environmentalDomains?: string[];
+  legalStatusDescriptionAr?: string;
+  legalStatusDescriptionEn?: string;
+  authorMetadataAr?: string;
+  authorMetadataEn?: string;
+}
+
+export class LibraryApplicationService {
+  private repo: LibraryRepository;
+
+  constructor(repo: LibraryRepository) {
+    this.repo = repo;
+  }
+
+  async listAll(): Promise<LibraryDocument[]> {
+    return this.repo.listAll();
+  }
+
+  async getById(id: string): Promise<LibraryDocument | null> {
+    if (!id || typeof id !== 'string' || id.trim() === '') {
+      return null;
+    }
+    return this.repo.getById(id.trim());
+  }
+
+  async create(input: CreateLibraryDocumentInput, actor: AdminUser): Promise<LibraryDocument> {
+    this.validateCreateInput(input);
+
+    const now = new Date().toISOString();
+    const id = input.id && input.id.trim() !== '' ? input.id.trim() : `doc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+    const newDoc: LibraryDocument = {
+      id,
+      titleAr: input.titleAr.trim(),
+      titleEn: input.titleEn.trim(),
+      originalTitle: input.originalTitle?.trim(),
+      documentType: input.documentType,
+      organizationId: input.organizationId.trim(),
+      sourceId: input.sourceId.trim(),
+      geographyAr: input.geographyAr.trim(),
+      geographyEn: input.geographyEn.trim(),
+      publicationDate: input.publicationDate.trim(),
+      language: input.language,
+      summaryAr: input.summaryAr.trim(),
+      summaryEn: input.summaryEn.trim(),
+      topicsAr: Array.isArray(input.topicsAr) ? input.topicsAr.map(t => t.trim()) : [],
+      topicsEn: Array.isArray(input.topicsEn) ? input.topicsEn.map(t => t.trim()) : [],
+      environmentalDomains: Array.isArray(input.environmentalDomains) ? input.environmentalDomains.map(d => d.trim()) : [],
+      rightsStatus: input.rightsStatus || LibraryRightsStatus.Unknown,
+      rightsNotesAr: input.rightsNotesAr?.trim(),
+      rightsNotesEn: input.rightsNotesEn?.trim(),
+      workflowState: WorkflowState.Draft,
+      workflowHistory: [],
+      legalStatusDescriptionAr: input.legalStatusDescriptionAr.trim(),
+      legalStatusDescriptionEn: input.legalStatusDescriptionEn.trim(),
+      authorMetadataAr: input.authorMetadataAr?.trim(),
+      authorMetadataEn: input.authorMetadataEn?.trim(),
+      createdAt: now,
+      updatedAt: now,
+      versions: [
+        {
+          id: `ver-${id}-1`,
+          documentId: id,
+          versionNumber: '1.0',
+          publishedDate: input.publicationDate.trim(),
+          changeDescriptionAr: 'إنشاء مسودة السجل المعرفي الأولية',
+          changeDescriptionEn: 'Initial draft knowledge record created',
+        },
+      ],
+    };
+
+    this.validateDocument(newDoc);
+    return this.repo.create(newDoc);
+  }
+
+  async updateMetadata(id: string, updates: UpdateLibraryMetadataInput, actor: AdminUser): Promise<LibraryDocument> {
+    const doc = await this.getById(id);
+    if (!doc) {
+      throw new Error(`NOT_FOUND: Document ${id} not found`);
+    }
+
+    const updated: LibraryDocument = {
+      ...doc,
+      ...(updates.titleAr !== undefined && { titleAr: updates.titleAr.trim() }),
+      ...(updates.titleEn !== undefined && { titleEn: updates.titleEn.trim() }),
+      ...(updates.originalTitle !== undefined && { originalTitle: updates.originalTitle.trim() }),
+      ...(updates.documentType !== undefined && { documentType: updates.documentType }),
+      ...(updates.organizationId !== undefined && { organizationId: updates.organizationId.trim() }),
+      ...(updates.sourceId !== undefined && { sourceId: updates.sourceId.trim() }),
+      ...(updates.geographyAr !== undefined && { geographyAr: updates.geographyAr.trim() }),
+      ...(updates.geographyEn !== undefined && { geographyEn: updates.geographyEn.trim() }),
+      ...(updates.publicationDate !== undefined && { publicationDate: updates.publicationDate.trim() }),
+      ...(updates.language !== undefined && { language: updates.language }),
+      ...(updates.summaryAr !== undefined && { summaryAr: updates.summaryAr.trim() }),
+      ...(updates.summaryEn !== undefined && { summaryEn: updates.summaryEn.trim() }),
+      ...(updates.topicsAr !== undefined && { topicsAr: updates.topicsAr.map(t => t.trim()) }),
+      ...(updates.topicsEn !== undefined && { topicsEn: updates.topicsEn.map(t => t.trim()) }),
+      ...(updates.environmentalDomains !== undefined && { environmentalDomains: updates.environmentalDomains.map(d => d.trim()) }),
+      ...(updates.legalStatusDescriptionAr !== undefined && { legalStatusDescriptionAr: updates.legalStatusDescriptionAr.trim() }),
+      ...(updates.legalStatusDescriptionEn !== undefined && { legalStatusDescriptionEn: updates.legalStatusDescriptionEn.trim() }),
+      ...(updates.authorMetadataAr !== undefined && { authorMetadataAr: updates.authorMetadataAr.trim() }),
+      ...(updates.authorMetadataEn !== undefined && { authorMetadataEn: updates.authorMetadataEn.trim() }),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Ensure metadata update cannot mutate rights or workflow fields
+    updated.rightsStatus = doc.rightsStatus;
+    updated.rightsNotesAr = doc.rightsNotesAr;
+    updated.rightsNotesEn = doc.rightsNotesEn;
+    updated.workflowState = doc.workflowState;
+    updated.workflowHistory = doc.workflowHistory;
+    updated.versions = doc.versions;
+
+    this.validateDocument(updated);
+    return this.repo.update(updated);
+  }
+
+  async updateRights(id: string, rightsStatus: LibraryRightsStatus, notesAr?: string, notesEn?: string, actor?: AdminUser): Promise<LibraryDocument> {
+    if (!Object.values(LibraryRightsStatus).includes(rightsStatus)) {
+      throw new Error(`INVALID_ARGUMENT: Invalid rights status: ${rightsStatus}`);
+    }
+
+    const doc = await this.getById(id);
+    if (!doc) {
+      throw new Error(`NOT_FOUND: Document ${id} not found`);
+    }
+
+    const updated: LibraryDocument = {
+      ...doc,
+      rightsStatus,
+      ...(notesAr !== undefined && { rightsNotesAr: notesAr.trim() }),
+      ...(notesEn !== undefined && { rightsNotesEn: notesEn.trim() }),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Ensure rights update cannot mutate workflow state/history or metadata
+    updated.workflowState = doc.workflowState;
+    updated.workflowHistory = doc.workflowHistory;
+
+    this.validateDocument(updated);
+    return this.repo.update(updated);
+  }
+
+  async transitionWorkflow(id: string, targetState: WorkflowState, comment: string | undefined, actor: AdminUser): Promise<LibraryDocument> {
+    if (!Object.values(WorkflowState).includes(targetState)) {
+      throw new Error(`INVALID_ARGUMENT: Invalid target workflow state: ${targetState}`);
+    }
+
+    const doc = await this.getById(id);
+    if (!doc) {
+      throw new Error(`NOT_FOUND: Document ${id} not found`);
+    }
+
+    const currentState = doc.workflowState;
+    const action = this.determineWorkflowAction(currentState, targetState);
+    if (!action) {
+      throw new Error(`INVALID_TRANSITION: Transition from ${currentState} to ${targetState} is not permitted.`);
+    }
+
+    const requiredPermission = this.getRequiredPermissionForAction(action);
+    const hasPerm = this.checkPermission(actor, requiredPermission, action);
+    if (!hasPerm) {
+      throw new Error(`PERMISSION_DENIED: Admin lacks required permission [${requiredPermission}] for action ${action}`);
+    }
+
+    const now = new Date().toISOString();
+    const transitionRecord: WorkflowTransitionRecord = {
+      id: `tr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      fromState: currentState,
+      toState: targetState,
+      action,
+      actorName: actor.name || 'Admin',
+      actorRole: actor.role || 'Editor',
+      timestamp: now,
+      comment: comment?.trim() || undefined,
+    };
+
+    const updated: LibraryDocument = {
+      ...doc,
+      workflowState: targetState,
+      workflowHistory: [transitionRecord, ...doc.workflowHistory],
+      updatedAt: now,
+    };
+
+    this.validateDocument(updated);
+    return this.repo.update(updated);
+  }
+
+  async addVersion(id: string, versionInput: Omit<LibraryDocumentVersion, 'id' | 'documentId'>, actor: AdminUser): Promise<LibraryDocument> {
+    const doc = await this.getById(id);
+    if (!doc) {
+      throw new Error(`NOT_FOUND: Document ${id} not found`);
+    }
+
+    if (!versionInput.versionNumber || versionInput.versionNumber.trim() === '') {
+      throw new Error('VALIDATION_ERROR: versionNumber is required');
+    }
+
+    const newVersion: LibraryDocumentVersion = {
+      id: `ver-${id}-${Date.now()}`,
+      documentId: id,
+      versionNumber: versionInput.versionNumber.trim(),
+      publishedDate: versionInput.publishedDate?.trim() || new Date().toISOString().split('T')[0],
+      changeDescriptionAr: versionInput.changeDescriptionAr?.trim() || '',
+      changeDescriptionEn: versionInput.changeDescriptionEn?.trim() || '',
+      referenceUrl: versionInput.referenceUrl?.trim(),
+    };
+
+    const updated: LibraryDocument = {
+      ...doc,
+      versions: [newVersion, ...doc.versions],
+      updatedAt: new Date().toISOString(),
+    };
+
+    this.validateDocument(updated);
+    return this.repo.update(updated);
+  }
+
+  private determineWorkflowAction(from: WorkflowState, to: WorkflowState): WorkflowAction | null {
+    if (from === WorkflowState.Draft && to === WorkflowState.InReview) return WorkflowAction.SubmitForReview;
+    if (from === WorkflowState.InReview && to === WorkflowState.ChangesRequested) return WorkflowAction.RequestChanges;
+    if (from === WorkflowState.InReview && to === WorkflowState.Approved) return WorkflowAction.Approve;
+    if (from === WorkflowState.ChangesRequested && to === WorkflowState.Draft) return WorkflowAction.ReviseDraft;
+    if (from === WorkflowState.Approved && to === WorkflowState.Published) return WorkflowAction.Publish;
+    return null;
+  }
+
+  private getRequiredPermissionForAction(action: WorkflowAction): AdminPermission {
+    switch (action) {
+      case WorkflowAction.SubmitForReview:
+        return AdminPermission.Create;
+      case WorkflowAction.RequestChanges:
+        return AdminPermission.Review;
+      case WorkflowAction.Approve:
+        return AdminPermission.Approve;
+      case WorkflowAction.ReviseDraft:
+        return AdminPermission.Edit;
+      case WorkflowAction.Publish:
+        return AdminPermission.Publish;
+      default:
+        return AdminPermission.Edit;
+    }
+  }
+
+  private checkPermission(actor: AdminUser, perm: AdminPermission, action: WorkflowAction): boolean {
+    if (!actor.isActive) return false;
+    if (AdminAuthorizationService.hasPermission(actor, perm)) {
+      return true;
+    }
+    if (action === WorkflowAction.SubmitForReview && AdminAuthorizationService.hasPermission(actor, AdminPermission.Edit)) return true;
+    if (action === WorkflowAction.ReviseDraft && AdminAuthorizationService.hasPermission(actor, AdminPermission.Create)) return true;
+    return false;
+  }
+
+  private validateCreateInput(input: CreateLibraryDocumentInput): void {
+    if (!input || typeof input !== 'object') {
+      throw new Error('VALIDATION_ERROR: Input object is required');
+    }
+    if (!input.titleAr || input.titleAr.trim() === '') throw new Error('VALIDATION_ERROR: titleAr is required');
+    if (!input.titleEn || input.titleEn.trim() === '') throw new Error('VALIDATION_ERROR: titleEn is required');
+    if (!input.documentType || !Object.values(LibraryDocumentType).includes(input.documentType)) {
+      throw new Error('VALIDATION_ERROR: Invalid or missing documentType');
+    }
+    if (!input.organizationId || input.organizationId.trim() === '') throw new Error('VALIDATION_ERROR: organizationId is required');
+    if (!input.sourceId || input.sourceId.trim() === '') throw new Error('VALIDATION_ERROR: sourceId is required');
+    if (!input.summaryAr || input.summaryAr.trim() === '') throw new Error('VALIDATION_ERROR: summaryAr is required');
+    if (!input.summaryEn || input.summaryEn.trim() === '') throw new Error('VALIDATION_ERROR: summaryEn is required');
+  }
+
+  private validateDocument(doc: LibraryDocument): void {
+    if (!doc || typeof doc !== 'object') {
+      throw new Error('VALIDATION_ERROR: Document object is required');
+    }
+    if (!doc.id || doc.id.trim() === '') throw new Error('VALIDATION_ERROR: id is required');
+    if (!doc.titleAr || doc.titleAr.trim() === '') throw new Error('VALIDATION_ERROR: titleAr is required');
+    if (!doc.titleEn || doc.titleEn.trim() === '') throw new Error('VALIDATION_ERROR: titleEn is required');
+    if (!Object.values(LibraryDocumentType).includes(doc.documentType)) {
+      throw new Error(`VALIDATION_ERROR: Invalid documentType: ${doc.documentType}`);
+    }
+    if (!Object.values(LibraryRightsStatus).includes(doc.rightsStatus)) {
+      throw new Error(`VALIDATION_ERROR: Invalid rightsStatus: ${doc.rightsStatus}`);
+    }
+    if (!Object.values(WorkflowState).includes(doc.workflowState)) {
+      throw new Error(`VALIDATION_ERROR: Invalid workflowState: ${doc.workflowState}`);
+    }
+    if (!Array.isArray(doc.topicsAr)) throw new Error('VALIDATION_ERROR: topicsAr must be an array');
+    if (!Array.isArray(doc.topicsEn)) throw new Error('VALIDATION_ERROR: topicsEn must be an array');
+    if (!Array.isArray(doc.environmentalDomains)) throw new Error('VALIDATION_ERROR: environmentalDomains must be an array');
+    if (!Array.isArray(doc.workflowHistory)) throw new Error('VALIDATION_ERROR: workflowHistory must be an array');
+    if (!Array.isArray(doc.versions)) throw new Error('VALIDATION_ERROR: versions must be an array');
+  }
+}

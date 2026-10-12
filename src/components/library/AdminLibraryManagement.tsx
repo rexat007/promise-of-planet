@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { 
   BookOpen, 
@@ -10,7 +10,8 @@ import {
   Clock, 
   AlertTriangle, 
   Edit3, 
-  RefreshCw
+  RefreshCw,
+  Loader2
 } from 'lucide-react';
 import type { AdminUser } from '../../types/admin';
 import { WorkflowState } from '../../types/workflow';
@@ -26,11 +27,11 @@ import type {
   LibrarySource 
 } from '../../types/library';
 import { 
-  MOCK_LIBRARY_DOCUMENTS, 
   MOCK_ORGANIZATIONS, 
   MOCK_SOURCES 
 } from '../../data/mockLibraryData';
 import { LibraryDocumentEditorModal } from './LibraryDocumentEditorModal';
+import { LibraryAdminClient } from '../../services/libraryAdminClient';
 
 interface AdminLibraryManagementProps {
   currentUser: AdminUser;
@@ -40,7 +41,10 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
 
-  const [documents, setDocuments] = useState<LibraryDocument[]>(MOCK_LIBRARY_DOCUMENTS);
+  const [documents, setDocuments] = useState<LibraryDocument[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
   const [organizations] = useState<LibraryOrganization[]>(MOCK_ORGANIZATIONS);
   const [sources] = useState<LibrarySource[]>(MOCK_SOURCES);
 
@@ -55,6 +59,30 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   const canCreate = AdminAccessService.hasPermission(currentUser, AdminPermission.Create);
+
+  const loadDocuments = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      if (!LibraryAdminClient.isBackendAvailable() || !LibraryAdminClient.isAuthenticated()) {
+        setError(isAr ? 'الخادم غير متصل أو لم يتم تسجيل الدخول كمسؤول' : 'Backend unconfigured or unauthenticated session.');
+        setDocuments([]);
+        setLoading(false);
+        return;
+      }
+      const remoteDocs = await LibraryAdminClient.listAll();
+      setDocuments(remoteDocs);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load library documents');
+      setDocuments([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [isAr]);
+
+  useEffect(() => {
+    loadDocuments();
+  }, [loadDocuments]);
 
   // Filtered List Computation
   const filteredDocuments = useMemo(() => {
@@ -91,14 +119,64 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
     });
   }, [documents, searchQuery, selectedType, selectedRights, selectedWorkflow]);
 
-  const handleSaveDocument = (savedDoc: LibraryDocument) => {
-    setDocuments((prev) => {
-      const exists = prev.some((d) => d.id === savedDoc.id);
+  const handleSaveDocument = async (savedDoc: LibraryDocument) => {
+    try {
+      const exists = documents.some((d) => d.id === savedDoc.id);
+      let canonical: LibraryDocument;
       if (exists) {
-        return prev.map((d) => (d.id === savedDoc.id ? savedDoc : d));
+        canonical = await LibraryAdminClient.updateMetadata(savedDoc.id, {
+          titleAr: savedDoc.titleAr,
+          titleEn: savedDoc.titleEn,
+          originalTitle: savedDoc.originalTitle,
+          documentType: savedDoc.documentType,
+          organizationId: savedDoc.organizationId,
+          sourceId: savedDoc.sourceId,
+          geographyAr: savedDoc.geographyAr,
+          geographyEn: savedDoc.geographyEn,
+          publicationDate: savedDoc.publicationDate,
+          language: savedDoc.language,
+          summaryAr: savedDoc.summaryAr,
+          summaryEn: savedDoc.summaryEn,
+          topicsAr: savedDoc.topicsAr,
+          topicsEn: savedDoc.topicsEn,
+          environmentalDomains: savedDoc.environmentalDomains,
+          legalStatusDescriptionAr: savedDoc.legalStatusDescriptionAr,
+          legalStatusDescriptionEn: savedDoc.legalStatusDescriptionEn,
+          authorMetadataAr: savedDoc.authorMetadataAr,
+          authorMetadataEn: savedDoc.authorMetadataEn,
+        });
+      } else {
+        canonical = await LibraryAdminClient.create({
+          id: savedDoc.id,
+          titleAr: savedDoc.titleAr,
+          titleEn: savedDoc.titleEn,
+          originalTitle: savedDoc.originalTitle,
+          documentType: savedDoc.documentType,
+          organizationId: savedDoc.organizationId,
+          sourceId: savedDoc.sourceId,
+          geographyAr: savedDoc.geographyAr,
+          geographyEn: savedDoc.geographyEn,
+          publicationDate: savedDoc.publicationDate,
+          language: savedDoc.language,
+          summaryAr: savedDoc.summaryAr,
+          summaryEn: savedDoc.summaryEn,
+          topicsAr: savedDoc.topicsAr,
+          topicsEn: savedDoc.topicsEn,
+          environmentalDomains: savedDoc.environmentalDomains,
+          legalStatusDescriptionAr: savedDoc.legalStatusDescriptionAr,
+          legalStatusDescriptionEn: savedDoc.legalStatusDescriptionEn,
+          authorMetadataAr: savedDoc.authorMetadataAr,
+          authorMetadataEn: savedDoc.authorMetadataEn,
+          rightsStatus: savedDoc.rightsStatus,
+          rightsNotesAr: savedDoc.rightsNotesAr,
+          rightsNotesEn: savedDoc.rightsNotesEn,
+        });
       }
-      return [savedDoc, ...prev];
-    });
+      await loadDocuments();
+      setActiveModalDoc(canonical);
+    } catch (err: any) {
+      alert(err.message || 'Failed to save document');
+    }
   };
 
   const handleCreateNew = () => {
@@ -320,16 +398,25 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
             />
           </div>
 
-          {/* Add Document Action */}
-          {canCreate && (
+          {/* Add Document Action & Refresh */}
+          <div className="flex items-center gap-2 w-full sm:w-auto">
             <button
-              onClick={handleCreateNew}
-              className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-extrabold text-xs sm:text-sm transition-all shadow-md flex items-center justify-center gap-2 shrink-0 cursor-pointer"
+              onClick={loadDocuments}
+              className="p-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 transition-colors cursor-pointer"
+              title={isAr ? 'تحديث القائمة' : 'Refresh list'}
             >
-              <Plus className="h-4 w-4" />
-              <span>{isAr ? 'إضافة وثيقة معرفية جديدة' : 'Add Knowledge Document'}</span>
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
-          )}
+            {canCreate && (
+              <button
+                onClick={handleCreateNew}
+                className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-extrabold text-xs sm:text-sm transition-all shadow-md flex items-center justify-center gap-2 shrink-0 cursor-pointer"
+              >
+                <Plus className="h-4 w-4" />
+                <span>{isAr ? 'إضافة وثيقة معرفية جديدة' : 'Add Knowledge Document'}</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Filters dropdown row */}
@@ -415,11 +502,29 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
           )}
         </div>
 
-        {filteredDocuments.length === 0 ? (
+        {loading ? (
+          <div className="p-16 text-center text-gray-500 dark:text-gray-400 space-y-3">
+            <Loader2 className="h-8 w-8 mx-auto animate-spin text-emerald-600" />
+            <p className="font-bold text-sm">
+              {isAr ? 'جاري تحميل السجلات المعرفية من الخادم الآمن...' : 'Loading canonical library records from secure server...'}
+            </p>
+          </div>
+        ) : error ? (
+          <div className="p-12 text-center text-rose-600 dark:text-rose-400 space-y-3">
+            <AlertTriangle className="h-10 w-10 mx-auto" />
+            <p className="font-bold text-sm">{error}</p>
+            <button
+              onClick={loadDocuments}
+              className="px-4 py-2 rounded-xl bg-gray-100 dark:bg-gray-800 font-bold text-xs"
+            >
+              {isAr ? 'إعادة المحاولة' : 'Retry'}
+            </button>
+          </div>
+        ) : filteredDocuments.length === 0 ? (
           <div className="p-12 text-center text-gray-500 dark:text-gray-400 space-y-3">
             <BookOpen className="h-10 w-10 mx-auto text-gray-300 dark:text-gray-700" />
             <p className="font-bold text-sm">
-              {isAr ? 'لم يتم العثور على وثائق بيئية تطابق شروط التصفية.' : 'No knowledge documents matched your filter parameters.'}
+              {isAr ? 'لم يتم العثور على وثائق بيئية تطابق شروط التصفية أو أن السجل فارغ.' : 'No knowledge documents found or catalog is empty.'}
             </p>
           </div>
         ) : (
@@ -568,7 +673,10 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
       <LibraryDocumentEditorModal
         document={activeModalDoc}
         isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
+        onClose={() => {
+          setIsModalOpen(false);
+          loadDocuments();
+        }}
         onSave={handleSaveDocument}
         organizations={organizations}
         sources={sources}
