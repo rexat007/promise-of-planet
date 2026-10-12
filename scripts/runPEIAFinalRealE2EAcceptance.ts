@@ -1102,7 +1102,7 @@ async function runAcceptanceHarness(): Promise<void> {
         credential,
         outcome,
       });
-      if (replayRes.kind === 'ACCEPTED' && replayRes.value.ok === true && replayRes.value.taskId === TEST_TASK_ID) {
+      if (replayRes.ok === true && replayRes.taskId === TEST_TASK_ID) {
         replayOk = true;
       } else {
         reportStageFailure('REPLAY', `Replay failed: ${JSON.stringify(replayRes)}`);
