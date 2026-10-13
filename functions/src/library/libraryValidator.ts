@@ -4,6 +4,19 @@ import { WorkflowState, WorkflowAction, type WorkflowTransitionRecord } from '..
 
 export class LibraryValidator {
   public static validateDocument(doc: any): LibraryDocument {
+    this.validateDocumentStructure(doc);
+    return doc as LibraryDocument;
+  }
+
+  public static validatePersistedDocument(doc: any, expectedId: string): LibraryDocument {
+    this.validateDocumentStructure(doc);
+    if (doc.id !== expectedId) {
+      throw new Error(`VALIDATION_ERROR: ID mismatch: ${doc.id} !== ${expectedId}`);
+    }
+    return doc as LibraryDocument;
+  }
+
+  public static validateDocumentStructure(doc: any): void {
     if (!doc || typeof doc !== 'object') throw new Error('VALIDATION_ERROR: Document object is required');
 
     const requiredFields = [
@@ -39,8 +52,6 @@ export class LibraryValidator {
 
     const allowedFields = [...requiredFields, 'originalTitle', 'rightsNotesAr', 'rightsNotesEn', 'authorMetadataAr', 'authorMetadataEn', 'topicsAr', 'topicsEn', 'environmentalDomains', 'workflowHistory', 'versions'];
     for (const key in doc) { if (!allowedFields.includes(key)) throw new Error(`VALIDATION_ERROR: Unexpected field: ${key}`); }
-    
-    return doc as LibraryDocument;
   }
 
   private static validateWorkflowRecord(record: WorkflowTransitionRecord): void {

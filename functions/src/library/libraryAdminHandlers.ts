@@ -21,8 +21,10 @@ export const manageLibraryDocuments = onCall(async (request) => {
   try {
     switch (data.action) {
       case 'listAll':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.View)) throw new HttpsError('permission-denied', 'Missing permission');
         return { documents: await service.listAll() };
       case 'getById':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.View)) throw new HttpsError('permission-denied', 'Missing permission');
         return { document: await service.getById(data.id) };
       case 'create':
         if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Create)) throw new HttpsError('permission-denied', 'Missing permission');

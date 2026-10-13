@@ -59,10 +59,6 @@ export class FirestoreLibraryRepository implements LibraryRepository {
   }
 
   private deserializeDocument(data: any, expectedId: string): LibraryDocument {
-    const doc = LibraryValidator.validateDocument(data);
-    if (doc.id !== expectedId) {
-      throw new Error(`VALIDATION_ERROR: ID mismatch: ${doc.id} !== ${expectedId}`);
-    }
-    return doc;
+    return LibraryValidator.validatePersistedDocument(data, expectedId);
   }
 }
