@@ -9,7 +9,7 @@
     "target": "es2022",
     "moduleResolution": "node",
     "ignoreDeprecations": "5.0",
-    "rootDir": ".."
+    "rootDir": "src"
   },
   "compileOnSave": true,
   "include": ["src"]
