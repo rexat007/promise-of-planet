@@ -340,7 +340,9 @@ export class PlatformSettingsValidator {
         for (const [k, v] of Object.entries(input.channels)) {
           if (!['youtube', 'facebook', 'instagram', 'whatsapp'].includes(k)) {
             errors.push(`Unknown channel '${k}'.`);
-          } else if (v && typeof v === 'object') {
+          } else if (v === null || typeof v !== 'object') {
+            errors.push(`channels.${k} must be an object.`);
+          } else {
             const ch = v as Record<string, any>;
             if ('enabled' in ch && typeof ch.enabled !== 'boolean') {
               errors.push(`channels.${k}.enabled must be a boolean.`);
