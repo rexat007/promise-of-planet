@@ -93,10 +93,11 @@ export class PlatformSettingsValidator {
         }
       }
       if (id.logoStoragePath !== null && id.logoStoragePath !== undefined) {
-        if (typeof id.logoStoragePath !== 'string' || 
-            !id.logoStoragePath.startsWith('branding/platform-logo/') || 
-            (id.logoStoragePath.includes('..') || id.logoStoragePath.includes('\\')) ||
-            !(id.logoStoragePath.endsWith('.png') || id.logoStoragePath.endsWith('.webp'))) {
+        const p = id.logoStoragePath;
+        if (typeof p !== 'string' || 
+            !p.startsWith('branding/platform-logo/') || 
+            p.includes('..') || p.includes('\\') || p.includes('?') || p.includes('#') ||
+            !(p.endsWith('.png') || p.endsWith('.webp'))) {
           errors.push('identity.logoStoragePath must be null or a valid branding storage path (ending in .png or .webp).');
         }
       }
@@ -316,7 +317,7 @@ export class PlatformSettingsValidator {
             if (k === 'logoStoragePath') {
               if (v !== null && v !== undefined && (typeof v !== 'string' || 
                   !v.startsWith('branding/platform-logo/') || 
-                  (v.includes('..') || v.includes('\\')) ||
+                  v.includes('..') || v.includes('\\') || v.includes('?') || v.includes('#') ||
                   !(v.endsWith('.png') || v.endsWith('.webp')))) {
                 errors.push('identity.logoStoragePath must be null or a valid branding storage path (ending in .png or .webp).');
               }

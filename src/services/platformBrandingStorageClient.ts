@@ -1,6 +1,5 @@
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
-import { getAuth } from 'firebase/auth';
-import { app } from './firebase';
+import { app, auth } from './firebase';
 import { isFirebaseStorageConfigured } from './firebase';
 
 export interface BrandingStorageResult {
@@ -22,7 +21,6 @@ export const validateLogoFile = (file: File): { isValid: boolean; error?: string
 export const uploadLogo = async (file: File): Promise<BrandingStorageResult> => {
   if (!isFirebaseStorageConfigured) throw new Error('Storage is not configured.');
   
-  const auth = getAuth(app);
   if (!auth.currentUser) throw new Error('Unauthorized');
   
   const storage = getStorage(app);
@@ -41,11 +39,17 @@ export const uploadLogo = async (file: File): Promise<BrandingStorageResult> => 
 export const deleteManagedLogo = async (storagePath: string): Promise<void> => {
   if (!isFirebaseStorageConfigured) throw new Error('Storage is not configured.');
   
-  const auth = getAuth(app);
   if (!auth.currentUser) throw new Error('Unauthorized');
   
-  if (!storagePath || !storagePath.startsWith('branding/platform-logo/')) throw new Error('Invalid storage path.');
-  if (storagePath.includes('..') || storagePath.includes('\\')) throw new Error('Invalid path traversal.');
+  if (!storagePath || 
+      !storagePath.startsWith('branding/platform-logo/') ||
+      storagePath.includes('..') || 
+      storagePath.includes('\\') ||
+      storagePath.includes('?') ||
+      storagePath.includes('#') ||
+      !(storagePath.endsWith('.png') || storagePath.endsWith('.webp'))) {
+    throw new Error('Invalid storage path.');
+  }
   
   const storage = getStorage(app);
   const storageRef = ref(storage, storagePath);
