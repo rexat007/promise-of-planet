@@ -276,6 +276,57 @@ export const AdminGlobalSettings: React.FC<AdminGlobalSettingsProps> = ({ curren
         </div>
       )}
 
+      {/* 4. Identity & Branding Shell */}
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-2 px-1">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            {isAr ? 'الهوية والعلامة التجارية' : 'Identity & Branding'}
+          </h3>
+        </div>
+
+        <div className="bg-white dark:bg-gray-900 rounded-3xl border border-gray-200/80 dark:border-gray-800 p-5 sm:p-6 shadow-xs space-y-4 text-start">
+          <div className="flex items-start gap-4">
+            <div className="h-16 w-16 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 flex items-center justify-center text-[10px] text-center text-gray-500 p-2">
+              {isAr ? 'وعد الكوكب' : 'Promise of Planet'}
+            </div>
+            <div className="space-y-3 flex-1">
+              <p className="text-xs text-gray-600 dark:text-gray-400">
+                {isAr
+                  ? 'إدارة شعار وهوية المنصة سيتم ربطها بالتخزين والإعدادات المعتمدة في الخطوة التالية.'
+                  : 'Platform logo and identity management will be connected to canonical storage and settings in the next step.'}
+              </p>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled
+                  className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-800 text-xs font-semibold text-gray-400 dark:text-gray-500 cursor-not-allowed"
+                >
+                  {isAr ? 'اختيار الشعار' : 'Choose Logo'}
+                </button>
+                <button
+                  type="button"
+                  disabled
+                  className="px-3 py-1.5 rounded-lg bg-gray-200 dark:bg-gray-800 text-xs font-semibold text-gray-400 dark:text-gray-500 cursor-not-allowed"
+                >
+                  {isAr ? 'حفظ الشعار' : 'Save Logo'}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-400 dark:text-gray-500">
+                PNG / WebP • Max 2 MB
+              </p>
+            </div>
+          </div>
+          <div className="pt-2 border-t border-gray-100 dark:border-gray-800">
+            <p className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
+              {isAr
+                ? 'واجهة الشعار مضافة فقط — الربط الفعلي لم يبدأ بعد.'
+                : 'Branding interface only — functional wiring has not started yet.'}
+            </p>
+          </div>
+        </div>
+      </div>
+
       {/* 4. Platform Experience Section (Canonical 2 Settings Only) */}
       <div className="space-y-4">
         <div className="flex items-center justify-between gap-2 px-1">
