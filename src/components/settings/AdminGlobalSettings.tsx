@@ -20,10 +20,16 @@ import {
   GlobalSettingsService,
   DEFAULT_GLOBAL_SETTINGS,
 } from '../../services/globalSettingsService';
+import { PlatformSettingsAdminClient } from '../../services/platformSettingsAdminClient';
 import type {
   PlatformGlobalSettings,
   UpdateGlobalSettingsInput,
 } from '../../types/settings';
+import {
+  validateLogoFile,
+  uploadLogo,
+  deleteManagedLogo,
+} from '../../services/platformBrandingStorageClient';
 import { ResetDefaultsConfirmModal } from './ResetDefaultsConfirmModal';
 
 
@@ -54,6 +60,21 @@ export const AdminGlobalSettings: React.FC<AdminGlobalSettingsProps> = ({ curren
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // 3b. Branding state
+  const [persistedPlatformSettings, setPersistedPlatformSettings] = useState<PlatformGlobalSettings | null>(null);
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [logoPreviewUrl, setLogoPreviewUrl] = useState<string | null>(null);
+  const [logoError, setLogoError] = useState<string | null>(null);
+  const [logoSuccess, setLogoSuccess] = useState<string | null>(null);
+  const [logoLoading, setLogoLoading] = useState(false);
+
+  // Cleanup object URLs on unmount/replacement
+  useEffect(() => {
+    return () => {
+      if (logoPreviewUrl) URL.revokeObjectURL(logoPreviewUrl);
+    };
+  }, [logoPreviewUrl]);
+
   // 4. Subscribe to canonical GlobalSettingsService changes
   useEffect(() => {
     const unsubscribe = GlobalSettingsService.subscribe((updatedSettings) => {
@@ -61,6 +82,19 @@ export const AdminGlobalSettings: React.FC<AdminGlobalSettingsProps> = ({ curren
     });
     return () => unsubscribe();
   }, []);
+
+  // 4b. Load branding settings on mount
+  useEffect(() => {
+    if (canManageSettings) {
+      setLogoLoading(true);
+      PlatformSettingsAdminClient.get()
+        .then(setPersistedPlatformSettings)
+        .catch(() => {
+           setLogoError(isAr ? 'تعذر الوصول إلى إعدادات الشعار المعتمدة في بيئة التشغيل الحالية.' : 'Canonical branding settings are unavailable in the current environment.');
+        })
+        .finally(() => setLogoLoading(false));
+    }
+  }, [canManageSettings, isAr]);
 
   // 5. Calculate dirty state against current canonical settings
   const isClimateClockDirty = draft.climateClockEnabled !== canonicalSettings.climateClockEnabled;
@@ -111,7 +145,87 @@ export const AdminGlobalSettings: React.FC<AdminGlobalSettingsProps> = ({ curren
   // Discard draft and revert to canonical
   const handleDiscardDraft = () => {
     setDraft({ ...canonicalSettings });
+    setLogoFile(null);
+    if (logoPreviewUrl) {
+      URL.revokeObjectURL(logoPreviewUrl);
+      setLogoPreviewUrl(null);
+    }
     setErrorMessage(null);
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setErrorMessage(null);
+    const validation = validateLogoFile(file);
+    if (!validation.isValid) {
+      setErrorMessage(validation.error || 'Invalid file.');
+      return;
+    }
+
+    if (logoPreviewUrl) URL.revokeObjectURL(logoPreviewUrl);
+    setLogoFile(file);
+    setLogoPreviewUrl(URL.createObjectURL(file));
+  };
+
+  const handleSaveLogo = async () => {
+    if (!logoFile) return;
+    setLogoError(null);
+    setLogoSuccess(null);
+    setLogoLoading(true);
+
+    try {
+      // Defect 2: Init only on Save if missing
+      let current = await PlatformSettingsAdminClient.get();
+      if (current === null) {
+        const initialized = await PlatformSettingsAdminClient.initializeFromDefaults();
+        current = initialized.settings;
+      }
+
+      const oldStoragePath = current?.identity?.logoStoragePath;
+      const uploaded = await uploadLogo(logoFile);
+
+      try {
+        const updateResult = await PlatformSettingsAdminClient.update({
+          identity: {
+            logoUrl: uploaded.downloadUrl,
+            logoStoragePath: uploaded.storagePath,
+          },
+        });
+
+        // Update state
+        setPersistedPlatformSettings(updateResult.settings);
+        setLogoFile(null);
+        if (logoPreviewUrl) {
+          URL.revokeObjectURL(logoPreviewUrl);
+          setLogoPreviewUrl(null);
+        }
+
+        // Cleanup old logo if successful and path changed
+        if (oldStoragePath && oldStoragePath !== uploaded.storagePath) {
+          try {
+            await deleteManagedLogo(oldStoragePath);
+          } catch (e) {
+            console.error('Failed to delete old logo', e);
+          }
+        }
+
+        setLogoSuccess(isAr ? 'تم تحديث الشعار بنجاح.' : 'Logo updated successfully.');
+      } catch (updateErr) {
+        // Defect 3: Cleanup new upload if update fails
+        try {
+          await deleteManagedLogo(uploaded.storagePath);
+        } catch (e) {
+          console.error('Failed to cleanup orphan logo', e);
+        }
+        throw updateErr;
+      }
+    } catch (err: unknown) {
+      setLogoError(isAr ? 'فشل تحديث الشعار.' : 'Failed to update logo.');
+    } finally {
+      setLogoLoading(false);
+    }
   };
 
   // Handle Reset to Defaults confirmation
@@ -285,44 +399,60 @@ export const AdminGlobalSettings: React.FC<AdminGlobalSettingsProps> = ({ curren
         </div>
 
         <div className="bg-white dark:bg-gray-900 rounded-3xl border border-gray-200/80 dark:border-gray-800 p-5 sm:p-6 shadow-xs space-y-4 text-start">
+          {/* Branding Error/Success - New */}
+          {(logoError || logoSuccess) && (
+            <div className={`p-3 rounded-xl border text-xs ${logoError ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800 text-rose-900 dark:text-rose-200' : 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'}`}>
+                {logoError || logoSuccess}
+            </div>
+          )}
           <div className="flex items-start gap-4">
-            <div className="h-16 w-16 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 flex items-center justify-center text-[10px] text-center text-gray-500 p-2">
-              {isAr ? 'وعد الكوكب' : 'Promise of Planet'}
+            <div className="h-16 w-16 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 flex items-center justify-center text-[10px] text-center text-gray-500 overflow-hidden">
+              {logoPreviewUrl ? (
+                <img src={logoPreviewUrl} alt="Logo preview" className="h-full w-full object-cover" />
+              ) : persistedPlatformSettings?.identity?.logoStoragePath ? (
+                <img src={persistedPlatformSettings.identity.logoStoragePath} alt="Current logo" className="h-full w-full object-cover" />
+              ) : (
+                isAr ? 'وعد الكوكب' : 'Promise of Planet'
+              )}
             </div>
             <div className="space-y-3 flex-1">
               <p className="text-xs text-gray-600 dark:text-gray-400">
                 {isAr
-                  ? 'إدارة شعار وهوية المنصة سيتم ربطها بالتخزين والإعدادات المعتمدة في الخطوة التالية.'
-                  : 'Platform logo and identity management will be connected to canonical storage and settings in the next step.'}
+                  ? 'اختر شعاراً بصيغة PNG أو WebP (بحد أقصى 2 ميجابايت) لتحديث هوية المنصة.'
+                  : 'Select a PNG or WebP logo (max 2MB) to update the platform identity.'}
               </p>
 
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled
-                  className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-800 text-xs font-semibold text-gray-400 dark:text-gray-500 cursor-not-allowed"
+                <input
+                  type="file"
+                  accept="image/png,image/webp"
+                  onChange={handleFileChange}
+                  className="hidden"
+                  id="logo-file-input"
+                />
+                <label
+                  htmlFor="logo-file-input"
+                  className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs font-semibold text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer shadow-xs"
                 >
                   {isAr ? 'اختيار الشعار' : 'Choose Logo'}
-                </button>
+                </label>
                 <button
                   type="button"
-                  disabled
-                  className="px-3 py-1.5 rounded-lg bg-gray-200 dark:bg-gray-800 text-xs font-semibold text-gray-400 dark:text-gray-500 cursor-not-allowed"
+                  onClick={handleSaveLogo}
+                  disabled={!logoFile || logoLoading}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${
+                    logoFile && !logoLoading
+                      ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                      : 'bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed'
+                  }`}
                 >
-                  {isAr ? 'حفظ الشعار' : 'Save Logo'}
+                  {logoLoading ? (isAr ? 'جاري الحفظ...' : 'Saving...') : (isAr ? 'حفظ الشعار' : 'Save Logo')}
                 </button>
               </div>
               <p className="text-[10px] text-gray-400 dark:text-gray-500">
                 PNG / WebP • Max 2 MB
               </p>
             </div>
-          </div>
-          <div className="pt-2 border-t border-gray-100 dark:border-gray-800">
-            <p className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
-              {isAr
-                ? 'واجهة الشعار مضافة فقط — الربط الفعلي لم يبدأ بعد.'
-                : 'Branding interface only — functional wiring has not started yet.'}
-            </p>
           </div>
         </div>
       </div>
