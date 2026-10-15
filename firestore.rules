@@ -137,5 +137,15 @@ service cloud.firestore {
       // Immutable relationship: client updates and deletes are denied
       allow update, delete: if false;
     }
+
+    // Platform Settings Collection Rules Block
+    match /platform_settings/{settingId} {
+      // Public read allowed ONLY for canonical global settings document
+      allow get: if settingId == 'global';
+      allow list: if false;
+
+      // Client mutations strictly forbidden (all mutations occur via Admin SDK callable)
+      allow create, update, delete: if false;
+    }
   }
 }

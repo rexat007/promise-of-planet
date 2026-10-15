@@ -6,8 +6,8 @@ import { Footer } from './Footer';
 interface AppShellProps {
   children: React.ReactNode;
   onEnterAdmin?: () => void;
-  activePage?: 'home' | 'training-center';
-  onNavigate?: (page: 'home' | 'training-center') => void;
+  activePage?: 'home' | 'training-center' | 'about' | 'contact';
+  onNavigate?: (page: 'home' | 'training-center' | 'about' | 'contact') => void;
 }
 
 export function AppShell({ children, onEnterAdmin, activePage, onNavigate }: AppShellProps) {
@@ -28,7 +28,7 @@ export function AppShell({ children, onEnterAdmin, activePage, onNavigate }: App
       </main>
 
       {/* 4. Footer */}
-      <Footer />
+      <Footer onNavigate={onNavigate} />
     </div>
   );
 }

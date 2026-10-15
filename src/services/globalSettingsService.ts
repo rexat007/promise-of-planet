@@ -1,6 +1,6 @@
 import type { AdminUser } from '../types/admin';
 import { AdminPermission } from '../types/admin';
-import type { AuditChange, AuditEvent } from '../types/audit';
+import type { AuditChange } from '../types/audit';
 import { AuditAction, AuditTargetType } from '../types/audit';
 import type {
   PlatformGlobalSettings,
@@ -12,30 +12,129 @@ import { AdminAccessService } from './adminAccess';
 import { AdminAuditService } from './adminAuditService';
 
 /**
- * Canonical Default Settings for Promise of Planet
+ * Canonical Safe Default / Fallback Settings for Promise of Planet
+ *
+ * Invariants:
+ * - Fallback is NOT persistent.
+ * - Fallback is NOT source of truth once Firestore canonical settings exist.
+ * - Fallback contains strictly verified channels only (YouTube, Facebook).
+ * - No fake contact info or legal commitments.
  */
 export const DEFAULT_GLOBAL_SETTINGS: Readonly<PlatformGlobalSettings> = Object.freeze({
+  identity: Object.freeze({
+    platformNameAr: 'وعد الكوكب',
+    platformNameEn: 'Promise of Planet',
+    taglineAr: 'منصة تعليمية وإعلامية بيئية',
+    taglineEn: 'Environmental Educational and Media Platform',
+    subtitleAr: 'منصة سودانية للصحافة والمعرفة البيئية',
+    subtitleEn: 'Sudanese Platform for Environmental Journalism and Knowledge',
+    descriptionAr: 'منصة رائدة للصحافة والمعرفة البيئية والتدريب والمشاركة المجتمعية في السودان.',
+    descriptionEn: 'A leading platform for environmental journalism, knowledge, training, and community engagement in Sudan.',
+    logoUrl: null,
+    logoDarkUrl: null,
+    faviconUrl: null,
+  }),
+  institutional: Object.freeze({
+    aboutIntroAr: 'منصة إعلامية ومعرفية وتدريبية مستقلة مكرسة لقضايا البيئة، التغير المناخي، حوكمة الموارد الطبيعية، والتنمية المستدامة في السودان والمنطقة.',
+    aboutIntroEn: 'An environmental media, knowledge, and training platform dedicated to climate resilience, natural resource governance, and ecological stewardship in Sudan and the surrounding region.',
+    visionAr: 'بيئة سودانية وإقليمية واعية ومستدامة، تعتمد على المعرفة الموثوقة والمساءلة المجتمعية في حماية الموارد الطبيعية.',
+    visionEn: 'An informed and sustainable Sudanese and regional environment grounded in verified knowledge and community stewardship of natural resources.',
+    missionAr: 'تقديم تغطية صحفية علمية رصينة وموضوعية حول التحديات المناخية والبيئية، وتوفير مساحة لتوثيق التحولات الميدانية، ومساندة التدريب وبناء المهارات الصحفية المتخصصة.',
+    missionEn: 'Delivering rigorous, evidence-based environmental journalism, documenting field realities, and empowering researchers and media practitioners with specialized skills.',
+    sudanContextAr: 'يركز العمل على توثيق آثار الجفاف والنزاعات البيئية وأنشطة التعدين وإدارة أحواض الأنهار والمياه الجوفية في السودان.',
+    sudanContextEn: 'Focusing on documenting climate impacts, drought, environmental governance, mining pressures, and river basin stewardship across Sudan.',
+    editorialPositioningAr: 'الالتزام التام بالحياد المهني، والاستناد إلى الأدلة العلمية والتحقق الميداني والشفافية في نقل الحقائق البيئية.',
+    editorialPositioningEn: 'Committed to professional neutrality, scientific grounding, field verification, and editorial transparency.',
+    conferenceCoverageStatementAr: 'تغطيات ميدانية وتوثيقية للفعاليات والمؤتمرات المناخية الإقليمية والدولية لنقل صوت المجتمعات المتأثرة.',
+    conferenceCoverageStatementEn: 'Field and documentary coverage of regional and global climate conferences, amplifying the voices of affected communities.',
+  }),
+  channels: Object.freeze({
+    youtube: Object.freeze({
+      url: 'https://www.youtube.com/@PromiseOfPlanet',
+      enabled: true,
+    }),
+    facebook: Object.freeze({
+      url: 'https://www.facebook.com/PromiseOfPlanet/',
+      enabled: true,
+    }),
+    instagram: Object.freeze({
+      url: '',
+      enabled: false,
+    }),
+    whatsapp: Object.freeze({
+      url: '',
+      enabled: false,
+    }),
+  }),
+  contact: Object.freeze({
+    contactEmail: '',
+    pressEmail: '',
+    phone: '',
+    addressAr: '',
+    addressEn: '',
+    accreditationNoticeAr: 'للصحفيين والباحثين والمؤسسات المهتمة بالتغطيات الصحفية والفعاليات البيئية والمناخية، يمكن التواصل ومتابعة التحديثات عبر قنوات البث الرسمية المعلنة، إلى حين إطلاق بوابة الاتصال التحريرية المباشرة.',
+    accreditationNoticeEn: 'Journalists, researchers, and organizations seeking accreditation verification and environmental conference coverage inquiries can follow official updates via our official broadcast channels.',
+  }),
+  footer: Object.freeze({
+    descriptionAr: 'منصة سودانية للصحافة والمعرفة البيئية والتدريب والمشاركة المجتمعية.',
+    descriptionEn: 'Sudanese platform for environmental journalism, knowledge, training, and community engagement.',
+    rightsTextAr: 'جميع الحقوق محفوظة © 2026 وعد الكوكب',
+    rightsTextEn: 'All rights reserved © 2026 Promise of Planet',
+  }),
+  legal: Object.freeze({
+    privacy: Object.freeze({
+      titleAr: 'سياسة الخصوصية',
+      titleEn: 'Privacy Policy',
+      contentAr: '',
+      contentEn: '',
+      effectiveDate: null,
+      published: false,
+    }),
+    terms: Object.freeze({
+      titleAr: 'شروط الخدمة',
+      titleEn: 'Terms of Service',
+      contentAr: '',
+      contentEn: '',
+      effectiveDate: null,
+      published: false,
+    }),
+  }),
+  metadata: Object.freeze({
+    siteTitleAr: 'وعد الكوكب | Promise of Planet',
+    siteTitleEn: 'Promise of Planet | Environmental Media & Knowledge',
+    metaDescriptionAr: 'منصة وعد الكوكب - منصة رائدة للصحافة والمعرفة البيئية والتدريب في السودان.',
+    metaDescriptionEn: 'Promise of Planet - Leading environmental journalism, knowledge, and training platform in Sudan.',
+  }),
+  behavior: Object.freeze({
+    climateClockEnabled: true,
+    defaultLanguage: 'ar',
+  }),
   climateClockEnabled: true,
   defaultLanguage: 'ar',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+  updatedBy: 'system',
 });
 
 /**
- * Allowed canonical setting keys.
- * Updates containing keys outside this set are strictly rejected.
+ * Allowed top-level canonical setting keys.
  */
-const ALLOWED_SETTING_KEYS = new Set<string>(['climateClockEnabled', 'defaultLanguage']);
+const ALLOWED_TOP_LEVEL_KEYS = new Set<string>([
+  'identity',
+  'institutional',
+  'channels',
+  'contact',
+  'footer',
+  'legal',
+  'metadata',
+  'behavior',
+  'climateClockEnabled',
+  'defaultLanguage',
+]);
 
 /**
  * Global Settings Service
  *
- * Minimal canonical configuration service for existing platform-wide capabilities.
- *
- * Architecture Principles:
- * 1. Manages existing configurable platform behavior only (no speculative features).
- * 2. Does NOT store secrets, tokens, or private credentials.
- * 3. Reuses canonical RBAC authority (AdminPermission.ManageSettings).
- * 4. Transparent about in-memory persistence reality (no fake database abstraction).
- * 5. Provides read-only immutable access, atomic updates, and reactive subscriptions.
+ * Provides in-memory state, subscriber reactivity, and validation.
  */
 export class GlobalSettingsService {
   private static currentSettings: PlatformGlobalSettings = { ...DEFAULT_GLOBAL_SETTINGS };
@@ -43,7 +142,6 @@ export class GlobalSettingsService {
 
   /**
    * Retrieves the current active global settings.
-   * Returns an immutable frozen copy to prevent direct external mutation.
    */
   public static getSettings(): Readonly<PlatformGlobalSettings> {
     return Object.freeze({ ...this.currentSettings });
@@ -58,7 +156,6 @@ export class GlobalSettingsService {
 
   /**
    * Validates a settings update payload.
-   * Rejects unknown keys and validates value types.
    */
   public static validateSettings(input: Record<string, unknown>): SettingsValidationResult {
     const errors: string[] = [];
@@ -67,25 +164,28 @@ export class GlobalSettingsService {
       return { isValid: false, errors: ['Settings input must be a valid non-null object.'] };
     }
 
-    // 1. Strict key containment check (Anti-dumping ground rule)
     for (const key of Object.keys(input)) {
-      if (!ALLOWED_SETTING_KEYS.has(key)) {
+      if (!ALLOWED_TOP_LEVEL_KEYS.has(key)) {
         errors.push(`Unknown setting key '${key}' is rejected. Global Settings does not permit unmanaged keys.`);
       }
     }
 
-    // 2. Value validation: climateClockEnabled
-    if ('climateClockEnabled' in input) {
-      if (typeof input.climateClockEnabled !== 'boolean') {
-        errors.push("Invalid value for 'climateClockEnabled': must be a boolean.");
-      }
+    // Top-level or nested behavior checks
+    if ('climateClockEnabled' in input && typeof input.climateClockEnabled !== 'boolean') {
+      errors.push("Invalid value for 'climateClockEnabled': must be a boolean.");
     }
 
-    // 3. Value validation: defaultLanguage
-    if ('defaultLanguage' in input) {
-      const val = input.defaultLanguage;
-      if (val !== 'ar' && val !== 'en') {
-        errors.push("Invalid value for 'defaultLanguage': must be either 'ar' or 'en'.");
+    if ('defaultLanguage' in input && input.defaultLanguage !== 'ar' && input.defaultLanguage !== 'en') {
+      errors.push("Invalid value for 'defaultLanguage': must be either 'ar' or 'en'.");
+    }
+
+    if ('behavior' in input && input.behavior && typeof input.behavior === 'object') {
+      const b = input.behavior as Record<string, unknown>;
+      if ('climateClockEnabled' in b && typeof b.climateClockEnabled !== 'boolean') {
+        errors.push("Invalid value for 'behavior.climateClockEnabled': must be a boolean.");
+      }
+      if ('defaultLanguage' in b && b.defaultLanguage !== 'ar' && b.defaultLanguage !== 'en') {
+        errors.push("Invalid value for 'behavior.defaultLanguage': must be either 'ar' or 'en'.");
       }
     }
 
@@ -98,121 +198,161 @@ export class GlobalSettingsService {
   /**
    * Applies an atomic partial update to global settings.
    * Requires AdminPermission.ManageSettings.
-   * Returns the updated settings and the structured AuditChange deltas.
    */
   public static updateSettings(
-    input: UpdateGlobalSettingsInput & Record<string, unknown>,
-    actor?: AdminUser
+    input: UpdateGlobalSettingsInput,
+    actor?: AdminUser | null
   ): SettingsMutationResult {
-    // 1. Authorization check via canonical RBAC
     if (!actor || !AdminAccessService.hasPermission(actor, AdminPermission.ManageSettings)) {
-      throw new Error(
-        `Unauthorized: Action requires permission '${AdminPermission.ManageSettings}'.`
-      );
+      throw new Error('ACCESS_DENIED: User lacks permission to manage platform settings.');
     }
 
-    // 2. Validation check
-    const validation = this.validateSettings(input);
+    const validation = this.validateSettings(input as Record<string, unknown>);
     if (!validation.isValid) {
-      throw new Error(`Settings validation failed: ${validation.errors.join('; ')}`);
+      throw new Error(`VALIDATION_FAILED: ${validation.errors.join('; ')}`);
     }
 
-    // 3. Calculate structured AuditChange deltas
-    const changes: AuditChange[] = [];
     const prev = this.currentSettings;
-    const next: PlatformGlobalSettings = { ...prev };
+    const next: PlatformGlobalSettings = {
+      ...prev,
+      identity: input.identity ? { ...prev.identity, ...input.identity } : prev.identity,
+      institutional: input.institutional ? { ...prev.institutional, ...input.institutional } : prev.institutional,
+      channels: input.channels ? {
+        youtube: input.channels.youtube ? { ...prev.channels.youtube, ...input.channels.youtube } : prev.channels.youtube,
+        facebook: input.channels.facebook ? { ...prev.channels.facebook, ...input.channels.facebook } : prev.channels.facebook,
+        instagram: input.channels.instagram ? { ...prev.channels.instagram, ...input.channels.instagram } : prev.channels.instagram,
+        whatsapp: input.channels.whatsapp ? { ...prev.channels.whatsapp, ...input.channels.whatsapp } : prev.channels.whatsapp,
+      } : prev.channels,
+      contact: input.contact ? { ...prev.contact, ...input.contact } : prev.contact,
+      footer: input.footer ? { ...prev.footer, ...input.footer } : prev.footer,
+      legal: input.legal ? {
+        privacy: input.legal.privacy ? { ...prev.legal.privacy, ...input.legal.privacy } : prev.legal.privacy,
+        terms: input.legal.terms ? { ...prev.legal.terms, ...input.legal.terms } : prev.legal.terms,
+      } : prev.legal,
+      metadata: input.metadata ? { ...prev.metadata, ...input.metadata } : prev.metadata,
+      behavior: {
+        climateClockEnabled: input.behavior?.climateClockEnabled ?? input.climateClockEnabled ?? prev.behavior.climateClockEnabled,
+        defaultLanguage: input.behavior?.defaultLanguage ?? input.defaultLanguage ?? prev.behavior.defaultLanguage,
+      },
+      climateClockEnabled: input.behavior?.climateClockEnabled ?? input.climateClockEnabled ?? prev.behavior.climateClockEnabled,
+      defaultLanguage: input.behavior?.defaultLanguage ?? input.defaultLanguage ?? prev.behavior.defaultLanguage,
+      updatedAt: new Date().toISOString(),
+      updatedBy: actor.id,
+    };
 
-    if ('climateClockEnabled' in input && input.climateClockEnabled !== undefined) {
-      if (input.climateClockEnabled !== prev.climateClockEnabled) {
-        changes.push({
-          field: 'climateClockEnabled',
-          previousValue: prev.climateClockEnabled,
-          newValue: input.climateClockEnabled,
-        });
-        (next as { climateClockEnabled: boolean }).climateClockEnabled = input.climateClockEnabled;
-      }
+    // Calculate changes
+    const changes: AuditChange[] = [];
+    if (prev.behavior.climateClockEnabled !== next.behavior.climateClockEnabled) {
+      changes.push({
+        field: 'behavior.climateClockEnabled',
+        previousValue: prev.behavior.climateClockEnabled,
+        newValue: next.behavior.climateClockEnabled,
+      });
+    }
+    if (prev.behavior.defaultLanguage !== next.behavior.defaultLanguage) {
+      changes.push({
+        field: 'behavior.defaultLanguage',
+        previousValue: prev.behavior.defaultLanguage,
+        newValue: next.behavior.defaultLanguage,
+      });
     }
 
-    if ('defaultLanguage' in input && input.defaultLanguage !== undefined) {
-      if (input.defaultLanguage !== prev.defaultLanguage) {
-        changes.push({
-          field: 'defaultLanguage',
-          previousValue: prev.defaultLanguage,
-          newValue: input.defaultLanguage,
-        });
-        (next as { defaultLanguage: 'ar' | 'en' }).defaultLanguage = input.defaultLanguage;
-      }
-    }
+    if (changes.length > 0) {
+      this.currentSettings = next;
+      this.notifyListeners(next);
 
-    // 4. No-Op Protection: If no effective state changes, do not mutate, notify, or create misleading audit events
-    if (changes.length === 0) {
-      return {
-        settings: this.getSettings(),
-        changes: [],
-      };
-    }
-
-    // 5. Commit update in memory
-    this.currentSettings = next;
-
-    // 6. Record canonical AuditEvent with defensive in-memory rollback guard
-    let auditEvent: AuditEvent;
-    try {
-      auditEvent = AdminAuditService.recordEvent({
+      const auditEvent = AdminAuditService.recordEvent({
         actorUserId: actor.id,
         actorName: actor.name,
         actorRole: actor.role,
         action: AuditAction.Updated,
         targetType: AuditTargetType.GlobalSettings,
-        targetId: 'platform-global-settings',
-        targetTitle: 'Platform Global Settings',
+        targetId: 'platform_global_settings',
+        targetTitle: 'Global Platform Settings',
         changes,
+        metadata: { note: `Updated settings fields: ${changes.map((c) => c.field).join(', ')}` },
       });
-    } catch (auditErr) {
-      // In-memory rollback to prevent settings-audit divergence
-      this.currentSettings = prev;
-      throw auditErr;
+
+      return {
+        settings: this.getSettings(),
+        changes,
+        auditEvent,
+      };
     }
 
-    // 7. Notify reactive subscribers only after state and audit consistency
-    const frozen = this.getSettings();
-    this.listeners.forEach((listener) => {
-      try {
-        listener(frozen);
-      } catch (err) {
-        console.error('Error in GlobalSettingsService subscriber:', err);
-      }
+    return {
+      settings: this.getSettings(),
+      changes: [],
+    };
+  }
+
+  /**
+   * Resets settings to canonical defaults.
+   */
+  public static resetToDefaults(actor: AdminUser): SettingsMutationResult {
+    if (!AdminAccessService.hasPermission(actor, AdminPermission.ManageSettings)) {
+      throw new Error('ACCESS_DENIED: User lacks permission to manage platform settings.');
+    }
+
+    const prev = this.currentSettings;
+    const defaults = DEFAULT_GLOBAL_SETTINGS;
+
+    const changes: AuditChange[] = [];
+    if (prev.behavior.climateClockEnabled !== defaults.behavior.climateClockEnabled) {
+      changes.push({
+        field: 'behavior.climateClockEnabled',
+        previousValue: prev.behavior.climateClockEnabled,
+        newValue: defaults.behavior.climateClockEnabled,
+      });
+    }
+    if (prev.behavior.defaultLanguage !== defaults.behavior.defaultLanguage) {
+      changes.push({
+        field: 'behavior.defaultLanguage',
+        previousValue: prev.behavior.defaultLanguage,
+        newValue: defaults.behavior.defaultLanguage,
+      });
+    }
+
+    this.currentSettings = { ...defaults, updatedAt: new Date().toISOString(), updatedBy: actor.id };
+    this.notifyListeners(this.currentSettings);
+
+    const auditEvent = AdminAuditService.recordEvent({
+      actorUserId: actor.id,
+      actorName: actor.name,
+      actorRole: actor.role,
+      action: AuditAction.Updated,
+      targetType: AuditTargetType.GlobalSettings,
+      targetId: 'platform_global_settings',
+      targetTitle: 'Global Platform Settings',
+      changes: changes.length > 0 ? changes : [{ field: 'all', previousValue: 'custom', newValue: 'defaults' }],
+      metadata: { note: 'Global platform settings were reset to baseline defaults.' },
     });
 
     return {
-      settings: frozen,
+      settings: this.getSettings(),
       changes,
       auditEvent,
     };
   }
 
   /**
-   * Resets global settings to canonical defaults.
-   * Requires AdminPermission.ManageSettings.
-   */
-  public static resetToDefaults(actor?: AdminUser): SettingsMutationResult {
-    return this.updateSettings(
-      {
-        climateClockEnabled: DEFAULT_GLOBAL_SETTINGS.climateClockEnabled,
-        defaultLanguage: DEFAULT_GLOBAL_SETTINGS.defaultLanguage,
-      },
-      actor
-    );
-  }
-
-  /**
-   * Subscribes to settings change events.
-   * Returns an unsubscribe function.
+   * Subscribes a listener callback to settings changes.
    */
   public static subscribe(listener: (settings: PlatformGlobalSettings) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  private static notifyListeners(settings: PlatformGlobalSettings): void {
+    const frozen = Object.freeze({ ...settings });
+    this.listeners.forEach((listener) => {
+      try {
+        listener(frozen);
+      } catch (e) {
+        console.error('Error executing GlobalSettingsService subscriber listener:', e);
+      }
+    });
   }
 }

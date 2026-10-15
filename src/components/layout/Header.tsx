@@ -6,8 +6,8 @@ import { smoothScrollToSection } from '../../utils/interaction';
 
 interface HeaderProps {
   onEnterAdmin?: () => void;
-  activePage?: 'home' | 'training-center';
-  onNavigate?: (page: 'home' | 'training-center') => void;
+  activePage?: 'home' | 'training-center' | 'about' | 'contact';
+  onNavigate?: (page: 'home' | 'training-center' | 'about' | 'contact') => void;
 }
 
 export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: HeaderProps) {
@@ -85,6 +85,18 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setActivePanelKey(null);
+    } else if (key === 'about') {
+      if (onNavigate) {
+        onNavigate('about');
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      setActivePanelKey(null);
+    } else if (key === 'contact') {
+      if (onNavigate) {
+        onNavigate('contact');
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      setActivePanelKey(null);
     }
   };
 
@@ -135,7 +147,7 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
               nextTriggerEl.focus();
             }
           } else {
-            const nextEl = document.getElementById('header-citizenJournalism-nav-btn');
+            const nextEl = document.getElementById('header-about-nav-btn');
             if (nextEl) {
               nextEl.focus();
             }
@@ -154,11 +166,10 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
 
   const navItems = [
     { key: 'home', label: t('navigation.home') },
-    { key: 'news', label: t('navigation.news') },
     { key: 'library', label: t('navigation.library'), hasPanel: true },
     { key: 'training', label: t('navigation.training'), hasPanel: true },
-    { key: 'citizenJournalism', label: t('navigation.citizenJournalism') },
-    { key: 'aboutUs', label: t('navigation.aboutUs') },
+    { key: 'about', label: t('navigation.aboutUs') },
+    { key: 'contact', label: t('navigation.contact') },
   ];
 
   const librarySubtopics = [
@@ -262,7 +273,9 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
             {navItems.map((item) => {
               const isActive = 
                 (item.key === 'home' && activePage === 'home') ||
-                (item.key === 'training' && activePage === 'training-center');
+                (item.key === 'training' && activePage === 'training-center') ||
+                (item.key === 'about' && activePage === 'about') ||
+                (item.key === 'contact' && activePage === 'contact');
 
               if (item.hasPanel) {
                 return (

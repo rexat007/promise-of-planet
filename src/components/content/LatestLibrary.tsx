@@ -1,54 +1,5 @@
 import React from 'react';
-import type { Category } from '../../types';
-import { getCategoryLabel } from './contentFormatters';
-
-export interface LibraryItemPreview {
-  id: string;
-  titleAr: string;
-  titleEn: string;
-  excerptAr: string;
-  excerptEn: string;
-  category: Category;
-  format: 'PDF' | 'ResearchPaper' | 'PolicyBrief' | 'Toolkit';
-  pages?: number;
-  publishedDate: string;
-}
-
-const MOCK_LIBRARY_PREVIEWS: LibraryItemPreview[] = [
-  {
-    id: 'lib-01',
-    titleAr: 'دليل الإدارة المستدامة للمياه الجوفية في حوض النيل وحزام الساحل',
-    titleEn: 'Handbook of Sustainable Groundwater Management in the Nile Basin & Sahel',
-    excerptAr: 'مرجع تطبيقي شامل لتقنيات حماية الآبار الجوفية وإدارة الحفائر المائية في المناطق شبه الجافة.',
-    excerptEn: 'Comprehensive practical guide on borehole protection and water catchment reservoirs in semi-arid lands.',
-    category: 'Water',
-    format: 'PDF',
-    pages: 64,
-    publishedDate: '2026-02-15',
-  },
-  {
-    id: 'lib-02',
-    titleAr: 'تقييم الغطاء النباتي وتأثير الكثبان الرملية على الزراعة المطرية في السودان',
-    titleEn: 'Vegetation Cover Assessment & Sand Dune Impacts on Rainfed Agriculture in Sudan',
-    excerptAr: 'ورقة بحثية بيئية محكّمة تحلل معدلات التراجع الشجري وآليات زراعة الأحزمة الخضراء الواقية.',
-    excerptEn: 'Peer-reviewed research paper analyzing tree cover reduction and protective shelterbelt mechanics.',
-    category: 'Agriculture',
-    format: 'ResearchPaper',
-    pages: 42,
-    publishedDate: '2026-01-28',
-  },
-  {
-    id: 'lib-03',
-    titleAr: 'موجز سياسات: التشريعات البيئية والمسؤولية المناخية لقطاع التعدين التقليدي',
-    titleEn: 'Policy Brief: Environmental Legislation & Climate Liability in Artisanal Mining',
-    excerptAr: 'توصيات سياساتية موجزة للمشرعين والمنظمات حول حظر استخدام الزئبق وحماية الموارد المائية.',
-    excerptEn: 'Concise policy recommendations for regulators on banning mercury and safeguarding water sources.',
-    category: 'EnvironmentalPolicy',
-    format: 'PolicyBrief',
-    pages: 18,
-    publishedDate: '2026-02-05',
-  },
-];
+import { BookOpen, FileCheck, Scale, Sparkles } from 'lucide-react';
 
 export interface LatestLibraryProps {
   currentLanguage: 'ar' | 'en';
@@ -58,72 +9,93 @@ export interface LatestLibraryProps {
 
 export const LatestLibrary: React.FC<LatestLibraryProps> = ({
   currentLanguage,
-  onExploreLibrary,
   className = '',
 }) => {
   const isArabic = currentLanguage === 'ar';
 
-  const formatLabels: Record<string, { ar: string; en: string }> = {
-    PDF: { ar: 'كتيب توثيقي PDF', en: 'Documentary PDF' },
-    ResearchPaper: { ar: 'ورقة بحثية محكمة', en: 'Peer-Reviewed Paper' },
-    PolicyBrief: { ar: 'موجز سياسات وتشريعات', en: 'Policy Brief' },
-    Toolkit: { ar: 'حقيبة أدوات معرفية', en: 'Knowledge Toolkit' },
-  };
+  const plannedTracks = [
+    {
+      id: 'handbooks',
+      icon: BookOpen,
+      titleAr: 'أدلة إرشادية للمياه والأراضي',
+      titleEn: 'Water & Land Practice Handbooks',
+      descAr: 'يجري حصر وجمع الأدلة الإرشادية والتطبيقية لإدارة الموارد المائية ومكافحة التصحر تمهيداً لإتاحتها مستقبلاً.',
+      descEn: 'Applied guides and handbooks for water management and anti-desertification are being gathered for future publication.',
+    },
+    {
+      id: 'research',
+      icon: FileCheck,
+      titleAr: 'دراسات وأوراق بيئية',
+      titleEn: 'Environmental Studies & Papers',
+      descAr: 'يجري رصد ومراجعة الأوراق البحثية والدراسات البيئية المعنية بآثار التغير المناخي والغطاء النباتي لإدراجها في الأرشيف.',
+      descEn: 'Environmental research papers on climate impacts and vegetation trends are being surveyed and reviewed for future archiving.',
+    },
+    {
+      id: 'policy',
+      icon: Scale,
+      titleAr: 'مواجز السياسات والتشريعات البيئية',
+      titleEn: 'Policy & Legislative Briefs',
+      descAr: 'يجري تجميع ومراجعة أوراق الموقف والتوصيات التنظيمية الخاصة بحوكمة الموارد الطبيعية لإتاحتها للباحثين.',
+      descEn: 'Policy briefs and regulatory recommendations on natural resource governance are being compiled for researchers.',
+    },
+  ];
 
   return (
     <section
       className={`space-y-6 ${className}`}
-      aria-label={isArabic ? 'أحدث مواد المكتبة البيئية' : 'Latest Library Materials'}
+      aria-label={isArabic ? 'المكتبة البيئية والمصادر المعرفية' : 'Environmental Library & Knowledge Resources'}
     >
-      {/* 3 Limited Curated Previews */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {MOCK_LIBRARY_PREVIEWS.map((item) => (
-          <article
-            key={item.id}
-            className="flex flex-col justify-between bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 shadow-xs hover:border-emerald-500/50 hover:shadow-md transition-all duration-200"
-          >
-            <div>
-              {/* Category & Format Badges */}
-              <div className="flex items-center justify-between gap-2 mb-3">
-                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-800/60">
-                  {getCategoryLabel(item.category, isArabic)}
-                </span>
-                <span className="text-[11px] font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded">
-                  {isArabic ? formatLabels[item.format].ar : formatLabels[item.format].en}
-                </span>
-              </div>
-
-              {/* Title */}
-              <h3 className="text-base font-bold text-gray-900 dark:text-white leading-snug mb-2 line-clamp-2">
-                {isArabic ? item.titleAr : item.titleEn}
-              </h3>
-
-              {/* Excerpt */}
-              <p className="text-xs text-gray-600 dark:text-gray-300 leading-relaxed line-clamp-3 mb-4">
-                {isArabic ? item.excerptAr : item.excerptEn}
-              </p>
-            </div>
-
-            {/* Footer Metadata */}
-            <div className="pt-3 border-t border-gray-100 dark:border-gray-800 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-              <span>{item.pages ? (isArabic ? `${item.pages} صفحة` : `${item.pages} pages`) : ''}</span>
-              <span className="font-mono">{item.publishedDate}</span>
-            </div>
-          </article>
-        ))}
+      {/* Editorial Curation Banner */}
+      <div className="bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800/60 rounded-2xl p-6 sm:p-8 text-center max-w-3xl mx-auto space-y-3">
+        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300">
+          <Sparkles className="w-3.5 h-3.5" />
+          <span>{isArabic ? 'المكتبة الرقمية — قيد التجميع والمراجعة' : 'Digital Library — Curation & Review in Progress'}</span>
+        </div>
+        <h3 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white">
+          {isArabic ? 'قيد التجميع والمراجعة التحريرية' : 'Curation & Review in Progress'}
+        </h3>
+        <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-300 leading-relaxed max-w-2xl mx-auto">
+          {isArabic
+            ? 'تعمل المنصة حالياً على جمع ومراجعة وتدقيق المواد المعرفية والأدلة الإرشادية البيئية تمهيداً لنشرها تباعاً، لضمان مصداقية المصادر ودقتها التحريرية.'
+            : 'Environmental knowledge resources and practice guides are currently being compiled and reviewed for future public release, ensuring source credibility and editorial accuracy.'}
+        </p>
       </div>
 
-      {/* Prominent CTA */}
-      <div className="flex justify-center pt-2">
-        <button
-          type="button"
-          onClick={onExploreLibrary}
-          className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-medium text-sm transition-colors shadow-sm"
-        >
-          <span>{isArabic ? 'استكشف المكتبة البيئية الكاملة' : 'Explore the Full Environmental Library'}</span>
-          <span aria-hidden="true">{isArabic ? '←' : '→'}</span>
-        </button>
+      {/* Forthcoming Curated Collections */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {plannedTracks.map((track) => {
+          const Icon = track.icon;
+          return (
+            <div
+              key={track.id}
+              className="flex flex-col justify-between bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 p-5 shadow-xs transition-all duration-200"
+            >
+              <div className="space-y-3">
+                <div className="w-10 h-10 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 flex items-center justify-center">
+                  <Icon className="w-5 h-5" />
+                </div>
+                <h4 className="text-base font-bold text-gray-900 dark:text-white leading-snug">
+                  {isArabic ? track.titleAr : track.titleEn}
+                </h4>
+                <p className="text-xs text-gray-600 dark:text-gray-400 leading-relaxed">
+                  {isArabic ? track.descAr : track.descEn}
+                </p>
+              </div>
+
+              <div className="pt-4 mt-4 border-t border-gray-100 dark:border-gray-800 flex items-center justify-between text-[11px] text-gray-500 dark:text-gray-400">
+                <span className="inline-block px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 font-medium">
+                  {isArabic ? 'قيد التجميع' : 'In Compilation'}
+                </span>
+                <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                  {isArabic ? 'مراجعة وتدقيق' : 'Under Review'}
+                </span>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
 };
+
+

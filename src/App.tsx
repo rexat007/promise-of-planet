@@ -14,6 +14,8 @@ import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { ResponsiveGuard } from './components/dev/ResponsiveGuard';
 import { smoothScrollToSection } from './utils/interaction';
 import { TrainingCenter } from './components/training/TrainingCenter';
+import { AboutUsView } from './components/about/AboutUsView';
+import { ContactView } from './components/contact/ContactView';
 import type { Language } from './types';
 import './App.css';
 
@@ -33,7 +35,7 @@ function App() {
     }
     return false;
   });
-  const [activePage, setActivePage] = useState<'home' | 'training-center'>('home');
+  const [activePage, setActivePage] = useState<'home' | 'training-center' | 'about' | 'contact'>('home');
 
   // Sync root container dir attribute to ensure viewport scrollbar stays anchored on the right (Rule L)
   useEffect(() => {
@@ -72,7 +74,11 @@ function App() {
             activePage={activePage}
             onNavigate={(page) => setActivePage(page)}
           >
-            {activePage === 'training-center' ? (
+            {activePage === 'about' ? (
+              <AboutUsView onNavigate={(page) => setActivePage(page)} />
+            ) : activePage === 'contact' ? (
+              <ContactView onNavigate={(page) => setActivePage(page)} />
+            ) : activePage === 'training-center' ? (
               <TrainingCenter />
             ) : (
               <>
@@ -109,12 +115,18 @@ function App() {
                           <span>{isAr ? 'تصفح مركز التدريب والمسارات البيئية' : 'Explore Training Center Hub'}</span>
                           <span aria-hidden="true">→</span>
                         </button>
+                        <button
+                          onClick={() => setActivePage('about')}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-950/90 hover:bg-emerald-900 text-emerald-300 border border-emerald-800/80 text-xs sm:text-sm font-medium pop-motion-micro pop-hover-lift cursor-pointer"
+                        >
+                          <span>{isAr ? 'عن المنصة ورسالتها' : 'About Platform & Mission'}</span>
+                        </button>
                       </div>
                     </div>
                   </Container>
                 </div>
 
-                {/* 3. Latest Library Materials Section: Limited curated preview (3 items) with CTA */}
+                {/* 3. Latest Library Materials Section: Truthful curation state */}
                 <Section id="library-section" className="bg-gray-50/60 dark:bg-gray-950/60 border-b border-gray-200/60 dark:border-gray-800/60 pop-motion-section">
                   <Container>
                     <SectionHeading
@@ -123,12 +135,11 @@ function App() {
                     />
                     <LatestLibrary
                       currentLanguage={currentLang}
-                      onExploreLibrary={() => smoothScrollToSection('library-section')}
                     />
                   </Container>
                 </Section>
 
-                {/* 4. Latest Training Courses Section: Limited curated preview (3 courses) with CTA */}
+                {/* 4. Latest Training Courses Section: Limited curated preview with CTA */}
                 <Section id="training-section" className="bg-white dark:bg-gray-900 pop-motion-section">
                   <Container>
                     <SectionHeading
