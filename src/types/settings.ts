@@ -19,6 +19,7 @@ export interface PlatformIdentitySettings {
    * Nullable to allow graceful fallback to typographic brand.
    */
   readonly logoUrl: string | null;
+  readonly logoStoragePath: string | null;
   readonly logoDarkUrl?: string | null;
   readonly faviconUrl?: string | null;
 }

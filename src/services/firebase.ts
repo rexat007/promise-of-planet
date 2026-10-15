@@ -17,6 +17,7 @@ export const firebaseConfig = {
   projectId: env.VITE_FIREBASE_PROJECT_ID || "",
   authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || "",
   appId: env.VITE_FIREBASE_APP_ID || "",
+  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || "",
 };
 
 // Detect whether a valid, non-blank configuration exists
@@ -25,6 +26,12 @@ export const isFirebaseConfigured = !!(
   firebaseConfig.apiKey.trim() !== "" &&
   firebaseConfig.projectId &&
   firebaseConfig.projectId.trim() !== ""
+);
+
+export const isFirebaseStorageConfigured = !!(
+  isFirebaseConfigured &&
+  firebaseConfig.storageBucket &&
+  firebaseConfig.storageBucket.trim() !== ""
 );
 
 export let app: any = null;

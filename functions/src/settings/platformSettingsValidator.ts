@@ -312,8 +312,15 @@ export class PlatformSettingsValidator {
       } else {
         const id = input.identity;
         for (const [k, v] of Object.entries(id)) {
-          if (['logoUrl', 'logoDarkUrl', 'faviconUrl'].includes(k)) {
-            if (v !== null && v !== undefined && (typeof v !== 'string' || (v.trim() !== '' && !isValidUrl(v)))) {
+          if (['logoUrl', 'logoStoragePath', 'logoDarkUrl', 'faviconUrl'].includes(k)) {
+            if (k === 'logoStoragePath') {
+              if (v !== null && v !== undefined && (typeof v !== 'string' || 
+                  !v.startsWith('branding/platform-logo/') || 
+                  (v.includes('..') || v.includes('\\')) ||
+                  !(v.endsWith('.png') || v.endsWith('.webp')))) {
+                errors.push('identity.logoStoragePath must be null or a valid branding storage path (ending in .png or .webp).');
+              }
+            } else if (v !== null && v !== undefined && (typeof v !== 'string' || (v.trim() !== '' && !isValidUrl(v)))) {
               errors.push(`identity.${k} must be null, empty, or a valid http/https URL.`);
             }
           } else if (typeof v !== 'string') {

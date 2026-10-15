@@ -1,0 +1,18 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /branding/platform-logo/{fileName} {
+      // If ManageSettings is granted to another role in shared/adminContract.ts later,
+      // Storage Rules MUST be updated accordingly.
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.resource.size <= 2 * 1024 * 1024
+                   && (request.resource.contentType == 'image/png' || request.resource.contentType == 'image/webp')
+                   && firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.isActive == true
+                   && firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.role == 'Owner';
+      allow delete: if request.auth != null
+                   && firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.isActive == true
+                   && firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.role == 'Owner';
+    }
+  }
+}

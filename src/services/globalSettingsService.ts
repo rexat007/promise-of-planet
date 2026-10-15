@@ -31,6 +31,7 @@ export const DEFAULT_GLOBAL_SETTINGS: Readonly<PlatformGlobalSettings> = Object.
     descriptionAr: 'منصة رائدة للصحافة والمعرفة البيئية والتدريب والمشاركة المجتمعية في السودان.',
     descriptionEn: 'A leading platform for environmental journalism, knowledge, training, and community engagement in Sudan.',
     logoUrl: null,
+    logoStoragePath: null,
     logoDarkUrl: null,
     faviconUrl: null,
   }),
