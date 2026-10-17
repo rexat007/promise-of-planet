@@ -16,6 +16,7 @@ import { smoothScrollToSection } from './utils/interaction';
 import { TrainingCenter } from './components/training/TrainingCenter';
 import { AboutUsView } from './components/about/AboutUsView';
 import { ContactView } from './components/contact/ContactView';
+import { PublicMediaHub } from './components/media/PublicMediaHub';
 import type { Language } from './types';
 import './App.css';
 
@@ -35,7 +36,7 @@ function App() {
     }
     return false;
   });
-  const [activePage, setActivePage] = useState<'home' | 'training-center' | 'about' | 'contact'>('home');
+  const [activePage, setActivePage] = useState<'home' | 'training-center' | 'about' | 'contact' | 'media'>('home');
 
   // Sync root container dir attribute to ensure viewport scrollbar stays anchored on the right (Rule L)
   useEffect(() => {
@@ -80,6 +81,8 @@ function App() {
               <ContactView onNavigate={(page) => setActivePage(page)} />
             ) : activePage === 'training-center' ? (
               <TrainingCenter />
+            ) : activePage === 'media' ? (
+              <PublicMediaHub />
             ) : (
               <>
                 {/* 1. Hero Section: Gateway to the Platform (Preserved without turning into a news portal) */}

@@ -20,6 +20,8 @@ import {
   type TranslationStatus,
   type AvailabilityStatus,
   isCanonicalCategory,
+  type CanonicalPlaylist,
+  isCanonicalPlaylist,
 } from '../../../src/types';
 
 export {
@@ -44,4 +46,6 @@ export {
   type TranslationStatus,
   type AvailabilityStatus,
   isCanonicalCategory,
+  type CanonicalPlaylist,
+  isCanonicalPlaylist,
 };

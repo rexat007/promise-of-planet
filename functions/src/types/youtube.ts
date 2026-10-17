@@ -60,3 +60,28 @@ export interface YouTubeFetchResult {
   skippedTerminal: number;
   nextPageToken?: string;
 }
+
+export interface YouTubePlaylist {
+  id: string; // YouTube playlist ID
+  title: string;
+  description: string;
+  thumbnailUrl: string;
+  itemCount: number;
+  publishedAt: string;
+}
+
+export interface YouTubePlaylistItemWithDetails {
+  videoId: string;
+  playlistItemId?: string;
+  position?: number;
+  addedToPlaylistAt?: string;
+}
+
+export interface YouTubePlaylistSyncResult {
+  playlistsDiscovered: number;
+  playlistsCreated: number;
+  playlistsUpdated: number;
+  videosIngested: number;
+  itemsAssociated: number;
+}
+

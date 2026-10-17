@@ -5,6 +5,7 @@ import type {
   YouTubeIntegrationConfig,
   YouTubeImportCandidate,
   YouTubeFetchResult,
+  YouTubePlaylistSyncResult,
   CandidateEditorialDraft,
   CandidateLifecycleStatus
 } from '../types/youtube';
@@ -133,4 +134,18 @@ export const YouTubeAdminClient = {
     });
     return res.data;
   },
+
+  async syncPlaylists(maxResults = 20): Promise<YouTubePlaylistSyncResult> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<
+      { action: string; maxResults?: number },
+      YouTubePlaylistSyncResult
+    >(fns, 'manageYouTubeIntegration');
+    const res = await callable({
+      action: 'syncPlaylists',
+      maxResults,
+    });
+    return res.data;
+  },
 };
+

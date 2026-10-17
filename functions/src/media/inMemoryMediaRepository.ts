@@ -116,4 +116,27 @@ export class InMemoryMediaRepository implements MediaRepository {
     }
     return result;
   }
+
+  // Playlist management
+  private playlists: Record<string, import('../types/media').CanonicalPlaylist> = {};
+
+  async getPlaylistById(id: string): Promise<import('../types/media').CanonicalPlaylist | null> {
+    const pl = this.playlists[id];
+    return pl ? JSON.parse(JSON.stringify(pl)) : null;
+  }
+
+  async createPlaylist(playlist: import('../types/media').CanonicalPlaylist): Promise<import('../types/media').CanonicalPlaylist> {
+    this.playlists[playlist.id] = JSON.parse(JSON.stringify(playlist));
+    return JSON.parse(JSON.stringify(playlist));
+  }
+
+  async updatePlaylist(playlist: import('../types/media').CanonicalPlaylist): Promise<import('../types/media').CanonicalPlaylist> {
+    this.playlists[playlist.id] = JSON.parse(JSON.stringify(playlist));
+    return JSON.parse(JSON.stringify(playlist));
+  }
+
+  async listPlaylists(): Promise<import('../types/media').CanonicalPlaylist[]> {
+    return Object.values(this.playlists).map(p => JSON.parse(JSON.stringify(p)));
+  }
 }
+

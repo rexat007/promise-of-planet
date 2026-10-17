@@ -563,7 +563,7 @@ export const AdminGlobalSettings: React.FC<AdminGlobalSettingsProps> = ({ curren
                   {isAr ? 'لغة المنصة الافتراضية' : 'Default Platform Language'}
                 </label>
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-100 dark:bg-sky-950/60 text-sky-800 dark:text-sky-300 border border-sky-300 dark:border-sky-800 shrink-0">
-                  {draft.defaultLanguage.toUpperCase()}
+                  {(draft.defaultLanguage || 'ar').toUpperCase()}
                 </span>
               </div>
               <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed ps-7">

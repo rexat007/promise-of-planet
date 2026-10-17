@@ -270,6 +270,32 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     }
   };
 
+  const [isSyncingPlaylists, setIsSyncingPlaylists] = useState(false);
+
+  const handleSyncPlaylists = async () => {
+    if (isSyncingPlaylists) return;
+    if (!canManageSettings) {
+      setErrorMsg(tText('غير مصرح لك بمزامنة قوائم التشغيل (مطلوب صلاحية إدارة الإعدادات)', 'Unauthorized: ManageSettings permission required to sync playlists'));
+      return;
+    }
+    setIsSyncingPlaylists(true);
+    setSyncError(null);
+    try {
+      const res = await YouTubeAdminClient.syncPlaylists();
+      setSuccessMsg(tText(
+        `تمت مزامنة ${res.playlistsDiscovered} قائمة تشغيل وربط ${res.itemsAssociated} فيديو بنجاح`,
+        `Successfully synced ${res.playlistsDiscovered} playlists and associated ${res.itemsAssociated} videos`
+      ));
+      await loadYouTubeCandidates();
+      await refreshData();
+    } catch (err: any) {
+      const msg = err?.message || tText('فشل مزامنة قوائم التشغيل', 'Failed to sync playlists');
+      setSyncError(msg);
+    } finally {
+      setIsSyncingPlaylists(false);
+    }
+  };
+
   const handleSaveCandidateDraft = async (candidateId: string, draft: any) => {
     const updated = await YouTubeAdminClient.updateEditorialDraft(candidateId, draft);
     setCandidates(prev => prev.map(c => c.id === candidateId ? updated : c));
@@ -872,6 +898,26 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
                   <>
                     <DownloadCloud className="w-3.5 h-3.5" />
                     <span>{tText('جلب الفيديوهات من يوتيوب', 'Fetch from YouTube')}</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleSyncPlaylists()}
+                disabled={isSyncingPlaylists || !canManageSettings}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black flex items-center gap-2 transition-colors cursor-pointer shadow-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                id="sync-playlists-btn"
+              >
+                {isSyncingPlaylists ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>{tText('جاري مزامنة القوائم...', 'Syncing Playlists...')}</span>
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>{tText('مزامنة قوائم التشغيل', 'Sync Playlists')}</span>
                   </>
                 )}
               </button>

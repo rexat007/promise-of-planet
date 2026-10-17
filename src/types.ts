@@ -362,9 +362,6 @@ export interface Report extends ContentItem {
   sources: ContentSource[];
 }
 
-/**
- * Editorial video model with strict separation of editorial data and YouTube source data.
- */
 export interface Video extends ContentItem {
   contentType: 'Video';
   editorialDescriptionAr: string;
@@ -375,6 +372,36 @@ export interface Video extends ContentItem {
   sources?: ContentSource[];
   rightsNotes?: string;
   youtubeSource: YouTubeSource;
+  playlistIds?: string[];
+}
+
+/**
+ * Canonical Playlist representation for grouping verified videos.
+ * Keeps playlist grouping distinct from ContentVideoRelation.
+ */
+export interface CanonicalPlaylist {
+  id: string; // e.g. "playlist_yt_" + externalPlaylistId or custom ID
+  externalPlaylistId?: string; // YouTube playlist ID if imported
+  titleAr: string;
+  titleEn?: string;
+  descriptionAr: string;
+  descriptionEn?: string;
+  thumbnailUrl?: string;
+  itemCount: number;
+  status: 'Draft' | 'Published' | 'Archived';
+  videoIds: string[]; // Ordered list of canonical Video IDs belonging to this playlist
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function isCanonicalPlaylist(value: unknown): value is CanonicalPlaylist {
+  if (!value || typeof value !== 'object') return false;
+  const p = value as Record<string, any>;
+  return (
+    typeof p.id === 'string' &&
+    typeof p.titleAr === 'string' &&
+    Array.isArray(p.videoIds)
+  );
 }
 
 // ============================================================================

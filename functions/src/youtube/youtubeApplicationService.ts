@@ -1,7 +1,6 @@
 import type { YouTubeRepository } from './youtubeRepository';
-import { FirestoreYouTubeRepository } from './firestoreYouTubeRepository';
 import type { YouTubeClient } from './youtubeClient';
-import { RealYouTubeClient } from './realYouTubeClient';
+import type { MediaRepository } from '../media/mediaRepository';
 import type {
   YouTubeIntegrationConfig,
   YouTubeImportCandidate,
@@ -9,15 +8,33 @@ import type {
   CandidateEditorialDraft,
   CandidateLifecycleStatus,
   YouTubeFetchResult,
+  YouTubePlaylistSyncResult,
 } from '../types/youtube';
 
 export class YoutubeApplicationService {
   private repository: YouTubeRepository;
   private client: YouTubeClient;
+  private mediaRepository?: MediaRepository;
 
-  constructor(repository?: YouTubeRepository, client?: YouTubeClient) {
-    this.repository = repository || new FirestoreYouTubeRepository();
-    this.client = client || new RealYouTubeClient();
+  constructor(repository?: YouTubeRepository, client?: YouTubeClient, mediaRepository?: MediaRepository) {
+    if (repository) {
+      this.repository = repository;
+    } else {
+      // Lazy load only when default production instantiation is needed
+      const { FirestoreYouTubeRepository } = require('./firestoreYouTubeRepository');
+      this.repository = new FirestoreYouTubeRepository();
+    }
+
+    if (client) {
+      this.client = client;
+    } else {
+      const { RealYouTubeClient } = require('./realYouTubeClient');
+      this.client = new RealYouTubeClient();
+    }
+
+    if (mediaRepository) {
+      this.mediaRepository = mediaRepository;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -194,6 +211,112 @@ export class YoutubeApplicationService {
       nextPageToken: playlistPage.nextPageToken,
     };
   }
+
+  /**
+   * Channel Playlist Discovery & Synchronization Engine
+   * Discovers official playlists, retrieves paginated memberships,
+   * dedupes videos, ingests candidates into PendingReview, and records
+   * canonical playlist associations.
+   */
+  public async syncChannelPlaylists(input?: { maxResults?: number }): Promise<YouTubePlaylistSyncResult> {
+    const config = await this.repository.getConfiguration('youtube-primary');
+    if (!config) {
+      throw new Error('Configuration missing: youtube-primary is not initialized');
+    }
+    if (!config.enabled) {
+      throw new Error('YouTube integration is disabled');
+    }
+    if (!config.channelId || config.channelId.trim() === '') {
+      throw new Error('Invalid Configuration: channelId is required');
+    }
+
+    // 1. Discover playlists owned by the channel
+    const playlists = await this.client.getChannelPlaylists(config.channelId, input?.maxResults || 20);
+
+    let playlistsCreated = 0;
+    let playlistsUpdated = 0;
+    let videosIngested = 0;
+    let itemsAssociated = 0;
+
+    for (const pl of playlists) {
+      const canonicalPlaylistId = `playlist_yt_${pl.id}`;
+      // Retrieve memberships
+      const memberships = await this.client.getPlaylistMemberships(pl.id, undefined, 50);
+      const videoIds = memberships.items.map(m => m.videoId);
+
+      // Collect video IDs that need details batch fetched
+      const missingDetailsIds: string[] = [];
+      for (const vid of videoIds) {
+        const candidateId = `youtube_${vid}`;
+        const existingCandidate = await this.repository.getCandidate(candidateId);
+        if (!existingCandidate) {
+          missingDetailsIds.push(vid);
+        }
+      }
+
+      if (missingDetailsIds.length > 0) {
+        const fetchedVideos = await this.client.getVideoDetailsBatch(missingDetailsIds);
+        for (const fv of fetchedVideos) {
+          const snapshot: CandidateSourceSnapshot = {
+            sourceTitle: fv.sourceTitle,
+            sourceDescription: fv.sourceDescription,
+            sourceThumbnailUrl: fv.sourceThumbnailUrl,
+            // Original publication timestamp from video details, NOT playlist item addition
+            youtubePublishedAt: fv.youtubePublishedAt,
+          };
+          await this.saveCandidateFromSource(snapshot, fv.externalVideoId);
+          videosIngested++;
+        }
+      }
+
+      // Map to canonical video IDs (e.g. video_yt_${vid})
+      const mappedVideoIds = videoIds.map(vid => `video_yt_${vid}`);
+      itemsAssociated += mappedVideoIds.length;
+
+      // Upsert playlist in media repository if available
+      if (this.mediaRepository) {
+        const existingPl = await this.mediaRepository.getPlaylistById(canonicalPlaylistId);
+        const nowIso = new Date().toISOString();
+        if (existingPl) {
+          await this.mediaRepository.updatePlaylist({
+            ...existingPl,
+            titleAr: pl.title,
+            descriptionAr: pl.description,
+            thumbnailUrl: pl.thumbnailUrl || existingPl.thumbnailUrl,
+            itemCount: pl.itemCount,
+            videoIds: mappedVideoIds,
+            updatedAt: nowIso,
+          });
+          playlistsUpdated++;
+        } else {
+          await this.mediaRepository.createPlaylist({
+            id: canonicalPlaylistId,
+            externalPlaylistId: pl.id,
+            titleAr: pl.title,
+            titleEn: undefined,
+            descriptionAr: pl.description,
+            descriptionEn: undefined,
+            thumbnailUrl: pl.thumbnailUrl,
+            itemCount: pl.itemCount,
+            status: 'Published',
+            videoIds: mappedVideoIds,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          });
+          playlistsCreated++;
+        }
+      }
+    }
+
+    return {
+      playlistsDiscovered: playlists.length,
+      playlistsCreated,
+      playlistsUpdated,
+      videosIngested,
+      itemsAssociated,
+    };
+  }
+
 
   public async saveCandidateFromSource(
     snapshot: CandidateSourceSnapshot,

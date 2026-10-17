@@ -1,4 +1,4 @@
-import type { Video, ContentVideoRelation, ContentType, RelationType, Placement, RightsStatus, VisibilityDecision } from "../types";
+import type { Video, ContentVideoRelation, CanonicalPlaylist, ContentType, RelationType, Placement, RightsStatus, VisibilityDecision } from "../types";
 import { AdminAccessService } from "./adminAccess";
 import { AdminPermission } from "../types/admin";
 import type { AdminUser } from "../types/admin";
@@ -10,6 +10,7 @@ import { mockNewsList, mockReportsList, mockVideosList, mockContentVideoRelation
 // Mock store to be replaced by durable storage later
 let videos: Video[] = [...mockVideosList];
 let relations: ContentVideoRelation[] = [...mockContentVideoRelations];
+let playlists: CanonicalPlaylist[] = [];
 
 export const MediaService = {
   listAll: (): Video[] => [...videos],
@@ -260,6 +261,32 @@ export const MediaService = {
   
   getRelationsForVideo: (videoId: string): ContentVideoRelation[] => {
     return relations.filter(r => r.videoId === videoId);
+  },
+
+  listPlaylists: (): CanonicalPlaylist[] => [...playlists],
+
+  getPlaylistById: (id: string): CanonicalPlaylist | undefined => playlists.find(p => p.id === id),
+
+  createPlaylist: (data: CanonicalPlaylist): CanonicalPlaylist => {
+    playlists = playlists.filter(p => p.id !== data.id);
+    playlists.push(data);
+    return data;
+  },
+
+  updatePlaylist: (data: CanonicalPlaylist): CanonicalPlaylist => {
+    const idx = playlists.findIndex(p => p.id === data.id);
+    if (idx !== -1) {
+      playlists[idx] = data;
+    } else {
+      playlists.push(data);
+    }
+    return data;
+  },
+
+  getVideosForPlaylist: (playlistId: string): Video[] => {
+    const pl = playlists.find(p => p.id === playlistId);
+    if (!pl) return [];
+    return videos.filter(v => pl.videoIds.includes(v.id));
   }
 };
 

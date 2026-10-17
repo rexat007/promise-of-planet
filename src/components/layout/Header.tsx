@@ -1,13 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Container } from './Container';
-import { Shield, ChevronDown, BookOpen, FileText, Scale, Package, Sparkles, Users, Clock } from 'lucide-react';
+import { Shield, ChevronDown, BookOpen, FileText, Scale, Package, Sparkles, Users, Clock, Menu, X } from 'lucide-react';
 import { smoothScrollToSection } from '../../utils/interaction';
 
 interface HeaderProps {
   onEnterAdmin?: () => void;
-  activePage?: 'home' | 'training-center' | 'about' | 'contact';
-  onNavigate?: (page: 'home' | 'training-center' | 'about' | 'contact') => void;
+  activePage?: 'home' | 'training-center' | 'about' | 'contact' | 'media';
+  onNavigate?: (page: 'home' | 'training-center' | 'about' | 'contact' | 'media') => void;
 }
 
 export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: HeaderProps) {
@@ -15,6 +15,7 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
   const isAr = i18n.language === 'ar';
   const [activePanelKey, setActivePanelKey] = useState<'library' | 'training' | null>(null);
   const [isScrolled, setIsScrolled] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
 
   // Monitor scroll position to transition header between Resting (top) and Elevated (scrolled) states
@@ -97,6 +98,12 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setActivePanelKey(null);
+    } else if (key === 'media') {
+      if (onNavigate) {
+        onNavigate('media');
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      setActivePanelKey(null);
     }
   };
 
@@ -170,6 +177,7 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
     { key: 'training', label: t('navigation.training'), hasPanel: true },
     { key: 'about', label: t('navigation.aboutUs') },
     { key: 'contact', label: t('navigation.contact') },
+    { key: 'media', label: isAr ? 'الوسائط المتعددة' : 'Multimedia' },
   ];
 
   const librarySubtopics = [
@@ -275,7 +283,8 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
                 (item.key === 'home' && activePage === 'home') ||
                 (item.key === 'training' && activePage === 'training-center') ||
                 (item.key === 'about' && activePage === 'about') ||
-                (item.key === 'contact' && activePage === 'contact');
+                (item.key === 'contact' && activePage === 'contact') ||
+                (item.key === 'media' && activePage === 'media');
 
               if (item.hasPanel) {
                 return (
@@ -417,22 +426,38 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
           </div>
         )}
 
-        {/* Mobile Navigation Bar */}
-        <div className="lg:hidden py-2.5 border-t border-gray-100 dark:border-gray-800 flex overflow-x-auto gap-4 no-scrollbar" dir={isAr ? 'rtl' : 'ltr'}>
-          {navItems.map((item) => (
-            <a
-              key={item.key}
-              href={`#${item.key}`}
-              onClick={(e) => {
-                e.preventDefault();
-                handleNavClick(item.key);
-              }}
-              className="text-xs font-medium text-gray-700 dark:text-gray-200 hover:text-emerald-600 dark:hover:text-emerald-400 whitespace-nowrap pop-motion-micro py-1"
-            >
-              {item.label}
-            </a>
-          ))}
+        {/* Mobile Navigation Toggle */}
+        <div className="lg:hidden flex items-center">
+          <button
+            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+            className="p-2 text-gray-700 dark:text-gray-200"
+            aria-label={isMobileMenuOpen ? "Close menu" : "Open menu"}
+          >
+            {isMobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+          </button>
         </div>
+
+        {/* Mobile Navigation Overlay */}
+        {isMobileMenuOpen && (
+          <div className="lg:hidden absolute top-16 left-0 right-0 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 p-4 z-40 shadow-lg">
+            <nav className="flex flex-col gap-4">
+              {navItems.map((item) => (
+                <a
+                  key={item.key}
+                  href={`#${item.key}`}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    handleNavClick(item.key);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="text-lg font-medium text-gray-700 dark:text-gray-200 hover:text-emerald-600 dark:hover:text-emerald-400"
+                >
+                  {item.label}
+                </a>
+              ))}
+            </nav>
+          </div>
+        )}
       </Container>
     </header>
   );

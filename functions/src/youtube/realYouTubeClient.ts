@@ -3,6 +3,7 @@ import type {
   YouTubeFetchedVideo,
   YouTubePlaylistPage,
 } from './youtubeClient';
+import type { YouTubePlaylist, YouTubePlaylistItemWithDetails } from '../types/youtube';
 import { defaultProductionApiKeyProvider, type YouTubeApiKeyProvider } from './youtubeSecrets';
 
 export class RealYouTubeClient implements YouTubeClient {
@@ -190,4 +191,101 @@ export class RealYouTubeClient implements YouTubeClient {
       throw this.sanitizeError(e);
     }
   }
+
+  public async getChannelPlaylists(channelId: string, maxResults = 20): Promise<YouTubePlaylist[]> {
+    if (!channelId || channelId.trim() === '') {
+      throw new Error('Invalid channelId: Channel ID cannot be empty');
+    }
+
+    const apiKey = this.getApiKey();
+    const limit = Math.min(Math.max(maxResults, 1), 50);
+    const url = `https://www.googleapis.com/youtube/v3/playlists?part=snippet,contentDetails&channelId=${encodeURIComponent(
+      channelId.trim()
+    )}&maxResults=${limit}&key=${apiKey}`;
+
+    try {
+      const response = await this.fetchWithRetry(url);
+      const data = (await response.json()) as any;
+
+      if (!data || !Array.isArray(data.items)) {
+        throw new Error('Malformed YouTube playlists response');
+      }
+
+      return data.items.map((item: any) => {
+        const snippet = item?.snippet || {};
+        const thumbs = snippet?.thumbnails || {};
+        const thumbUrl =
+          thumbs.maxres?.url ||
+          thumbs.standard?.url ||
+          thumbs.high?.url ||
+          thumbs.medium?.url ||
+          thumbs.default?.url ||
+          '';
+
+        return {
+          id: item.id,
+          title: snippet.title || '',
+          description: snippet.description || '',
+          thumbnailUrl: thumbUrl,
+          itemCount: item?.contentDetails?.itemCount ?? 0,
+          publishedAt: snippet.publishedAt || new Date().toISOString(),
+        };
+      });
+    } catch (e) {
+      throw this.sanitizeError(e);
+    }
+  }
+
+  public async getPlaylistMemberships(
+    playlistId: string,
+    pageToken?: string,
+    maxResults = 50
+  ): Promise<{ items: YouTubePlaylistItemWithDetails[]; nextPageToken?: string }> {
+    if (!playlistId || playlistId.trim() === '') {
+      throw new Error('Invalid playlistId: Playlist ID cannot be empty');
+    }
+
+    const apiKey = this.getApiKey();
+    const limit = Math.min(Math.max(maxResults, 1), 50);
+    let url = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&playlistId=${encodeURIComponent(
+      playlistId.trim()
+    )}&maxResults=${limit}&key=${apiKey}`;
+
+    if (pageToken && pageToken.trim() !== '') {
+      url += `&pageToken=${encodeURIComponent(pageToken.trim())}`;
+    }
+
+    try {
+      const response = await this.fetchWithRetry(url);
+      const data = (await response.json()) as any;
+
+      if (!data || !Array.isArray(data.items)) {
+        throw new Error('Malformed YouTube playlistItems response');
+      }
+
+      const items: YouTubePlaylistItemWithDetails[] = data.items
+        .map((item: any) => {
+          const videoId =
+            item?.contentDetails?.videoId ||
+            item?.snippet?.resourceId?.videoId ||
+            '';
+          return {
+            videoId: typeof videoId === 'string' ? videoId.trim() : '',
+            playlistItemId: item?.id,
+            position: item?.snippet?.position,
+            // Preserve playlist addition timestamp separately from original video publishedAt
+            addedToPlaylistAt: item?.snippet?.publishedAt,
+          };
+        })
+        .filter((item: YouTubePlaylistItemWithDetails) => item.videoId !== '');
+
+      return {
+        items,
+        nextPageToken: data.nextPageToken || undefined,
+      };
+    } catch (e) {
+      throw this.sanitizeError(e);
+    }
+  }
 }
+

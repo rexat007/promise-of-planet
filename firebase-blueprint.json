@@ -78,6 +78,14 @@
     "/enrollments/{enrollmentId}": {
       "schema": "Enrollment",
       "description": "Durable Course Enrollments Collection"
+    },
+    "/media/{mediaId}": {
+      "schema": "Video",
+      "description": "Canonical Multimedia Items Collection"
+    },
+    "/playlists/{playlistId}": {
+      "schema": "CanonicalPlaylist",
+      "description": "Canonical Playlists Collection"
     }
   }
 }

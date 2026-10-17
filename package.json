@@ -9,6 +9,7 @@
     "lint": "oxlint src",
     "preview": "vite preview",
     "test:youtube": "npx tsx scripts/runYoutubeTests.ts && npx tsx scripts/runYoutubeReviewTests.ts && npx tsx scripts/runCandidateAcceptanceTests.ts",
+    "test:multimedia": "npx tsx scripts/runMultimediaFunctionalTests.ts",
     "test:library": "npx tsx scripts/runLibraryPersistenceTests.ts"
   },
   "dependencies": {

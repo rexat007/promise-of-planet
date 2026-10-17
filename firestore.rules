@@ -147,5 +147,30 @@ service cloud.firestore {
       // Client mutations strictly forbidden (all mutations occur via Admin SDK callable)
       allow create, update, delete: if false;
     }
+
+    // Canonical Media Collection Rules Block
+    match /media/{mediaId} {
+      // Public read allowed ONLY for Published, Approved, Rights-Cleared videos not marked Hidden
+      // Administrators can inspect all items
+      allow get, list: if (
+        resource.data.status == 'Published' &&
+        resource.data.approvalStatus == 'Approved' &&
+        resource.data.rightsStatus == 'Cleared' &&
+        resource.data.visibilityDecision != 'Hidden'
+      ) || isAdmin();
+
+      // Client mutations strictly denied (handled by server callable / admin SDK)
+      allow create, update, delete: if false;
+    }
+
+    // Canonical Playlists Collection Rules Block
+    match /playlists/{playlistId} {
+      // Public read allowed for Published playlists
+      allow get, list: if (resource.data.status == 'Published') || isAdmin();
+
+      // Client mutations strictly denied (handled by server callable / admin SDK)
+      allow create, update, delete: if false;
+    }
   }
 }
+

@@ -43,7 +43,7 @@ i18n.on('languageChanged', (lng) => {
 });
 
 // Set initial html lang and ensure root html/body stay ltr
-const initialLang = i18n.language || defaultLang;
+const initialLang = i18n.language || defaultLang || 'ar';
 document.documentElement.setAttribute('dir', 'ltr');
 document.documentElement.setAttribute('lang', initialLang);
 if (document.body) {

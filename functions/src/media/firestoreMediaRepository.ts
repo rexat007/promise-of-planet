@@ -1,6 +1,6 @@
 import { getFirestore } from 'firebase-admin/firestore';
 import type { MediaRepository } from './mediaRepository';
-import type { Video, ContentVideoRelation } from '../types/media';
+import type { Video, ContentVideoRelation, CanonicalPlaylist } from '../types/media';
 
 /**
  * Production-ready Firestore-backed Media Repository.
@@ -163,4 +163,33 @@ export class FirestoreMediaRepository implements MediaRepository {
     const { _relations, ...rest } = data;
     return rest as Video;
   }
+
+  // ---------------------------------------------------------------------------
+  // Canonical Playlist Management
+  // ---------------------------------------------------------------------------
+  public static readonly PLAYLISTS_COLLECTION = 'playlists' as const;
+
+  async getPlaylistById(id: string): Promise<CanonicalPlaylist | null> {
+    const docSnap = await this.db.collection(FirestoreMediaRepository.PLAYLISTS_COLLECTION).doc(id).get();
+    if (!docSnap.exists) return null;
+    return docSnap.data() as CanonicalPlaylist;
+  }
+
+  async createPlaylist(playlist: CanonicalPlaylist): Promise<CanonicalPlaylist> {
+    const docRef = this.db.collection(FirestoreMediaRepository.PLAYLISTS_COLLECTION).doc(playlist.id);
+    await docRef.set(playlist);
+    return playlist;
+  }
+
+  async updatePlaylist(playlist: CanonicalPlaylist): Promise<CanonicalPlaylist> {
+    const docRef = this.db.collection(FirestoreMediaRepository.PLAYLISTS_COLLECTION).doc(playlist.id);
+    await docRef.update(playlist as any);
+    return playlist;
+  }
+
+  async listPlaylists(): Promise<CanonicalPlaylist[]> {
+    const snapshot = await this.db.collection(FirestoreMediaRepository.PLAYLISTS_COLLECTION).get();
+    return snapshot.docs.map(doc => doc.data() as CanonicalPlaylist);
+  }
 }
+

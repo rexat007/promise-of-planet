@@ -330,9 +330,12 @@ export async function runDurableMediaTests(): Promise<{ test: string; passed: bo
       updateVideo: async () => { throw new Error('Simulated repository write failure'); },
       listVideos: async () => [],
       saveRelation: async () => { throw new Error('Simulated relation failure'); },
-      deleteRelation: async () => false,
       getRelationsForVideo: async () => [],
       getRelationsForContent: async () => [],
+      getPlaylistById: async () => null,
+      createPlaylist: async () => { throw new Error('Simulated playlist failure'); },
+      updatePlaylist: async () => { throw new Error('Simulated playlist failure'); },
+      listPlaylists: async () => [],
     };
     const failingService = new MediaApplicationService(brokenRepo);
     let threw = false;

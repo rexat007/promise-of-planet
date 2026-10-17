@@ -99,4 +99,54 @@ export class FakeYouTubeClient implements YouTubeClient {
     }
     return result;
   }
+
+  // Channel playlists fixture mapping: channelId -> YouTubePlaylist[]
+  public channelPlaylists: Record<string, import('../types/youtube').YouTubePlaylist[]> = {};
+  // Playlist membership fixture mapping: playlistId -> { items: YouTubePlaylistItemWithDetails[]; nextPageToken?: string }
+  public playlistMemberships: Record<string, { items: import('../types/youtube').YouTubePlaylistItemWithDetails[]; nextPageToken?: string }> = {};
+
+  public async getChannelPlaylists(
+    channelId: string,
+    maxResults = 20
+  ): Promise<import('../types/youtube').YouTubePlaylist[]> {
+    if (this.shouldFailWithApiKeyError) {
+      throw new Error('YouTube API key missing or invalid');
+    }
+    if (this.shouldFailWithQuotaError) {
+      throw new Error('YouTube API quota exceeded');
+    }
+    if (this.shouldFailWithChannelNotFound || !channelId) {
+      throw new Error(`YouTube Channel not found or invalid: ${channelId}`);
+    }
+
+    const list = this.channelPlaylists[channelId] || [];
+    return list.slice(0, maxResults);
+  }
+
+  public async getPlaylistMemberships(
+    playlistId: string,
+    _pageToken?: string,
+    maxResults = 50
+  ): Promise<{ items: import('../types/youtube').YouTubePlaylistItemWithDetails[]; nextPageToken?: string }> {
+    if (this.shouldFailWithApiKeyError) {
+      throw new Error('YouTube API key missing or invalid');
+    }
+    if (this.shouldFailWithQuotaError) {
+      throw new Error('YouTube API quota exceeded');
+    }
+    if (!playlistId) {
+      throw new Error('Invalid playlistId: Playlist ID cannot be empty');
+    }
+
+    const res = this.playlistMemberships[playlistId];
+    if (!res) {
+      return { items: [] };
+    }
+
+    return {
+      items: res.items.slice(0, maxResults),
+      nextPageToken: res.nextPageToken,
+    };
+  }
 }
+

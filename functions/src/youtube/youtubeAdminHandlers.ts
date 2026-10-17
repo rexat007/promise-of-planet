@@ -142,6 +142,18 @@ export async function executeManageYouTubeIntegrationRequest(
     }
   }
 
+  if (action === 'syncPlaylists') {
+    await authenticateAndAuthorize(requestContext, AdminPermission.ManageSettings, adminRepo);
+    const maxResults = typeof data.maxResults === 'number' ? data.maxResults : 20;
+    try {
+      const syncResult = await youtubeAppService.syncChannelPlaylists({ maxResults });
+      return syncResult;
+    } catch (err: any) {
+      if (err instanceof HttpsError) throw err;
+      throw new HttpsError('internal', `SYNC_PLAYLISTS_FAILED: ${err?.message || 'Failed to sync playlists'}`);
+    }
+  }
+
   throw new HttpsError('invalid-argument', 'INVALID_ACTION: Unsupported action requested');
 }
 
