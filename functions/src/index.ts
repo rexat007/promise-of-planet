@@ -14,6 +14,7 @@ export { peiaPendingTaskGateway } from "./peia/firebasePendingTaskHttpEndpoint";
 export { peiaAdvisoryResultSubmission } from "./peia/firebaseAdvisoryResultSubmissionEndpoint";
 export { peiaNonAdvisoryOutcomeSubmission } from "./peia/firebaseNonAdvisoryOutcomeSubmissionEndpoint";
 export { PublicMediaRepository } from "./media/publicMediaRepository";
+export { manageNews, getPublicNews } from "./news/newsAdminHandlers";
 
 /**
  * Public Multimedia Gateway conforming to Firebase v2 onRequest.

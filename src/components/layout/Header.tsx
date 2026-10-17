@@ -6,8 +6,8 @@ import { smoothScrollToSection } from '../../utils/interaction';
 
 interface HeaderProps {
   onEnterAdmin?: () => void;
-  activePage?: 'home' | 'training-center' | 'about' | 'contact' | 'media';
-  onNavigate?: (page: 'home' | 'training-center' | 'about' | 'contact' | 'media') => void;
+  activePage?: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media';
+  onNavigate?: (page: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media') => void;
 }
 
 export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: HeaderProps) {
@@ -83,6 +83,12 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
     } else if (key === 'home') {
       if (onNavigate) {
         onNavigate('home');
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      setActivePanelKey(null);
+    } else if (key === 'news') {
+      if (onNavigate) {
+        onNavigate('news');
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setActivePanelKey(null);
@@ -173,6 +179,7 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
 
   const navItems = [
     { key: 'home', label: t('navigation.home') },
+    { key: 'news', label: isAr ? 'الأخبار' : 'News' },
     { key: 'library', label: t('navigation.library'), hasPanel: true },
     { key: 'training', label: t('navigation.training'), hasPanel: true },
     { key: 'about', label: t('navigation.aboutUs') },
@@ -281,6 +288,7 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
             {navItems.map((item) => {
               const isActive = 
                 (item.key === 'home' && activePage === 'home') ||
+                (item.key === 'news' && activePage === 'news') ||
                 (item.key === 'training' && activePage === 'training-center') ||
                 (item.key === 'about' && activePage === 'about') ||
                 (item.key === 'contact' && activePage === 'contact') ||

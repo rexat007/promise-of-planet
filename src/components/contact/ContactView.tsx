@@ -15,7 +15,7 @@ const YouTubeIcon = ({ className = 'w-6 h-6' }: { className?: string }) => (
 
 
 interface ContactViewProps {
-  onNavigate?: (page: 'home' | 'training-center' | 'about' | 'contact' | 'media') => void;
+  onNavigate?: (page: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media') => void;
 }
 
 export function ContactView({ onNavigate: _onNavigate }: ContactViewProps) {

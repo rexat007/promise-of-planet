@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 
 interface AboutUsViewProps {
-  onNavigate?: (page: 'home' | 'training-center' | 'about' | 'contact' | 'media') => void;
+  onNavigate?: (page: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media') => void;
 }
 
 export function AboutUsView({ onNavigate }: AboutUsViewProps) {

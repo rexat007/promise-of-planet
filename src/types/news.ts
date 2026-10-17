@@ -18,6 +18,10 @@ export interface NewsItem {
   createdAt: string;
   updatedAt: string;
   history: WorkflowTransitionRecord[];
+  location?: string;
+  urgencyLevel?: 'Standard' | 'Urgent' | 'Breaking';
+  publishedAt?: string;
+  relatedVideoIds?: string[];
 }
 
 export const NEWS_CATEGORIES = [

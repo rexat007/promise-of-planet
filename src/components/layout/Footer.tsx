@@ -24,7 +24,7 @@ const SocialIcon = ({
   </a>
 );
 
-export function Footer({ onNavigate }: { onNavigate?: (page: 'home' | 'training-center' | 'about' | 'contact' | 'media') => void; }) {
+export function Footer({ onNavigate }: { onNavigate?: (page: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media') => void; }) {
   const { t, i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
 
@@ -48,6 +48,7 @@ export function Footer({ onNavigate }: { onNavigate?: (page: 'home' | 'training-
             </h4>
             <ul className="space-y-2 text-xs sm:text-sm text-gray-400">
               <li><button onClick={() => { if (onNavigate) onNavigate('home'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="hover:text-emerald-400 transition-colors cursor-pointer">{t('navigation.home')}</button></li>
+              <li><button onClick={() => { if (onNavigate) onNavigate('news'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="hover:text-emerald-400 transition-colors cursor-pointer">{isAr ? 'الأخبار' : 'News'}</button></li>
               <li><button onClick={() => { if (onNavigate) onNavigate('about'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="hover:text-emerald-400 transition-colors cursor-pointer">{t('navigation.aboutUs')}</button></li>
               <li><button onClick={() => { if (onNavigate) onNavigate('training-center'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="hover:text-emerald-400 transition-colors cursor-pointer">{t('navigation.training')}</button></li>
               <li><button onClick={() => { if (onNavigate) onNavigate('media'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="hover:text-emerald-400 transition-colors cursor-pointer">{isAr ? 'الوسائط المتعددة' : 'Multimedia'}</button></li>

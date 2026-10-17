@@ -17,6 +17,7 @@ import { TrainingCenter } from './components/training/TrainingCenter';
 import { AboutUsView } from './components/about/AboutUsView';
 import { ContactView } from './components/contact/ContactView';
 import { PublicMediaHub } from './components/media/PublicMediaHub';
+import { PublicNewsHub } from './components/news/PublicNewsHub';
 import type { Language } from './types';
 import './App.css';
 
@@ -36,7 +37,34 @@ function App() {
     }
     return false;
   });
-  const [activePage, setActivePage] = useState<'home' | 'training-center' | 'about' | 'contact' | 'media'>('home');
+  const [activePage, setActivePage] = useState<'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media'>(() => {
+    if (typeof window !== 'undefined' && window.location.hash.startsWith('#news')) {
+      return 'news';
+    }
+    return 'home';
+  });
+
+  const [initialNewsSlug, setInitialNewsSlug] = useState<string | undefined>(() => {
+    if (typeof window !== 'undefined' && window.location.hash.startsWith('#news/')) {
+      return window.location.hash.replace('#news/', '');
+    }
+    return undefined;
+  });
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      const hash = window.location.hash;
+      if (hash.startsWith('#news/')) {
+        setActivePage('news');
+        setInitialNewsSlug(hash.replace('#news/', ''));
+      } else if (hash === '#news') {
+        setActivePage('news');
+        setInitialNewsSlug(undefined);
+      }
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
 
   // Sync root container dir attribute to ensure viewport scrollbar stays anchored on the right (Rule L)
   useEffect(() => {
@@ -75,7 +103,9 @@ function App() {
             activePage={activePage}
             onNavigate={(page) => setActivePage(page)}
           >
-            {activePage === 'about' ? (
+            {activePage === 'news' ? (
+              <PublicNewsHub initialArticleIdOrSlug={initialNewsSlug} onNavigate={(page) => setActivePage(page)} />
+            ) : activePage === 'about' ? (
               <AboutUsView onNavigate={(page) => setActivePage(page)} />
             ) : activePage === 'contact' ? (
               <ContactView onNavigate={(page) => setActivePage(page)} />
@@ -104,6 +134,13 @@ function App() {
                       </p>
                       {/* Architectural Navigation Anchor Links */}
                       <div className="flex flex-wrap items-center gap-3 pt-2">
+                        <button
+                          onClick={() => setActivePage('news')}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs sm:text-sm font-medium shadow-xs pop-motion-micro pop-hover-lift cursor-pointer"
+                        >
+                          <span>{isAr ? 'الأخبار والتحقيقات' : 'News & Investigations'}</span>
+                          <span aria-hidden="true">→</span>
+                        </button>
                         <button
                           onClick={() => smoothScrollToSection('library-section')}
                           className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-medium shadow-xs pop-motion-micro pop-hover-lift cursor-pointer"

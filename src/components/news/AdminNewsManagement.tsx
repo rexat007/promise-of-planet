@@ -9,6 +9,7 @@ import type { AdminUser } from '../../types/admin';
 import { WorkflowEngine } from '../../services/workflowEngine';
 import { AdminAccessService } from '../../services/adminAccess';
 import { AdminPermission } from '../../types/admin';
+import { NewsAdminClient } from '../../services/newsAdminClient';
 import { 
   Newspaper, 
   Search, 
@@ -42,10 +43,32 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   const isAr = i18n.language === 'ar';
 
   // State
-  const [newsList, setNewsList] = useState<NewsItem[]>(INITIAL_MOCK_NEWS);
+  const [newsList, setNewsList] = useState<NewsItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<string>('All');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
+
+  // Load articles from durable storage on mount
+  useEffect(() => {
+    let isMounted = true;
+    async function loadStoredNews() {
+      try {
+        const stored = await NewsAdminClient.listAll();
+        if (stored.length > 0) {
+          if (isMounted) setNewsList(stored);
+        } else {
+          NewsAdminClient.seedIfEmpty(INITIAL_MOCK_NEWS);
+          const seeded = await NewsAdminClient.listAll();
+          if (isMounted) setNewsList(seeded.length > 0 ? seeded : INITIAL_MOCK_NEWS);
+        }
+      } catch (e) {
+        console.error('Failed to load news from storage:', e);
+        if (isMounted) setNewsList(INITIAL_MOCK_NEWS);
+      }
+    }
+    loadStoredNews();
+    return () => { isMounted = false; };
+  }, []);
   
   // Modal state
   const [activeItem, setActiveItem] = useState<NewsItem | null>(null);
@@ -167,7 +190,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   };
 
   // Save article edits
-  const handleSaveForm = () => {
+  const handleSaveForm = async () => {
     if (!editForm.titleAr?.trim()) {
       setErrorMessage(isAr ? 'يرجى كتابة عنوان المقال باللغة العربية' : 'Arabic title is required');
       return;
@@ -176,64 +199,52 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
     const parsedTags = tagsInput.split(',').map(t => t.trim()).filter(Boolean);
     const parsedSources = sourcesInput.split(',').map(s => s.trim()).filter(Boolean);
 
-    if (isCreating) {
-      const createdItem: NewsItem = {
-        ...(editForm as NewsItem),
-        tags: parsedTags,
-        sources: parsedSources,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      setNewsList([createdItem, ...newsList]);
-    } else if (activeItem) {
-      const updatedItem: NewsItem = {
-        ...(editForm as NewsItem),
-        tags: parsedTags,
-        sources: parsedSources,
-        updatedAt: new Date().toISOString(),
-      };
-      setNewsList(newsList.map(item => item.id === updatedItem.id ? updatedItem : item));
-    }
+    try {
+      let savedItem: NewsItem;
+      if (isCreating) {
+        const itemToSave: NewsItem = {
+          ...(editForm as NewsItem),
+          tags: parsedTags,
+          sources: parsedSources,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          workflowState: WorkflowState.Draft,
+          history: [],
+        };
+        savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser);
+        setNewsList([savedItem, ...newsList]);
+      } else if (activeItem) {
+        const itemToSave: NewsItem = {
+          ...(editForm as NewsItem),
+          tags: parsedTags,
+          sources: parsedSources,
+          updatedAt: new Date().toISOString(),
+        };
+        savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser);
+        setNewsList(newsList.map(item => item.id === savedItem.id ? savedItem : item));
+      }
 
-    setErrorMessage(null);
-    setSuccessNotification(
-      isAr ? 'تم حفظ التعديلات بنجاح' : 'Article changes saved successfully'
-    );
-    setIsSaveSuccess(true);
+      setErrorMessage(null);
+      setSuccessNotification(
+        isAr ? 'تم حفظ التعديلات بنجاح' : 'Article changes saved successfully'
+      );
+      setIsSaveSuccess(true);
+    } catch (err: any) {
+      setErrorMessage(err.message || (isAr ? 'فشل حفظ المقال' : 'Failed to save article'));
+    }
   };
 
   // Execute workflow transition on activeItem
-  const handleExecuteTransition = (config: WorkflowTransitionConfig, comment?: string) => {
+  const handleExecuteTransition = async (config: WorkflowTransitionConfig, comment?: string) => {
     if (!activeItem) return;
 
-    // Build adapter object for WorkflowEngine
-    const adapterItem = {
-      id: activeItem.id,
-      titleAr: activeItem.titleAr,
-      titleEn: activeItem.titleEn,
-      contentType: 'News' as const,
-      currentState: activeItem.workflowState,
-      authorName: activeItem.author,
-      createdAt: activeItem.createdAt,
-      updatedAt: activeItem.updatedAt,
-      category: activeItem.category,
-      history: activeItem.history,
-    };
-
     try {
-      const resultAdapter = WorkflowEngine.executeTransition(
-        adapterItem,
+      const updatedNewsItem = await NewsAdminClient.executeTransition(
+        activeItem.id,
         config.toState,
         currentUser,
         comment
       );
-
-      const updatedNewsItem: NewsItem = {
-        ...activeItem,
-        workflowState: resultAdapter.currentState,
-        updatedAt: resultAdapter.updatedAt,
-        history: resultAdapter.history,
-      };
 
       setActiveItem(updatedNewsItem);
       setNewsList(newsList.map(n => n.id === updatedNewsItem.id ? updatedNewsItem : n));
