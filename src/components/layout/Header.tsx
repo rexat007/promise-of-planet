@@ -7,6 +7,7 @@ import { smoothScrollToSection } from '../../utils/interaction';
 export type PublicPageKey =
   | 'home'
   | 'news'
+  | 'library'
   | 'training-center'
   | 'media'
   | 'citizen-journalist'
@@ -74,13 +75,9 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
   const handleNavClick = (key: string) => {
     if (key === 'library') {
       if (onNavigate) {
-        onNavigate('home');
-        setTimeout(() => {
-          smoothScrollToSection('library-section');
-        }, 100);
-      } else {
-        smoothScrollToSection('library-section');
+        onNavigate('library');
       }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
       setActivePanelKey(null);
     } else if (key === 'training') {
       if (onNavigate) {

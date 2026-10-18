@@ -4,6 +4,7 @@ import { FirestoreLibraryRepository } from './firestoreLibraryRepository';
 import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
 import { AdminPermission } from '../../../src/types/admin';
+import { PublicLibraryRepository } from './publicLibraryRepository';
 
 export const manageLibraryDocuments = onCall(async (request) => {
   const { data, auth } = request;
@@ -59,3 +60,14 @@ export const manageLibraryDocuments = onCall(async (request) => {
     throw new HttpsError('internal', error.message);
   }
 });
+
+export const getPublicLibrary = onCall({ cors: true }, async (_request) => {
+  try {
+    const pubRepo = new PublicLibraryRepository();
+    const documents = await pubRepo.listPublicDocuments();
+    return { documents };
+  } catch (error: any) {
+    throw new HttpsError('internal', error.message || 'Failed to retrieve public library documents');
+  }
+});
+

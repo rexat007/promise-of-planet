@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test:youtube": "npx tsx scripts/runYoutubeTests.ts && npx tsx scripts/runYoutubeReviewTests.ts && npx tsx scripts/runCandidateAcceptanceTests.ts",
     "test:multimedia": "npx tsx scripts/runMultimediaFunctionalTests.ts",
-    "test:library": "npx tsx scripts/runLibraryPersistenceTests.ts"
+    "test:library": "npx tsx scripts/runLibraryPersistenceTests.ts",
+    "test:public-library": "npx tsx scripts/runPublicLibraryFunctionalTests.ts"
   },
   "dependencies": {
     "@types/uuid": "^11.0.0",

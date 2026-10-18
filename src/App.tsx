@@ -18,6 +18,7 @@ import { AboutUsView } from './components/about/AboutUsView';
 import { PublicMediaHub } from './components/media/PublicMediaHub';
 import { PublicNewsHub } from './components/news/PublicNewsHub';
 import { PublicCitizenJournalist } from './components/community/PublicCitizenJournalist';
+import { PublicLibraryHub } from './components/library/PublicLibraryHub';
 import type { PublicPageKey } from './components/layout/Header';
 import type { Language } from './types';
 import './App.css';
@@ -113,6 +114,8 @@ function App() {
           >
             {activePage === 'news' ? (
               <PublicNewsHub initialArticleIdOrSlug={initialNewsSlug} onNavigate={(page) => setActivePage(page)} />
+            ) : activePage === 'library' ? (
+              <PublicLibraryHub />
             ) : activePage === 'citizen-journalist' ? (
               <PublicCitizenJournalist />
             ) : activePage === 'about' || activePage === 'contact' ? (
@@ -190,6 +193,7 @@ function App() {
                     />
                     <LatestLibrary
                       currentLanguage={currentLang}
+                      onExploreLibrary={() => setActivePage('library')}
                     />
                   </Container>
                 </Section>

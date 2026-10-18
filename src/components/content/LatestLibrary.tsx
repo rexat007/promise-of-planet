@@ -9,6 +9,7 @@ export interface LatestLibraryProps {
 
 export const LatestLibrary: React.FC<LatestLibraryProps> = ({
   currentLanguage,
+  onExploreLibrary,
   className = '',
 }) => {
   const isArabic = currentLanguage === 'ar';
@@ -94,6 +95,19 @@ export const LatestLibrary: React.FC<LatestLibraryProps> = ({
           );
         })}
       </div>
+
+      {onExploreLibrary && (
+        <div className="text-center pt-2">
+          <button
+            type="button"
+            onClick={onExploreLibrary}
+            className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs sm:text-sm shadow-md transition-all cursor-pointer"
+          >
+            <span>{isArabic ? 'تصفح المكتبة البيئية الكاملة' : 'Explore Full Environmental Library'}</span>
+            <span aria-hidden="true">→</span>
+          </button>
+        </div>
+      )}
     </section>
   );
 };
