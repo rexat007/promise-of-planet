@@ -5,7 +5,6 @@ import {
   Search, 
   Download, 
   Sparkles, 
-  Globe, 
   Calendar, 
   Building2, 
   ExternalLink, 
@@ -16,8 +15,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { LibraryDocumentType, LibraryRightsStatus } from '../../types/library';
-import type { LibraryDocument, LibraryOrganization, LibrarySource } from '../../types/library';
-import { MOCK_ORGANIZATIONS, MOCK_SOURCES } from '../../data/mockLibraryData';
+import type { PublicLibraryDocument } from '../../types/library';
 import { PublicLibraryClient } from '../../services/publicLibraryClient';
 import { Container } from '../layout/Container';
 
@@ -25,9 +23,7 @@ export function PublicLibraryHub() {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
 
-  const [documents, setDocuments] = useState<LibraryDocument[]>([]);
-  const [organizations] = useState<LibraryOrganization[]>(MOCK_ORGANIZATIONS);
-  const [sources] = useState<LibrarySource[]>(MOCK_SOURCES);
+  const [documents, setDocuments] = useState<PublicLibraryDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState<string | null>(null);
 
@@ -38,7 +34,7 @@ export function PublicLibraryHub() {
   const [selectedRights] = useState<string>('ALL');
 
   // Selected Document Inspector State
-  const [selectedDoc, setSelectedDoc] = useState<LibraryDocument | null>(null);
+  const [selectedDoc, setSelectedDoc] = useState<PublicLibraryDocument | null>(null);
   const [aiSummary, setAiSummary] = useState<string>('');
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -71,10 +67,20 @@ export function PublicLibraryHub() {
     return documents.filter(doc => {
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const matchTitle = doc.titleAr.toLowerCase().includes(q) || doc.titleEn.toLowerCase().includes(q);
+        const matchTitle =
+          doc.titleAr.toLowerCase().includes(q) ||
+          doc.titleEn.toLowerCase().includes(q) ||
+          Boolean(doc.originalTitle && doc.originalTitle.toLowerCase().includes(q));
         const matchSummary = doc.summaryAr.toLowerCase().includes(q) || doc.summaryEn.toLowerCase().includes(q);
-        const matchTopic = doc.topicsAr.some(t => t.toLowerCase().includes(q)) || doc.topicsEn.some(t => t.toLowerCase().includes(q));
-        if (!matchTitle && !matchSummary && !matchTopic) return false;
+        const matchTopic =
+          doc.topicsAr.some(t => t.toLowerCase().includes(q)) ||
+          doc.topicsEn.some(t => t.toLowerCase().includes(q)) ||
+          doc.environmentalDomains.some(d => d.toLowerCase().includes(q));
+        const matchProvenance =
+          doc.organizationId.toLowerCase().includes(q) ||
+          doc.sourceId.toLowerCase().includes(q);
+        const matchGeo = doc.geographyAr.toLowerCase().includes(q) || doc.geographyEn.toLowerCase().includes(q);
+        if (!matchTitle && !matchSummary && !matchTopic && !matchProvenance && !matchGeo) return false;
       }
 
       if (selectedType !== 'ALL' && doc.documentType !== selectedType) {
@@ -93,18 +99,48 @@ export function PublicLibraryHub() {
     });
   }, [documents, searchQuery, selectedType, selectedDomain, selectedRights]);
 
-  const handleSelectDoc = (doc: LibraryDocument) => {
+  const handleSelectDoc = (doc: PublicLibraryDocument) => {
     setSelectedDoc(doc);
     setAiSummary('');
     setAiError(null);
   };
 
-  const getOrg = (orgId: string): LibraryOrganization | undefined => {
-    return organizations.find(o => o.id === orgId);
+  const getLegalStatusDescription = (doc: PublicLibraryDocument): string | undefined => {
+    const primary = isAr ? doc.legalStatusDescriptionAr : doc.legalStatusDescriptionEn;
+    const fallback = isAr ? doc.legalStatusDescriptionEn : doc.legalStatusDescriptionAr;
+    const resolved = primary?.trim() || fallback?.trim();
+    return resolved && resolved.length > 0 ? resolved : undefined;
   };
 
-  const getSource = (sourceId: string): LibrarySource | undefined => {
-    return sources.find(s => s.id === sourceId);
+  const isDownloadPermitted = (doc: PublicLibraryDocument) => {
+    return (
+      doc.rightsStatus === LibraryRightsStatus.OpenPubliclyAvailable ||
+      doc.rightsStatus === LibraryRightsStatus.PermissionGranted
+    );
+  };
+
+  const isValidPublicHttpUrl = (rawUrl?: string): string | undefined => {
+    if (typeof rawUrl !== 'string') return undefined;
+    const trimmed = rawUrl.trim();
+    if (!trimmed) return undefined;
+    try {
+      const parsed = new URL(trimmed);
+      if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || !parsed.hostname) {
+        return undefined;
+      }
+      return trimmed;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const getVerifiedReferenceUrl = (doc: PublicLibraryDocument): string | undefined => {
+    if (!isDownloadPermitted(doc)) return undefined;
+    for (const v of doc.versions || []) {
+      const safeUrl = isValidPublicHttpUrl(v.referenceUrl);
+      if (safeUrl) return safeUrl;
+    }
+    return undefined;
   };
 
   const handleGenerateAiSummary = async () => {
@@ -141,9 +177,8 @@ export function PublicLibraryHub() {
     }
   };
 
-  const isDownloadPermitted = (doc: LibraryDocument) => {
-    return doc.rightsStatus === LibraryRightsStatus.OpenPubliclyAvailable || doc.rightsStatus === LibraryRightsStatus.PermissionGranted;
-  };
+  const verifiedReferenceUrl = selectedDoc ? getVerifiedReferenceUrl(selectedDoc) : undefined;
+  const selectedLegalStatus = selectedDoc ? getLegalStatusDescription(selectedDoc) : undefined;
 
   return (
     <div className="min-h-screen bg-gray-50/50 dark:bg-gray-950 py-10 sm:py-16" dir={isAr ? 'rtl' : 'ltr'}>
@@ -248,7 +283,6 @@ export function PublicLibraryHub() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 {filteredDocuments.map((doc) => {
-                  const org = getOrg(doc.organizationId);
                   const isSelected = selectedDoc?.id === doc.id;
                   return (
                     <div
@@ -279,7 +313,7 @@ export function PublicLibraryHub() {
 
                       <div className="pt-4 mt-4 border-t border-gray-100 dark:border-gray-800 flex items-center justify-between text-xs font-semibold text-gray-500">
                         <span className="truncate max-w-[180px]">
-                          {isAr ? org?.nameAr : org?.nameEn}
+                          {doc.organizationId}
                         </span>
                         <button
                           type="button"
@@ -301,13 +335,23 @@ export function PublicLibraryHub() {
             <div className="lg:col-span-1">
               <div className="sticky top-24 bg-white dark:bg-gray-900 rounded-3xl p-6 shadow-xl border border-gray-200/80 dark:border-gray-800 space-y-6">
                 <div className="flex items-start justify-between gap-3 pb-4 border-b border-gray-100 dark:border-gray-800">
-                  <div>
-                    <span className="inline-block px-2.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300 font-bold text-[10px] mb-2">
-                      {selectedDoc.documentType}
-                    </span>
+                  <div className="space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="inline-block px-2.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300 font-bold text-[10px]">
+                        {selectedDoc.documentType}
+                      </span>
+                      <span className="inline-block px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 font-semibold text-[10px] uppercase">
+                        {selectedDoc.language}
+                      </span>
+                    </div>
                     <h2 className="text-lg font-extrabold text-gray-900 dark:text-white leading-snug">
                       {isAr ? selectedDoc.titleAr : selectedDoc.titleEn}
                     </h2>
+                    {selectedDoc.originalTitle && (
+                      <p className="text-[11px] text-gray-500 dark:text-gray-400 font-medium">
+                        {selectedDoc.originalTitle}
+                      </p>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -321,11 +365,11 @@ export function PublicLibraryHub() {
                 <div className="space-y-4 text-xs">
                   <div className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
                     <Building2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span className="font-bold">{isAr ? getOrg(selectedDoc.organizationId)?.nameAr : getOrg(selectedDoc.organizationId)?.nameEn}</span>
+                    <span className="font-bold">{selectedDoc.organizationId}</span>
                   </div>
                   <div className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
                     <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>{selectedDoc.publicationDate} · {selectedDoc.geographyAr}</span>
+                    <span>{selectedDoc.publicationDate} · {isAr ? selectedDoc.geographyAr : selectedDoc.geographyEn}</span>
                   </div>
                 </div>
 
@@ -338,6 +382,18 @@ export function PublicLibraryHub() {
                     {isAr ? selectedDoc.summaryAr : selectedDoc.summaryEn}
                   </p>
                 </div>
+
+                {/* Descriptive Legal Status */}
+                {selectedLegalStatus && (
+                  <div className="space-y-1.5 pt-3 border-t border-gray-100 dark:border-gray-800">
+                    <h4 className="text-xs font-bold text-gray-900 dark:text-white">
+                      {isAr ? 'الوضع القانوني التوثيقي' : 'Descriptive Legal Status'}
+                    </h4>
+                    <p className="text-xs text-gray-600 dark:text-gray-300 leading-relaxed">
+                      {selectedLegalStatus}
+                    </p>
+                  </div>
+                )}
 
                 {/* AI Summary / Translation Section */}
                 <div className="space-y-3 pt-3 border-t border-gray-100 dark:border-gray-800">
@@ -389,25 +445,64 @@ export function PublicLibraryHub() {
                     {isAr ? 'المواضيع والمجالات البيئية' : 'Topics & Environmental Domains'}
                   </h4>
                   <div className="flex flex-wrap gap-1.5">
+                    {selectedDoc.environmentalDomains.map((domain, i) => (
+                      <span key={`dom-${i}`} className="px-2 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold">
+                        {domain}
+                      </span>
+                    ))}
                     {(isAr ? selectedDoc.topicsAr : selectedDoc.topicsEn).map((topic, i) => (
-                      <span key={i} className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-[11px] font-medium">
+                      <span key={`top-${i}`} className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-[11px] font-medium">
                         {topic}
                       </span>
                     ))}
                   </div>
                 </div>
 
+                {/* Version History */}
+                {selectedDoc.versions && selectedDoc.versions.length > 0 && (
+                  <div className="space-y-2 pt-3 border-t border-gray-100 dark:border-gray-800">
+                    <h4 className="text-xs font-bold text-gray-900 dark:text-white">
+                      {isAr ? 'سجل الإصدارات المعتمدة' : 'Approved Version History'}
+                    </h4>
+                    <div className="space-y-1.5">
+                      {selectedDoc.versions.map((ver) => (
+                        <div key={ver.id} className="p-2.5 rounded-lg bg-gray-50 dark:bg-gray-800/50 text-[11px] flex items-center justify-between gap-2">
+                          <span className="font-bold text-emerald-700 dark:text-emerald-400">
+                            v{ver.versionNumber}
+                          </span>
+                          <span className="text-gray-600 dark:text-gray-300 truncate">
+                            {isAr ? ver.changeDescriptionAr : ver.changeDescriptionEn}
+                          </span>
+                          <span className="text-gray-400 shrink-0">{ver.publishedDate}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Provenance & Rights */}
-                <div className="pt-3 border-t border-gray-100 dark:border-gray-800 space-y-3">
+                <div className="pt-3 border-t border-gray-100 dark:border-gray-800 space-y-2.5">
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-gray-500 font-medium">{isAr ? 'حالة الحقوق:' : 'Rights Status:'}</span>
                     <span className="font-bold text-emerald-700 dark:text-emerald-400">{selectedDoc.rightsStatus}</span>
                   </div>
+                  <div className="flex items-center justify-between text-xs gap-2">
+                    <span className="text-gray-500 font-medium shrink-0">{isAr ? 'معرّف الجهة المسؤولة:' : 'Organization ID:'}</span>
+                    <span className="font-semibold text-gray-700 dark:text-gray-300 truncate">{selectedDoc.organizationId}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs gap-2">
+                    <span className="text-gray-500 font-medium shrink-0">{isAr ? 'معرّف المصدر التوثيقي:' : 'Source Registry ID:'}</span>
+                    <span className="font-semibold text-gray-700 dark:text-gray-300 truncate">{selectedDoc.sourceId}</span>
+                  </div>
 
                   <div className="grid grid-cols-2 gap-2 pt-2">
-                    {isDownloadPermitted(selectedDoc) ? (
+                    {!isDownloadPermitted(selectedDoc) ? (
+                      <div className="col-span-2 py-2.5 px-4 rounded-xl bg-gray-100 dark:bg-gray-800 text-gray-500 text-xs font-bold text-center">
+                        {isAr ? 'الوثيقة مقيدة أو تتطلب إذناً خاصاً لإعادة التوزيع' : 'Restricted document — Permission required for redistribution'}
+                      </div>
+                    ) : verifiedReferenceUrl ? (
                       <a
-                        href={getSource(selectedDoc.sourceId)?.sourceUrl || '#'}
+                        href={verifiedReferenceUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="col-span-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs inline-flex items-center justify-center gap-2 transition-colors shadow-sm"
@@ -417,8 +512,8 @@ export function PublicLibraryHub() {
                         <ExternalLink className="w-3.5 h-3.5" />
                       </a>
                     ) : (
-                      <div className="col-span-2 py-2.5 px-4 rounded-xl bg-gray-100 dark:bg-gray-800 text-gray-500 text-xs font-bold text-center">
-                        {isAr ? 'الوثيقة مقيدة أو تتطلب إذناً خاصاً لإعادة التوزيع' : 'Restricted document — Permission required for redistribution'}
+                      <div className="col-span-2 py-2.5 px-4 rounded-xl bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 text-xs font-semibold text-center">
+                        {isAr ? 'سجل مرجعي موثق — لا يتوفر رابط ملف خارجي مباشر لهذه النسخة' : 'Verified reference record — No direct external file link attached to this version'}
                       </div>
                     )}
 
@@ -429,23 +524,11 @@ export function PublicLibraryHub() {
                         setCopiedLink(true);
                         setTimeout(() => setCopiedLink(false), 2000);
                       }}
-                      className="py-2 px-3 rounded-xl bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      className="col-span-2 py-2 px-3 rounded-xl bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                     >
                       {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                       <span>{copiedLink ? (isAr ? 'تم النسخ' : 'Copied') : (isAr ? 'نسخ الرابط' : 'Copy Link')}</span>
                     </button>
-
-                    {getSource(selectedDoc.sourceId)?.sourceUrl && (
-                      <a
-                        href={getSource(selectedDoc.sourceId)?.sourceUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="py-2 px-3 rounded-xl bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors"
-                      >
-                        <Globe className="w-3.5 h-3.5" />
-                        <span>{isAr ? 'المصدر الرسمي' : 'Official Source'}</span>
-                      </a>
-                    )}
                   </div>
                 </div>
               </div>
@@ -456,3 +539,5 @@ export function PublicLibraryHub() {
     </div>
   );
 }
+
+

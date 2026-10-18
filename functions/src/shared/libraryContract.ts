@@ -113,6 +113,38 @@ export interface LibraryDocument {
 }
 
 /**
+ * Sanitized Public Environmental Library Document DTO
+ * Returned by PublicLibraryRepository and getPublicLibrary.
+ * Strictly excludes internal workflowHistory, internal rightsNotesAr/rightsNotesEn,
+ * and private authorMetadataAr/authorMetadataEn.
+ */
+export interface PublicLibraryDocument {
+  id: string;
+  titleAr: string;
+  titleEn: string;
+  originalTitle?: string;
+  documentType: LibraryDocumentType;
+  organizationId: string;
+  sourceId: string;
+  geographyAr: string;
+  geographyEn: string;
+  publicationDate: string;
+  language: 'ar' | 'en' | 'bilingual' | 'other';
+  summaryAr: string;
+  summaryEn: string;
+  topicsAr: string[];
+  topicsEn: string[];
+  environmentalDomains: string[];
+  legalStatusDescriptionAr: string;
+  legalStatusDescriptionEn: string;
+  rightsStatus: LibraryRightsStatus;
+  versions: LibraryDocumentVersion[];
+  workflowState: WorkflowState;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
  * Multi-dimensional Classification Filter
  */
 export interface LibraryClassification {
@@ -123,3 +155,4 @@ export interface LibraryClassification {
   geography?: string;
   searchQuery?: string;
 }
+
