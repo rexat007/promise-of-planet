@@ -186,6 +186,21 @@ export function mapAdvisoryResultHttpError(
         },
       };
     }
+    if (
+      error.code === 'TRANSACTION_REQUIRED' ||
+      error.code === 'TASK_DOCUMENT_REF_MISSING'
+    ) {
+      return {
+        status: 500,
+        body: {
+          ok: false,
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: PUBLIC_MESSAGES.INTERNAL_ERROR,
+          },
+        },
+      };
+    }
     return {
       status: 400,
       body: {

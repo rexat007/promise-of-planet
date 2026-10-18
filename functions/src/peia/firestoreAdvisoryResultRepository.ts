@@ -114,6 +114,13 @@ export class FirestoreAdvisoryResultRepository implements AdvisoryResultReposito
   async saveWithTaskConvergence(
     record: ReconciledAdvisoryResultPersistenceRecord
   ): Promise<AdvisoryResultSaveResult> {
+    if (typeof this.db.runTransaction !== 'function') {
+      throw new AdvisoryResultRepositoryError(
+        'TRANSACTION_REQUIRED',
+        'Firestore transaction support is required for advisory result task convergence.'
+      );
+    }
+
     const outcomeDocId = deriveAdvisoryResultDocumentId(record.taskId);
     const outcomeRef = this.db.collection(PEIA_ADVISORY_RESULT_COLLECTION).doc(outcomeDocId);
     const taskQuery = this.db
@@ -218,6 +225,17 @@ export class FirestoreAdvisoryResultRepository implements AdvisoryResultReposito
         );
       }
 
+      if (
+        !taskDoc.ref ||
+        typeof taskDoc.ref.id !== 'string' ||
+        taskDoc.ref.id.trim() === ''
+      ) {
+        throw new AdvisoryResultRepositoryError(
+          'TASK_DOCUMENT_REF_MISSING',
+          `Authoritative review task document reference for taskId "${record.taskId}" is missing.`
+        );
+      }
+
       transaction.create(outcomeRef, record);
       transaction.update(taskDoc.ref, {
         status: AITaskStatus.Completed,
@@ -226,43 +244,6 @@ export class FirestoreAdvisoryResultRepository implements AdvisoryResultReposito
       return { disposition: 'STORED' };
     };
 
-    if (typeof this.db.runTransaction === 'function') {
-      return this.db.runTransaction(executeTx);
-    }
-
-    const tx: FirestoreTransaction = {
-      async get(target: any) {
-        if (target && (target._isTaskQuery || typeof target.where === 'function' || typeof target.limit === 'function')) {
-          if (typeof target.get === 'function') {
-            return target.get();
-          }
-          return { docs: [] };
-        }
-        if (typeof target.get === 'function') {
-          const snap = await target.get();
-          return { exists: snap.exists, data: () => snap.data(), ref: target };
-        }
-        return { exists: false, data: () => null };
-      },
-      create(ref: any, data: any) {
-        if (typeof ref.create === 'function') {
-          ref.create(data);
-        }
-      },
-      update(ref: any, data: any) {
-        const fn = ref?.['up' + 'date'];
-        if (typeof fn === 'function') {
-          fn.call(ref, data);
-        }
-      },
-      set(ref: any, data: any) {
-        const fn = ref?.['se' + 't'];
-        if (typeof fn === 'function') {
-          fn.call(ref, data);
-        }
-      },
-    };
-
-    return executeTx(tx);
+    return this.db.runTransaction(executeTx);
   }
 }

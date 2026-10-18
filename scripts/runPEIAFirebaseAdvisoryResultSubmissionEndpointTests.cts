@@ -488,15 +488,11 @@ registerTest('Integration: full cycle', async () => {
     collection: (_name: string) => {
       const q: AdvisoryResultFirestoreQuery = {
         where: (field: string, _op: string, value: unknown) => {
-          const matching = Object.values(tasksStorage)
-            .filter((t) => t[field] === value)
-            .map((data) => ({
+          const matching = Object.entries(tasksStorage)
+            .filter(([, t]) => t[field] === value)
+            .map(([id, data]) => ({
               data: () => data,
-              ref: {
-                update: async (updates: any) => {
-                  Object.assign(data, updates);
-                },
-              },
+              ref: { id },
             }));
           const filteredQuery: AdvisoryResultFirestoreQuery = {
             where: () => filteredQuery,
@@ -515,10 +511,15 @@ registerTest('Integration: full cycle', async () => {
   const fakeResultWriteDb: FirestoreDatabase = {
     collection: (name: string) => {
       if (name === PEIA_PENDING_TASK_COLLECTION) {
-        return fakeTaskReadDb.collection(name);
+        return {
+          doc: (docId: string) => ({ id: docId }),
+          where: (field: string, op: string, value: unknown) =>
+            fakeTaskReadDb.collection(name).where(field, op, value),
+        };
       }
       return {
         doc: (docId: string) => ({
+          id: docId,
           get: async () => ({
             exists: docId in resultsStorage,
             data: () => resultsStorage[docId],
@@ -531,7 +532,75 @@ registerTest('Integration: full cycle', async () => {
             return {};
           },
         }),
+        where: () => {
+          throw new Error('Unexpected query on advisory results collection');
+        },
       };
+    },
+    runTransaction: async <T>(updateFn: (tx: any) => Promise<T>): Promise<T> => {
+      const stagedCreates: Array<{ docId: string; data: unknown }> = [];
+      const stagedUpdates: Array<{ docId: string; updates: Record<string, unknown> }> = [];
+
+      const tx = {
+        get: async (target: any) => {
+          if (target && typeof target.get === 'function' && typeof target.where === 'function') {
+            return target.get();
+          }
+          const docId = target.id;
+          const rawExisting = resultsStorage[docId];
+          return {
+            exists: docId in resultsStorage,
+            ref: target,
+            data: () =>
+              rawExisting !== undefined ? JSON.parse(JSON.stringify(rawExisting)) : undefined,
+          };
+        },
+        create: (ref: any, data: unknown) => {
+          stagedCreates.push({
+            docId: ref.id,
+            data: JSON.parse(JSON.stringify(data)),
+          });
+          return tx;
+        },
+        update: (ref: any, updates: Record<string, unknown>) => {
+          stagedUpdates.push({
+            docId: ref.id,
+            updates: JSON.parse(JSON.stringify(updates)),
+          });
+          return tx;
+        },
+        set: () => {
+          throw new Error('set() is forbidden');
+        },
+      };
+
+      const result = await updateFn(tx);
+
+      // Validate all staged creates before applying any mutation
+      const seenCreates = new Set<string>();
+      for (const item of stagedCreates) {
+        if (!item.docId || item.docId in resultsStorage || seenCreates.has(item.docId)) {
+          throw new FirestoreAlreadyExistsError();
+        }
+        seenCreates.add(item.docId);
+      }
+
+      // Validate all staged updates before applying any mutation
+      for (const item of stagedUpdates) {
+        if (!item.docId || !(item.docId in tasksStorage)) {
+          throw new Error(`Task document ${item.docId} not found`);
+        }
+      }
+
+      // Commit staged writes atomically after all validations pass
+      for (const item of stagedCreates) {
+        resultsStorage[item.docId] = item.data;
+      }
+      for (const item of stagedUpdates) {
+        Object.assign(tasksStorage[item.docId], item.updates);
+      }
+
+      return result;
     },
   };
 
@@ -555,6 +624,9 @@ registerTest('Integration: full cycle', async () => {
 
   const docId = deriveAdvisoryResultDocumentId(taskId);
   if (!resultsStorage[docId]) throw new Error('Result was not stored');
+  if (tasksStorage[taskId].status !== AITaskStatus.Completed) {
+    throw new Error(`Expected authoritative task status Completed, got ${String(tasksStorage[taskId].status)}`);
+  }
 
   const res2 = new MockResponse();
   await executeAdvisoryResultSubmission(req1, res2, { verifier, persistenceRuntime });
@@ -709,6 +781,54 @@ registerTest('26. Allow header present on 405', async () => {
   await executeAdvisoryResultSubmission(req, res, getDeps());
   if (res.statusCode !== 405) throw new Error('Expected 405');
   if (res.headers['Allow'] !== 'POST') throw new Error('Missing Allow header');
+});
+
+// 30. TRANSACTION_REQUIRED maps to 500 INTERNAL_ERROR without leaking internals
+registerTest('30. TRANSACTION_REQUIRED maps to 500 INTERNAL_ERROR without leaking internals', async () => {
+  clearCollections();
+  seedMachine('m1', VALID_TOKEN);
+  const persistenceMock = async (): Promise<AdvisoryResultPersistenceResult> => {
+    throw new AdvisoryResultRepositoryError(
+      'TRANSACTION_REQUIRED',
+      'Firestore transaction support is required for advisory result task convergence.'
+    );
+  };
+  const req = new MockRequest({ headers: { 'Authorization': `Bearer ${VALID_TOKEN}` }, body: createValidResult() });
+  const res = new MockResponse();
+  await executeAdvisoryResultSubmission(req, res, getDeps(persistenceMock));
+  if (res.statusCode !== 500) throw new Error(`Expected 500, got ${res.statusCode}`);
+  const bodyStr = JSON.stringify(res.body);
+  if (bodyStr.includes('TRANSACTION_REQUIRED') || bodyStr.includes('Firestore transaction support')) {
+    throw new Error('Internal repository error details leaked in response');
+  }
+  const parsed = JSON.parse(bodyStr);
+  if (parsed.ok !== false || parsed.error?.code !== 'INTERNAL_ERROR' || parsed.error?.message !== 'Internal server error.') {
+    throw new Error(`Unexpected response body: ${bodyStr}`);
+  }
+});
+
+// 31. TASK_DOCUMENT_REF_MISSING maps to 500 INTERNAL_ERROR without leaking internals
+registerTest('31. TASK_DOCUMENT_REF_MISSING maps to 500 INTERNAL_ERROR without leaking internals', async () => {
+  clearCollections();
+  seedMachine('m1', VALID_TOKEN);
+  const persistenceMock = async (): Promise<AdvisoryResultPersistenceResult> => {
+    throw new AdvisoryResultRepositoryError(
+      'TASK_DOCUMENT_REF_MISSING',
+      'Authoritative review task document reference for taskId "t1" is missing.'
+    );
+  };
+  const req = new MockRequest({ headers: { 'Authorization': `Bearer ${VALID_TOKEN}` }, body: createValidResult() });
+  const res = new MockResponse();
+  await executeAdvisoryResultSubmission(req, res, getDeps(persistenceMock));
+  if (res.statusCode !== 500) throw new Error(`Expected 500, got ${res.statusCode}`);
+  const bodyStr = JSON.stringify(res.body);
+  if (bodyStr.includes('TASK_DOCUMENT_REF_MISSING') || bodyStr.includes('t1') || bodyStr.includes('document reference')) {
+    throw new Error('Internal repository error details leaked in response');
+  }
+  const parsed = JSON.parse(bodyStr);
+  if (parsed.ok !== false || parsed.error?.code !== 'INTERNAL_ERROR' || parsed.error?.message !== 'Internal server error.') {
+    throw new Error(`Unexpected response body: ${bodyStr}`);
+  }
 });
 
 async function runTests() {
