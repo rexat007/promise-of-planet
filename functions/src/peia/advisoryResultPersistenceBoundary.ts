@@ -214,7 +214,10 @@ function validateExistingPrincipal(principal: unknown): VerifiedMachinePrincipal
     p.isActive !== true ||
     !Array.isArray(p.capabilities) ||
     new Set(p.capabilities).size !== p.capabilities.length ||
-    !p.capabilities.every(cap => typeof cap === 'string' && validCapabilities.includes(cap)) ||
+    !p.capabilities.every(
+      (cap): cap is PEIAMachineCapability =>
+        typeof cap === 'string' && validCapabilities.includes(cap)
+    ) ||
     !p.capabilities.includes(PEIAMachineCapability.SUBMIT_ADVISORY_RESULT)
   ) {
     throw new AdvisoryResultPersistenceError(
@@ -223,7 +226,11 @@ function validateExistingPrincipal(principal: unknown): VerifiedMachinePrincipal
     );
   }
 
-  return principal as VerifiedMachinePrincipal;
+  return {
+    principalId: p.principalId,
+    isActive: true,
+    capabilities: p.capabilities,
+  };
 }
 
 export function validateExistingRecord(

@@ -144,8 +144,9 @@ export function validateMachineCredentialPersistenceRecord(
   }
 
   // Delegate hex and format validation to canonical validateMachineCredentialDigest
+  let validatedDigest: ReturnType<typeof validateMachineCredentialDigest>;
   try {
-    validateMachineCredentialDigest(credentialDigest.value);
+    validatedDigest = validateMachineCredentialDigest(credentialDigest.value);
   } catch (err) {
     throw new MachineCredentialPersistenceError(
       'INVALID_MACHINE_CREDENTIAL_DIGEST',
@@ -236,7 +237,7 @@ export function validateMachineCredentialPersistenceRecord(
     credentialScheme,
     credentialDigest: {
       algorithm: credentialDigest.algorithm,
-      value: credentialDigest.value,
+      value: validatedDigest.value,
     },
     principal: {
       principalId,
