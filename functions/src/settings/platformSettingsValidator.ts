@@ -1,15 +1,3 @@
-import type {
-  PlatformGlobalSettings,
-  PlatformIdentitySettings,
-  PlatformInstitutionalSettings,
-  PlatformChannelsSettings,
-  PlatformContactSettings,
-  PlatformFooterSettings,
-  PlatformLegalSettings,
-  PlatformMetadataSettings,
-  PlatformBehaviorSettings,
-} from '../../../src/types/settings';
-
 const SCRIPT_REGEX = /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>|<iframe\b|javascript:|onload=|onerror=/i;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

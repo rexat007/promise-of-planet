@@ -2,119 +2,18 @@ import type { AdminUser } from '../types/admin';
 import { AdminPermission } from '../types/admin';
 import type { AuditChange } from '../types/audit';
 import { AuditAction, AuditTargetType } from '../types/audit';
-import type {
-  PlatformGlobalSettings,
-  SettingsMutationResult,
-  SettingsValidationResult,
-  UpdateGlobalSettingsInput,
+import {
+  DEFAULT_GLOBAL_SETTINGS,
+  type PlatformGlobalSettings,
+  type SettingsMutationResult,
+  type SettingsValidationResult,
+  type UpdateGlobalSettingsInput,
 } from '../types/settings';
 import { AdminAccessService } from './adminAccess';
 import { AdminAuditService } from './adminAuditService';
 
-/**
- * Canonical Safe Default / Fallback Settings for Promise of Planet
- *
- * Invariants:
- * - Fallback is NOT persistent.
- * - Fallback is NOT source of truth once Firestore canonical settings exist.
- * - Fallback contains strictly verified channels only (YouTube, Facebook).
- * - No fake contact info or legal commitments.
- */
-export const DEFAULT_GLOBAL_SETTINGS: Readonly<PlatformGlobalSettings> = Object.freeze({
-  identity: Object.freeze({
-    platformNameAr: 'وعد الكوكب',
-    platformNameEn: 'Promise of Planet',
-    taglineAr: 'منصة تعليمية وإعلامية بيئية',
-    taglineEn: 'Environmental Educational and Media Platform',
-    subtitleAr: 'منصة سودانية للصحافة والمعرفة البيئية',
-    subtitleEn: 'Sudanese Platform for Environmental Journalism and Knowledge',
-    descriptionAr: 'منصة رائدة للصحافة والمعرفة البيئية والتدريب والمشاركة المجتمعية في السودان.',
-    descriptionEn: 'A leading platform for environmental journalism, knowledge, training, and community engagement in Sudan.',
-    logoUrl: null,
-    logoStoragePath: null,
-    logoDarkUrl: null,
-    faviconUrl: null,
-  }),
-  institutional: Object.freeze({
-    aboutIntroAr: 'منصة إعلامية ومعرفية وتدريبية مستقلة مكرسة لقضايا البيئة، التغير المناخي، حوكمة الموارد الطبيعية، والتنمية المستدامة في السودان والمنطقة.',
-    aboutIntroEn: 'An environmental media, knowledge, and training platform dedicated to climate resilience, natural resource governance, and ecological stewardship in Sudan and the surrounding region.',
-    visionAr: 'بيئة سودانية وإقليمية واعية ومستدامة، تعتمد على المعرفة الموثوقة والمساءلة المجتمعية في حماية الموارد الطبيعية.',
-    visionEn: 'An informed and sustainable Sudanese and regional environment grounded in verified knowledge and community stewardship of natural resources.',
-    missionAr: 'تقديم تغطية صحفية علمية رصينة وموضوعية حول التحديات المناخية والبيئية، وتوفير مساحة لتوثيق التحولات الميدانية، ومساندة التدريب وبناء المهارات الصحفية المتخصصة.',
-    missionEn: 'Delivering rigorous, evidence-based environmental journalism, documenting field realities, and empowering researchers and media practitioners with specialized skills.',
-    sudanContextAr: 'يركز العمل على توثيق آثار الجفاف والنزاعات البيئية وأنشطة التعدين وإدارة أحواض الأنهار والمياه الجوفية في السودان.',
-    sudanContextEn: 'Focusing on documenting climate impacts, drought, environmental governance, mining pressures, and river basin stewardship across Sudan.',
-    editorialPositioningAr: 'الالتزام التام بالحياد المهني، والاستناد إلى الأدلة العلمية والتحقق الميداني والشفافية في نقل الحقائق البيئية.',
-    editorialPositioningEn: 'Committed to professional neutrality, scientific grounding, field verification, and editorial transparency.',
-    conferenceCoverageStatementAr: 'تغطيات ميدانية وتوثيقية للفعاليات والمؤتمرات المناخية الإقليمية والدولية لنقل صوت المجتمعات المتأثرة.',
-    conferenceCoverageStatementEn: 'Field and documentary coverage of regional and global climate conferences, amplifying the voices of affected communities.',
-  }),
-  channels: Object.freeze({
-    youtube: Object.freeze({
-      url: 'https://www.youtube.com/@PromiseOfPlanet',
-      enabled: true,
-    }),
-    facebook: Object.freeze({
-      url: 'https://www.facebook.com/PromiseOfPlanet/',
-      enabled: true,
-    }),
-    instagram: Object.freeze({
-      url: '',
-      enabled: false,
-    }),
-    whatsapp: Object.freeze({
-      url: '',
-      enabled: false,
-    }),
-  }),
-  contact: Object.freeze({
-    contactEmail: '',
-    pressEmail: '',
-    phone: '',
-    addressAr: '',
-    addressEn: '',
-    accreditationNoticeAr: 'للصحفيين والباحثين والمؤسسات المهتمة بالتغطيات الصحفية والفعاليات البيئية والمناخية، يمكن التواصل ومتابعة التحديثات عبر قنوات البث الرسمية المعلنة، إلى حين إطلاق بوابة الاتصال التحريرية المباشرة.',
-    accreditationNoticeEn: 'Journalists, researchers, and organizations seeking accreditation verification and environmental conference coverage inquiries can follow official updates via our official broadcast channels.',
-  }),
-  footer: Object.freeze({
-    descriptionAr: 'منصة سودانية للصحافة والمعرفة البيئية والتدريب والمشاركة المجتمعية.',
-    descriptionEn: 'Sudanese platform for environmental journalism, knowledge, training, and community engagement.',
-    rightsTextAr: 'جميع الحقوق محفوظة © 2026 وعد الكوكب',
-    rightsTextEn: 'All rights reserved © 2026 Promise of Planet',
-  }),
-  legal: Object.freeze({
-    privacy: Object.freeze({
-      titleAr: 'سياسة الخصوصية',
-      titleEn: 'Privacy Policy',
-      contentAr: '',
-      contentEn: '',
-      effectiveDate: null,
-      published: false,
-    }),
-    terms: Object.freeze({
-      titleAr: 'شروط الخدمة',
-      titleEn: 'Terms of Service',
-      contentAr: '',
-      contentEn: '',
-      effectiveDate: null,
-      published: false,
-    }),
-  }),
-  metadata: Object.freeze({
-    siteTitleAr: 'وعد الكوكب | Promise of Planet',
-    siteTitleEn: 'Promise of Planet | Environmental Media & Knowledge',
-    metaDescriptionAr: 'منصة وعد الكوكب - منصة رائدة للصحافة والمعرفة البيئية والتدريب في السودان.',
-    metaDescriptionEn: 'Promise of Planet - Leading environmental journalism, knowledge, and training platform in Sudan.',
-  }),
-  behavior: Object.freeze({
-    climateClockEnabled: true,
-    defaultLanguage: 'ar',
-  }),
-  climateClockEnabled: true,
-  defaultLanguage: 'ar',
-  updatedAt: '2026-01-01T00:00:00.000Z',
-  updatedBy: 'system',
-});
+export { DEFAULT_GLOBAL_SETTINGS };
+
 
 /**
  * Allowed top-level canonical setting keys.

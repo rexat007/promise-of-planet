@@ -1,5 +1,5 @@
 import { getFirestore } from 'firebase-admin/firestore';
-import type { PlatformGlobalSettings } from '../../../src/types/settings';
+import type { PlatformGlobalSettings } from '../shared/settingsContract';
 import { PlatformSettingsValidator } from './platformSettingsValidator';
 
 export interface IPlatformSettingsRepository {
