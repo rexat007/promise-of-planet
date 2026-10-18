@@ -1,12 +1,10 @@
 import {
   PEIAMachineCredentialScheme,
   validateMachineCredentialDigest,
-  type ValidatedMachineCredentialDigest,
   type MachineCredentialBinding,
 } from './machineCredentialContract';
 import {
   PEIAMachineCapability,
-  type VerifiedMachinePrincipal,
 } from './machineAuthorizationBoundary';
 
 export interface MachineCredentialPersistenceRecord {

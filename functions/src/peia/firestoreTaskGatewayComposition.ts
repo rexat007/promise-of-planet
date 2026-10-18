@@ -8,8 +8,10 @@ import {
   type FirestoreReadDatabase as PendingTaskFirestoreReadDatabase,
 } from './firestorePendingTaskSource';
 import {
-  executePendingTaskGatewayRequest,
   type PendingTaskGatewaySuccess,
+} from './taskGatewayContract';
+import {
+  executePendingTaskGatewayRequest,
 } from './taskGatewayOrchestrator';
 
 /**

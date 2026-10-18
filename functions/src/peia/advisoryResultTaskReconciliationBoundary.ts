@@ -1,6 +1,6 @@
 import { AuthorizedAdvisoryResultIntake } from './authorizedAdvisoryResultIntakeBoundary';
 import { validateAIReviewTask } from './aiTaskValidator';
-import { AITaskStatus, type AIReviewTask } from '../types/aiTask';
+import { type AIReviewTask } from '../types/aiTask';
 
 export interface AdvisoryResultTaskSource {
   fetchTaskById(taskId: string): Promise<unknown | null>;

@@ -1,7 +1,7 @@
 import {
   ReconciledAdvisoryResultIntake,
 } from './advisoryResultTaskReconciliationBoundary';
-import { AITaskStatus, type AIReviewTask } from '../types/aiTask';
+import { type AIReviewTask } from '../types/aiTask';
 import {
   VerifiedMachinePrincipal,
   PEIAMachineCapability,
@@ -318,16 +318,6 @@ export function isTaskEqual(a: AIReviewTask, b: AIReviewTask): boolean {
     return false;
   }
   return isDeepEqual(a.contentSnapshot, b.contentSnapshot);
-}
-
-function areCapabilitiesEqual(a: readonly string[], b: readonly string[]): boolean {
-  const setA = new Set(a);
-  const setB = new Set(b);
-  if (setA.size !== setB.size) return false;
-  for (const cap of setA) {
-    if (!setB.has(cap)) return false;
-  }
-  return true;
 }
 
 export async function persistReconciledAdvisoryResult(
