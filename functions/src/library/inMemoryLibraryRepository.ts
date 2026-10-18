@@ -1,5 +1,5 @@
 import type { LibraryRepository } from './libraryRepository';
-import type { LibraryDocument } from '../../../src/types/library';
+import type { LibraryDocument } from '../shared/libraryContract';
 import { LibraryValidator } from './libraryValidator';
 
 export class InMemoryLibraryRepository implements LibraryRepository {

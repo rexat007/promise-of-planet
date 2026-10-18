@@ -1,6 +1,6 @@
-import type { LibraryDocument, LibraryDocumentVersion } from '../../../src/types/library';
-import { LibraryDocumentType, LibraryRightsStatus } from '../../../src/types/library';
-import { WorkflowState, WorkflowAction, type WorkflowTransitionRecord } from '../../../src/types/workflow';
+import type { LibraryDocument, LibraryDocumentVersion } from '../shared/libraryContract';
+import { LibraryDocumentType, LibraryRightsStatus } from '../shared/libraryContract';
+import { WorkflowState, WorkflowAction, type WorkflowTransitionRecord } from '../shared/workflowContract';
 
 export class LibraryValidator {
   public static validateDocument(doc: any): LibraryDocument {

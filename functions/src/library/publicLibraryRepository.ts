@@ -1,6 +1,6 @@
 import type { LibraryRepository } from './libraryRepository';
-import { WorkflowState } from '../../../src/types/workflow';
-import type { LibraryDocument } from '../../../src/types/library';
+import { WorkflowState } from '../shared/workflowContract';
+import type { LibraryDocument } from '../shared/libraryContract';
 
 export class PublicLibraryRepository {
   private repo: LibraryRepository;

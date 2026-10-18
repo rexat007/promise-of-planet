@@ -1,4 +1,4 @@
-import type { LibraryDocument } from '../../../src/types/library';
+import type { LibraryDocument } from '../shared/libraryContract';
 
 export interface LibraryRepository {
   getById(id: string): Promise<LibraryDocument | null>;
