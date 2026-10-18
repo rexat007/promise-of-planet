@@ -35,3 +35,7 @@ lib/
 
 # Firebase Cache
 .firebase/
+
+# Generated frontend JavaScript — never commit
+/src/**/*.js
+/src/**/*.js.map

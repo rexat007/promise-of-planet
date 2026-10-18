@@ -8,8 +8,10 @@
     "strict": true,
     "target": "es2022",
     "moduleResolution": "node",
-    "rootDir": "src"
+    "ignoreDeprecations": "5.0",
+    "rootDir": "src",
+    "noEmitOnError": true
   },
   "compileOnSave": true,
-  "include": ["src", "../src"]
+  "include": ["src"]
 }
