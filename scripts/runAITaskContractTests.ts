@@ -1,5 +1,19 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  AITaskType as CanonicalAITaskType,
+  AITaskStatus as CanonicalAITaskStatus,
+} from '../functions/src/shared/aiTaskContract';
+import {
+  AITaskType as FrontendAITaskType,
+  AITaskStatus as FrontendAITaskStatus,
+} from '../src/types/aiTask';
+import {
+  AIReviewTargetType as CanonicalAIReviewTargetType,
+} from '../functions/src/shared/aiReviewContract';
+import {
+  AIReviewTargetType as FrontendAIReviewTargetType,
+} from '../src/types/aiReview';
 
 interface TestResult {
   id: string;
@@ -13,14 +27,22 @@ function runAITaskContractTests(): TestResult[] {
   const results: TestResult[] = [];
 
   try {
-    const aiTaskPath = path.join(process.cwd(), 'src/types/aiTask.ts');
-    const taskCode = fs.readFileSync(aiTaskPath, 'utf8');
+    const canonicalTaskPath = path.join(process.cwd(), 'functions/src/shared/aiTaskContract.ts');
+    const frontendTaskPath = path.join(process.cwd(), 'src/types/aiTask.ts');
+    const canonicalReviewPath = path.join(process.cwd(), 'functions/src/shared/aiReviewContract.ts');
+    const taskCode = fs.readFileSync(canonicalTaskPath, 'utf8');
+    const frontendBridgeCode = fs.readFileSync(frontendTaskPath, 'utf8');
+    const reviewCode = fs.readFileSync(canonicalReviewPath, 'utf8');
 
-    // 1. CONTENT_REVIEW is the only task type
-    const onlyContentReviewType = taskCode.includes("CONTENT_REVIEW: 'CONTENT_REVIEW'") && 
-                                  !taskCode.includes('LIBRARY_INGEST') && 
-                                  !taskCode.includes('MEDIA_SYNC') && 
-                                  !taskCode.includes('SOURCE_DISCOVERY');
+    // 1. CONTENT_REVIEW is the only task type (source + runtime)
+    const runtimeTaskTypeKeys = Object.keys(CanonicalAITaskType);
+    const onlyContentReviewType =
+      taskCode.includes("CONTENT_REVIEW: 'CONTENT_REVIEW'") &&
+      !taskCode.includes('LIBRARY_INGEST') &&
+      !taskCode.includes('MEDIA_SYNC') &&
+      !taskCode.includes('SOURCE_DISCOVERY') &&
+      runtimeTaskTypeKeys.length === 1 &&
+      CanonicalAITaskType.CONTENT_REVIEW === 'CONTENT_REVIEW';
     results.push({
       id: 'A',
       name: 'CONTENT_REVIEW is the only task type',
@@ -29,13 +51,22 @@ function runAITaskContractTests(): TestResult[] {
       message: onlyContentReviewType ? undefined : 'Found extra task types that violate minimal capability scope',
     });
 
-    // 2. Pending / Completed / Failed are the only statuses
-    const onlyMinimalStatuses = taskCode.includes("Pending: 'Pending'") && 
-                                taskCode.includes("Completed: 'Completed'") && 
-                                taskCode.includes("Failed: 'Failed'") && 
-                                !taskCode.includes('InProgress') && 
-                                !taskCode.includes('Cancelled') && 
-                                !taskCode.includes('Queued');
+    // 2. Pending / Completed / Failed are the only statuses (source + runtime)
+    const runtimeStatusKeys = Object.keys(CanonicalAITaskStatus).sort();
+    const onlyMinimalStatuses =
+      taskCode.includes("Pending: 'Pending'") &&
+      taskCode.includes("Completed: 'Completed'") &&
+      taskCode.includes("Failed: 'Failed'") &&
+      !taskCode.includes('InProgress') &&
+      !taskCode.includes('Cancelled') &&
+      !taskCode.includes('Queued') &&
+      runtimeStatusKeys.length === 3 &&
+      runtimeStatusKeys[0] === 'Completed' &&
+      runtimeStatusKeys[1] === 'Failed' &&
+      runtimeStatusKeys[2] === 'Pending' &&
+      CanonicalAITaskStatus.Pending === 'Pending' &&
+      CanonicalAITaskStatus.Completed === 'Completed' &&
+      CanonicalAITaskStatus.Failed === 'Failed';
     results.push({
       id: 'B',
       name: 'Pending / Completed / Failed are the only statuses (Cancellation deferred)',
@@ -44,24 +75,26 @@ function runAITaskContractTests(): TestResult[] {
       message: onlyMinimalStatuses ? undefined : 'Found invalid status vocabulary or cancellation states',
     });
 
-    // 3. ReviewTargetIdentity is reused
-    const reusesTargetIdentity = taskCode.includes("import type { ReviewTargetIdentity }") || 
-                                 taskCode.includes("import type {ReviewTargetIdentity}");
+    // 3. ReviewTargetIdentity is reused from canonical aiReviewContract
+    const reusesTargetIdentity =
+      taskCode.includes("import type { ReviewTargetIdentity } from './aiReviewContract'") ||
+      taskCode.includes("import type {ReviewTargetIdentity} from './aiReviewContract'");
     results.push({
       id: 'C',
-      name: 'ReviewTargetIdentity is reused from aiReview',
+      name: 'ReviewTargetIdentity is reused from canonical aiReviewContract',
       classification: 'STATIC_SOURCE_ASSERTION',
       passed: reusesTargetIdentity,
-      message: reusesTargetIdentity ? undefined : 'Did not reuse the existing ReviewTargetIdentity contract',
+      message: reusesTargetIdentity ? undefined : 'Did not reuse the canonical ReviewTargetIdentity contract from ./aiReviewContract',
     });
 
     // 4. Required fields exist: taskId, taskType, target, contentSnapshot, createdAt, status
-    const hasRequiredFields = taskCode.includes('taskId:') && 
-                              taskCode.includes('taskType:') && 
-                              taskCode.includes('target:') && 
-                              taskCode.includes('contentSnapshot:') && 
-                              taskCode.includes('createdAt:') && 
-                              taskCode.includes('status:');
+    const hasRequiredFields =
+      taskCode.includes('taskId:') &&
+      taskCode.includes('taskType:') &&
+      taskCode.includes('target:') &&
+      taskCode.includes('contentSnapshot:') &&
+      taskCode.includes('createdAt:') &&
+      taskCode.includes('status:');
     results.push({
       id: 'D',
       name: 'Required task fields exist (taskId, taskType, target, contentSnapshot, createdAt, status)',
@@ -71,11 +104,13 @@ function runAITaskContractTests(): TestResult[] {
     });
 
     // 5. Fields are marked readonly
-    const utilizesReadonly = taskCode.includes('readonly taskId:') && 
-                             taskCode.includes('readonly taskType:') && 
-                             taskCode.includes('readonly target:') && 
-                             taskCode.includes('readonly contentSnapshot:') && 
-                             taskCode.includes('readonly createdAt:');
+    const utilizesReadonly =
+      taskCode.includes('readonly taskId:') &&
+      taskCode.includes('readonly taskType:') &&
+      taskCode.includes('readonly target:') &&
+      taskCode.includes('readonly contentSnapshot:') &&
+      taskCode.includes('readonly createdAt:') &&
+      taskCode.includes('readonly status:');
     results.push({
       id: 'E',
       name: 'Task attributes are readonly for snapshot immutability',
@@ -85,17 +120,18 @@ function runAITaskContractTests(): TestResult[] {
     });
 
     // 6. No priority, cancellation, language, worker identity/auth, or human authority fields
-    const noProhibitedFields = !taskCode.includes('priority:') && 
-                               !taskCode.includes('workerId:') && 
-                               !taskCode.includes('apiKey:') && 
-                               !taskCode.includes('serviceAccount:') && 
-                               !taskCode.includes('machineToken:') &&
-                               !taskCode.includes('language:') &&
-                               !taskCode.includes('lang:') &&
-                               !taskCode.includes('approved:') && 
-                               !taskCode.includes('published:') && 
-                               !taskCode.includes('workflowState:') && 
-                               !taskCode.includes('suggestedAction:');
+    const noProhibitedFields =
+      !taskCode.includes('priority:') &&
+      !taskCode.includes('workerId:') &&
+      !taskCode.includes('apiKey:') &&
+      !taskCode.includes('serviceAccount:') &&
+      !taskCode.includes('machineToken:') &&
+      !taskCode.includes('language:') &&
+      !taskCode.includes('lang:') &&
+      !taskCode.includes('approved:') &&
+      !taskCode.includes('published:') &&
+      !taskCode.includes('workflowState:') &&
+      !taskCode.includes('suggestedAction:');
     results.push({
       id: 'F',
       name: 'No priority, cancellation, language, worker identity, or human decision fields are specified',
@@ -115,9 +151,15 @@ function runAITaskContractTests(): TestResult[] {
     });
 
     // 8. AIReviewArtifact remains untouched & no duplicate result type was created
-    const noResultTypeDuplication = !taskCode.includes('interface AIReviewArtifact') && 
-                                    !taskCode.includes('interface AgentResult') && 
-                                    !taskCode.includes('interface AITaskResult');
+    const noResultTypeDuplication =
+      reviewCode.includes('export interface AIReviewArtifact') &&
+      reviewCode.includes('readonly isAdvisoryOnly: true;') &&
+      !taskCode.includes('interface AIReviewArtifact') &&
+      !taskCode.includes('interface AgentResult') &&
+      !taskCode.includes('interface AITaskResult') &&
+      !frontendBridgeCode.includes('interface AIReviewArtifact') &&
+      !frontendBridgeCode.includes('interface AgentResult') &&
+      !frontendBridgeCode.includes('interface AITaskResult');
     results.push({
       id: 'H',
       name: 'AIReviewArtifact is untouched and no duplicate result types are declared',
@@ -126,15 +168,33 @@ function runAITaskContractTests(): TestResult[] {
       message: noResultTypeDuplication ? undefined : 'Duplicate result types found inside the task contract',
     });
 
-    // 9. No runtime gateway/persistence/queue implementation exists in this unit
-    const noGatewayImplementation = !fs.existsSync(path.join(process.cwd(), 'src/services/aiTaskService.ts')) &&
-                                    !fs.existsSync(path.join(process.cwd(), 'src/services/aiQueueService.ts'));
+    // 9. No runtime gateway/persistence/queue implementation exists in src/services/
+    const noGatewayImplementation =
+      !fs.existsSync(path.join(process.cwd(), 'src/services/aiTaskService.ts')) &&
+      !fs.existsSync(path.join(process.cwd(), 'src/services/aiQueueService.ts'));
     results.push({
       id: 'I',
       name: 'No runtime gateway, persistence, or queue implementation is created',
       classification: 'STATIC_SOURCE_ASSERTION',
       passed: noGatewayImplementation,
       message: noGatewayImplementation ? undefined : 'Found premature runtime implementations in src/services/',
+    });
+
+    // 10. src/types/aiTask.ts re-exports canonical contract and preserves reference identity
+    const validFrontendBridgeAndIdentity =
+      frontendBridgeCode.includes("from '../../functions/src/shared/aiTaskContract'") &&
+      !frontendBridgeCode.includes('interface AIReviewTask') &&
+      !frontendBridgeCode.includes('AITaskType = {') &&
+      !frontendBridgeCode.includes('AITaskStatus = {') &&
+      FrontendAITaskType === CanonicalAITaskType &&
+      FrontendAITaskStatus === CanonicalAITaskStatus &&
+      FrontendAIReviewTargetType === CanonicalAIReviewTargetType;
+    results.push({
+      id: 'J',
+      name: 'Frontend compatibility bridge re-exports canonical task contract and preserves runtime reference identity',
+      classification: 'UNIT_LOGIC_TEST',
+      passed: validFrontendBridgeAndIdentity,
+      message: validFrontendBridgeAndIdentity ? undefined : 'Frontend compatibility bridge or runtime reference identity mismatch',
     });
 
   } catch (err: any) {

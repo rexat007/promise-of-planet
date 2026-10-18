@@ -4,7 +4,7 @@ import {
 import {
   AIReviewTargetType,
   AIReviewSeverity,
-} from '../../../src/types/aiReview';
+} from '../shared/aiReviewContract';
 
 export interface AdvisoryResultIntakeTaskReference {
   readonly taskId: string;

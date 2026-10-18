@@ -1,5 +1,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  AITaskType as CanonicalAITaskType,
+  AITaskStatus as CanonicalAITaskStatus,
+} from '../functions/src/shared/aiTaskContract';
+import {
+  AITaskType as ServerAITaskType,
+  AITaskStatus as ServerAITaskStatus,
+} from '../functions/src/types/aiTask';
+import {
+  AITaskType as FrontendAITaskType,
+  AITaskStatus as FrontendAITaskStatus,
+} from '../src/types/aiTask';
+import {
+  AIReviewTargetType as CanonicalAIReviewTargetType,
+} from '../functions/src/shared/aiReviewContract';
+import {
+  AIReviewTargetType as FrontendAIReviewTargetType,
+} from '../src/types/aiReview';
 
 interface TestResult {
   id: string;
@@ -27,20 +45,23 @@ function runAITaskServerContractTests(): TestResult[] {
     if (serverFileExists) {
       const serverCode = fs.readFileSync(serverTaskPath, 'utf8');
 
-      // B. it re-exports from '../../../src/types/aiTask'
-      const reexportsCanonical = serverCode.includes("from '../../../src/types/aiTask'");
+      // B. it re-exports from '../shared/aiTaskContract' and does not use cross-root '../../../src/types/aiTask'
+      const reexportsCanonical =
+        serverCode.includes("from '../shared/aiTaskContract'") &&
+        !serverCode.includes("from '../../../src/types/aiTask'");
       results.push({
         id: 'B',
-        name: 'Re-exports directly from canonical src/types/aiTask',
+        name: 'Re-exports directly from canonical ../shared/aiTaskContract',
         classification: 'STATIC_SOURCE_ASSERTION',
         passed: reexportsCanonical,
-        message: reexportsCanonical ? undefined : 'Does not re-export from target relative path',
+        message: reexportsCanonical ? undefined : 'Does not re-export from canonical ../shared/aiTaskContract path',
       });
 
       // C. it does NOT redefine types/interfaces
-      const noRedefinition = !serverCode.includes('interface AIReviewTask') &&
-                             !serverCode.includes('AITaskType = {') &&
-                             !serverCode.includes('AITaskStatus = {');
+      const noRedefinition =
+        !serverCode.includes('interface AIReviewTask') &&
+        !serverCode.includes('AITaskType = {') &&
+        !serverCode.includes('AITaskStatus = {');
       results.push({
         id: 'C',
         name: 'Does not redefine interfaces, types, or enum objects locally',
@@ -50,30 +71,51 @@ function runAITaskServerContractTests(): TestResult[] {
       });
     }
 
-    // D. Canonical src/types/aiTask.ts remains unchanged
-    const canonicalPath = path.join(process.cwd(), 'src/types/aiTask.ts');
+    // D. Canonical functions/src/shared/aiTaskContract.ts and frontend compatibility bridge src/types/aiTask.ts exist and remain aligned
+    const canonicalPath = path.join(process.cwd(), 'functions/src/shared/aiTaskContract.ts');
+    const frontendBridgePath = path.join(process.cwd(), 'src/types/aiTask.ts');
     const canonicalExists = fs.existsSync(canonicalPath);
+    const frontendBridgeExists = fs.existsSync(frontendBridgePath);
+    const frontendBridgeCode = frontendBridgeExists ? fs.readFileSync(frontendBridgePath, 'utf8') : '';
+    const frontendBridgeClean =
+      frontendBridgeExists &&
+      frontendBridgeCode.includes("from '../../functions/src/shared/aiTaskContract'") &&
+      !frontendBridgeCode.includes('interface AIReviewTask') &&
+      !frontendBridgeCode.includes('AITaskType = {') &&
+      !frontendBridgeCode.includes('AITaskStatus = {');
+
     results.push({
       id: 'D_1',
-      name: 'Canonical src/types/aiTask.ts exists',
+      name: 'Canonical functions/src/shared/aiTaskContract.ts and frontend bridge src/types/aiTask.ts exist without duplicate declarations',
       classification: 'STATIC_SOURCE_ASSERTION',
-      passed: canonicalExists,
-      message: canonicalExists ? undefined : 'Canonical src/types/aiTask.ts was deleted or moved',
+      passed: canonicalExists && frontendBridgeClean,
+      message: (canonicalExists && frontendBridgeClean)
+        ? undefined
+        : 'Canonical functions/src/shared/aiTaskContract.ts or frontend compatibility bridge src/types/aiTask.ts is missing or invalid',
     });
 
     if (canonicalExists) {
       const canonicalCode = fs.readFileSync(canonicalPath, 'utf8');
-      const onlyContentReviewType = canonicalCode.includes("CONTENT_REVIEW: 'CONTENT_REVIEW'") && 
-                                    !canonicalCode.includes('LIBRARY_INGEST') && 
-                                    !canonicalCode.includes('MEDIA_SYNC') && 
-                                    !canonicalCode.includes('SOURCE_DISCOVERY');
-      const onlyMinimalStatuses = canonicalCode.includes("Pending: 'Pending'") && 
-                                  canonicalCode.includes("Completed: 'Completed'") && 
-                                  canonicalCode.includes("Failed: 'Failed'") && 
-                                  !canonicalCode.includes('InProgress') && 
-                                  !canonicalCode.includes('Cancelled') && 
-                                  !canonicalCode.includes('Queued');
-      
+      const onlyContentReviewType =
+        canonicalCode.includes("CONTENT_REVIEW: 'CONTENT_REVIEW'") &&
+        !canonicalCode.includes('LIBRARY_INGEST') &&
+        !canonicalCode.includes('MEDIA_SYNC') &&
+        !canonicalCode.includes('SOURCE_DISCOVERY') &&
+        Object.keys(CanonicalAITaskType).length === 1 &&
+        CanonicalAITaskType.CONTENT_REVIEW === 'CONTENT_REVIEW';
+      const runtimeStatuses = Object.keys(CanonicalAITaskStatus).sort();
+      const onlyMinimalStatuses =
+        canonicalCode.includes("Pending: 'Pending'") &&
+        canonicalCode.includes("Completed: 'Completed'") &&
+        canonicalCode.includes("Failed: 'Failed'") &&
+        !canonicalCode.includes('InProgress') &&
+        !canonicalCode.includes('Cancelled') &&
+        !canonicalCode.includes('Queued') &&
+        runtimeStatuses.length === 3 &&
+        runtimeStatuses[0] === 'Completed' &&
+        runtimeStatuses[1] === 'Failed' &&
+        runtimeStatuses[2] === 'Pending';
+
       results.push({
         id: 'D_2',
         name: 'Canonical task types remain restricted (CONTENT_REVIEW only)',
@@ -89,13 +131,29 @@ function runAITaskServerContractTests(): TestResult[] {
         passed: onlyMinimalStatuses,
         message: onlyMinimalStatuses ? undefined : 'Canonical status vocabulary has been altered',
       });
+
+      const referenceIdentityIntact =
+        FrontendAITaskType === CanonicalAITaskType &&
+        ServerAITaskType === CanonicalAITaskType &&
+        FrontendAITaskStatus === CanonicalAITaskStatus &&
+        ServerAITaskStatus === CanonicalAITaskStatus &&
+        FrontendAIReviewTargetType === CanonicalAIReviewTargetType;
+
+      results.push({
+        id: 'D_4',
+        name: 'Runtime reference identity holds across canonical, server bridge, and frontend bridge',
+        classification: 'UNIT_LOGIC_TEST',
+        passed: referenceIdentityIntact,
+        message: referenceIdentityIntact ? undefined : 'Reference identity mismatch between canonical, server, and frontend exports',
+      });
     }
 
-    // E. No PEIA server runtime implementation was introduced
-    const serverFilesCheck = !fs.existsSync(path.join(process.cwd(), 'functions/src/services/aiTaskService.ts')) &&
-                              !fs.existsSync(path.join(process.cwd(), 'functions/src/services/aiTaskRepository.ts')) &&
-                              !fs.existsSync(path.join(process.cwd(), 'functions/src/youtube/aiTaskHandler.ts'));
-    
+    // E. No legacy PEIA server runtime implementation was introduced
+    const serverFilesCheck =
+      !fs.existsSync(path.join(process.cwd(), 'functions/src/services/aiTaskService.ts')) &&
+      !fs.existsSync(path.join(process.cwd(), 'functions/src/services/aiTaskRepository.ts')) &&
+      !fs.existsSync(path.join(process.cwd(), 'functions/src/youtube/aiTaskHandler.ts'));
+
     // Check functions/src/index.ts
     const indexCode = fs.readFileSync(path.join(process.cwd(), 'functions/src/index.ts'), 'utf8');
     const indexClean = !indexCode.includes('aiTask') && !indexCode.includes('TaskService') && !indexCode.includes('TaskHandler');
@@ -120,8 +178,9 @@ function runAITaskServerContractTests(): TestResult[] {
     });
 
     // G. No worker-auth implementation was added
-    const noWorkerAuthFiles = !fs.existsSync(path.join(process.cwd(), 'functions/src/auth/workerAuth.ts')) &&
-                              !fs.existsSync(path.join(process.cwd(), 'functions/src/youtube/workerAuth.ts'));
+    const noWorkerAuthFiles =
+      !fs.existsSync(path.join(process.cwd(), 'functions/src/auth/workerAuth.ts')) &&
+      !fs.existsSync(path.join(process.cwd(), 'functions/src/youtube/workerAuth.ts'));
     results.push({
       id: 'G',
       name: 'No machine principal or worker auth helper was added',

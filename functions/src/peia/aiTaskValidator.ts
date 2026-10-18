@@ -1,5 +1,5 @@
 import { AITaskType, AITaskStatus, type AIReviewTask } from '../types/aiTask';
-import { AIReviewTargetType } from '../../../src/types/aiReview';
+import { AIReviewTargetType } from '../shared/aiReviewContract';
 
 export class ValidationError extends Error {
   readonly code: string;
