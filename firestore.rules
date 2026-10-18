@@ -30,6 +30,42 @@ service cloud.firestore {
       );
     }
 
+    function isAuthorizedCommunityReviewer() {
+      return isAdmin() && (
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'Owner' ||
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'CitizenModerator' ||
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'ContentEditor' ||
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'LibraryCurator' ||
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'RightsReviewer' ||
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'TrainingManager'
+      );
+    }
+
+    function isCanonicalCitizenSubmissionShape() {
+      return request.resource.data.keys().hasAll([
+          'id', 'submittedAt', 'submittedByUid', 'contributorName',
+          'title', 'body', 'sourceLanguage', 'category',
+          'status', 'attachments', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'id', 'submittedAt', 'submittedByUid', 'contributorName', 'contributorContact',
+          'title', 'body', 'sourceLanguage', 'category', 'locationDescription',
+          'status', 'attachments', 'editorialReferenceId', 'moderatorNotes',
+          'reviewedByUid', 'reviewedByName', 'updatedAt'
+        ])
+        && request.resource.data.id is string
+        && request.resource.data.submittedAt is string
+        && request.resource.data.submittedByUid is string
+        && request.resource.data.contributorName is string
+        && request.resource.data.title is string
+        && request.resource.data.body is string
+        && (request.resource.data.sourceLanguage == 'ar' || request.resource.data.sourceLanguage == 'en')
+        && (request.resource.data.category in ['water', 'climate', 'desertification', 'marine'])
+        && (request.resource.data.status in ['Received', 'UnderReview', 'AcceptedForEditorial', 'Rejected'])
+        && request.resource.data.attachments is list
+        && request.resource.data.updatedAt is string;
+    }
+
     function isCanonicalAccountShape() {
       return request.resource.data.keys().hasOnly(['id', 'email', 'displayName', 'createdAt', 'updatedAt'])
         && request.resource.data.id is string
@@ -171,6 +207,35 @@ service cloud.firestore {
       // Client mutations strictly denied (handled by server callable / admin SDK)
       allow create, update, delete: if false;
     }
+
+    // Canonical Citizen Journalism Submissions Collection Rules Block
+    match /citizen_submissions/{submissionId} {
+      // Contributor can only read their own submission; active Admins can read all submissions
+      allow get, list: if (isSignedIn() && resource.data.submittedByUid == request.auth.uid) || isAdmin();
+
+      // Authenticated citizen with a provisioned canonical Account can create a new submission in Received status
+      allow create: if isSignedIn()
+        && exists(/databases/$(database)/documents/accounts/$(request.auth.uid))
+        && request.resource.data.id == submissionId
+        && request.resource.data.submittedByUid == request.auth.uid
+        && request.resource.data.status == 'Received'
+        && !('moderatorNotes' in request.resource.data)
+        && !('editorialReferenceId' in request.resource.data)
+        && !('reviewedByUid' in request.resource.data)
+        && !('reviewedByName' in request.resource.data)
+        && isCanonicalCitizenSubmissionShape();
+
+      // Only authorized community reviewers can update moderation status/notes; ownership & timestamps are immutable
+      allow update: if isAuthorizedCommunityReviewer()
+        && request.resource.data.id == submissionId
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.submittedByUid == resource.data.submittedByUid
+        && request.resource.data.submittedAt == resource.data.submittedAt
+        && isCanonicalCitizenSubmissionShape();
+
+      allow delete: if false;
+    }
   }
 }
+
 

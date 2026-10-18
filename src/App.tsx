@@ -15,9 +15,10 @@ import { ResponsiveGuard } from './components/dev/ResponsiveGuard';
 import { smoothScrollToSection } from './utils/interaction';
 import { TrainingCenter } from './components/training/TrainingCenter';
 import { AboutUsView } from './components/about/AboutUsView';
-import { ContactView } from './components/contact/ContactView';
 import { PublicMediaHub } from './components/media/PublicMediaHub';
 import { PublicNewsHub } from './components/news/PublicNewsHub';
+import { PublicCitizenJournalist } from './components/community/PublicCitizenJournalist';
+import type { PublicPageKey } from './components/layout/Header';
 import type { Language } from './types';
 import './App.css';
 
@@ -37,9 +38,14 @@ function App() {
     }
     return false;
   });
-  const [activePage, setActivePage] = useState<'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media'>(() => {
-    if (typeof window !== 'undefined' && window.location.hash.startsWith('#news')) {
-      return 'news';
+  const [activePage, setActivePage] = useState<PublicPageKey>(() => {
+    if (typeof window !== 'undefined') {
+      if (window.location.hash.startsWith('#news')) {
+        return 'news';
+      }
+      if (window.location.hash === '#citizen-journalist') {
+        return 'citizen-journalist';
+      }
     }
     return 'home';
   });
@@ -60,6 +66,8 @@ function App() {
       } else if (hash === '#news') {
         setActivePage('news');
         setInitialNewsSlug(undefined);
+      } else if (hash === '#citizen-journalist') {
+        setActivePage('citizen-journalist');
       }
     };
     window.addEventListener('hashchange', handleHashChange);
@@ -105,10 +113,10 @@ function App() {
           >
             {activePage === 'news' ? (
               <PublicNewsHub initialArticleIdOrSlug={initialNewsSlug} onNavigate={(page) => setActivePage(page)} />
-            ) : activePage === 'about' ? (
+            ) : activePage === 'citizen-journalist' ? (
+              <PublicCitizenJournalist />
+            ) : activePage === 'about' || activePage === 'contact' ? (
               <AboutUsView onNavigate={(page) => setActivePage(page)} />
-            ) : activePage === 'contact' ? (
-              <ContactView onNavigate={(page) => setActivePage(page)} />
             ) : activePage === 'training-center' ? (
               <TrainingCenter />
             ) : activePage === 'media' ? (
@@ -153,6 +161,13 @@ function App() {
                           className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-900/80 hover:bg-emerald-800 text-emerald-200 border border-emerald-700/60 text-xs sm:text-sm font-medium pop-motion-micro pop-hover-lift cursor-pointer"
                         >
                           <span>{isAr ? 'تصفح مركز التدريب والمسارات البيئية' : 'Explore Training Center Hub'}</span>
+                          <span aria-hidden="true">→</span>
+                        </button>
+                        <button
+                          onClick={() => setActivePage('citizen-journalist')}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-900/90 hover:bg-emerald-800 text-emerald-200 border border-emerald-700/60 text-xs sm:text-sm font-medium pop-motion-micro pop-hover-lift cursor-pointer"
+                        >
+                          <span>{isAr ? 'المواطن الصحفي' : 'Citizen Journalist'}</span>
                           <span aria-hidden="true">→</span>
                         </button>
                         <button

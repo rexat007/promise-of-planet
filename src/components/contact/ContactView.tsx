@@ -1,21 +1,15 @@
 import { useTranslation } from 'react-i18next';
 import { Container } from '../layout/Container';
+import { SocialPlatformIcon } from '../common/SocialPlatformIcon';
+import type { PublicPageKey } from '../layout/Header';
 import { 
-  Share2, 
   ExternalLink, 
   Info,
   Calendar
 } from 'lucide-react';
 
-const YouTubeIcon = ({ className = 'w-6 h-6' }: { className?: string }) => (
-  <svg className={className} viewBox="0 0 24 24" fill="currentColor">
-    <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
-  </svg>
-);
-
-
 interface ContactViewProps {
-  onNavigate?: (page: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media') => void;
+  onNavigate?: (page: PublicPageKey) => void;
 }
 
 export function ContactView({ onNavigate: _onNavigate }: ContactViewProps) {
@@ -49,8 +43,8 @@ export function ContactView({ onNavigate: _onNavigate }: ContactViewProps) {
           <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 sm:p-8 shadow-xs hover:border-red-500/40 transition-colors">
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
               <div className="flex items-start gap-4">
-                <div className="p-3.5 rounded-xl bg-red-50 dark:bg-red-950/50 text-red-600 dark:text-red-400 shrink-0">
-                  <YouTubeIcon className="w-6 h-6" />
+                <div className="p-2.5 rounded-xl bg-red-50 dark:bg-red-950/50 text-red-600 dark:text-red-400 shrink-0">
+                  <SocialPlatformIcon platform="youtube" alt="YouTube" sizeClassName="w-8 h-8" />
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
@@ -87,8 +81,8 @@ export function ContactView({ onNavigate: _onNavigate }: ContactViewProps) {
           {/* 2. Official Facebook Archive & Community (Established 2024) */}
           <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 sm:p-8 shadow-xs">
             <div className="flex items-start gap-4">
-              <div className="p-3.5 rounded-xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 shrink-0">
-                <Share2 className="w-6 h-6" />
+              <div className="p-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 shrink-0">
+                <SocialPlatformIcon platform="facebook" alt="Facebook" sizeClassName="w-8 h-8" />
               </div>
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
@@ -127,8 +121,8 @@ export function ContactView({ onNavigate: _onNavigate }: ContactViewProps) {
           <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 sm:p-8 shadow-xs hover:border-pink-500/40 transition-colors">
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
               <div className="flex items-start gap-4">
-                <div className="p-3.5 rounded-xl bg-pink-50 dark:bg-pink-950/50 text-pink-600 dark:text-pink-400 shrink-0">
-                  <Share2 className="w-6 h-6" />
+                <div className="p-2.5 rounded-xl bg-pink-50 dark:bg-pink-950/50 text-pink-600 dark:text-pink-400 shrink-0">
+                  <SocialPlatformIcon platform="instagram" alt="Instagram" sizeClassName="w-8 h-8" />
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
@@ -160,8 +154,8 @@ export function ContactView({ onNavigate: _onNavigate }: ContactViewProps) {
           <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 sm:p-8 shadow-xs hover:border-green-500/40 transition-colors">
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
               <div className="flex items-start gap-4">
-                <div className="p-3.5 rounded-xl bg-green-50 dark:bg-green-950/50 text-green-600 dark:text-green-400 shrink-0">
-                  <Share2 className="w-6 h-6" />
+                <div className="p-2.5 rounded-xl bg-green-50 dark:bg-green-950/50 text-green-600 dark:text-green-400 shrink-0">
+                  <SocialPlatformIcon platform="whatsapp" alt="WhatsApp" sizeClassName="w-8 h-8" />
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">

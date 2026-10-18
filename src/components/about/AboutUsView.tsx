@@ -1,5 +1,8 @@
 import { useTranslation } from 'react-i18next';
 import { Container } from '../layout/Container';
+import { SocialPlatformIcon } from '../common/SocialPlatformIcon';
+import { smoothScrollToSection } from '../../utils/interaction';
+import type { PublicPageKey } from '../layout/Header';
 import { 
   Globe, 
   FileText, 
@@ -7,11 +10,14 @@ import {
   ShieldCheck, 
   Tv, 
   ArrowRight, 
-  ArrowLeft 
+  ArrowLeft,
+  ExternalLink,
+  Info,
+  Calendar
 } from 'lucide-react';
 
 interface AboutUsViewProps {
-  onNavigate?: (page: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media') => void;
+  onNavigate?: (page: PublicPageKey) => void;
 }
 
 export function AboutUsView({ onNavigate }: AboutUsViewProps) {
@@ -54,6 +60,10 @@ export function AboutUsView({ onNavigate }: AboutUsViewProps) {
     },
   ];
 
+  const handleScrollToChannels = () => {
+    smoothScrollToSection('official-channels-section');
+  };
+
   return (
     <div className="bg-gray-50/50 dark:bg-gray-950 min-h-screen py-8 sm:py-14 pop-page-fade">
       <Container className="max-w-5xl">
@@ -62,15 +72,14 @@ export function AboutUsView({ onNavigate }: AboutUsViewProps) {
           <span className="text-xs font-semibold text-emerald-800 dark:text-emerald-400 uppercase tracking-wider">
             {isAr ? 'عن المنصة والمهمة التحريرية' : 'About the Platform & Editorial Mission'}
           </span>
-          {onNavigate && (
-            <button
-              onClick={() => onNavigate('contact')}
-              className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
-            >
-              <span>{isAr ? 'القنوات الرسمية والاتصال' : 'Official Channels & Contact'}</span>
-              <ArrowIcon className="w-3.5 h-3.5" />
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={handleScrollToChannels}
+            className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+          >
+            <span>{isAr ? 'القنوات الرسمية والاتصال' : 'Official Channels & Contact'}</span>
+            <ArrowIcon className="w-3.5 h-3.5" />
+          </button>
         </div>
 
         {/* Hero Introduction */}
@@ -144,7 +153,7 @@ export function AboutUsView({ onNavigate }: AboutUsViewProps) {
         </div>
 
         {/* Conference Coverage & Press Engagement */}
-        <div className="bg-emerald-950 text-white rounded-2xl p-6 sm:p-8 border border-emerald-900 space-y-4">
+        <div className="bg-emerald-950 text-white rounded-2xl p-6 sm:p-8 border border-emerald-900 space-y-4 mb-12">
           <h2 className="text-lg sm:text-xl font-bold text-emerald-200">
             {isAr ? 'التغطيات البيئية والمؤتمرات المناخية' : 'Environmental & Climate Conference Coverage'}
           </h2>
@@ -154,24 +163,232 @@ export function AboutUsView({ onNavigate }: AboutUsViewProps) {
               : 'Promise of Planet tracks and covers regional and multilateral environmental events focusing on climate justice, anti-desertification initiatives, and ecological adaptation priorities for vulnerable regions.'}
           </p>
 
-          {onNavigate && (
-            <div className="pt-2 flex flex-wrap items-center gap-3">
-              <button
-                onClick={() => onNavigate('contact')}
-                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-medium transition-colors cursor-pointer"
-              >
-                {isAr ? 'التواصل والاستفسارات الصحفية' : 'Media & Press Inquiries'}
-              </button>
-              <button
-                onClick={() => onNavigate('training-center')}
-                className="px-4 py-2 rounded-lg bg-emerald-900 hover:bg-emerald-800 text-emerald-200 border border-emerald-700/60 text-xs sm:text-sm font-medium transition-colors cursor-pointer"
-              >
-                {isAr ? 'تصفح مركز التدريب' : 'Explore Training Center'}
-              </button>
+          <div className="pt-2 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleScrollToChannels}
+              className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-medium transition-colors cursor-pointer"
+            >
+              {isAr ? 'التواصل والاستفسارات الصحفية' : 'Media & Press Inquiries'}
+            </button>
+            {onNavigate && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('citizen-journalist')}
+                  className="px-4 py-2 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-emerald-100 border border-emerald-600/60 text-xs sm:text-sm font-medium transition-colors cursor-pointer"
+                >
+                  {isAr ? 'المواطن الصحفي — إرسال بلاغ' : 'Citizen Journalist — Submit Report'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('training-center')}
+                  className="px-4 py-2 rounded-lg bg-emerald-900 hover:bg-emerald-800 text-emerald-200 border border-emerald-700/60 text-xs sm:text-sm font-medium transition-colors cursor-pointer"
+                >
+                  {isAr ? 'تصفح مركز التدريب' : 'Explore Training Center'}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Consolidated Official Channels & Engagement Section */}
+        <div id="official-channels-section" className="pt-8 border-t border-gray-200 dark:border-gray-800 space-y-6">
+          <div className="space-y-2">
+            <span className="text-xs font-semibold text-emerald-800 dark:text-emerald-400 uppercase tracking-wider block">
+              {isAr ? 'القنوات الرسمية والتواصل الإعلامي' : 'Official Channels & Media Inquiries'}
+            </span>
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-gray-900 dark:text-white tracking-tight">
+              {isAr ? 'التواصل والقنوات المعتمدة' : 'Official Channels & Engagement'}
+            </h2>
+            <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400 leading-relaxed max-w-2xl">
+              {isAr
+                ? 'متابعة المواد التوثيقية والندوات والتغطيات الميدانية عبر المنافذ الرسمية لمنصة وعد الكوكب، والتواصل المباشر مع فرق التحرير والتدريب.'
+                : 'Follow documentary releases, webinars, and field reporting through the verified official channels of Promise of Planet.'}
+            </p>
+          </div>
+
+          <div className="space-y-5">
+            {/* 1. Official YouTube Channel */}
+            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 sm:p-8 shadow-xs hover:border-red-500/40 transition-colors">
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                <div className="flex items-start gap-4">
+                  <div className="p-2.5 rounded-xl bg-red-50 dark:bg-red-950/50 text-red-600 dark:text-red-400 shrink-0">
+                    <SocialPlatformIcon
+                      platform="youtube"
+                      alt={isAr ? 'يوتيوب وعد الكوكب' : 'Promise of Planet YouTube'}
+                      sizeClassName="w-8 h-8"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-red-100 dark:bg-red-900/60 text-red-800 dark:text-red-300">
+                        {isAr ? 'قناة معتمدة' : 'Official Channel'}
+                      </span>
+                      <span className="text-xs text-gray-400 font-mono">@PromiseOfPlanet</span>
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900 dark:text-white">
+                      {isAr ? 'قناة وعد الكوكب على يوتيوب' : 'Promise of Planet on YouTube'}
+                    </h3>
+                    <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400 leading-relaxed max-w-xl">
+                      {isAr
+                        ? 'القناة الرسمية المخصصة للمواد المرئية، الندوات البيئية، والتقارير الميدانية المصورة.'
+                        : 'The official channel dedicated to documentary features, environmental webinars, and visual field reports.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="sm:self-center shrink-0">
+                  <a
+                    href="https://www.youtube.com/@PromiseOfPlanet"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-medium text-xs sm:text-sm transition-colors shadow-xs"
+                  >
+                    <span>{isAr ? 'زيارة القناة الرسمية' : 'Visit Official Channel'}</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              </div>
             </div>
-          )}
+
+            {/* 2. Official Facebook Archive & Community */}
+            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 sm:p-8 shadow-xs hover:border-blue-500/40 transition-colors">
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                <div className="flex items-start gap-4">
+                  <div className="p-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 shrink-0">
+                    <SocialPlatformIcon
+                      platform="facebook"
+                      alt={isAr ? 'فيسبوك وعد الكوكب' : 'Promise of Planet Facebook'}
+                      sizeClassName="w-8 h-8"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-300">
+                        {isAr ? 'مجتمع وأرشيف موثق' : 'Official Page & Archive'}
+                      </span>
+                      <span className="text-xs text-gray-400 flex items-center gap-1">
+                        <Calendar className="w-3 h-3" />
+                        <span>{isAr ? 'نشط منذ 2024' : 'Active since 2024'}</span>
+                      </span>
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900 dark:text-white">
+                      {isAr ? 'صفحة وعد الكوكب على فيسبوك' : 'Promise of Planet on Facebook'}
+                    </h3>
+                    <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400 leading-relaxed max-w-xl">
+                      {isAr
+                        ? 'تضم الصفحة أرشيف التغطيات الميدانية، الفعاليات الحية، والتقارير الصحفية المنشورة منذ عام 2024.'
+                        : 'Features field reporting, live broadcasts, and media releases published since 2024.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="sm:self-center shrink-0">
+                  <a
+                    href="https://www.facebook.com/PromiseOfPlanet/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium text-xs sm:text-sm transition-colors shadow-xs"
+                  >
+                    <span>{isAr ? 'زيارة صفحة فيسبوك الرسمية' : 'Visit Official Facebook Page'}</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            {/* 3. Instagram Account */}
+            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 sm:p-8 shadow-xs hover:border-pink-500/40 transition-colors">
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                <div className="flex items-start gap-4">
+                  <div className="p-2.5 rounded-xl bg-pink-50 dark:bg-pink-950/50 text-pink-600 dark:text-pink-400 shrink-0">
+                    <SocialPlatformIcon
+                      platform="instagram"
+                      alt={isAr ? 'إنستغرام وعد الكوكب' : 'Promise of Planet Instagram'}
+                      sizeClassName="w-8 h-8"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-pink-100 dark:bg-pink-900/60 text-pink-800 dark:text-pink-300">
+                        {isAr ? 'حساب معتمد' : 'Official Account'}
+                      </span>
+                      <span className="text-xs text-gray-400 font-mono">@promiseplanet1974</span>
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900 dark:text-white">
+                      {isAr ? 'إنستغرام وعد الكوكب' : 'Promise of Planet on Instagram'}
+                    </h3>
+                  </div>
+                </div>
+                <div className="sm:self-center shrink-0">
+                  <a
+                    href="https://www.instagram.com/promiseplanet1974?igsh=aXhiOHpzMDB3ajZx"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-pink-600 hover:bg-pink-700 text-white font-medium text-xs sm:text-sm transition-colors shadow-xs"
+                  >
+                    <span>{isAr ? 'زيارة إنستغرام الرسمي' : 'Visit Official Instagram'}</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            {/* 4. WhatsApp Channel */}
+            <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 p-6 sm:p-8 shadow-xs hover:border-green-500/40 transition-colors">
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                <div className="flex items-start gap-4">
+                  <div className="p-2.5 rounded-xl bg-green-50 dark:bg-green-950/50 text-green-600 dark:text-green-400 shrink-0">
+                    <SocialPlatformIcon
+                      platform="whatsapp"
+                      alt={isAr ? 'واتساب وعد الكوكب' : 'Promise of Planet WhatsApp'}
+                      sizeClassName="w-8 h-8"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-green-100 dark:bg-green-900/60 text-green-800 dark:text-green-300">
+                        {isAr ? 'قناة بث مباشرة' : 'Broadcast Channel'}
+                      </span>
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900 dark:text-white">
+                      {isAr ? 'قناة وعد الكوكب على واتساب' : 'Promise of Planet on WhatsApp'}
+                    </h3>
+                  </div>
+                </div>
+                <div className="sm:self-center shrink-0">
+                  <a
+                    href="https://whatsapp.com/channel/0029Vazh20iB4hdWzpMeOI0r"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-700 text-white font-medium text-xs sm:text-sm transition-colors shadow-xs"
+                  >
+                    <span>{isAr ? 'متابعة قناة واتساب' : 'Follow WhatsApp Channel'}</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            {/* 5. Journalist Accreditation & Conference Coverage Guidance */}
+            <div className="bg-emerald-50/70 dark:bg-emerald-950/40 rounded-2xl border border-emerald-200/80 dark:border-emerald-800/60 p-6 sm:p-8 space-y-3">
+              <div className="flex items-center gap-2 text-emerald-800 dark:text-emerald-300 font-bold text-sm">
+                <Info className="w-4 h-4 shrink-0" />
+                <h3>
+                  {isAr ? 'استفسارات الاعتماد والتغطيات الصحفية للمؤتمرات' : 'Press Accreditation & Conference Inquiries'}
+                </h3>
+              </div>
+              <p className="text-xs sm:text-sm text-gray-700 dark:text-gray-300 leading-relaxed">
+                {isAr
+                  ? 'للصحفيين والباحثين والمؤسسات المهتمة بالتغطيات الصحفية والفعاليات البيئية والمناخية، يمكن التواصل ومتابعة التحديثات عبر قنوات البث الرسمية المعلنة أعلاه، إلى حين إطلاق بوابة الاتصال التحريرية المباشرة.'
+                  : 'Journalists, researchers, and organizations seeking accreditation verification and environmental conference coverage inquiries can follow official updates via our official broadcast channels above.'}
+              </p>
+            </div>
+          </div>
         </div>
       </Container>
     </div>
   );
 }
+

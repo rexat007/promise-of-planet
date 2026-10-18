@@ -4,10 +4,19 @@ import { Container } from './Container';
 import { Shield, ChevronDown, BookOpen, FileText, Scale, Package, Sparkles, Users, Clock, Menu, X } from 'lucide-react';
 import { smoothScrollToSection } from '../../utils/interaction';
 
+export type PublicPageKey =
+  | 'home'
+  | 'news'
+  | 'training-center'
+  | 'media'
+  | 'citizen-journalist'
+  | 'about'
+  | 'contact';
+
 interface HeaderProps {
   onEnterAdmin?: () => void;
-  activePage?: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media';
-  onNavigate?: (page: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media') => void;
+  activePage?: PublicPageKey;
+  onNavigate?: (page: PublicPageKey) => void;
 }
 
 export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: HeaderProps) {
@@ -92,6 +101,18 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setActivePanelKey(null);
+    } else if (key === 'media') {
+      if (onNavigate) {
+        onNavigate('media');
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      setActivePanelKey(null);
+    } else if (key === 'citizen-journalist') {
+      if (onNavigate) {
+        onNavigate('citizen-journalist');
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      setActivePanelKey(null);
     } else if (key === 'about') {
       if (onNavigate) {
         onNavigate('about');
@@ -100,15 +121,11 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
       setActivePanelKey(null);
     } else if (key === 'contact') {
       if (onNavigate) {
-        onNavigate('contact');
+        onNavigate('about');
+        setTimeout(() => {
+          smoothScrollToSection('official-channels-section');
+        }, 100);
       }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      setActivePanelKey(null);
-    } else if (key === 'media') {
-      if (onNavigate) {
-        onNavigate('media');
-      }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
       setActivePanelKey(null);
     }
   };
@@ -160,7 +177,7 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
               nextTriggerEl.focus();
             }
           } else {
-            const nextEl = document.getElementById('header-about-nav-btn');
+            const nextEl = document.getElementById('header-citizen-journalist-nav-btn');
             if (nextEl) {
               nextEl.focus();
             }
@@ -180,11 +197,11 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
   const navItems = [
     { key: 'home', label: t('navigation.home') },
     { key: 'news', label: isAr ? 'الأخبار' : 'News' },
-    { key: 'library', label: t('navigation.library'), hasPanel: true },
-    { key: 'training', label: t('navigation.training'), hasPanel: true },
-    { key: 'about', label: t('navigation.aboutUs') },
-    { key: 'contact', label: t('navigation.contact') },
-    { key: 'media', label: isAr ? 'الوسائط المتعددة' : 'Multimedia' },
+    { key: 'media', label: isAr ? 'الوسائط' : 'Multimedia' },
+    { key: 'library', label: isAr ? 'المكتبة' : 'Library', hasPanel: true },
+    { key: 'training', label: isAr ? 'التدريب' : 'Training', hasPanel: true },
+    { key: 'citizen-journalist', label: isAr ? 'المواطن الصحفي' : 'Citizen Journalist' },
+    { key: 'about', label: isAr ? 'من نحن' : 'About Us' },
   ];
 
   const librarySubtopics = [
@@ -289,10 +306,10 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
               const isActive = 
                 (item.key === 'home' && activePage === 'home') ||
                 (item.key === 'news' && activePage === 'news') ||
+                (item.key === 'media' && activePage === 'media') ||
                 (item.key === 'training' && activePage === 'training-center') ||
-                (item.key === 'about' && activePage === 'about') ||
-                (item.key === 'contact' && activePage === 'contact') ||
-                (item.key === 'media' && activePage === 'media');
+                (item.key === 'citizen-journalist' && activePage === 'citizen-journalist') ||
+                (item.key === 'about' && (activePage === 'about' || activePage === 'contact'));
 
               if (item.hasPanel) {
                 return (

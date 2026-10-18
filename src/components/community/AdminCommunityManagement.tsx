@@ -1,15 +1,17 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { 
   Users, 
   Search, 
   FileText, 
-  Eye
+  Eye,
+  RefreshCw,
+  AlertCircle
 } from 'lucide-react';
 import type { AdminUser } from '../../types/admin';
 import type { CitizenSubmission } from '../../types/community';
-import { SubmissionStatus } from '../../types/community';
-import { MOCK_CITIZEN_SUBMISSIONS } from '../../data/mockCommunityData';
+import { SubmissionStatus, CANONICAL_COMMUNITY_CATEGORIES } from '../../types/community';
+import { CitizenSubmissionService } from '../../services/citizenSubmissionService';
 import { CitizenSubmissionReviewModal } from './CitizenSubmissionReviewModal';
 import { getCommunityCategoryLabel } from '../content/contentFormatters';
 import { dynamicTranslationService } from '../../services/dynamicTranslation';
@@ -23,7 +25,9 @@ export function AdminCommunityManagement({ currentUser }: AdminCommunityManageme
   const isAr = i18n.language === 'ar';
   const targetLang = isAr ? 'ar' : 'en';
 
-  const [submissions, setSubmissions] = useState<CitizenSubmission[]>(MOCK_CITIZEN_SUBMISSIONS);
+  const [submissions, setSubmissions] = useState<CitizenSubmission[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Filter States
   const [searchQuery, setSearchQuery] = useState('');
@@ -35,9 +39,31 @@ export function AdminCommunityManagement({ currentUser }: AdminCommunityManageme
   const [activeSubmission, setActiveSubmission] = useState<CitizenSubmission | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
-  // Unique Categories from mock data
+  const loadSubmissions = useCallback(async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const list = await CitizenSubmissionService.listSubmissionsForAdmin(currentUser);
+      setSubmissions(list);
+    } catch (err: any) {
+      setLoadError(
+        err?.message ||
+          (isAr
+            ? 'تعذر تحميل بلاغات صحافة المواطن من الخادم.'
+            : 'Unable to load citizen submissions from backend.')
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  }, [currentUser, isAr]);
+
+  useEffect(() => {
+    loadSubmissions();
+  }, [loadSubmissions]);
+
+  // Canonical Categories plus any present in loaded submissions
   const categories = useMemo(() => {
-    const set = new Set(submissions.map(s => s.category));
+    const set = new Set<string>([...CANONICAL_COMMUNITY_CATEGORIES, ...submissions.map(s => s.category)]);
     return Array.from(set);
   }, [submissions]);
 
@@ -77,6 +103,7 @@ export function AdminCommunityManagement({ currentUser }: AdminCommunityManageme
 
   const handleUpdateSubmission = (updated: CitizenSubmission) => {
     setSubmissions(prev => prev.map(s => s.id === updated.id ? updated : s));
+    setActiveSubmission(updated);
   };
 
   const getStatusBadge = (status: SubmissionStatus) => {
@@ -132,11 +159,36 @@ export function AdminCommunityManagement({ currentUser }: AdminCommunityManageme
         </div>
         
         <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={loadSubmissions}
+            disabled={isLoading}
+            className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 font-bold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+            <span>{isAr ? 'تحديث' : 'Refresh'}</span>
+          </button>
           <span className="px-3 py-1.5 rounded-xl bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold text-xs">
             {isAr ? `الإجمالي: ${filteredSubmissions.length}` : `Total: ${filteredSubmissions.length}`}
           </span>
         </div>
       </div>
+
+      {loadError && (
+        <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 flex items-center justify-between gap-3 text-xs sm:text-sm text-amber-800 dark:text-amber-300">
+          <div className="flex items-center gap-2.5">
+            <AlertCircle className="w-5 h-5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span>{loadError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={loadSubmissions}
+            className="px-3 py-1.5 rounded-lg bg-amber-200/70 dark:bg-amber-900/60 hover:bg-amber-200 font-bold text-xs shrink-0 cursor-pointer"
+          >
+            {isAr ? 'إعادة المحاولة' : 'Retry'}
+          </button>
+        </div>
+      )}
 
       {/* Filter & Search Toolbar */}
       <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 p-4 rounded-2xl shadow-xs space-y-4">

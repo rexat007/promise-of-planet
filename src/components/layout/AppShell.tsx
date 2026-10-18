@@ -1,13 +1,13 @@
 import React from 'react';
 import { ClimateClockSlot } from './ClimateClockSlot';
-import { Header } from './Header';
+import { Header, type PublicPageKey } from './Header';
 import { Footer } from './Footer';
 
 interface AppShellProps {
   children: React.ReactNode;
   onEnterAdmin?: () => void;
-  activePage?: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media';
-  onNavigate?: (page: 'home' | 'news' | 'training-center' | 'about' | 'contact' | 'media') => void;
+  activePage?: PublicPageKey;
+  onNavigate?: (page: PublicPageKey) => void;
 }
 
 export function AppShell({ children, onEnterAdmin, activePage, onNavigate }: AppShellProps) {

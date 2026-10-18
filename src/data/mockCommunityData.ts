@@ -5,6 +5,7 @@ export const MOCK_CITIZEN_SUBMISSIONS: CitizenSubmission[] = [
   {
     id: 'sub-001',
     submittedAt: '2026-09-15T08:30:00Z',
+    submittedByUid: 'citizen-user-001',
     contributorName: 'عثمان محمد (مواطن - جبل أولياء)',
     contributorContact: 'othman.m@example.sd',
     title: 'ملاحظة تراجع منسوب النيل الأبيض وتأثيره على صغار الصيادين',
@@ -18,7 +19,10 @@ export const MOCK_CITIZEN_SUBMISSIONS: CitizenSubmission[] = [
         id: 'att-01',
         fileName: 'nile_water_level_jebel_awlia.jpg',
         fileType: 'image',
-        fileUrl: 'https://images.unsplash.com/photo-1544717305-2782549b5136?auto=format&fit=crop&w=800&q=80',
+        storagePath: 'citizen_submissions/citizen-user-001/sub-001/att-01_nile_water_level_jebel_awlia.jpg',
+        fileUrl: 'storage://citizen_submissions/citizen-user-001/sub-001/att-01_nile_water_level_jebel_awlia.jpg',
+        mimeType: 'image/jpeg',
+        sizeBytes: 245000,
       },
     ],
     moderatorNotes: 'تم استلام التقرير الميداني وتحويله للفريق الصحفي للتحقق من القياسات الهيدرولوجية.',
@@ -27,6 +31,7 @@ export const MOCK_CITIZEN_SUBMISSIONS: CitizenSubmission[] = [
   {
     id: 'sub-002',
     submittedAt: '2026-09-14T14:15:00Z',
+    submittedByUid: 'citizen-user-002',
     contributorName: 'فاطمة أحمد (ناشطة بيئية)',
     contributorContact: 'fatima.env@example.sd',
     title: 'مبادرة مجتمعية لتشجير حزام البوادي بمهيرية',
@@ -40,7 +45,10 @@ export const MOCK_CITIZEN_SUBMISSIONS: CitizenSubmission[] = [
         id: 'att-02',
         fileName: 'reforestation_barbar.jpg',
         fileType: 'image',
-        fileUrl: 'https://images.unsplash.com/photo-1542601906990-b4d3fb778b09?auto=format&fit=crop&w=800&q=80',
+        storagePath: 'citizen_submissions/citizen-user-002/sub-002/att-02_reforestation_barbar.jpg',
+        fileUrl: 'storage://citizen_submissions/citizen-user-002/sub-002/att-02_reforestation_barbar.jpg',
+        mimeType: 'image/jpeg',
+        sizeBytes: 312000,
       },
     ],
     editorialReferenceId: 'news-ref-barbar-01',
@@ -50,6 +58,7 @@ export const MOCK_CITIZEN_SUBMISSIONS: CitizenSubmission[] = [
   {
     id: 'sub-003',
     submittedAt: '2026-09-12T11:00:00Z',
+    submittedByUid: 'citizen-user-003',
     contributorName: 'حامد ابكر',
     title: 'ظاهرة نفوق أسماك محدودة في خور قديسي',
     body: 'تم رصد حالات نفوق عدد محدود من الأسماك نتيجة ارتفاع درجات الحرارة وانخفاض نسبة الأكسجين في المياه الراكدة ببعض أجزاء الخور.',
@@ -63,6 +72,7 @@ export const MOCK_CITIZEN_SUBMISSIONS: CitizenSubmission[] = [
   {
     id: 'sub-004',
     submittedAt: '2026-09-10T09:45:00Z',
+    submittedByUid: 'citizen-user-004',
     contributorName: 'مجموعة حماية الحياة البرية',
     title: 'رصد طيور مهاجرة غير معتادة قرب الأراضي الرطبة',
     body: 'تم توثيق وصول أسراب مبكرة من الطيور المهاجرة في مساراتها التقليدية عبر السودان.',
@@ -75,3 +85,4 @@ export const MOCK_CITIZEN_SUBMISSIONS: CitizenSubmission[] = [
     updatedAt: '2026-09-11T12:00:00Z',
   },
 ];
+

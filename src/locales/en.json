@@ -23,9 +23,10 @@
     "home": "Home",
     "news": "News",
     "library": "Environmental Library",
-    "training": "Training Center",
     "multimedia": "Multimedia",
-    "citizenJournalism": "Citizen Journalism",
+    "training": "Training Center",
+    "citizenJournalism": "Citizen Journalist",
+    "citizenJournalist": "Citizen Journalist",
     "aboutUs": "About Us",
     "contact": "Contact & Channels"
   },

@@ -14,5 +14,39 @@ service firebase.storage {
                    && firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.isActive == true
                    && firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.role == 'Owner';
     }
+
+    // Protected Citizen Journalism Evidence Attachments (Never publicly readable)
+    match /citizen_submissions/{userId}/{submissionId}/{fileName} {
+      allow read: if request.auth != null && (
+        request.auth.uid == userId ||
+        firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.isActive == true
+      );
+
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && firestore.exists(/databases/(default)/documents/accounts/$(request.auth.uid))
+        && request.resource.size > 0
+        && request.resource.size <= 15 * 1024 * 1024
+        && (
+          request.resource.contentType.matches('image/(jpeg|png|webp)') ||
+          request.resource.contentType.matches('video/(mp4|webm|quicktime)') ||
+          request.resource.contentType.matches('audio/(mpeg|wav|ogg)') ||
+          request.resource.contentType == 'application/pdf'
+        );
+
+      allow update: if false;
+
+      allow delete: if request.auth != null && (
+        request.auth.uid == userId ||
+        (
+          firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.isActive == true &&
+          (
+            firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.role == 'Owner' ||
+            firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.role == 'CitizenModerator'
+          )
+        )
+      );
+    }
   }
 }
+

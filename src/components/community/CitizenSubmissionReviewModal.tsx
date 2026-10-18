@@ -9,13 +9,16 @@ import {
   Paperclip, 
   CheckCircle,
   FileCheck,
-  Languages
+  Languages,
+  AlertCircle,
+  ExternalLink
 } from 'lucide-react';
-import type { CitizenSubmission } from '../../types/community';
+import type { CitizenSubmission, CitizenSubmissionAttachment } from '../../types/community';
 import { SubmissionStatus } from '../../types/community';
 import type { AdminUser } from '../../types/admin';
 import { AdminPermission } from '../../types/admin';
 import { AdminAccessService } from '../../services/adminAccess';
+import { CitizenSubmissionService } from '../../services/citizenSubmissionService';
 import { getCommunityCategoryLabel } from '../content/contentFormatters';
 import { dynamicTranslationService } from '../../services/dynamicTranslation';
 
@@ -38,13 +41,21 @@ export function CitizenSubmissionReviewModal({
 }: CitizenSubmissionReviewModalProps) {
   const [status, setStatus] = useState<SubmissionStatus>(SubmissionStatus.Received);
   const [moderatorNotes, setModeratorNotes] = useState<string>('');
+  const [editorialReferenceId, setEditorialReferenceId] = useState<string>('');
   const [showOriginalSource, setShowOriginalSource] = useState<boolean>(false);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [resolvingAttachmentId, setResolvingAttachmentId] = useState<string | null>(null);
 
   useEffect(() => {
     if (submission) {
       setStatus(submission.status);
       setModeratorNotes(submission.moderatorNotes || '');
+      setEditorialReferenceId(submission.editorialReferenceId || '');
       setShowOriginalSource(false);
+      setSaveError(null);
+      setAttachmentError(null);
     }
   }, [submission]);
 
@@ -69,15 +80,57 @@ export function CitizenSubmissionReviewModal({
 
   const canReview = AdminAccessService.hasPermission(currentUser, AdminPermission.Review);
 
-  const handleSave = () => {
-    const updated: CitizenSubmission = {
-      ...submission,
-      status,
-      moderatorNotes: moderatorNotes.trim() ? moderatorNotes : undefined,
-      updatedAt: new Date().toISOString(),
-    };
-    onUpdate(updated);
-    onClose();
+  const handleInspectAttachment = async (att: CitizenSubmissionAttachment) => {
+    setAttachmentError(null);
+    setResolvingAttachmentId(att.id);
+    try {
+      const resolvedUrl = await CitizenSubmissionService.resolveAttachmentAccessUrl(att, {
+        adminUser: currentUser,
+      });
+      if (typeof window !== 'undefined' && resolvedUrl) {
+        const anchor = document.createElement('a');
+        anchor.href = resolvedUrl;
+        anchor.target = '_blank';
+        anchor.rel = 'noopener noreferrer';
+        anchor.click();
+      }
+    } catch (err: any) {
+      setAttachmentError(
+        err?.message ||
+          (isAr
+            ? 'تعذر فتح المرفق الخاص. تأكد من صلاحيات التخزين السحابي.'
+            : 'Failed to resolve authorized access URL for private evidence attachment.')
+      );
+    } finally {
+      setResolvingAttachmentId(null);
+    }
+  };
+
+  const handleSave = async () => {
+    setSaveError(null);
+    setIsSaving(true);
+    try {
+      const persisted = await CitizenSubmissionService.moderateSubmission(
+        submission.id,
+        {
+          status,
+          moderatorNotes: moderatorNotes.trim() ? moderatorNotes.trim() : undefined,
+          editorialReferenceId: editorialReferenceId.trim() ? editorialReferenceId.trim() : undefined,
+        },
+        currentUser
+      );
+      onUpdate(persisted);
+      onClose();
+    } catch (err: any) {
+      setSaveError(
+        err?.message ||
+          (isAr
+            ? 'تعذر حفظ قرار الإشراف في الخادم. لم يتم تعديل الحالة.'
+            : 'Failed to persist moderation decision to backend. Status was not modified.')
+      );
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const getStatusBadge = (s: SubmissionStatus) => {
@@ -127,6 +180,7 @@ export function CitizenSubmissionReviewModal({
               </h2>
               <p className="text-xs text-gray-500 dark:text-gray-400">
                 ID: {submission.id} • {new Date(submission.submittedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US')}
+                {submission.submittedByUid ? ` • UID: ${submission.submittedByUid}` : ''}
               </p>
             </div>
           </div>
@@ -140,7 +194,13 @@ export function CitizenSubmissionReviewModal({
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          
+          {saveError && (
+            <div className="p-4 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/60 text-xs sm:text-sm text-red-700 dark:text-red-300 flex items-start gap-2.5">
+              <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+              <span>{saveError}</span>
+            </div>
+          )}
+
           {/* Status & Meta Bar */}
           <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl bg-gray-50 dark:bg-gray-800/40 border border-gray-100 dark:border-gray-800">
             <div className="space-y-1">
@@ -238,25 +298,36 @@ export function CitizenSubmissionReviewModal({
             <div className="space-y-2">
               <span className="text-xs font-bold text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
                 <Paperclip className="w-4 h-4 text-emerald-600" />
-                <span>{isAr ? `المرفقات والمواد المرئية (${submission.attachments.length})` : `Attachments (${submission.attachments.length})`}</span>
+                <span>{isAr ? `المرفقات والأدلة الميدانية الخاصة (${submission.attachments.length})` : `Private Evidence Attachments (${submission.attachments.length})`}</span>
               </span>
+              {attachmentError && (
+                <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/60 text-xs text-red-700 dark:text-red-300">
+                  {attachmentError}
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {submission.attachments.map((att) => (
-                  <a
+                  <button
                     key={att.id}
-                    href={att.fileUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 hover:border-emerald-500 dark:hover:border-emerald-500 bg-white dark:bg-gray-900 flex items-center gap-3 transition-colors group"
+                    type="button"
+                    disabled={resolvingAttachmentId === att.id}
+                    onClick={() => handleInspectAttachment(att)}
+                    className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 hover:border-emerald-500 dark:hover:border-emerald-500 bg-white dark:bg-gray-900 flex items-center justify-between gap-3 transition-colors group text-start cursor-pointer"
                   >
-                    <div className="p-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 group-hover:bg-emerald-100 transition-colors">
-                      <FileText className="w-4 h-4" />
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="p-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 group-hover:bg-emerald-100 transition-colors shrink-0">
+                        <FileText className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-bold text-gray-900 dark:text-white truncate">{att.fileName}</p>
+                        <span className="text-[10px] text-gray-500 uppercase">
+                          {att.fileType}
+                          {att.sizeBytes ? ` · ${(att.sizeBytes / (1024 * 1024)).toFixed(2)} MB` : ''}
+                        </span>
+                      </div>
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-bold text-gray-900 dark:text-white truncate">{att.fileName}</p>
-                      <span className="text-[10px] text-gray-500 uppercase">{att.fileType}</span>
-                    </div>
-                  </a>
+                    <ExternalLink className="w-4 h-4 text-gray-400 group-hover:text-emerald-600 shrink-0" />
+                  </button>
                 ))}
               </div>
             </div>
@@ -290,6 +361,19 @@ export function CitizenSubmissionReviewModal({
                     <option value={SubmissionStatus.Rejected}>{isAr ? 'مرفوض (Rejected)' : 'Rejected'}</option>
                   </select>
                 </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-700 dark:text-gray-300">
+                    {isAr ? 'مرجع المعالجة التحريرية (اختياري)' : 'Editorial Reference ID (Optional)'}
+                  </label>
+                  <input
+                    type="text"
+                    value={editorialReferenceId}
+                    onChange={(e) => setEditorialReferenceId(e.target.value)}
+                    placeholder={isAr ? 'مثال: news-ref-2026-01' : 'e.g. news-ref-2026-01'}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-sm text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
               </div>
             )}
 
@@ -306,6 +390,12 @@ export function CitizenSubmissionReviewModal({
                 className="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-sm text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500 disabled:opacity-60 resize-none"
               />
             </div>
+
+            <div className="text-[11px] text-gray-500 dark:text-gray-400">
+              {isAr
+                ? 'ملاحظة: حالة "مقبول للتحرير" تعني إحالة البلاغ لفريق التحرير ولا تنشر الخبر تلقائياً للجمهور.'
+                : 'Note: "Accepted for Editorial" marks the report for human editorial drafting and never automatically publishes a public News article.'}
+            </div>
           </div>
 
         </div>
@@ -314,6 +404,7 @@ export function CitizenSubmissionReviewModal({
         <div className="px-6 py-4 border-t border-gray-100 dark:border-gray-800 bg-gray-50/80 dark:bg-gray-950/50 flex items-center justify-end gap-3">
           <button
             onClick={onClose}
+            disabled={isSaving}
             className="px-4 py-2 rounded-xl text-xs font-bold text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors cursor-pointer"
           >
             {isAr ? 'إغلاق' : 'Close'}
@@ -321,10 +412,11 @@ export function CitizenSubmissionReviewModal({
           {canReview && (
             <button
               onClick={handleSave}
-              className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+              disabled={isSaving}
+              className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               <CheckCircle className="w-4 h-4" />
-              <span>{isAr ? 'حفظ التحديثات' : 'Save Changes'}</span>
+              <span>{isSaving ? (isAr ? 'جاري الحفظ...' : 'Saving...') : (isAr ? 'حفظ التحديثات' : 'Save Changes')}</span>
             </button>
           )}
         </div>
@@ -333,3 +425,4 @@ export function CitizenSubmissionReviewModal({
     </div>
   );
 }
+

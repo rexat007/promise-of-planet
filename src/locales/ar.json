@@ -23,9 +23,10 @@
     "home": "الرئيسية",
     "news": "الأخبار",
     "library": "المكتبة البيئية",
-    "training": "مركز التدريب",
     "multimedia": "الوسائط المتعددة",
-    "citizenJournalism": "صحافة المواطن",
+    "training": "مركز التدريب",
+    "citizenJournalism": "المواطن الصحفي",
+    "citizenJournalist": "المواطن الصحفي",
     "aboutUs": "من نحن",
     "contact": "الاتصال والقنوات"
   },
