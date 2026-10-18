@@ -22,7 +22,7 @@ import {
   isCanonicalCategory,
   type CanonicalPlaylist,
   isCanonicalPlaylist,
-} from '../../../src/types';
+} from '../shared/contentContract';
 
 export {
   type Video,

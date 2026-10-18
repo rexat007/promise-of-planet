@@ -1,0 +1,480 @@
+export type LocalizedText = {
+  ar: string;
+  en: string;
+};
+
+export type Language = 'ar' | 'en';
+
+// ============================================================================
+// 1. Content & Lifecycle Enums / String Literal Unions
+// ============================================================================
+
+/**
+ * Types of content items in the newsroom and media hub.
+ */
+export type ContentType = 'News' | 'Report' | 'Video';
+
+/**
+ * General lifecycle status of a content item.
+ * NOTE: 'Approved' is strictly decoupled and managed via ApprovalStatus.
+ */
+export type ContentStatus =
+  | 'Draft'
+  | 'PendingReview'
+  | 'InReview'
+  | 'Published'
+  | 'Archived'
+  | 'Rejected';
+
+/**
+ * Editorial approval status representing human editorial decisions.
+ */
+export type ApprovalStatus =
+  | 'Draft'
+  | 'Pending'
+  | 'InReview'
+  | 'Approved'
+  | 'ChangesRequested'
+  | 'Rejected';
+
+/**
+ * Intellectual property and media rights status.
+ */
+export const CANONICAL_RIGHTS_STATUSES = [
+  'NotStarted',
+  'InReview',
+  'Cleared',
+  'NeedsChanges',
+  'Rejected',
+] as const;
+
+export type RightsStatus = (typeof CANONICAL_RIGHTS_STATUSES)[number];
+
+export function isCanonicalRightsStatus(value: unknown): value is RightsStatus {
+  return typeof value === 'string' && (CANONICAL_RIGHTS_STATUSES as readonly string[]).includes(value);
+}
+
+/**
+ * Physical availability of the video on YouTube source platform.
+ */
+export type AvailabilityStatus =
+  | 'Available'
+  | 'Private'
+  | 'Deleted'
+  | 'Unavailable';
+
+/**
+ * Technical status of YouTube Data API synchronization attempts.
+ */
+export type SyncStatus =
+  | 'Healthy'
+  | 'SyncPending'
+  | 'SyncError';
+
+/**
+ * Editorial translation workflow status.
+ */
+export type TranslationStatus =
+  | 'NotRequired'
+  | 'PendingTranslation'
+  | 'InTranslation'
+  | 'Completed';
+
+/**
+ * Editorial visibility scope decisions for videos.
+ */
+export const CANONICAL_VISIBILITY_DECISIONS = [
+  'Hidden',
+  'MediaHubOnly',
+  'NewsEligible',
+  'Featured',
+] as const;
+
+export type VisibilityDecision = (typeof CANONICAL_VISIBILITY_DECISIONS)[number];
+
+export function isCanonicalVisibilityDecision(value: unknown): value is VisibilityDecision {
+  return typeof value === 'string' && (CANONICAL_VISIBILITY_DECISIONS as readonly string[]).includes(value);
+}
+
+/**
+ * Approved core environmental categories for Promise of Planet.
+ */
+export const CANONICAL_CATEGORIES = [
+  'Climate',
+  'Water',
+  'Biodiversity',
+  'Pollution',
+  'Energy',
+  'Agriculture',
+  'EnvironmentalPolicy',
+] as const;
+
+export type Category = (typeof CANONICAL_CATEGORIES)[number];
+
+export function isCanonicalCategory(value: unknown): value is Category {
+  return typeof value === 'string' && (CANONICAL_CATEGORIES as readonly string[]).includes(value);
+}
+
+export interface CanonicalCategoryDefinition {
+  value: Category;
+  labelAr: string;
+  labelEn: string;
+}
+
+export const CANONICAL_CATEGORY_DEFINITIONS: readonly CanonicalCategoryDefinition[] = [
+  { value: 'Climate', labelAr: 'المناخ', labelEn: 'Climate' },
+  { value: 'Water', labelAr: 'المياه', labelEn: 'Water' },
+  { value: 'Biodiversity', labelAr: 'التنوع الحيوي', labelEn: 'Biodiversity' },
+  { value: 'Pollution', labelAr: 'التلوث', labelEn: 'Pollution' },
+  { value: 'Energy', labelAr: 'الطاقة', labelEn: 'Energy' },
+  { value: 'Agriculture', labelAr: 'الزراعة', labelEn: 'Agriculture' },
+  { value: 'EnvironmentalPolicy', labelAr: 'السياسات البيئية', labelEn: 'Environmental Policy' },
+] as const;
+
+/**
+ * Editorial topic tag.
+ */
+export type Tag = string;
+
+/**
+ * Urgency level for news items.
+ */
+export type UrgencyLevel = 'Standard' | 'Urgent' | 'Breaking';
+
+/**
+ * Journalistic coverage type for news.
+ */
+export type CoverageType =
+  | 'FieldCoverage'
+  | 'OfficialStatement'
+  | 'AgencyReport'
+  | 'Investigative';
+
+/**
+ * Editorial nature of the video relation to a news/report article.
+ */
+export type RelationType =
+  | 'Embedded'
+  | 'RelatedCoverage'
+  | 'SupportingMaterial';
+
+/**
+ * Visual placement of the video inside the article layout.
+ */
+export type Placement =
+  | 'Top'
+  | 'Inline'
+  | 'Bottom'
+  | 'Sidebar';
+
+/**
+ * Source classification types.
+ */
+export type SourceType =
+  | 'OfficialGovernment'
+  | 'UNReport'
+  | 'AcademicStudy'
+  | 'FieldWitness'
+  | 'IndependentMedia'
+  | 'NGOReport';
+
+/**
+ * Legal rights basis for media assets.
+ */
+export type RightsBasis =
+  | 'OriginalProduction'
+  | 'Licensed'
+  | 'FairUse'
+  | 'PublicDomain'
+  | 'AuthorizedContributor';
+
+export type MusicStatus =
+  | 'OriginalTrack'
+  | 'LicensedMusic'
+  | 'RoyaltyFree'
+  | 'NeedsAudit';
+
+export type ArchiveFootageStatus =
+  | 'OwnFootage'
+  | 'LicensedArchive'
+  | 'FairUseExempt'
+  | 'NeedsReplacement';
+
+export type PeopleConsentStatus =
+  | 'ConsentObtained'
+  | 'NotRequired'
+  | 'PendingConsent';
+
+export type ApprovalDecision =
+  | 'Approved'
+  | 'ChangesRequested'
+  | 'Rejected'
+  | 'Revoked';
+
+// ============================================================================
+// 2. Auxiliary Structured Types
+// ============================================================================
+
+export interface ImageObject {
+  url: string;
+  altAr: string;
+  altEn?: string;
+  captionAr?: string;
+  captionEn?: string;
+  credit?: string;
+  sourceUrl?: string;
+}
+
+export interface YouTubeThumbnails {
+  default?: string;
+  medium?: string;
+  high?: string;
+  standard?: string;
+  maxres?: string;
+}
+
+export interface ReportSection {
+  id: string;
+  titleAr: string;
+  titleEn?: string;
+  bodyAr: string;
+  bodyEn?: string;
+  order: number;
+}
+
+export interface DataPoint {
+  id: string;
+  labelAr: string;
+  labelEn?: string;
+  value: string;
+  contextAr?: string;
+  contextEn?: string;
+}
+
+export interface FieldInterview {
+  id: string;
+  intervieweeName: string;
+  roleOrTitleAr: string;
+  roleOrTitleEn?: string;
+  quoteAr: string;
+  quoteEn?: string;
+  location?: string;
+}
+
+// ============================================================================
+// 3. Source & YouTube Metadata Models
+// ============================================================================
+
+/**
+ * Documented journalistic or scientific source.
+ * Independent for articles and videos.
+ */
+export interface ContentSource {
+  id: string;
+  sourceName: string;
+  sourceType: SourceType;
+  sourceUrl?: string;
+  accessedAt?: string;
+  reliabilityNotes?: string;
+  isPrimarySource?: boolean;
+}
+
+/**
+ * Raw source data fetched from YouTube Data API.
+ * Protected from manual editorial override and segregated from editorial fields.
+ */
+export interface YouTubeSource {
+  youtubeVideoId: string;
+  youtubeUrl: string;
+  channelId?: string;
+  channelName?: string;
+  channelUrl?: string;
+  originalTitle: string;
+  originalDescription: string;
+  youtubePublishedAt: string;
+  thumbnails: YouTubeThumbnails;
+  duration?: string;
+  originalAudioLanguage?: string;
+  hasCaptions?: boolean;
+  availabilityStatus?: AvailabilityStatus;
+  lastSyncedAt?: string; // Timestamp of the last SUCCESSFUL sync only
+}
+
+// ============================================================================
+// 4. Core Content Items (News, Report, Video)
+// ============================================================================
+
+/**
+ * Base abstract interface for all editorial content items.
+ */
+export interface ContentItem {
+  id: string;
+  contentType: ContentType;
+  titleAr: string;
+  titleEn?: string;
+  excerptAr: string;
+  excerptEn?: string;
+  category: Category;
+  tags: Tag[];
+  originalLanguage?: Language;
+  availableLanguages?: Language[];
+  translationStatus?: TranslationStatus;
+  featuredImage?: ImageObject;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt?: string;
+  author?: string;
+  producer?: string;
+  editor?: string;
+  status: ContentStatus;
+  approvalStatus: ApprovalStatus;
+  rightsStatus?: RightsStatus;
+  reviewNotes?: string;
+}
+
+/**
+ * News item model for time-sensitive environmental coverage.
+ */
+export interface News extends ContentItem {
+  contentType: 'News';
+  contentAr: string;
+  contentEn?: string;
+  eventDate?: string;
+  location: string;
+  urgencyLevel: UrgencyLevel;
+  coverageType?: CoverageType;
+  sources: ContentSource[];
+}
+
+/**
+ * In-depth analytical or investigative report model.
+ */
+export interface Report extends ContentItem {
+  contentType: 'Report';
+  contentAr: string;
+  contentEn?: string;
+  featuredImage: ImageObject; // Mandatory for Report
+  sections?: ReportSection[];
+  keyFindings?: string[];
+  dataPoints?: DataPoint[];
+  fieldInterviews?: FieldInterview[];
+  readTimeEstimate?: number;
+  sources: ContentSource[];
+}
+
+export interface Video extends ContentItem {
+  contentType: 'Video';
+  editorialDescriptionAr: string;
+  editorialDescriptionEn?: string;
+  editorialThumbnail?: ImageObject;
+  visibilityDecision: VisibilityDecision;
+  rightsStatus: RightsStatus; // Mandatory for Video
+  sources?: ContentSource[];
+  rightsNotes?: string;
+  youtubeSource: YouTubeSource;
+  playlistIds?: string[];
+}
+
+/**
+ * Canonical Playlist representation for grouping verified videos.
+ * Keeps playlist grouping distinct from ContentVideoRelation.
+ */
+export interface CanonicalPlaylist {
+  id: string; // e.g. "playlist_yt_" + externalPlaylistId or custom ID
+  externalPlaylistId?: string; // YouTube playlist ID if imported
+  titleAr: string;
+  titleEn?: string;
+  descriptionAr: string;
+  descriptionEn?: string;
+  thumbnailUrl?: string;
+  itemCount: number;
+  status: 'Draft' | 'Published' | 'Archived';
+  videoIds: string[]; // Ordered list of canonical Video IDs belonging to this playlist
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function isCanonicalPlaylist(value: unknown): value is CanonicalPlaylist {
+  if (!value || typeof value !== 'object') return false;
+  const p = value as Record<string, any>;
+  return (
+    typeof p.id === 'string' &&
+    typeof p.titleAr === 'string' &&
+    Array.isArray(p.videoIds)
+  );
+}
+
+// ============================================================================
+// 5. Relations, Governance, and Sync Models
+// ============================================================================
+
+/**
+ * Many-to-Many relation model connecting articles (News/Report) to Videos.
+ */
+export interface ContentVideoRelation {
+  id: string;
+  contentId: string;
+  videoId: string;
+  relationType: RelationType;
+  placement: Placement;
+  displayOrder: number;
+  isPrimary: boolean; // Indicates this video is the primary video for the article
+  caption?: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Editorial approval record documenting human editorial decisions.
+ */
+export interface ContentApprovalRecord {
+  id: string;
+  contentId: string;
+  decision: ApprovalDecision;
+  decidedBy: string; // Authorized decision-maker ID/Name
+  decidedAt: string;
+  targetVersion?: string;
+  reviewNotes?: string;
+  actionItems?: string[];
+}
+
+/**
+ * Intellectual property, music, and media rights audit record.
+ */
+export interface RightsReview {
+  id: string;
+  targetType: 'Video' | 'MediaAsset';
+  targetId: string;
+  reviewStatus: RightsStatus;
+  reviewer: string;
+  reviewedAt: string;
+  rightsBasis: RightsBasis;
+  permissionSource?: string;
+  musicStatus?: MusicStatus;
+  archiveFootageStatus?: ArchiveFootageStatus;
+  peopleConsentStatus?: PeopleConsentStatus;
+  notes?: string;
+  requiresFollowUp?: boolean;
+}
+
+/**
+ * Diagnostics and history log for YouTube Data API synchronization runs.
+ */
+export interface YouTubeSyncLog {
+  id: string;
+  startedAt: string;
+  completedAt: string;
+  status: 'Success' | 'PartialSuccess' | 'Failed';
+  syncStatus: SyncStatus;
+  requestedChannelId: string;
+  targetVideoId?: string;
+  fetchedCount: number;
+  createdCount: number;
+  updatedSourceCount: number;
+  skippedCount: number;
+  errorCount: number;
+  errorCode?: string;
+  errorMessage?: string;
+  diagnostics?: Record<string, unknown>;
+}

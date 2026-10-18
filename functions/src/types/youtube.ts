@@ -2,15 +2,15 @@ import {
   CANONICAL_CATEGORIES,
   type Category,
   isCanonicalCategory,
-} from '../../../src/types';
+  type Tag,
+} from '../shared/contentContract';
 
 export {
   CANONICAL_CATEGORIES,
   type Category,
   isCanonicalCategory,
+  type Tag,
 };
-
-export type Tag = string;
 
 export type CandidateLifecycleStatus = 'PendingReview' | 'Accepted' | 'Rejected';
 
