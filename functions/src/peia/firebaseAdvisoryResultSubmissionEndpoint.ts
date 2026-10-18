@@ -339,7 +339,10 @@ export const peiaAdvisoryResultSubmission = onRequest(
   {
     cors: false,
   },
-  async (request, response) => {
+  async (
+    request: AdvisoryResultSubmissionRequest,
+    response: AdvisoryResultSubmissionResponse
+  ) => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getFirestore } = require('firebase-admin/firestore');
     const db = getFirestore();
