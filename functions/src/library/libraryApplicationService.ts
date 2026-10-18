@@ -2,8 +2,8 @@ import type { LibraryRepository } from './libraryRepository';
 import type { LibraryDocument, LibraryDocumentVersion } from '../../../src/types/library';
 import { LibraryDocumentType, LibraryRightsStatus } from '../../../src/types/library';
 import { WorkflowState, WorkflowAction, type WorkflowTransitionRecord } from '../../../src/types/workflow';
-import type { AdminUser } from '../../../src/types/admin';
-import { AdminPermission } from '../../../src/types/admin';
+import type { AdminUser } from '../types/admin';
+import { AdminPermission } from '../types/admin';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
 import { LibraryValidator } from './libraryValidator';
 

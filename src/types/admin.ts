@@ -1,4 +1,4 @@
-import { AdminPermission, AdminDomain } from '../shared/adminContract';
+import type { AdminPermission, AdminDomain } from '../../functions/src/shared/adminContract';
 
 export {
   AdminRole,
@@ -13,7 +13,7 @@ export {
   hasAdminPermission,
   hasDomainResponsibility,
   isTabAuthorized,
-} from '../shared/adminContract';
+} from '../../functions/src/shared/adminContract';
 
 export interface NavigationItem {
   id: string;

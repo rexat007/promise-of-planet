@@ -1,4 +1,4 @@
-import type { AdminUser } from '../../../src/types/admin';
+import type { AdminUser } from '../types/admin';
 import type { PlatformGlobalSettings, UpdateGlobalSettingsInput } from '../../../src/types/settings';
 import { DEFAULT_GLOBAL_SETTINGS } from '../../../src/services/globalSettingsService';
 import type { IPlatformSettingsRepository } from './platformSettingsRepository';

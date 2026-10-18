@@ -1,10 +1,10 @@
 import {
-  AdminRole,
-  AdminPermission,
+  type AdminRole,
+  type AdminPermission,
   type AdminUser,
   getPermissionsForRole,
   hasAdminPermission,
-} from '../../../src/shared/adminContract';
+} from '../shared/adminContract';
 
 export class AdminAuthorizationService {
   /**

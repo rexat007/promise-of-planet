@@ -1,7 +1,7 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
-import { AdminPermission } from '../../../src/types/admin';
+import { AdminPermission } from '../types/admin';
 import { FirestorePlatformSettingsRepository } from './platformSettingsRepository';
 import { PlatformSettingsService } from './platformSettingsService';
 

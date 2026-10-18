@@ -1,10 +1,15 @@
 export {
   AdminRole,
   AdminPermission,
+  AdminDomain,
   type AdminUser,
   ROLE_PERMISSIONS_MAP,
+  ROLE_DOMAINS_MAP,
   isValidAdminRole,
   isValidAdminPermission,
   getPermissionsForRole,
   hasAdminPermission,
-} from '../../../src/shared/adminContract';
+  hasDomainResponsibility,
+  isTabAuthorized,
+} from '../shared/adminContract';
+

@@ -3,7 +3,7 @@ import { LibraryApplicationService } from './libraryApplicationService';
 import { FirestoreLibraryRepository } from './firestoreLibraryRepository';
 import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
-import { AdminPermission } from '../../../src/types/admin';
+import { AdminPermission } from '../types/admin';
 import { PublicLibraryRepository } from './publicLibraryRepository';
 
 export const manageLibraryDocuments = onCall(async (request) => {
