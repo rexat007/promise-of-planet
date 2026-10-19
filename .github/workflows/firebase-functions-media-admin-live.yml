@@ -1,0 +1,144 @@
+name: Deploy Administrative Multimedia Firebase Functions Live
+
+# PREREQUISITE NOTICE FOR PROJECT OWNER:
+# Before triggering this workflow, ensure that the Google Cloud Artifact Registry cleanup policy
+# for Cloud Functions Gen 2 container images has been configured in project 'promiseofplanet-bb325'
+# to automatically delete stale container build layers and prevent storage quota exhaustion.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy_media_admin_functions:
+    name: Deploy manageMedia, manageYouTubeIntegration, reviewYouTubeCandidate, syncYouTubeUploads
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Verify Main Branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::This workflow can only be run on the main branch."
+            exit 1
+          fi
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify Service Account Credential
+        env:
+          CREDENTIAL_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+        run: |
+          if [ -z "$CREDENTIAL_JSON" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 secret is empty or missing."
+            exit 1
+          fi
+          node -e '
+            const raw = process.env.CREDENTIAL_JSON;
+            let cred;
+            try {
+              cred = JSON.parse(raw);
+            } catch (err) {
+              console.error("::error::Failed to parse credential JSON.");
+              process.exit(1);
+            }
+            if (cred.type !== "service_account") {
+              console.error("::error::Credential is not a service_account (type: " + cred.type + ")");
+              process.exit(1);
+            }
+            if (cred.project_id !== "promiseofplanet-bb325") {
+              console.error("::error::Credential project_id mismatch. Expected promiseofplanet-bb325, found: " + cred.project_id);
+              process.exit(1);
+            }
+            console.log("Verified service-account credential for project: " + cred.project_id);
+          '
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Verify Secret Manager YOUTUBE_API_KEY
+        run: |
+          # 1. Verify YOUTUBE_API_KEY secret metadata exists in project promiseofplanet-bb325 without exposing value
+          if ! gcloud secrets describe YOUTUBE_API_KEY --project=promiseofplanet-bb325 >/dev/null 2>&1; then
+            echo "::error::YOUTUBE_API_KEY secret does not exist or service account lacks secretmanager.secrets.get permission in project promiseofplanet-bb325."
+            exit 1
+          fi
+
+          # 2. Verify that at least one enabled version exists without accessing or logging secret payload
+          ENABLED_VERSIONS=$(gcloud secrets versions list YOUTUBE_API_KEY --project=promiseofplanet-bb325 --filter="state=ENABLED" --format="value(name)" 2>/dev/null || true)
+          if [ -z "$ENABLED_VERSIONS" ]; then
+            echo "::error::YOUTUBE_API_KEY secret exists but has no ENABLED versions in project promiseofplanet-bb325."
+            exit 1
+          fi
+
+          echo "Verified YOUTUBE_API_KEY secret exists and has active enabled version(s) in Secret Manager."
+
+      - name: Verify Required Functions Source Exports
+        working-directory: functions
+        run: |
+          node -e '
+            const fs = require("fs");
+            const indexCode = fs.readFileSync("src/index.ts", "utf-8");
+            const required = [
+              "manageMedia",
+              "manageYouTubeIntegration",
+              "reviewYouTubeCandidate",
+              "syncYouTubeUploads"
+            ];
+            const missing = required.filter(fn => !indexCode.includes(fn));
+            if (missing.length > 0) {
+              console.error("::error::Missing required exports in functions/src/index.ts: " + missing.join(", "));
+              process.exit(1);
+            }
+            console.log("Verified all 4 required multimedia functions are exported in functions/src/index.ts");
+          '
+
+      - name: Install Functions Dependencies
+        working-directory: functions
+        run: npm ci
+
+      - name: Build Functions
+        working-directory: functions
+        run: npm run build
+
+      - name: Verify Compiled Functions Exports
+        working-directory: functions
+        run: |
+          node -e '
+            const lib = require("./lib/index.js");
+            const required = [
+              "manageMedia",
+              "manageYouTubeIntegration",
+              "reviewYouTubeCandidate",
+              "syncYouTubeUploads"
+            ];
+            const missing = required.filter(fn => typeof lib[fn] !== "function");
+            if (missing.length > 0) {
+              console.error("::error::Compiled lib/index.js is missing required functions: " + missing.join(", "));
+              process.exit(1);
+            }
+            console.log("Verified all 4 multimedia functions successfully compiled in lib/index.js");
+          '
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy Administrative Multimedia Functions to Firebase
+        run: |
+          firebase deploy \
+            --project promiseofplanet-bb325 \
+            --only "functions:manageMedia,functions:manageYouTubeIntegration,functions:reviewYouTubeCandidate,functions:syncYouTubeUploads" \
+            --non-interactive
