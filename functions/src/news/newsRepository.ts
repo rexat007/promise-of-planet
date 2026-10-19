@@ -31,6 +31,8 @@ export interface NewsItemBackend {
   summaryEn?: string;
   bodyAr: string;
   bodyEn?: string;
+  richBodyAr?: any;
+  richBodyEn?: any;
   author: string;
   category: string;
   tags: string[];
@@ -54,6 +56,8 @@ export interface SanitizedPublicNewsDTO {
   summaryEn?: string;
   bodyAr: string;
   bodyEn?: string;
+  richBodyAr?: any;
+  richBodyEn?: any;
   author: string;
   category: string;
   tags: string[];

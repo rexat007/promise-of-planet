@@ -6,6 +6,10 @@ import type {
 } from './newsRepository';
 import { FirestoreNewsRepository } from './firestoreNewsRepository';
 import { NewsValidator } from './newsValidator';
+import { 
+  validateRichNewsDocument, 
+  extractPlainTextFromRichDocument 
+} from '../shared/richNewsDocumentContract';
 
 export interface SaveNewsInput {
   id?: string;
@@ -15,6 +19,8 @@ export interface SaveNewsInput {
   summaryEn?: string;
   bodyAr: string;
   bodyEn?: string;
+  richBodyAr?: any;
+  richBodyEn?: any;
   author?: string;
   category: string;
   tags?: string[];
@@ -54,14 +60,40 @@ export class NewsApplicationService {
     // Server-authoritative ID generation: client-supplied document IDs are never accepted as authoritative
     const id = `news-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
+    // Rich validation and plain text derivation
+    let bodyAr = input.bodyAr || '';
+    let bodyEn = input.bodyEn || '';
+
+    if (input.richBodyAr) {
+      const v = validateRichNewsDocument(input.richBodyAr);
+      if (!v.valid) throw new Error(`INVALID_RICH_DOCUMENT_AR: ${v.errors.join('; ')}`);
+      const derived = extractPlainTextFromRichDocument(input.richBodyAr);
+      if (input.bodyAr && input.bodyAr.trim() !== derived.trim()) {
+        throw new Error('CONTRADICTORY_UPDATE: Simultaneous update of richBodyAr and bodyAr with mismatched content is forbidden.');
+      }
+      bodyAr = derived;
+    }
+
+    if (input.richBodyEn) {
+      const v = validateRichNewsDocument(input.richBodyEn);
+      if (!v.valid) throw new Error(`INVALID_RICH_DOCUMENT_EN: ${v.errors.join('; ')}`);
+      const derived = extractPlainTextFromRichDocument(input.richBodyEn);
+      if (input.bodyEn && input.bodyEn.trim() !== derived.trim()) {
+        throw new Error('CONTRADICTORY_UPDATE: Simultaneous update of richBodyEn and bodyEn with mismatched content is forbidden.');
+      }
+      bodyEn = derived;
+    }
+
     const item: NewsItemBackend = {
       id,
       titleAr: input.titleAr,
       titleEn: input.titleEn || '',
       summaryAr: input.summaryAr || '',
       summaryEn: input.summaryEn || '',
-      bodyAr: input.bodyAr || '',
-      bodyEn: input.bodyEn || '',
+      bodyAr,
+      bodyEn,
+      richBodyAr: input.richBodyAr,
+      richBodyEn: input.richBodyEn,
       author: input.author || actor.name,
       category: input.category,
       tags: input.tags || [],
@@ -111,6 +143,35 @@ export class NewsApplicationService {
     }
 
     const now = new Date().toISOString();
+    
+    let bodyAr = input.bodyAr !== undefined ? input.bodyAr : existing.bodyAr;
+    let bodyEn = input.bodyEn !== undefined ? input.bodyEn : existing.bodyEn;
+    let richBodyAr = input.richBodyAr !== undefined ? input.richBodyAr : existing.richBodyAr;
+    let richBodyEn = input.richBodyEn !== undefined ? input.richBodyEn : existing.richBodyEn;
+
+    // Contradiction checks and derivation
+    if (input.richBodyAr !== undefined) {
+      const v = validateRichNewsDocument(input.richBodyAr);
+      if (!v.valid) throw new Error(`INVALID_RICH_DOCUMENT_AR: ${v.errors.join('; ')}`);
+      const derived = extractPlainTextFromRichDocument(input.richBodyAr);
+      
+      if (input.bodyAr !== undefined && input.bodyAr.trim() !== derived.trim()) {
+        throw new Error('CONTRADICTORY_UPDATE: Simultaneous update of richBodyAr and bodyAr with mismatched content is forbidden.');
+      }
+      bodyAr = derived;
+    }
+
+    if (input.richBodyEn !== undefined) {
+      const v = validateRichNewsDocument(input.richBodyEn);
+      if (!v.valid) throw new Error(`INVALID_RICH_DOCUMENT_EN: ${v.errors.join('; ')}`);
+      const derived = extractPlainTextFromRichDocument(input.richBodyEn);
+      
+      if (input.bodyEn !== undefined && input.bodyEn.trim() !== derived.trim()) {
+        throw new Error('CONTRADICTORY_UPDATE: Simultaneous update of richBodyEn and bodyEn with mismatched content is forbidden.');
+      }
+      bodyEn = derived;
+    }
+
     const updated: NewsItemBackend = {
       ...existing,
       id: existing.id,
@@ -118,8 +179,10 @@ export class NewsApplicationService {
       titleEn: input.titleEn !== undefined ? input.titleEn : existing.titleEn,
       summaryAr: input.summaryAr !== undefined ? input.summaryAr : existing.summaryAr,
       summaryEn: input.summaryEn !== undefined ? input.summaryEn : existing.summaryEn,
-      bodyAr: input.bodyAr !== undefined ? input.bodyAr : existing.bodyAr,
-      bodyEn: input.bodyEn !== undefined ? input.bodyEn : existing.bodyEn,
+      bodyAr,
+      bodyEn,
+      richBodyAr,
+      richBodyEn,
       category: input.category !== undefined ? input.category : existing.category,
       tags: input.tags !== undefined ? input.tags : existing.tags,
       sources: input.sources !== undefined ? input.sources : existing.sources,

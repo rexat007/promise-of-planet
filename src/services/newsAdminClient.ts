@@ -83,6 +83,8 @@ export class NewsAdminClient {
     if (item.summaryEn !== undefined) payload.summaryEn = item.summaryEn.trim();
     if (item.bodyAr !== undefined) payload.bodyAr = item.bodyAr;
     if (item.bodyEn !== undefined) payload.bodyEn = item.bodyEn;
+    if (item.richBodyAr !== undefined) payload.richBodyAr = item.richBodyAr;
+    if (item.richBodyEn !== undefined) payload.richBodyEn = item.richBodyEn;
     if (item.category !== undefined) payload.category = item.category;
     if (item.tags !== undefined) payload.tags = item.tags;
     if (item.sources !== undefined) payload.sources = item.sources;

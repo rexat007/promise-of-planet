@@ -9,6 +9,8 @@ export interface NewsItem {
   summaryEn: string;
   bodyAr: string;
   bodyEn: string;
+  richBodyAr?: any;
+  richBodyEn?: any;
   author: string;
   category: string;
   tags: string[];
