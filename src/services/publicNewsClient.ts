@@ -1,7 +1,8 @@
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import { app, isFirebaseConfigured } from './firebase';
 import type { News } from '../types';
-import { WorkflowState } from '../types/workflow';
-import { NewsAdminClient } from './newsAdminClient';
-import { toCanonicalNews, normalizeCategory } from './newsDomainAdapter';
+import { publicDtoToCanonicalNews, normalizeCategory } from './newsDomainAdapter';
+import type { SanitizedPublicNewsDTO } from './newsDomainAdapter';
 
 export interface PublicNewsFilterOptions {
   searchQuery?: string;
@@ -10,7 +11,18 @@ export interface PublicNewsFilterOptions {
   language?: 'ar' | 'en';
 }
 
+export type PublicNewsTransport = (data: { lang?: 'ar' | 'en' }) => Promise<{ articles: SanitizedPublicNewsDTO[] }>;
+
+let customPublicTransport: PublicNewsTransport | null = null;
+
 export class PublicNewsClient {
+  /**
+   * Injects an isolated transport function (used for automated testing without live network mutation).
+   */
+  public static setTransport(transport: PublicNewsTransport | null): void {
+    customPublicTransport = transport;
+  }
+
   /**
    * Generates a semantic slug from title for URL/sharing.
    */
@@ -25,40 +37,50 @@ export class PublicNewsClient {
 
   /**
    * Retrieves all published, approved news articles for the public hub.
-   * Strictly enforces workflowState === 'Published'.
-   * No draft or unapproved items will ever be returned.
+   * Connects via callable Firebase function getPublicNews.
+   * Strictly enforces that only server-returned, sanitized, Published articles are returned.
    */
   public static async listPublishedNews(options: PublicNewsFilterOptions = {}): Promise<News[]> {
-    // 1. Fetch from durable storage / API
-    const rawItems = await NewsAdminClient.listAll();
+    let dtos: SanitizedPublicNewsDTO[] = [];
 
-    // 2. Filter strictly for Published
-    const publishedWorkflowItems = rawItems.filter(
-      item => item.workflowState === WorkflowState.Published
-    );
+    if (customPublicTransport) {
+      const res = await customPublicTransport({ lang: options.language || 'ar' });
+      dtos = res.articles || [];
+    } else {
+      if (!isFirebaseConfigured || !app) {
+        throw new Error('BACKEND_UNAVAILABLE: Firebase backend is not configured.');
+      }
+      try {
+        const fns = getFunctions(app);
+        const callable = httpsCallable<{ lang?: 'ar' | 'en' }, { articles: SanitizedPublicNewsDTO[] }>(fns, 'getPublicNews');
+        const res = await callable({ lang: options.language || 'ar' });
+        dtos = res.data?.articles || [];
+      } catch (err) {
+        console.error('Failed to fetch public news from server:', err);
+        throw new Error('BACKEND_UNAVAILABLE: Failed to retrieve public news from server.');
+      }
+    }
 
-    // 3. Convert to canonical News model
-    let canonicalItems: News[] = publishedWorkflowItems.map(toCanonicalNews);
+    // Convert server DTO to canonical News model
+    let canonicalItems: News[] = dtos.map(publicDtoToCanonicalNews);
 
-    // 4. Language availability filter:
+    // Language availability filter:
     if (options.language) {
       canonicalItems = canonicalItems.filter(item => {
         if (options.language === 'en') {
-          // If English requested, must have at least titleEn or contentEn, or fallback gracefully
           return Boolean(item.titleEn || item.titleAr);
         }
-        // Arabic is primary canonical
         return Boolean(item.titleAr);
       });
     }
 
-    // 5. Category filter
+    // Category filter
     if (options.category && options.category !== 'all') {
       const normalizedReqCat = normalizeCategory(options.category);
       canonicalItems = canonicalItems.filter(item => item.category === normalizedReqCat);
     }
 
-    // 6. Search query filter
+    // Search query filter
     if (options.searchQuery && options.searchQuery.trim() !== '') {
       const q = options.searchQuery.toLowerCase().trim();
       canonicalItems = canonicalItems.filter(item => {
@@ -82,7 +104,7 @@ export class PublicNewsClient {
       });
     }
 
-    // 7. Sort by publication date (descending by default)
+    // Sort by publication date (descending by default)
     canonicalItems.sort((a, b) => {
       const dateA = new Date(a.publishedAt || a.createdAt).getTime();
       const dateB = new Date(b.publishedAt || b.createdAt).getTime();
@@ -98,10 +120,10 @@ export class PublicNewsClient {
   public static async getPublishedArticle(idOrSlug: string): Promise<News | null> {
     const published = await this.listPublishedNews();
     const match = published.find(item => {
-      if (item.id === idOrSlug) return true;
-      const slug = this.getSlug(item.titleAr);
+      const matchesId = item.id === idOrSlug;
+      const slugAr = this.getSlug(item.titleAr);
       const slugEn = item.titleEn ? this.getSlug(item.titleEn) : '';
-      return slug === idOrSlug || slugEn === idOrSlug;
+      return matchesId || slugAr === idOrSlug || slugEn === idOrSlug;
     });
     return match || null;
   }

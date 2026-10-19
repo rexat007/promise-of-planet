@@ -51,7 +51,8 @@ export class NewsApplicationService {
    */
   async createDraft(input: SaveNewsInput, actor: ActorContext): Promise<NewsItemBackend> {
     const now = new Date().toISOString();
-    const id = input.id || `news-${Date.now()}`;
+    // Server-authoritative ID generation: client-supplied document IDs are never accepted as authoritative
+    const id = `news-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
     const item: NewsItemBackend = {
       id,
@@ -92,7 +93,10 @@ export class NewsApplicationService {
   }
 
   /**
-   * Updates an existing draft or article while in editorial workflow.
+   * Updates an existing draft while in Draft state.
+   * Strictly enforces that ONLY articles in Draft state can be edited.
+   * Modifying articles in InReview, Approved, Published, or ChangesRequested is rejected
+   * until an authorized transition back to Draft is completed.
    */
   async updateDraft(id: string, input: Partial<SaveNewsInput>, actor: ActorContext): Promise<NewsItemBackend> {
     const existing = await this.repo.getById(id);
@@ -100,13 +104,35 @@ export class NewsApplicationService {
       throw new Error(`NOT_FOUND: News article with ID ${id} does not exist`);
     }
 
+    if (existing.workflowState !== 'Draft') {
+      throw new Error(
+        `INVALID_TRANSITION: Cannot modify content for article '${id}' because its workflow state is '${existing.workflowState}'. Only articles in Draft state can be edited. Transition the article back to Draft before editing.`
+      );
+    }
+
     const now = new Date().toISOString();
     const updated: NewsItemBackend = {
       ...existing,
-      ...input,
       id: existing.id,
+      titleAr: input.titleAr !== undefined ? input.titleAr : existing.titleAr,
+      titleEn: input.titleEn !== undefined ? input.titleEn : existing.titleEn,
+      summaryAr: input.summaryAr !== undefined ? input.summaryAr : existing.summaryAr,
+      summaryEn: input.summaryEn !== undefined ? input.summaryEn : existing.summaryEn,
+      bodyAr: input.bodyAr !== undefined ? input.bodyAr : existing.bodyAr,
+      bodyEn: input.bodyEn !== undefined ? input.bodyEn : existing.bodyEn,
+      category: input.category !== undefined ? input.category : existing.category,
+      tags: input.tags !== undefined ? input.tags : existing.tags,
+      sources: input.sources !== undefined ? input.sources : existing.sources,
+      featuredImage: input.featuredImage !== undefined ? input.featuredImage : existing.featuredImage,
+      location: input.location !== undefined ? input.location : existing.location,
+      urgencyLevel: input.urgencyLevel !== undefined ? input.urgencyLevel : existing.urgencyLevel,
+      relatedVideoIds: input.relatedVideoIds !== undefined ? input.relatedVideoIds : existing.relatedVideoIds,
       updatedAt: now,
-      author: input.author || existing.author || actor.name,
+      author: existing.author || input.author || actor.name,
+      workflowState: existing.workflowState,
+      history: existing.history,
+      createdAt: existing.createdAt,
+      publishedAt: existing.publishedAt,
     };
 
     NewsValidator.validateNewsPayload(updated);

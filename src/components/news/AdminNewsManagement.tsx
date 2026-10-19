@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { NEWS_CATEGORIES } from '../../types/news';
 import type { NewsItem } from '../../types/news';
-import { INITIAL_MOCK_NEWS } from '../../data/mockNewsData';
 import { WorkflowState } from '../../types/workflow';
 import type { WorkflowTransitionConfig } from '../../types/workflow';
 import type { AdminUser } from '../../types/admin';
@@ -48,27 +47,25 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   const [selectedStatus, setSelectedStatus] = useState<string>('All');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
 
-  // Load articles from durable storage on mount
+  // Load articles from backend on mount
   useEffect(() => {
     let isMounted = true;
     async function loadStoredNews() {
       try {
+        setErrorMessage(null);
         const stored = await NewsAdminClient.listAll();
-        if (stored.length > 0) {
-          if (isMounted) setNewsList(stored);
-        } else {
-          NewsAdminClient.seedIfEmpty(INITIAL_MOCK_NEWS);
-          const seeded = await NewsAdminClient.listAll();
-          if (isMounted) setNewsList(seeded.length > 0 ? seeded : INITIAL_MOCK_NEWS);
+        if (isMounted) setNewsList(stored || []);
+      } catch (e: any) {
+        console.error('Failed to load news from backend:', e);
+        if (isMounted) {
+          setErrorMessage(isAr ? 'فشل تحميل الأخبار من الخادم.' : 'Failed to load news from server.');
+          setNewsList([]);
         }
-      } catch (e) {
-        console.error('Failed to load news from storage:', e);
-        if (isMounted) setNewsList(INITIAL_MOCK_NEWS);
       }
     }
     loadStoredNews();
     return () => { isMounted = false; };
-  }, []);
+  }, [isAr]);
   
   // Modal state
   const [activeItem, setActiveItem] = useState<NewsItem | null>(null);
@@ -130,6 +127,8 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   // Check user permission to create/edit
   const canCreate = AdminAccessService.hasPermission(currentUser, AdminPermission.Create);
   const canEdit = AdminAccessService.hasPermission(currentUser, AdminPermission.Edit) || canCreate;
+  const isDraft = isCreating || activeItem?.workflowState === WorkflowState.Draft;
+  const canSaveContent = canEdit && isDraft;
 
   // Filtered news items
   const filteredNews = newsList.filter(item => {
@@ -191,6 +190,15 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
 
   // Save article edits
   const handleSaveForm = async () => {
+    if (!isDraft) {
+      setErrorMessage(
+        isAr
+          ? 'لا يمكن تعديل محتوى المقال خارج مرحلة المسودة.'
+          : 'Content cannot be edited outside Draft state.'
+      );
+      return;
+    }
+
     if (!editForm.titleAr?.trim()) {
       setErrorMessage(isAr ? 'يرجى كتابة عنوان المقال باللغة العربية' : 'Arabic title is required');
       return;
@@ -202,26 +210,28 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
     try {
       let savedItem: NewsItem;
       if (isCreating) {
-        const itemToSave: NewsItem = {
-          ...(editForm as NewsItem),
+        // For new articles, omit the provisional client-generated ID so the server executes createDraft
+        const { id: _provisionalId, ...rest } = editForm as NewsItem;
+        const itemToSave: Partial<NewsItem> = {
+          ...rest,
           tags: parsedTags,
           sources: parsedSources,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
           workflowState: WorkflowState.Draft,
-          history: [],
         };
-        savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser);
+        savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser, true);
         setNewsList([savedItem, ...newsList]);
+        setActiveItem(savedItem);
+        setIsCreating(false);
       } else if (activeItem) {
-        const itemToSave: NewsItem = {
+        const itemToSave: Partial<NewsItem> = {
           ...(editForm as NewsItem),
+          id: activeItem.id,
           tags: parsedTags,
           sources: parsedSources,
-          updatedAt: new Date().toISOString(),
         };
-        savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser);
+        savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser, false);
         setNewsList(newsList.map(item => item.id === savedItem.id ? savedItem : item));
+        setActiveItem(savedItem);
       }
 
       setErrorMessage(null);
@@ -602,6 +612,17 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
             <div className="p-5 overflow-y-auto flex-1 space-y-6">
               {activeTab === 'content' ? (
                 <div className="space-y-4">
+                  {!isDraft && activeItem && (
+                    <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200/60 dark:border-amber-800/50 flex items-center gap-2.5 text-xs text-amber-800 dark:text-amber-300 font-medium">
+                      <ShieldAlert className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                      <span>
+                        {isAr
+                          ? 'محتوى المقال مقفل لكونه خارج مرحلة المسودة. لتعديل المحتوى، يجب إعادة المقال إلى مرحلة المسودة عبر دورة الاعتماد.'
+                          : 'Article content is locked because it is not in Draft state. To modify content, transition the article back to Draft via workflow.'}
+                      </span>
+                    </div>
+                  )}
+
                   {/* Arabic Title */}
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-700 dark:text-gray-300 flex items-center gap-1">
@@ -613,7 +634,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       value={editForm.titleAr || ''}
                       onChange={(e) => setEditForm({ ...editForm, titleAr: e.target.value })}
                       placeholder="عنوان المقال الخبري بالعربية..."
-                      disabled={!canEdit}
+                      disabled={!canSaveContent}
                       className="w-full px-3.5 py-2.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                     />
                   </div>
@@ -629,7 +650,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       value={editForm.titleEn || ''}
                       onChange={(e) => setEditForm({ ...editForm, titleEn: e.target.value })}
                       placeholder="Article title in English..."
-                      disabled={!canEdit}
+                      disabled={!canSaveContent}
                       className="w-full px-3.5 py-2.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                     />
                   </div>
@@ -643,7 +664,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       <select
                         value={editForm.category || NEWS_CATEGORIES[0].labelAr}
                         onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}
-                        disabled={!canEdit}
+                        disabled={!canSaveContent}
                         className="w-full px-3.5 py-2.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60 cursor-pointer"
                       >
                         {NEWS_CATEGORIES.map(cat => (
@@ -662,7 +683,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                         type="text"
                         value={editForm.author || ''}
                         onChange={(e) => setEditForm({ ...editForm, author: e.target.value })}
-                        disabled={!canEdit}
+                        disabled={!canSaveContent}
                         className="w-full px-3.5 py-2.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                       />
                     </div>
@@ -679,7 +700,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       value={editForm.summaryAr || ''}
                       onChange={(e) => setEditForm({ ...editForm, summaryAr: e.target.value })}
                       placeholder="ملخص موجز لأبرز نقاط الخبر..."
-                      disabled={!canEdit}
+                      disabled={!canSaveContent}
                       className="w-full px-3.5 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                     />
                   </div>
@@ -695,7 +716,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       value={editForm.summaryEn || ''}
                       onChange={(e) => setEditForm({ ...editForm, summaryEn: e.target.value })}
                       placeholder="Brief article summary in English..."
-                      disabled={!canEdit}
+                      disabled={!canSaveContent}
                       className="w-full px-3.5 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                     />
                   </div>
@@ -711,7 +732,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       value={editForm.bodyAr || ''}
                       onChange={(e) => setEditForm({ ...editForm, bodyAr: e.target.value })}
                       placeholder="المتن التفصيلي للمقال الخبري..."
-                      disabled={!canEdit}
+                      disabled={!canSaveContent}
                       className="w-full px-3.5 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                     />
                   </div>
@@ -727,7 +748,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       value={editForm.bodyEn || ''}
                       onChange={(e) => setEditForm({ ...editForm, bodyEn: e.target.value })}
                       placeholder="Full article body in English..."
-                      disabled={!canEdit}
+                      disabled={!canSaveContent}
                       className="w-full px-3.5 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                     />
                   </div>
@@ -745,7 +766,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                         value={tagsInput}
                         onChange={(e) => setTagsInput(e.target.value)}
                         placeholder="النيل, طوارئ, زراعة"
-                        disabled={!canEdit}
+                        disabled={!canSaveContent}
                         className="w-full px-3.5 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                       />
                     </div>
@@ -761,7 +782,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                         value={sourcesInput}
                         onChange={(e) => setSourcesInput(e.target.value)}
                         placeholder="وزارة الري, معهد علوم البحار"
-                        disabled={!canEdit}
+                        disabled={!canSaveContent}
                         className="w-full px-3.5 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                       />
                     </div>
@@ -947,7 +968,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                 {isAr ? 'إغلاق' : 'Close'}
               </button>
 
-              {canEdit && activeTab === 'content' && (
+              {canSaveContent && activeTab === 'content' && (
                 <button
                   onClick={handleSaveForm}
                   className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm inline-flex items-center gap-1.5 transition-colors cursor-pointer"

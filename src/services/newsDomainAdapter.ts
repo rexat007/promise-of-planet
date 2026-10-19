@@ -191,3 +191,58 @@ export function sanitizeForPublic(item: NewsItem): SanitizedPublicNewsDTO | null
     relatedVideoIds: item.relatedVideoIds || [],
   };
 }
+
+/**
+ * Converts a sanitized public news DTO returned from the server into the public News domain model.
+ * Does NOT fabricate approval records or editorial history.
+ */
+export function publicDtoToCanonicalNews(dto: SanitizedPublicNewsDTO): News {
+  const sources: ContentSource[] = (dto.sources || []).map((s, idx) => ({
+    id: `src-${idx + 1}`,
+    sourceName: s,
+    sourceType: 'IndependentMedia',
+    isPrimarySource: idx === 0,
+  }));
+
+  const featuredImage: ImageObject | undefined = dto.featuredImage
+    ? {
+        url: dto.featuredImage,
+        altAr: dto.titleAr,
+        altEn: dto.titleEn || dto.titleAr,
+        captionAr: dto.summaryAr,
+        captionEn: dto.summaryEn,
+      }
+    : undefined;
+
+  const hasArabic = Boolean(dto.titleAr && dto.bodyAr);
+  const hasEnglish = Boolean(dto.titleEn && dto.bodyEn);
+  const availableLanguages: ('ar' | 'en')[] = [];
+  if (hasArabic) availableLanguages.push('ar');
+  if (hasEnglish) availableLanguages.push('en');
+
+  return {
+    id: dto.id,
+    contentType: 'News',
+    titleAr: dto.titleAr,
+    titleEn: dto.titleEn || undefined,
+    excerptAr: dto.summaryAr,
+    excerptEn: dto.summaryEn || undefined,
+    contentAr: dto.bodyAr,
+    contentEn: dto.bodyEn || undefined,
+    category: normalizeCategory(dto.category),
+    tags: dto.tags || [],
+    originalLanguage: 'ar',
+    availableLanguages,
+    featuredImage,
+    createdAt: dto.createdAt,
+    updatedAt: dto.publishedAt || dto.createdAt,
+    publishedAt: dto.publishedAt,
+    author: dto.author,
+    status: 'Published',
+    approvalStatus: 'Approved',
+    rightsStatus: 'Cleared',
+    location: dto.location || 'Sudan / السودان',
+    urgencyLevel: (dto.urgencyLevel as UrgencyLevel) || 'Standard',
+    sources,
+  };
+}

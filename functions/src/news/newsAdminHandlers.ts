@@ -1,4 +1,4 @@
-import { onCall, onRequest, HttpsError } from 'firebase-functions/v2/https';
+import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { NewsApplicationService } from './newsApplicationService';
 import { PublicNewsRepository } from './publicNewsRepository';
 import type { AdminRepository } from '../admin/adminRepository';
@@ -76,11 +76,14 @@ export async function executeManageNewsRequest(
     }
 
     if (action === 'saveDraft') {
-      const admin = await authenticateAndAuthorize(requestContext, AdminPermission.Create, adminRepo);
       const payload = data.item;
       if (!payload) {
         throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: item payload is required');
       }
+
+      const isUpdate = Boolean(payload.id);
+      const requiredPermission = isUpdate ? AdminPermission.Edit : AdminPermission.Create;
+      const admin = await authenticateAndAuthorize(requestContext, requiredPermission, adminRepo);
 
       const actor = {
         uid: admin.id,
@@ -140,15 +143,15 @@ export const manageNews = onCall({ cors: true }, async (request) => {
 });
 
 /**
- * Public HTTP endpoint to retrieve sanitized, published news.
+ * Public Callable Cloud Function to retrieve sanitized, published news.
  */
-export const getPublicNews = onRequest({ cors: true }, async (request, response) => {
+export const getPublicNews = onCall({ cors: true }, async (request) => {
   try {
-    const language = request.query.lang === 'en' ? 'en' : 'ar';
+    const language = request.data?.lang === 'en' ? 'en' : 'ar';
     const repo = new PublicNewsRepository();
     const articles = await repo.listPublicNews(language);
-    response.json({ articles });
+    return { articles };
   } catch (error: any) {
-    response.status(500).json({ error: error.message || 'Failed to retrieve public news' });
+    throw new HttpsError('internal', error.message || 'Failed to retrieve public news');
   }
 });

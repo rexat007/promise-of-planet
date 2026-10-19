@@ -1,167 +1,144 @@
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import { app, auth, isFirebaseConfigured } from './firebase';
 import type { NewsItem } from '../types/news';
-import { WorkflowState } from '../types/workflow';
+import type { WorkflowState } from '../types/workflow';
 import type { AdminUser } from '../types/admin';
-import { WorkflowEngine } from './workflowEngine';
 
-const STORAGE_KEY = 'pop_news_durable_store_v1';
+export type NewsAdminTransport = (action: string, payload?: any) => Promise<any>;
+
+let customAdminTransport: NewsAdminTransport | null = null;
+
+function getFunctionsInstance() {
+  if (!isFirebaseConfigured || !app) {
+    throw new Error('BACKEND_UNCONFIGURED: Firebase backend is not configured in client environment.');
+  }
+  if (!auth?.currentUser) {
+    throw new Error('UNAUTHENTICATED: Authentication required. Newsroom management requires an authenticated Admin user session.');
+  }
+  return getFunctions(app);
+}
 
 export class NewsAdminClient {
-  private static getStoredItems(): NewsItem[] {
-    try {
-      const data = localStorage.getItem(STORAGE_KEY);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (Array.isArray(parsed)) {
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to read news items from durable storage:', e);
-    }
-    return [];
+  /**
+   * Allows injecting an isolated transport function (used for automated testing without live network mutation).
+   */
+  public static setTransport(transport: NewsAdminTransport | null): void {
+    customAdminTransport = transport;
   }
 
-  private static persistItems(items: NewsItem[]): void {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-    } catch (e) {
-      console.error('Failed to write news items to durable storage:', e);
+  public static isBackendAvailable(): boolean {
+    return isFirebaseConfigured && !!app;
+  }
+
+  public static isAuthenticated(): boolean {
+    return !!(isFirebaseConfigured && auth?.currentUser);
+  }
+
+  private static async executeAction<T = any>(action: string, payload?: any): Promise<T> {
+    if (customAdminTransport) {
+      return customAdminTransport(action, payload);
     }
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<{ action: string; [key: string]: any }, T>(fns, 'manageNews');
+    const res = await callable({ action, ...payload });
+    return res.data;
   }
 
   /**
-   * Retrieves all news items from durable storage.
+   * Retrieves all news items from authoritative server repository.
    */
   public static async listAll(): Promise<NewsItem[]> {
-    return this.getStoredItems();
+    const data = await this.executeAction<{ items: NewsItem[] }>('listAll');
+    return data.items || [];
   }
 
   /**
-   * Retrieves a single news item by ID.
+   * Retrieves a single news item by ID from authoritative server repository.
    */
   public static async getById(id: string): Promise<NewsItem | null> {
-    const items = this.getStoredItems();
-    return items.find(item => item.id === id) || null;
+    if (!id || typeof id !== 'string') return null;
+    const data = await this.executeAction<{ item: NewsItem | null }>('getById', { id: id.trim() });
+    return data.item ?? null;
   }
 
   /**
-   * Saves or updates a draft/article durably.
-   * Ensures author, source, dates and bilingual content are preserved.
+   * Saves or updates a draft article via server-authoritative manageNews.
+   * For new articles (isNew === true or when item.id is omitted), the provisional client ID is omitted
+   * so the server executes createDraft and assigns an authoritative Firestore ID.
    */
   public static async saveNewsItem(
-    item: NewsItem,
-    actor: AdminUser
+    item: Partial<NewsItem>,
+    _actor?: AdminUser,
+    isNew: boolean = false
   ): Promise<NewsItem> {
     if (!item.titleAr || item.titleAr.trim() === '') {
       throw new Error('Arabic title (titleAr) is mandatory for Promise of Planet news items');
     }
 
-    const items = this.getStoredItems();
-    const existingIndex = items.findIndex(n => n.id === item.id);
-    const now = new Date().toISOString();
+    const payload: Record<string, any> = {};
 
-    let updatedItem: NewsItem;
+    if (item.titleAr !== undefined) payload.titleAr = item.titleAr.trim();
+    if (item.titleEn !== undefined) payload.titleEn = item.titleEn.trim();
+    if (item.summaryAr !== undefined) payload.summaryAr = item.summaryAr.trim();
+    if (item.summaryEn !== undefined) payload.summaryEn = item.summaryEn.trim();
+    if (item.bodyAr !== undefined) payload.bodyAr = item.bodyAr;
+    if (item.bodyEn !== undefined) payload.bodyEn = item.bodyEn;
+    if (item.category !== undefined) payload.category = item.category;
+    if (item.tags !== undefined) payload.tags = item.tags;
+    if (item.sources !== undefined) payload.sources = item.sources;
+    if (item.featuredImage !== undefined) payload.featuredImage = item.featuredImage;
+    if (item.location !== undefined) payload.location = item.location;
+    if (item.urgencyLevel !== undefined) payload.urgencyLevel = item.urgencyLevel;
+    if (item.relatedVideoIds !== undefined) payload.relatedVideoIds = item.relatedVideoIds;
+    if (item.author !== undefined) payload.author = item.author;
 
-    if (existingIndex >= 0) {
-      const existing = items[existingIndex];
-      updatedItem = {
-        ...existing,
-        ...item,
-        updatedAt: now,
-        // Preserve original author if not changed
-        author: item.author || existing.author || actor.name,
-      };
-      items[existingIndex] = updatedItem;
-    } else {
-      updatedItem = {
-        ...item,
-        createdAt: item.createdAt || now,
-        updatedAt: now,
-        author: item.author || actor.name,
-        workflowState: item.workflowState || WorkflowState.Draft,
-        history: item.history || [],
-      };
-      items.unshift(updatedItem);
+    if (isNew) {
+      payload.titleEn = payload.titleEn || '';
+      payload.summaryAr = payload.summaryAr || '';
+      payload.summaryEn = payload.summaryEn || '';
+      payload.bodyAr = payload.bodyAr || '';
+      payload.bodyEn = payload.bodyEn || '';
+      payload.category = payload.category || 'Climate';
+      payload.tags = payload.tags || [];
+      payload.sources = payload.sources || [];
+      payload.location = payload.location || 'Sudan / السودان';
+      payload.urgencyLevel = payload.urgencyLevel || 'Standard';
+      payload.relatedVideoIds = payload.relatedVideoIds || [];
+    } else if (item.id && !item.id.startsWith('news-sudan-provisional-') && !item.id.startsWith('temp-')) {
+      payload.id = item.id;
     }
 
-    this.persistItems(items);
-    return updatedItem;
+    const data = await this.executeAction<{ item: NewsItem }>('saveDraft', { item: payload });
+    return data.item;
   }
 
   /**
-   * Executes a workflow transition with authorization check and history audit.
-   * STRICT: Human explicit publication only!
+   * Executes a workflow transition with server-side authorization and audit logging.
+   * Human explicit publication required for state === 'Published'.
    */
   public static async executeTransition(
     newsItemId: string,
     targetState: WorkflowState,
-    actor: AdminUser,
+    _actor?: AdminUser,
     comment?: string
   ): Promise<NewsItem> {
-    const items = this.getStoredItems();
-    const existingIndex = items.findIndex(n => n.id === newsItemId);
-    if (existingIndex < 0) {
-      throw new Error(`News item with ID ${newsItemId} not found`);
+    if (!newsItemId || !targetState) {
+      throw new Error('newsItemId and targetState are required for workflow transition');
     }
 
-    const existing = items[existingIndex];
-
-    // Build adapter item for WorkflowEngine
-    const adapterItem = {
-      id: existing.id,
-      titleAr: existing.titleAr,
-      titleEn: existing.titleEn || '',
-      contentType: 'News' as const,
-      currentState: existing.workflowState,
-      authorName: existing.author,
-      createdAt: existing.createdAt,
-      updatedAt: existing.updatedAt,
-      category: existing.category,
-      history: existing.history || [],
-    };
-
-    // Execute transition using canonical WorkflowEngine (validates permissions & workflow rules)
-    const resultAdapter = WorkflowEngine.executeTransition(
-      adapterItem,
+    const data = await this.executeAction<{ item: NewsItem }>('transitionWorkflow', {
+      id: newsItemId,
       targetState,
-      actor,
-      comment
-    );
+      comment: comment?.trim() || undefined,
+    });
 
-    const now = new Date().toISOString();
-    const updatedNewsItem: NewsItem = {
-      ...existing,
-      workflowState: resultAdapter.currentState,
-      updatedAt: resultAdapter.updatedAt,
-      history: resultAdapter.history,
-      publishedAt: resultAdapter.currentState === WorkflowState.Published 
-        ? (existing.publishedAt || now) 
-        : existing.publishedAt,
-    };
-
-    items[existingIndex] = updatedNewsItem;
-    this.persistItems(items);
-    return updatedNewsItem;
+    return data.item;
   }
 
   /**
-   * Resets/seeds items for testing or administration initialization if empty.
-   */
-  public static seedIfEmpty(items: NewsItem[]): void {
-    const existing = this.getStoredItems();
-    if (existing.length === 0 && items.length > 0) {
-      this.persistItems(items);
-    }
-  }
-
-  /**
-   * Clears storage (used for tests).
+   * Test/environment utility to clear test state. Does not touch live storage or local storage.
    */
   public static clear(): void {
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch (_e) {
-      // ignore
-    }
+    // No-op in production; retained for test suite compatibility
   }
 }
