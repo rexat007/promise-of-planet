@@ -14,6 +14,12 @@
     "test:public-library": "npx tsx scripts/runPublicLibraryFunctionalTests.ts"
   },
   "dependencies": {
+    "@tiptap/extension-link": "^3.32.0",
+    "@tiptap/extension-text-align": "^3.32.0",
+    "@tiptap/extension-underline": "^3.32.0",
+    "@tiptap/pm": "^3.32.0",
+    "@tiptap/react": "^3.32.0",
+    "@tiptap/starter-kit": "^3.32.0",
     "@types/uuid": "^11.0.0",
     "firebase": "^12.19.0",
     "i18next": "^26.4.2",
@@ -35,6 +41,7 @@
     "postcss": "^8.5.28",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.2",
-    "vite": "^8.3.0"
+    "vite": "^8.3.0",
+    "vitest": "^5.0.5"
   }
 }
