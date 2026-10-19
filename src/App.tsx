@@ -17,6 +17,8 @@ import { TrainingCenter } from './components/training/TrainingCenter';
 import { AboutUsView } from './components/about/AboutUsView';
 import { PublicMediaHub } from './components/media/PublicMediaHub';
 import { PublicNewsHub } from './components/news/PublicNewsHub';
+import { HomeNewsPreview } from './components/news/HomeNewsPreview';
+import { HomeMultimediaPreview } from './components/media/HomeMultimediaPreview';
 import { PublicCitizenJournalist } from './components/community/PublicCitizenJournalist';
 import { PublicLibraryHub } from './components/library/PublicLibraryHub';
 import type { PublicPageKey } from './components/layout/Header';
@@ -185,7 +187,19 @@ function App() {
                   </Container>
                 </div>
 
-                {/* 3. Latest Library Materials Section: Truthful curation state */}
+                {/* 2. Latest News Preview Section */}
+                <HomeNewsPreview
+                  currentLanguage={currentLang}
+                  onNavigate={(page) => setActivePage(page)}
+                />
+
+                {/* 3. Latest Multimedia & Video Preview Section */}
+                <HomeMultimediaPreview
+                  currentLanguage={currentLang}
+                  onNavigate={(page) => setActivePage(page)}
+                />
+
+                {/* 4. Latest Library Materials Section: Truthful curation state */}
                 <Section id="library-section" className="bg-gray-50/60 dark:bg-gray-950/60 border-b border-gray-200/60 dark:border-gray-800/60 pop-motion-section">
                   <Container>
                     <SectionHeading
