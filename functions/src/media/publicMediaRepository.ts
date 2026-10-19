@@ -80,16 +80,12 @@ function sanitizeContentSources(sources?: ContentSource[]): ContentSource[] | un
 
     const safeSourceUrl = sanitizePublicHttpUrl(s.sourceUrl);
     const accessedAt = typeof s.accessedAt === 'string' && s.accessedAt.trim() ? s.accessedAt.trim() : undefined;
-    const reliabilityNotes =
-      typeof s.reliabilityNotes === 'string' && s.reliabilityNotes.trim() ? s.reliabilityNotes.trim() : undefined;
-
     sanitized.push({
       id: s.id.trim(),
       sourceName: s.sourceName.trim(),
       sourceType: s.sourceType,
       ...(safeSourceUrl ? { sourceUrl: safeSourceUrl } : {}),
       ...(accessedAt ? { accessedAt } : {}),
-      ...(reliabilityNotes ? { reliabilityNotes } : {}),
       ...(typeof s.isPrimarySource === 'boolean' ? { isPrimarySource: s.isPrimarySource } : {}),
     });
   }
