@@ -87,7 +87,7 @@ function App() {
     <div id="app-root-container" dir={isAr ? 'rtl' : 'ltr'} className="min-h-screen w-full">
       <ResponsiveGuard />
       <ErrorBoundary isAr={isAr}>
-        <ViewTransition viewKey={isAdminOpen ? 'admin-workspace' : activePage}>
+        <ViewTransition viewKey={isAdminOpen ? 'admin-workspace' : 'public-app'}>
         {isAdminOpen ? (
           <AdminAccessGate 
             onExitAdmin={() => {
@@ -112,6 +112,7 @@ function App() {
             activePage={activePage}
             onNavigate={(page) => setActivePage(page)}
           >
+            <ViewTransition viewKey={activePage}>
             {activePage === 'news' ? (
               <PublicNewsHub initialArticleIdOrSlug={initialNewsSlug} onNavigate={(page) => setActivePage(page)} />
             ) : activePage === 'library' ? (
@@ -213,6 +214,7 @@ function App() {
                 </Section>
               </>
             )}
+            </ViewTransition>
           </AppShell>
         )}
       </ViewTransition>

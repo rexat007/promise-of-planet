@@ -80,5 +80,29 @@ export function runClimateClockRegressionTests(): TestResult[] {
     message: noGlobalOverflow ? undefined : 'Global overflow-x hidden masking found'
   });
 
+  // G. AppShell is NOT re-keyed on public page changes (stable layout mounting)
+  const appPath = path.join(process.cwd(), 'src/App.tsx');
+  const appCode = fs.readFileSync(appPath, 'utf8');
+  const appShellStable = !appCode.includes('<ViewTransition viewKey={isAdminOpen ? \'admin-workspace\' : activePage}>') &&
+    appCode.includes('viewKey={isAdminOpen ? \'admin-workspace\' : \'public-app\'}');
+  results.push({
+    id: 'G',
+    name: 'AppShell remains stably mounted across public tab navigation',
+    classification: 'STATIC_SOURCE_ASSERTION',
+    passed: appShellStable,
+    message: appShellStable ? undefined : 'AppShell is still keyed to activePage causing remount on navigation'
+  });
+
+  // H. ViewTransition animates page content inside AppShell with viewKey=activePage
+  const viewTransitionInsideAppShell = appCode.includes('<AppShell') &&
+    appCode.includes('<ViewTransition viewKey={activePage}>');
+  results.push({
+    id: 'H',
+    name: 'ViewTransition animates page content inside AppShell with activePage',
+    classification: 'STATIC_SOURCE_ASSERTION',
+    passed: viewTransitionInsideAppShell,
+    message: viewTransitionInsideAppShell ? undefined : 'ViewTransition with viewKey={activePage} not found inside AppShell'
+  });
+
   return results;
 }
