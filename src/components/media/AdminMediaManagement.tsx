@@ -1,10 +1,10 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { MediaService, isVideoPubliclyEligible } from '../../services/mediaService';
 import { AdminAccessService } from '../../services/adminAccess';
 import { AdminPermission } from '../../types/admin';
 import type { AdminUser } from '../../types/admin';
-import { mockNewsList } from '../../data/mockContent';
+import type { NewsItem } from '../../types/news';
+import { NewsAdminClient } from '../../services/newsAdminClient';
 import { VideoEmbed } from '../content/VideoEmbed';
 import type { 
   Video, 
@@ -12,6 +12,13 @@ import type {
   VisibilityDecision, 
   Category
 } from '../../types';
+
+const isVideoPubliclyEligible = (video: Video): boolean =>
+  video.status === 'Published' &&
+  video.approvalStatus === 'Approved' &&
+  video.rightsStatus === 'Cleared' &&
+  video.visibilityDecision !== 'Hidden' &&
+  video.youtubeSource?.availabilityStatus === 'Available';
 import { 
   Plus, 
   Search, 
@@ -61,7 +68,9 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   const useBackend = isBackendAvailable && isAuthenticated;
 
   // State
-  const [videos, setVideos] = useState<Video[]>(() => MediaService.listAll());
+  const [videos, setVideos] = useState<Video[]>([]);
+  const [newsList, setNewsList] = useState<NewsItem[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
@@ -106,18 +115,20 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
 
   // Linked relations state for backend mode
   const [linkedRelations, setLinkedRelations] = useState<any[]>([]);
+  const [videoRelationsMap, setVideoRelationsMap] = useState<Record<string, number>>({});
 
   const loadRelationsForSelectedVideo = async (videoId: string) => {
     try {
-      if (useBackend) {
+      if (isBackendAvailable && isAuthenticated) {
         const rels = await MediaAdminClient.getRelationsForVideo(videoId);
         setLinkedRelations(rels);
+        setVideoRelationsMap(prev => ({ ...prev, [videoId]: rels.length }));
       } else {
-        const rels = MediaService.getRelationsForVideo(videoId);
-        setLinkedRelations(rels);
+        setLinkedRelations([]);
       }
     } catch (err) {
-      console.warn('Failed to load relations:', err);
+      console.warn('Failed to load relations from backend:', err);
+      setLinkedRelations([]);
     }
   };
 
@@ -129,27 +140,45 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     }
   }, [selectedVideo, useBackend]);
 
-  // Refresh lists
+  // Refresh lists exclusively from Firebase backend
   const refreshData = async () => {
+    setLoading(true);
+    setErrorMsg(null);
     try {
-      if (useBackend) {
-        const list = await MediaAdminClient.listAll();
-        setVideos(list);
-        if (selectedVideo) {
-          const updated = list.find(v => v.id === selectedVideo.id);
-          setSelectedVideo(updated || null);
-          await loadRelationsForSelectedVideo(selectedVideo.id);
-        }
-      } else {
-        const list = MediaService.listAll();
-        setVideos(list);
-        if (selectedVideo) {
-          const updated = list.find(v => v.id === selectedVideo.id);
-          setSelectedVideo(updated || null);
+      if (!isBackendAvailable) {
+        throw new Error(tText('خادم الفايربيس غير مهيأ في البيئة الحالية.', 'Firebase backend is not configured in client environment.'));
+      }
+      if (!isAuthenticated) {
+        throw new Error(tText('يتطلب الوصول لجلسة مسؤول موثقة على الخادم.', 'Authentication required. Active Admin user session required.'));
+      }
+
+      // 1. Fetch videos independently so news retrieval failure does not hide media records
+      const fetchedVideos = await MediaAdminClient.listAll();
+      setVideos(fetchedVideos);
+
+      // 2. Fetch news articles independently for relations selector
+      try {
+        const fetchedNews = await NewsAdminClient.listAll();
+        setNewsList(fetchedNews);
+      } catch (newsErr) {
+        console.warn('Failed to load news records for relation selection:', newsErr);
+      }
+
+      if (selectedVideo) {
+        const updated = fetchedVideos.find(v => v.id === selectedVideo.id);
+        setSelectedVideo(updated || null);
+        if (updated) {
+          const rels = await MediaAdminClient.getRelationsForVideo(updated.id).catch(() => []);
+          setLinkedRelations(rels);
+          setVideoRelationsMap(prev => ({ ...prev, [updated.id]: rels.length }));
         }
       }
     } catch (err: any) {
-      console.warn('Failed to refresh data:', err);
+      console.error('Failed to load admin media records:', err);
+      setErrorMsg(err.message || tText('فشل تحميل بيانات الوسائط من الخادم.', 'Failed to load media records from server.'));
+      setVideos([]);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -343,82 +372,40 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     }
 
     try {
-      if (useBackend) {
-        const input = {
-          contentType: 'Video' as const,
-          category: regCategory,
-          titleAr: regTitleAr,
-          titleEn: regTitleEn || undefined,
-          excerptAr: regExcerptAr || regTitleAr,
-          excerptEn: regExcerptEn || undefined,
-          originalLanguage: 'ar' as const,
-          availableLanguages: regTitleEn ? ['ar', 'en'] : ['ar'],
-          translationStatus: regTitleEn ? 'Completed' as const : 'NotRequired' as const,
-          status: 'Draft' as const,
-          approvalStatus: 'Pending' as const,
-          visibilityDecision: 'Hidden' as const,
-          rightsStatus: 'NotStarted' as const,
-          editorialDescriptionAr: regDescAr,
-          editorialDescriptionEn: regDescEn || undefined,
-          tags: regTags ? regTags.split(',').map(t => t.trim()).filter(Boolean) : [],
-          editorialThumbnail: regThumbnailUrl ? { url: regThumbnailUrl, altAr: regTitleAr } : undefined,
-          youtubeSource: {
-            youtubeVideoId: regYoutubeId.trim(),
-            youtubeUrl: `https://www.youtube.com/watch?v=${regYoutubeId.trim()}`,
-            originalTitle: regTitleAr,
-            originalDescription: regDescAr,
-            youtubePublishedAt: new Date().toISOString(),
-            thumbnails: regThumbnailUrl ? { medium: regThumbnailUrl } : {},
-            ...(regChannelName ? { channelName: regChannelName } : {})
-          }
-        };
-        const newVideo = await MediaAdminClient.register(input);
-        setSuccessMsg(tText('تم تسجيل الفيديو بنجاح كمسودة على الخادم الدائم', 'Video successfully registered as draft on durable server'));
-        setIsRegisterOpen(false);
-        setSelectedVideo(newVideo);
-        await refreshData();
-      } else {
-        const data: Omit<Video, 'id' | 'createdAt' | 'updatedAt'> = {
-          contentType: 'Video',
-          category: regCategory,
-          titleAr: regTitleAr,
-          titleEn: regTitleEn || undefined,
-          excerptAr: regExcerptAr || regTitleAr,
-          excerptEn: regExcerptEn || undefined,
-          originalLanguage: 'ar',
-          availableLanguages: regTitleEn ? ['ar', 'en'] : ['ar'],
-          translationStatus: regTitleEn ? 'Completed' : 'NotRequired',
-          editor: currentUser.name,
-          producer: regChannelName || tText('جهة خارجية', 'External Source'),
-          status: 'Draft',
-          approvalStatus: 'Pending',
-          visibilityDecision: 'Hidden',
-          rightsStatus: 'NotStarted',
-          editorialDescriptionAr: regDescAr,
-          editorialDescriptionEn: regDescEn || undefined,
-          tags: regTags ? regTags.split(',').map(t => t.trim()).filter(Boolean) : [],
-          editorialThumbnail: regThumbnailUrl ? { url: regThumbnailUrl, altAr: regTitleAr } : undefined,
-          youtubeSource: {
-            youtubeVideoId: regYoutubeId.trim(),
-            youtubeUrl: `https://www.youtube.com/watch?v=${regYoutubeId.trim()}`,
-            channelId: 'UC-external',
-            channelName: regChannelName || 'External YouTube Creator',
-            channelUrl: 'https://youtube.com',
-            originalTitle: regTitleEn || regTitleAr,
-            originalDescription: regDescEn || regDescAr,
-            youtubePublishedAt: new Date().toISOString(),
-            duration: regDuration,
-            availabilityStatus: 'Available',
-            thumbnails: regThumbnailUrl ? { medium: regThumbnailUrl } : {}
-          }
-        };
-        const newVideo = MediaService.register(data, currentUser);
-        setSuccessMsg(tText('تم تسجيل الفيديو بنجاح كمسودة غير منشورة', 'Video successfully registered as draft'));
-        setIsRegisterOpen(false);
-        setSelectedVideo(newVideo);
-        refreshData();
-      }
-      
+      const input = {
+        contentType: 'Video' as const,
+        category: regCategory,
+        titleAr: regTitleAr,
+        titleEn: regTitleEn || undefined,
+        excerptAr: regExcerptAr || regTitleAr,
+        excerptEn: regExcerptEn || undefined,
+        originalLanguage: 'ar' as const,
+        availableLanguages: regTitleEn ? ['ar', 'en'] : ['ar'],
+        translationStatus: regTitleEn ? 'Completed' as const : 'NotRequired' as const,
+        status: 'Draft' as const,
+        approvalStatus: 'Pending' as const,
+        visibilityDecision: 'Hidden' as const,
+        rightsStatus: 'NotStarted' as const,
+        editorialDescriptionAr: regDescAr,
+        editorialDescriptionEn: regDescEn || undefined,
+        tags: regTags ? regTags.split(',').map(t => t.trim()).filter(Boolean) : [],
+        editorialThumbnail: regThumbnailUrl ? { url: regThumbnailUrl, altAr: regTitleAr } : undefined,
+        youtubeSource: {
+          youtubeVideoId: regYoutubeId.trim(),
+          youtubeUrl: `https://www.youtube.com/watch?v=${regYoutubeId.trim()}`,
+          originalTitle: regTitleAr,
+          originalDescription: regDescAr,
+          youtubePublishedAt: new Date().toISOString(),
+          thumbnails: regThumbnailUrl ? { medium: regThumbnailUrl } : {},
+          ...(regChannelName ? { channelName: regChannelName } : {})
+        }
+      };
+      const newVideo = await MediaAdminClient.register(input);
+      setSuccessMsg(tText('تم تسجيل الفيديو بنجاح كمسودة على الخادم الدائم', 'Video successfully registered as draft on durable server'));
+      setIsRegisterOpen(false);
+      setSelectedVideo(newVideo);
+      await refreshData();
+
       // Reset form
       setRegTitleAr('');
       setRegTitleEn('');
@@ -459,12 +446,8 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
         tags: editTags ? editTags.split(',').map(t => t.trim()).filter(Boolean) : []
       };
 
-      if (useBackend) {
-        const updated = await MediaAdminClient.updateMetadata(selectedVideo.id, updates);
-        setSelectedVideo(updated);
-      } else {
-        MediaService.updateMetadata(selectedVideo.id, updates, currentUser);
-      }
+      const updated = await MediaAdminClient.updateMetadata(selectedVideo.id, updates);
+      setSelectedVideo(updated);
       setSuccessMsg(tText('تم تحديث البيانات الوصفية التحريرية بنجاح', 'Editorial metadata successfully updated'));
       setIsEditMetadataOpen(false);
       await refreshData();
@@ -479,12 +462,8 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     setErrorMsg(null);
 
     try {
-      if (useBackend) {
-        const updated = await MediaAdminClient.updateRightsStatus(selectedVideo.id, status, rightsNotes || undefined);
-        setSelectedVideo(updated);
-      } else {
-        MediaService.updateRightsStatus(selectedVideo.id, status, rightsNotes || undefined, currentUser);
-      }
+      const updated = await MediaAdminClient.updateRightsStatus(selectedVideo.id, status, rightsNotes || undefined);
+      setSelectedVideo(updated);
       setRightsNotes('');
       setSuccessMsg(tText(`تم تحديث حالة حقوق النشر إلى: ${status}`, `Rights status updated to: ${status}`));
       await refreshData();
@@ -499,12 +478,8 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     setErrorMsg(null);
 
     try {
-      if (useBackend) {
-        const updated = await MediaAdminClient.updateVisibilityDecision(selectedVideo.id, decision);
-        setSelectedVideo(updated);
-      } else {
-        MediaService.updateVisibilityDecision(selectedVideo.id, decision, currentUser);
-      }
+      const updated = await MediaAdminClient.updateVisibilityDecision(selectedVideo.id, decision);
+      setSelectedVideo(updated);
       setSuccessMsg(tText(`تم تحديث قرار الظهور إلى: ${decision}`, `Visibility decision updated to: ${decision}`));
       await refreshData();
     } catch (e: any) {
@@ -519,18 +494,7 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     setErrorMsg(null);
 
     try {
-      if (useBackend) {
-        await MediaAdminClient.linkVideoToContent(selectedVideo.id, selectedNewsId, relationType, placement);
-      } else {
-        MediaService.linkVideoToContent(
-          selectedVideo.id, 
-          selectedNewsId, 
-          'News', 
-          relationType, 
-          placement, 
-          currentUser
-        );
-      }
+      await MediaAdminClient.linkVideoToContent(selectedVideo.id, selectedNewsId, relationType, placement);
       setSuccessMsg(tText('تم ربط الفيديو بالخبر بنجاح', 'Successfully linked video to news item'));
       setSelectedNewsId('');
       await refreshData();
@@ -545,11 +509,7 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     setErrorMsg(null);
 
     try {
-      if (useBackend) {
-        await MediaAdminClient.unlinkVideoFromContent(selectedVideo.id, newsId);
-      } else {
-        MediaService.unlinkVideoFromContent(selectedVideo.id, newsId, currentUser);
-      }
+      await MediaAdminClient.unlinkVideoFromContent(selectedVideo.id, newsId);
       setSuccessMsg(tText('تم إلغاء ربط الفيديو بنجاح', 'Successfully unlinked video'));
       await refreshData();
     } catch (e: any) {
@@ -566,10 +526,10 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
     }
   };
 
-  // Helper to find the News entity based on relationship
+  // Helper to find the News entity from authentic news list
   const getNewsTitle = (newsId: string) => {
-    const item = mockNewsList.find(n => n.id === newsId);
-    if (!item) return newsId;
+    const item = newsList.find(n => n.id === newsId);
+    if (!item) return isAr ? `[مادة غير متاحة: ${newsId}]` : `[Unavailable Item: ${newsId}]`;
     return isAr ? item.titleAr : (item.titleEn || item.titleAr);
   };
 
@@ -577,8 +537,8 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   const linkableNews = useMemo(() => {
     if (!selectedVideo) return [];
     const linkedIds = linkedRelations.map(r => r.contentId);
-    return mockNewsList.filter(news => !linkedIds.includes(news.id));
-  }, [selectedVideo, linkedRelations]);
+    return newsList.filter(news => !linkedIds.includes(news.id));
+  }, [selectedVideo, linkedRelations, newsList]);
 
   return (
     <div className="space-y-6 w-full max-w-full min-w-0" id="admin-media-workspace" dir={isAr ? 'rtl' : 'ltr'}>
@@ -1252,10 +1212,11 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
             </span>
             <button 
               onClick={refreshData}
-              className="p-1.5 text-gray-500 hover:text-emerald-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer transition-colors"
+              disabled={loading}
+              className="p-1.5 text-gray-500 hover:text-emerald-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer transition-colors disabled:opacity-50"
               title={tText('تحديث البيانات', 'Refresh Lists')}
             >
-              <RefreshCw className="w-4 h-4" />
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
           </div>
 
@@ -1282,7 +1243,7 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
                   <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
                     {filteredVideos.map((v) => {
                       const isSelected = selectedVideo?.id === v.id;
-                      const hasRelations = MediaService.getRelationsForVideo(v.id).length;
+                      const hasRelations = videoRelationsMap[v.id] ?? (selectedVideo?.id === v.id ? linkedRelations.length : 0);
                       return (
                         <tr 
                           key={v.id} 
@@ -1367,7 +1328,7 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
               <div className="xl:hidden divide-y divide-gray-100 dark:divide-gray-800" id="mobile-cards-list">
                 {filteredVideos.map((v) => {
                   const isSelected = selectedVideo?.id === v.id;
-                  const hasRelations = MediaService.getRelationsForVideo(v.id).length;
+                  const hasRelations = videoRelationsMap[v.id] ?? (selectedVideo?.id === v.id ? linkedRelations.length : 0);
                   return (
                     <div 
                       key={v.id}
