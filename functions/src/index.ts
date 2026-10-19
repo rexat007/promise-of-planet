@@ -1,4 +1,4 @@
-import { onRequest } from "firebase-functions/v2/https";
+import { onCall, onRequest, HttpsError } from "firebase-functions/v2/https";
 import * as logger from "firebase-functions/logger";
 
 // Initialize admin SDK automatically inside functions
@@ -18,21 +18,19 @@ export { manageNews, getPublicNews } from "./news/newsAdminHandlers";
 export { submitCitizenReport, manageCitizenSubmissions } from "./community/communityHandlers";
 
 /**
- * Public Multimedia Gateway conforming to Firebase v2 onRequest.
- * Returns strictly filtered public videos and canonical playlists.
+ * Public Multimedia Gateway conforming to Firebase v2 onCall callable protocol.
+ * Returns strictly filtered and DTO-sanitized public videos and canonical playlists.
  */
-export const getPublicMultimedia = onRequest({ cors: true }, async (_request, response) => {
+export const getPublicMultimedia = onCall({ cors: true }, async (_request) => {
   try {
     const { PublicMediaRepository } = await import("./media/publicMediaRepository");
     const repo = new PublicMediaRepository();
-    const [videos, playlists] = await Promise.all([
-      repo.listPublicVideos(),
-      repo.listPublicPlaylists(),
-    ]);
-    response.json({ videos, playlists });
+    const videos = await repo.listPublicVideos();
+    const playlists = await repo.listPublicPlaylists(videos.map((v) => v.id));
+    return { videos, playlists };
   } catch (error: any) {
     logger.error("Failed to retrieve public multimedia", error);
-    response.status(500).json({ error: "Failed to retrieve public multimedia" });
+    throw new HttpsError("internal", "Failed to retrieve public multimedia");
   }
 });
 
