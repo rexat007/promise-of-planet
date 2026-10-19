@@ -13,6 +13,7 @@ import type { AdminRepository } from '../../functions/src/admin/adminRepository'
 import { NewsApplicationService } from '../../functions/src/news/newsApplicationService';
 import { PublicNewsRepository } from '../../functions/src/news/publicNewsRepository';
 import { executeManageNewsRequest } from '../../functions/src/news/newsAdminHandlers';
+import { sanitizeForFirestore } from '../../functions/src/news/firestoreNewsRepository';
 
 export interface TestResult {
   id: string;
@@ -33,7 +34,8 @@ class InMemoryNewsRepository implements NewsRepository {
   }
 
   async save(item: NewsItemBackend): Promise<void> {
-    this.items.set(item.id, JSON.parse(JSON.stringify(item)));
+    const cleanItem = sanitizeForFirestore({ ...item });
+    this.items.set(item.id, JSON.parse(JSON.stringify(cleanItem)));
   }
 
   async listAll(): Promise<NewsItemBackend[]> {
@@ -44,8 +46,15 @@ class InMemoryNewsRepository implements NewsRepository {
     return Array.from(this.items.values())
       .filter(item => item.workflowState === 'Published')
       .filter(item => {
-        if (language === 'en') return Boolean(item.titleEn || item.bodyEn);
-        return Boolean(item.titleAr);
+        if (item.workflowState !== 'Published') return false;
+        if (language === 'en') {
+          return Boolean(
+            (item.titleEn && item.titleEn.trim()) ||
+            (item.bodyEn && item.bodyEn.trim()) ||
+            (item.titleAr && item.titleAr.trim())
+          );
+        }
+        return Boolean(item.titleAr && item.titleAr.trim());
       })
       .map(v => JSON.parse(JSON.stringify(v)));
   }
@@ -672,6 +681,137 @@ export async function runNewsFunctionalTests(): Promise<TestResult[]> {
     );
   } catch (err: any) {
     assert('REQ-11', 'Public Backend Failure Integrity (Fail-Closed)', false, err.message);
+  }
+
+  // --------------------------------------------------------------------------
+  // TEST 12: Firestore Serialization Safety & Preserved Meaningful Values
+  // --------------------------------------------------------------------------
+  try {
+    currentAuthUid = editorAdmin.id;
+    // 1. Direct unit verification of sanitizeForFirestore serialization boundary
+    const testPayloadWithUndefined: any = {
+      id: 'news-test-serialization',
+      titleAr: 'اختبار المعالجة المحددة لحقول فايرستور',
+      titleEn: undefined, // undefined optional field
+      publishedAt: undefined, // undefined optional field
+      emptyStringField: '', // meaningful empty string
+      zeroField: 0, // meaningful zero
+      falseField: false, // meaningful false
+      nullField: null, // meaningful null
+      nestedObj: {
+        validProp: 'preserved',
+        undefProp: undefined,
+      },
+      history: [
+        { id: 'trans-1', action: 'create', comment: undefined },
+      ],
+    };
+
+    const sanitized = sanitizeForFirestore(testPayloadWithUndefined);
+
+    const undefinedOmitted =
+      !('titleEn' in sanitized) &&
+      !('publishedAt' in sanitized) &&
+      !('undefProp' in sanitized.nestedObj) &&
+      !('comment' in sanitized.history[0]);
+
+    const meaningfulValuesPreserved =
+      sanitized.emptyStringField === '' &&
+      sanitized.zeroField === 0 &&
+      sanitized.falseField === false &&
+      sanitized.nullField === null &&
+      sanitized.nestedObj.validProp === 'preserved' &&
+      sanitized.id === 'news-test-serialization';
+
+    // 2. Missing optional fields during draft creation must not fail
+    const minimalDraftInput: Partial<NewsItem> = {
+      titleAr: 'مسودة بدون حقول اختيارية',
+      author: editorAdmin.name,
+      // all other optional fields omitted / undefined
+    };
+
+    const createdMinimal = await NewsAdminClient.saveNewsItem(minimalDraftInput, editorAdmin, true);
+    const minimalCreationOk =
+      Boolean(createdMinimal.id && createdMinimal.id.startsWith('news-')) &&
+      createdMinimal.workflowState === WorkflowState.Draft &&
+      createdMinimal.history.length === 1 &&
+      !('publishedAt' in createdMinimal || (createdMinimal as any).publishedAt);
+
+    assert(
+      'REQ-12',
+      'Firestore Serialization Safety & Preserved Meaningful Values',
+      undefinedOmitted && meaningfulValuesPreserved && minimalCreationOk,
+      'Undefined values safely omitted; 0, false, null, and empty strings preserved; missing optional fields succeed with server identity intact'
+    );
+  } catch (err: any) {
+    assert('REQ-12', 'Firestore Serialization Safety & Preserved Meaningful Values', false, err.message);
+  }
+
+  // --------------------------------------------------------------------------
+  // TEST 13: Public Arabic Fallback Under English Language Selection
+  // --------------------------------------------------------------------------
+  try {
+    currentAuthUid = editorAdmin.id;
+    // 1. Create Arabic-only published article (no English title or body)
+    let arOnlyItem = await NewsAdminClient.saveNewsItem(
+      {
+        titleAr: 'خبر بيئي منشور باللغة العربية حصراً',
+        summaryAr: 'ملخص عربي فقط لبيان التراجع البيئي في الجزيرة.',
+        bodyAr: 'مقال تفصيلي بالعربية فقط لتوثيق الوضع الزراعي...',
+        category: 'الزراعة والأمن الغذائي',
+      },
+      editorAdmin,
+      true
+    );
+    arOnlyItem = await NewsAdminClient.executeTransition(arOnlyItem.id, WorkflowState.InReview, editorAdmin);
+    currentAuthUid = ownerAdmin.id;
+    arOnlyItem = await NewsAdminClient.executeTransition(arOnlyItem.id, WorkflowState.Approved, ownerAdmin);
+    arOnlyItem = await NewsAdminClient.executeTransition(arOnlyItem.id, WorkflowState.Published, ownerAdmin);
+
+    // 2. Create bilingual published article
+    currentAuthUid = editorAdmin.id;
+    let bilingualItem = await NewsAdminClient.saveNewsItem(
+      {
+        titleAr: 'تقرير مشترك ثنائي اللغة',
+        titleEn: 'Joint Bilingual Environmental Report',
+        summaryAr: 'ملخص عربي',
+        summaryEn: 'English summary',
+        bodyAr: 'محتوى عربي',
+        bodyEn: 'English content',
+        category: 'المناخ والتغيرات الجوية',
+      },
+      editorAdmin,
+      true
+    );
+    bilingualItem = await NewsAdminClient.executeTransition(bilingualItem.id, WorkflowState.InReview, editorAdmin);
+    currentAuthUid = ownerAdmin.id;
+    bilingualItem = await NewsAdminClient.executeTransition(bilingualItem.id, WorkflowState.Approved, ownerAdmin);
+    bilingualItem = await NewsAdminClient.executeTransition(bilingualItem.id, WorkflowState.Published, ownerAdmin);
+
+    // 3. Query public news hub under English selection ('en')
+    const englishSelectionArticles = await PublicNewsClient.listPublishedNews({ language: 'en' });
+    const arArticleIncludedUnderEn = englishSelectionArticles.some(a => a.id === arOnlyItem.id);
+    const bilingualIncludedUnderEn = englishSelectionArticles.some(a => a.id === bilingualItem.id);
+
+    // 4. Query public news hub under Arabic selection ('ar')
+    const arabicSelectionArticles = await PublicNewsClient.listPublishedNews({ language: 'ar' });
+    const arArticleIncludedUnderAr = arabicSelectionArticles.some(a => a.id === arOnlyItem.id);
+    const bilingualIncludedUnderAr = arabicSelectionArticles.some(a => a.id === bilingualItem.id);
+
+    const fallbackPreserved =
+      arArticleIncludedUnderEn &&
+      bilingualIncludedUnderEn &&
+      arArticleIncludedUnderAr &&
+      bilingualIncludedUnderAr;
+
+    assert(
+      'REQ-13',
+      'Public Arabic Fallback Under English Language Selection',
+      fallbackPreserved,
+      'Arabic-only published articles remain accessible under English fallback; bilingual articles returned for both languages'
+    );
+  } catch (err: any) {
+    assert('REQ-13', 'Public Arabic Fallback Under English Language Selection', false, err.message);
   }
 
   // Clean up test transport
