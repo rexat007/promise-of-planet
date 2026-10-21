@@ -1078,19 +1078,40 @@ export class FirestoreEditorialBinaryIntakeSessionStore
       IntakeSessionFirestoreDocumentSnapshot
     >();
 
-    const targetStatuses: readonly EditorialBinaryIntakeSessionStatus[] = [
+    // 1. Directly reconcilable non-terminal statuses: actionable regardless of expiration
+    const directlyReconcilableStatuses: readonly EditorialBinaryIntakeSessionStatus[] = [
       'NeedsReconciliation',
       'CleanupPending',
       'Registering',
       'Registered',
     ];
 
+    // 2. In-flight active statuses: actionable if expired (worker aborted during intake)
+    const inFlightActiveStatuses: readonly EditorialBinaryIntakeSessionStatus[] = [
+      'Created',
+      'Quarantined',
+      'PreliminarilyVerified',
+      'Promoting',
+    ];
+
+    // Validate nowIso strictly if provided
+    if (options?.nowIso !== undefined) {
+      if (!isValidCanonicalUtcTimestamp(options.nowIso)) {
+        throw new EditorialBinaryIntakeError({
+          code: 'INVALID_INPUT',
+          message: `Invalid nowIso timestamp "${String(options.nowIso)}". Must be a valid canonical UTC ISO-8601 string.`,
+        });
+      }
+    }
+
     try {
-      // 1. Query bounded batches for each active reconcilable status using single-field equality
-      for (const status of targetStatuses) {
-        const query = collectionRef
-          .where('status', '==', status)
-          .limit(effectiveLimit);
+      // 1. Query directly actionable statuses using composite-index prefix (status ASC, expiresAt ASC)
+      for (const status of directlyReconcilableStatuses) {
+        let query = collectionRef.where('status', '==', status);
+        if (typeof query.orderBy === 'function') {
+          query = query.orderBy('expiresAt', 'asc');
+        }
+        query = query.limit(effectiveLimit);
         const snap = await query.get();
         if (snap && Array.isArray(snap.docs)) {
           for (const doc of snap.docs) {
@@ -1104,59 +1125,70 @@ export class FirestoreEditorialBinaryIntakeSessionStore
         }
       }
 
-      // 2. Query bounded batch for expired sessions using single-field inequality on expiresAt
-      if (options?.nowIso && isValidCanonicalUtcTimestamp(options.nowIso)) {
-        const expiredQuery = collectionRef
-          .where('expiresAt', '<=', options.nowIso)
-          .limit(effectiveLimit);
-        const expSnap = await expiredQuery.get();
-        if (expSnap && Array.isArray(expSnap.docs)) {
-          for (const doc of expSnap.docs) {
-            if (doc && doc.exists) {
-              const id = doc.id || (doc.data() as any)?.intakeId;
-              if (id) {
-                candidateDocsMap.set(id, doc);
+      // 2. Query expiry-gated statuses using compound composite-index query (status == X AND expiresAt <= nowIso ORDER BY expiresAt ASC)
+      if (options?.nowIso !== undefined) {
+        for (const status of inFlightActiveStatuses) {
+          let query = collectionRef
+            .where('status', '==', status)
+            .where('expiresAt', '<=', options.nowIso);
+          if (typeof query.orderBy === 'function') {
+            query = query.orderBy('expiresAt', 'asc');
+          }
+          query = query.limit(effectiveLimit);
+          const snap = await query.get();
+          if (snap && Array.isArray(snap.docs)) {
+            for (const doc of snap.docs) {
+              if (doc && doc.exists) {
+                const id = doc.id || (doc.data() as any)?.intakeId;
+                if (id) {
+                  candidateDocsMap.set(id, doc);
+                }
               }
             }
           }
         }
       }
 
-      // 3. Parse, validate, filter out non-reconcilable/terminal sessions, and sort deterministically
+      // 3. Parse, validate, fail closed on corrupted documents, and filter actionable sessions
       const validSessions: EditorialBinaryIntakeSession[] = [];
-
       for (const doc of candidateDocsMap.values()) {
+        let session: EditorialBinaryIntakeSession;
         try {
-          const session = validatePersistedIntakeSessionEnvelope(
+          session = validatePersistedIntakeSessionEnvelope(
             doc.data(),
             undefined,
             this.limits
           );
-
-          const isDirectlyReconcilable =
-            session.status === 'NeedsReconciliation' ||
-            session.status === 'CleanupPending' ||
-            session.status === 'Registering' ||
-            session.status === 'Registered';
-
-          const isExpiredUnfinished =
-            nowMs !== null &&
-            !Number.isNaN(nowMs) &&
-            Date.parse(session.expiresAt) <= nowMs &&
-            session.status !== 'Completed' &&
-            !(
-              session.status === 'Failed' &&
-              session.pendingCleanupObjects.length === 0
-            );
-
-          if (isDirectlyReconcilable || isExpiredUnfinished) {
-            validSessions.push(session);
-          }
         } catch {
-          // Fail-closed on corrupted records: do not return malformed sessions
+          const docId = typeof doc.id === 'string' ? doc.id : 'unknown';
+          const safeId = docId.replace(/[^A-Za-z0-9_.:-]/g, '');
+          throw new EditorialBinaryIntakeError({
+            code: 'STORAGE_FAILURE',
+            message: `Corrupted intake session record encountered during reconciliation discovery for document "${safeId}".`,
+            intakeId: safeId !== 'unknown' ? safeId : undefined,
+          });
+        }
+
+        const isDirectlyReconcilable =
+          session.status === 'NeedsReconciliation' ||
+          session.status === 'CleanupPending' ||
+          session.status === 'Registering' ||
+          session.status === 'Registered';
+
+        const isExpiredUnfinished =
+          nowMs !== null &&
+          !Number.isNaN(nowMs) &&
+          Date.parse(session.expiresAt) <= nowMs &&
+          session.status !== 'Completed' &&
+          !(
+            session.status === 'Failed' &&
+            session.pendingCleanupObjects.length === 0
+          );
+
+        if (isDirectlyReconcilable || isExpiredUnfinished) {
+          validSessions.push(session);
         }
       }
-
       // 4. Deterministic ordering: by expiresAt ascending, then intakeId ascending
       validSessions.sort((a, b) => {
         const timeDiff =

@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import * as fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   computeCrc32,
@@ -203,9 +204,114 @@ class SharedFirestoreBackingStore {
 /**
  * Creates a Fake Firestore Database wrapping the shared store.
  */
+interface RecordedQuery {
+  readonly collection: string;
+  readonly filters: ReadonlyArray<{ field: string; op: string; val: unknown }>;
+  readonly orderBys: ReadonlyArray<{ field: string; direction: 'asc' | 'desc' }>;
+  readonly limit?: number;
+}
+
 function createFakeFirestoreDatabase(
-  store: SharedFirestoreBackingStore
+  store: SharedFirestoreBackingStore,
+  spyRecorder?: {
+    recordQuery?(queryDesc: RecordedQuery): void;
+  }
 ): IntakeSessionFirestoreDatabase {
+  function makeQuery(
+    collectionName: string,
+    initialFilters: Array<{ field: string; op: string; val: unknown }> = [],
+    initialOrderBys: Array<{ field: string; direction: 'asc' | 'desc' }> = []
+  ): IntakeSessionFirestoreQuery {
+    const filters = [...initialFilters];
+    const orderBys = [...initialOrderBys];
+    let queryLimit: number | undefined;
+
+    const query: IntakeSessionFirestoreQuery = {
+      where(
+        nextField: string,
+        nextOp: string,
+        nextVal: unknown
+      ): IntakeSessionFirestoreQuery {
+        filters.push({ field: nextField, op: nextOp, val: nextVal });
+        return query;
+      },
+      orderBy(
+        nextField: string,
+        directionStr?: 'asc' | 'desc'
+      ): IntakeSessionFirestoreQuery {
+        orderBys.push({ field: nextField, direction: directionStr ?? 'asc' });
+        return query;
+      },
+      limit(limitCount: number): IntakeSessionFirestoreQuery {
+        queryLimit = limitCount;
+        return query;
+      },
+      async get(): Promise<IntakeSessionFirestoreQuerySnapshot> {
+        if (spyRecorder?.recordQuery) {
+          spyRecorder.recordQuery({
+            collection: collectionName,
+            filters: [...filters],
+            orderBys: [...orderBys],
+            limit: queryLimit,
+          });
+        }
+        const allDocs = store.listDocs(collectionName);
+        const matched = allDocs.filter(({ data }) => {
+          for (const f of filters) {
+            const docVal = data[f.field];
+            if (f.op === '==' && docVal !== f.val) return false;
+            if (f.op === '<=' && (docVal as any) > (f.val as any))
+              return false;
+            if (f.op === '>=' && (docVal as any) < (f.val as any))
+              return false;
+            if (f.op === '<' && (docVal as any) >= (f.val as any))
+              return false;
+            if (f.op === '>' && (docVal as any) <= (f.val as any))
+              return false;
+          }
+          return true;
+        });
+
+        // Server-side ordering before limit
+        if (orderBys.length > 0) {
+          matched.sort((a, b) => {
+            for (const ob of orderBys) {
+              const valA = a.data[ob.field];
+              const valB = b.data[ob.field];
+              let diff = 0;
+              if (typeof valA === 'string' && typeof valB === 'string') {
+                diff = valA.localeCompare(valB);
+              } else if (typeof valA === 'number' && typeof valB === 'number') {
+                diff = valA - valB;
+              }
+              if (diff !== 0) {
+                return ob.direction === 'desc' ? -diff : diff;
+              }
+            }
+            return 0;
+          });
+        }
+
+        const limited =
+          queryLimit !== undefined
+            ? matched.slice(0, queryLimit)
+            : matched;
+        const docSnapshots: IntakeSessionFirestoreDocumentSnapshot[] =
+          limited.map(({ id, data }) => ({
+            id,
+            exists: true,
+            data: () => data,
+          }));
+        return {
+          empty: docSnapshots.length === 0,
+          size: docSnapshots.length,
+          docs: docSnapshots,
+        };
+      },
+    };
+    return query;
+  }
+
   return {
     collection(collectionName: string): IntakeSessionFirestoreCollectionRef {
       return {
@@ -227,59 +333,21 @@ function createFakeFirestoreDatabase(
           opStr: string,
           value: unknown
         ): IntakeSessionFirestoreQuery {
-          const filters: Array<{ field: string; op: string; val: unknown }> = [
-            { field: fieldPath, op: opStr, val: value },
-          ];
-          let queryLimit: number | undefined;
-
-          const query: IntakeSessionFirestoreQuery = {
-            where(
-              nextField: string,
-              nextOp: string,
-              nextVal: unknown
-            ): IntakeSessionFirestoreQuery {
-              filters.push({ field: nextField, op: nextOp, val: nextVal });
-              return query;
-            },
-            limit(limitCount: number): IntakeSessionFirestoreQuery {
-              queryLimit = limitCount;
-              return query;
-            },
-            async get(): Promise<IntakeSessionFirestoreQuerySnapshot> {
-              const allDocs = store.listDocs(collectionName);
-              const matched = allDocs.filter(({ data }) => {
-                for (const f of filters) {
-                  const docVal = data[f.field];
-                  if (f.op === '==' && docVal !== f.val) return false;
-                  if (f.op === '<=' && (docVal as any) > (f.val as any))
-                    return false;
-                  if (f.op === '>=' && (docVal as any) < (f.val as any))
-                    return false;
-                  if (f.op === '<' && (docVal as any) >= (f.val as any))
-                    return false;
-                  if (f.op === '>' && (docVal as any) <= (f.val as any))
-                    return false;
-                }
-                return true;
-              });
-              const limited =
-                queryLimit !== undefined
-                  ? matched.slice(0, queryLimit)
-                  : matched;
-              const docSnapshots: IntakeSessionFirestoreDocumentSnapshot[] =
-                limited.map(({ id, data }) => ({
-                  id,
-                  exists: true,
-                  data: () => data,
-                }));
-              return {
-                empty: docSnapshots.length === 0,
-                size: docSnapshots.length,
-                docs: docSnapshots,
-              };
-            },
-          };
-          return query;
+          return makeQuery(
+            collectionName,
+            [{ field: fieldPath, op: opStr, val: value }],
+            []
+          );
+        },
+        orderBy(
+          fieldPath: string,
+          directionStr?: 'asc' | 'desc'
+        ): IntakeSessionFirestoreQuery {
+          return makeQuery(
+            collectionName,
+            [],
+            [{ field: fieldPath, direction: directionStr ?? 'asc' }]
+          );
         },
       };
     },
@@ -722,6 +790,406 @@ describe('IMG-F3-06 — FirestoreEditorialBinaryIntakeSessionStore', () => {
     await expect(store.getSessionById('intake_corrupt_01')).rejects.toThrow(
       EditorialBinaryIntakeError
     );
+  });
+
+  it('discovers actionable expired Created session despite 105 older expired Completed sessions (remediation of starvation defect)', async () => {
+    const sharedStore = new SharedFirestoreBackingStore();
+    const db = createFakeFirestoreDatabase(sharedStore);
+    const store = new FirestoreEditorialBinaryIntakeSessionStore(db);
+
+    // 105 older expired Completed sessions
+    for (let i = 0; i < 105; i++) {
+      const pad = String(i).padStart(3, '0');
+      const completedSession: EditorialBinaryIntakeSession = {
+        ...createSampleSession(`intake_completed_${pad}`, 'Completed'),
+        createdAt: '2026-04-18T09:00:00.000Z',
+        updatedAt: '2026-04-18T09:30:00.000Z',
+        expiresAt: `2026-04-18T10:00:${String(i % 60).padStart(2, '0')}.000Z`,
+        canonicalRegistrationAttempted: true,
+        canonicalRegistrationSucceeded: true,
+      };
+      await store.createSessionIfAbsent(completedSession);
+    }
+
+    // 1 expired unfinished Created session that is newer in expiresAt
+    const actionableSession: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_created_actionable', 'Created'),
+      createdAt: '2026-04-18T10:30:00.000Z',
+      updatedAt: '2026-04-18T10:30:00.000Z',
+      expiresAt: '2026-04-18T11:00:00.000Z',
+    };
+    await store.createSessionIfAbsent(actionableSession);
+
+    // Bounded discovery call with limit = 50
+    const discovered = await store.listSessionsForReconciliation({
+      nowIso: '2026-04-18T12:00:00.000Z',
+      limit: 50,
+    });
+
+    // The actionable session must NOT be starved by the 105 older Completed sessions!
+    expect(discovered).toHaveLength(1);
+    expect(discovered[0].intakeId).toBe('intake_created_actionable');
+    expect(discovered[0].status).toBe('Created');
+  });
+
+  it('demonstrates repeated bounded discovery and forward progress across multiple batches without starvation', async () => {
+    const sharedStore = new SharedFirestoreBackingStore();
+    const db = createFakeFirestoreDatabase(sharedStore);
+    const store = new FirestoreEditorialBinaryIntakeSessionStore(db);
+
+    // Plant 120 expired Created sessions
+    for (let i = 0; i < 120; i++) {
+      const pad = String(i).padStart(3, '0');
+      const session: EditorialBinaryIntakeSession = {
+        ...createSampleSession(`intake_fwd_${pad}`, 'Created'),
+        createdAt: '2026-04-18T10:00:00.000Z',
+        updatedAt: '2026-04-18T10:00:00.000Z',
+        expiresAt: `2026-04-18T11:00:${String(i % 60).padStart(2, '0')}.000Z`,
+      };
+      await store.createSessionIfAbsent(session);
+    }
+
+    // Batch 1 (limit 50): discovers first 50
+    const batch1 = await store.listSessionsForReconciliation({
+      nowIso: '2026-04-18T12:00:00.000Z',
+      limit: 50,
+    });
+    expect(batch1).toHaveLength(50);
+
+    // Simulate reconciliation worker transitioning batch 1 to Completed
+    for (const s of batch1) {
+      await store.updateSession(
+        {
+          ...s,
+          status: 'Completed',
+          canonicalRegistrationSucceeded: true,
+        },
+        s.revision
+      );
+    }
+
+    // Batch 2 (limit 50): discovers next 50
+    const batch2 = await store.listSessionsForReconciliation({
+      nowIso: '2026-04-18T12:00:00.000Z',
+      limit: 50,
+    });
+    expect(batch2).toHaveLength(50);
+    expect(batch2[0].intakeId).not.toBe(batch1[0].intakeId);
+
+    // Reconcile batch 2
+    for (const s of batch2) {
+      await store.updateSession(
+        {
+          ...s,
+          status: 'Completed',
+          canonicalRegistrationSucceeded: true,
+        },
+        s.revision
+      );
+    }
+
+    // Batch 3 (limit 50): discovers remaining 20
+    const batch3 = await store.listSessionsForReconciliation({
+      nowIso: '2026-04-18T12:00:00.000Z',
+      limit: 50,
+    });
+    expect(batch3).toHaveLength(20);
+
+    // Reconcile batch 3
+    for (const s of batch3) {
+      await store.updateSession(
+        {
+          ...s,
+          status: 'Completed',
+          canonicalRegistrationSucceeded: true,
+        },
+        s.revision
+      );
+    }
+
+    // Batch 4: zero sessions remaining
+    const batch4 = await store.listSessionsForReconciliation({
+      nowIso: '2026-04-18T12:00:00.000Z',
+      limit: 50,
+    });
+    expect(batch4).toHaveLength(0);
+  });
+
+  it('structurally excludes terminal Completed and clean Failed records from occupying the discovery window', async () => {
+    const sharedStore = new SharedFirestoreBackingStore();
+    const db = createFakeFirestoreDatabase(sharedStore);
+    const store = new FirestoreEditorialBinaryIntakeSessionStore(db);
+
+    // Completed session
+    const completedSession: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_term_completed', 'Completed'),
+      expiresAt: '2026-04-18T10:00:00.000Z',
+    };
+    await store.createSessionIfAbsent(completedSession);
+
+    // Clean Failed session (pendingCleanupObjects empty)
+    const failedCleanSession: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_term_failed', 'Failed'),
+      expiresAt: '2026-04-18T10:00:00.000Z',
+      pendingCleanupObjects: [],
+    };
+    await store.createSessionIfAbsent(failedCleanSession);
+
+    // Active session
+    const activeSession: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_active_reconcile', 'NeedsReconciliation'),
+      expiresAt: '2026-04-18T14:00:00.000Z',
+    };
+    await store.createSessionIfAbsent(activeSession);
+
+    const discovered = await store.listSessionsForReconciliation({
+      nowIso: '2026-04-18T12:00:00.000Z',
+      limit: 10,
+    });
+
+    expect(discovered).toHaveLength(1);
+    expect(discovered[0].intakeId).toBe('intake_active_reconcile');
+  });
+
+  it('fails closed and surfaces STORAGE_FAILURE when discovering a malformed session document during reconciliation', async () => {
+    const sharedStore = new SharedFirestoreBackingStore();
+    const db = createFakeFirestoreDatabase(sharedStore);
+    const store = new FirestoreEditorialBinaryIntakeSessionStore(db);
+
+    // Directly plant a corrupted record under an actionable status
+    sharedStore.setDoc(
+      FirestoreEditorialBinaryIntakeSessionStore.COLLECTION,
+      'intake_malformed_recon_01',
+      {
+        intakeId: 'intake_malformed_recon_01',
+        status: 'NeedsReconciliation',
+      }
+    );
+
+    // Must NOT swallow corruption silently; must fail closed with STORAGE_FAILURE
+    await expect(
+      store.listSessionsForReconciliation({
+        nowIso: '2026-04-18T12:00:00.000Z',
+        limit: 10,
+      })
+    ).rejects.toThrow(EditorialBinaryIntakeError);
+
+    try {
+      await store.listSessionsForReconciliation({
+        nowIso: '2026-04-18T12:00:00.000Z',
+        limit: 10,
+      });
+    } catch (err) {
+      expect(err).toBeInstanceOf(EditorialBinaryIntakeError);
+      const e = err as EditorialBinaryIntakeError;
+      expect(e.code).toBe('STORAGE_FAILURE');
+      expect(e.message).toContain('Corrupted intake session record encountered');
+      expect(e.intakeId).toBe('intake_malformed_recon_01');
+    }
+  });
+
+  it('excludes nonexpired in-flight sessions at the query level so 105 nonexpired sessions do not starve an expired actionable session', async () => {
+    const sharedStore = new SharedFirestoreBackingStore();
+    const db = createFakeFirestoreDatabase(sharedStore);
+    const store = new FirestoreEditorialBinaryIntakeSessionStore(db);
+
+    // Plant 105 nonexpired Created sessions (expiresAt in future: 13:00)
+    for (let i = 0; i < 105; i++) {
+      const pad = String(i).padStart(3, '0');
+      const unexpiredSession: EditorialBinaryIntakeSession = {
+        ...createSampleSession(`intake_unexpired_created_${pad}`, 'Created'),
+        createdAt: '2026-04-18T11:00:00.000Z',
+        updatedAt: '2026-04-18T11:00:00.000Z',
+        expiresAt: `2026-04-18T13:00:${String(i % 60).padStart(2, '0')}.000Z`,
+      };
+      await store.createSessionIfAbsent(unexpiredSession);
+    }
+
+    // Plant 1 expired Created session (expiresAt in past: 11:30)
+    const expiredSession: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_expired_created_target', 'Created'),
+      createdAt: '2026-04-18T10:00:00.000Z',
+      updatedAt: '2026-04-18T10:00:00.000Z',
+      expiresAt: '2026-04-18T11:30:00.000Z',
+    };
+    await store.createSessionIfAbsent(expiredSession);
+
+    // Bounded discovery call with limit = 50: must find the single expired session and not be filled by unexpired sessions
+    const discovered50 = await store.listSessionsForReconciliation({
+      nowIso: '2026-04-18T12:00:00.000Z',
+      limit: 50,
+    });
+    expect(discovered50).toHaveLength(1);
+    expect(discovered50[0].intakeId).toBe('intake_expired_created_target');
+    expect(discovered50[0].status).toBe('Created');
+
+    // Bounded discovery call with limit = 100: must still find exactly the 1 expired session
+    const discovered100 = await store.listSessionsForReconciliation({
+      nowIso: '2026-04-18T12:00:00.000Z',
+      limit: 100,
+    });
+    expect(discovered100).toHaveLength(1);
+    expect(discovered100[0].intakeId).toBe('intake_expired_created_target');
+  });
+
+  it('selects directly actionable statuses regardless of expiration, while requiring expiration for in-flight active statuses', async () => {
+    const sharedStore = new SharedFirestoreBackingStore();
+    const db = createFakeFirestoreDatabase(sharedStore);
+    const store = new FirestoreEditorialBinaryIntakeSessionStore(db);
+
+    const futureIso = '2026-04-18T16:00:00.000Z';
+    const nowIso = '2026-04-18T12:00:00.000Z';
+
+    // 4 directly actionable statuses with future expiresAt
+    const directStatuses: readonly EditorialBinaryIntakeSessionStatus[] = [
+      'NeedsReconciliation',
+      'CleanupPending',
+      'Registering',
+      'Registered',
+    ];
+    for (const status of directStatuses) {
+      const session: EditorialBinaryIntakeSession = {
+        ...createSampleSession(`intake_direct_${status}`, status),
+        expiresAt: futureIso,
+      };
+      await store.createSessionIfAbsent(session);
+    }
+
+    // 4 in-flight active statuses with future expiresAt (NOT yet expired, should NOT be returned)
+    const inFlightStatuses: readonly EditorialBinaryIntakeSessionStatus[] = [
+      'Created',
+      'Quarantined',
+      'PreliminarilyVerified',
+      'Promoting',
+    ];
+    for (const status of inFlightStatuses) {
+      const session: EditorialBinaryIntakeSession = {
+        ...createSampleSession(`intake_inflight_${status}`, status),
+        expiresAt: futureIso,
+      };
+      await store.createSessionIfAbsent(session);
+    }
+
+    const discovered = await store.listSessionsForReconciliation({
+      nowIso,
+      limit: 50,
+    });
+
+    const discoveredIds = discovered.map((s) => s.intakeId);
+    expect(discovered).toHaveLength(4);
+    for (const status of directStatuses) {
+      expect(discoveredIds).toContain(`intake_direct_${status}`);
+    }
+    for (const status of inFlightStatuses) {
+      expect(discoveredIds).not.toContain(`intake_inflight_${status}`);
+    }
+  });
+
+  it('rejects invalid or non-canonical nowIso strings with INVALID_INPUT', async () => {
+    const sharedStore = new SharedFirestoreBackingStore();
+    const db = createFakeFirestoreDatabase(sharedStore);
+    const store = new FirestoreEditorialBinaryIntakeSessionStore(db);
+
+    await expect(
+      store.listSessionsForReconciliation({ nowIso: 'not-a-timestamp' })
+    ).rejects.toThrow(EditorialBinaryIntakeError);
+
+    try {
+      await store.listSessionsForReconciliation({ nowIso: '2026/04/18 12:00' });
+    } catch (err) {
+      expect(err).toBeInstanceOf(EditorialBinaryIntakeError);
+      const e = err as EditorialBinaryIntakeError;
+      expect(e.code).toBe('INVALID_INPUT');
+      expect(e.message).toContain('Invalid nowIso timestamp');
+    }
+  });
+
+  it('verifies exact query predicates, composite index configuration, and firebase.json references', async () => {
+    const sharedStore = new SharedFirestoreBackingStore();
+    const recordedQueries: RecordedQuery[] = [];
+    const db = createFakeFirestoreDatabase(sharedStore, {
+      recordQuery: (q) => recordedQueries.push(q),
+    });
+    const store = new FirestoreEditorialBinaryIntakeSessionStore(db);
+
+    await store.listSessionsForReconciliation({
+      nowIso: '2026-04-18T12:00:00.000Z',
+      limit: 50,
+    });
+
+    // Verify directly actionable queries:
+    // status == X, orderBy expiresAt asc, limit 50
+    const directStatuses = [
+      'NeedsReconciliation',
+      'CleanupPending',
+      'Registering',
+      'Registered',
+    ];
+    for (const status of directStatuses) {
+      const q = recordedQueries.find(
+        (rec) =>
+          rec.filters.length === 1 &&
+          rec.filters[0].field === 'status' &&
+          rec.filters[0].val === status
+      );
+      expect(q).toBeDefined();
+      expect(q?.orderBys).toEqual([{ field: 'expiresAt', direction: 'asc' }]);
+      expect(q?.limit).toBe(50);
+    }
+
+    // Verify expiry-gated queries:
+    // status == X, expiresAt <= nowIso, orderBy expiresAt asc, limit 50
+    const expiryStatuses = [
+      'Created',
+      'Quarantined',
+      'PreliminarilyVerified',
+      'Promoting',
+    ];
+    for (const status of expiryStatuses) {
+      const q = recordedQueries.find(
+        (rec) =>
+          rec.filters.some((f) => f.field === 'status' && f.val === status) &&
+          rec.filters.some(
+            (f) =>
+              f.field === 'expiresAt' &&
+              f.op === '<=' &&
+              f.val === '2026-04-18T12:00:00.000Z'
+          )
+      );
+      expect(q).toBeDefined();
+      expect(q?.orderBys).toEqual([{ field: 'expiresAt', direction: 'asc' }]);
+      expect(q?.limit).toBe(50);
+    }
+
+    // Verify firestore.indexes.json exists, is valid JSON, and matches exact composite index spec
+    const indexesContent = fs.readFileSync('firestore.indexes.json', 'utf8');
+    const parsedIndexes = JSON.parse(indexesContent);
+    expect(parsedIndexes).toEqual({
+      indexes: [
+        {
+          collectionGroup: 'editorial_binary_intake_sessions',
+          queryScope: 'COLLECTION',
+          fields: [
+            {
+              fieldPath: 'status',
+              order: 'ASCENDING',
+            },
+            {
+              fieldPath: 'expiresAt',
+              order: 'ASCENDING',
+            },
+          ],
+        },
+      ],
+      fieldOverrides: [],
+    });
+
+    // Verify firebase.json contains the firestore.indexes configuration
+    const firebaseConfigContent = fs.readFileSync('firebase.json', 'utf8');
+    const parsedFirebaseConfig = JSON.parse(firebaseConfigContent);
+    expect(parsedFirebaseConfig.firestore).toBeDefined();
+    expect(parsedFirebaseConfig.firestore.rules).toBe('firestore.rules');
+    expect(parsedFirebaseConfig.firestore.indexes).toBe('firestore.indexes.json');
   });
 });
 
