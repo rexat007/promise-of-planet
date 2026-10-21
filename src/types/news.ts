@@ -1,3 +1,4 @@
+import type { JournalisticType } from '../types';
 import { WorkflowState } from './workflow';
 import type { WorkflowTransitionRecord } from './workflow';
 
@@ -5,6 +6,9 @@ export interface NewsItem {
   id: string;
   titleAr: string;
   titleEn: string;
+  kickerAr?: string;
+  kickerEn?: string;
+  journalisticType?: JournalisticType;
   summaryAr: string;
   summaryEn: string;
   bodyAr: string;
@@ -25,11 +29,3 @@ export interface NewsItem {
   publishedAt?: string;
   relatedVideoIds?: string[];
 }
-
-export const NEWS_CATEGORIES = [
-  { id: 'water', labelAr: 'الموارد المائية والنيل', labelEn: 'Water Resources & Nile' },
-  { id: 'climate', labelAr: 'المناخ والطقس', labelEn: 'Climate & Weather' },
-  { id: 'reforestation', labelAr: 'التصحر والغطاء النباتي', labelEn: 'Desertification & Vegetation' },
-  { id: 'marine', labelAr: 'البيئة البحرية والتنوع الحيوي', labelEn: 'Marine & Biodiversity' },
-  { id: 'emergency', labelAr: 'الاستجابة والطوارئ البيئية', labelEn: 'Emergency Response & Alerts' },
-] as const;

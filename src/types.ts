@@ -2,6 +2,7 @@ export {
   type LocalizedText,
   type Language,
   type ContentType,
+  type JournalisticType,
   type ContentStatus,
   type ApprovalStatus,
   CANONICAL_RIGHTS_STATUSES,

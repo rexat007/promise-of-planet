@@ -34,6 +34,12 @@ export const NewsCard: React.FC<NewsCardProps> = ({
     excerpt = hasEnglish ? (news.excerptEn || '') : news.excerptAr;
   }
 
+  const isDisplayingEnglishTitle = isArabic
+    ? (!hasArabic && Boolean(news.titleEn))
+    : hasEnglish;
+  const rawKicker = isDisplayingEnglishTitle ? news.kickerEn : news.kickerAr;
+  const kicker = rawKicker?.trim() ? rawKicker.trim() : undefined;
+
   // Urgency badge if Urgent or Breaking
   let badge: React.ReactNode = null;
   if (news.urgencyLevel === 'Breaking') {
@@ -54,6 +60,7 @@ export const NewsCard: React.FC<NewsCardProps> = ({
     <ContentCard
       contentType="News"
       title={title}
+      kicker={kicker}
       excerpt={excerpt}
       category={news.category}
       publishedAt={news.publishedAt || news.createdAt}

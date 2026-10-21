@@ -1,18 +1,19 @@
-import type { Category, ContentType, UrgencyLevel, RelationType, SourceType } from '../../types';
+import { 
+  CANONICAL_CATEGORY_DEFINITIONS,
+  type Category, 
+  type ContentType, 
+  type UrgencyLevel, 
+  type RelationType, 
+  type SourceType 
+} from '../../types';
 import { SubmissionStatus } from '../../types/community';
 
-export function getCategoryLabel(category: Category, isArabic: boolean): string {
-  const map: Record<Category, { ar: string; en: string }> = {
-    Climate: { ar: 'المناخ والطقس', en: 'Climate & Weather' },
-    Water: { ar: 'المياه والنيل', en: 'Water & Nile' },
-    Biodiversity: { ar: 'التنوع الحيوي والحياة البرية', en: 'Biodiversity & Wildlife' },
-    Pollution: { ar: 'التلوث والنفايات', en: 'Pollution & Waste' },
-    Energy: { ar: 'الطاقة المتجددة', en: 'Renewable Energy' },
-    Agriculture: { ar: 'الزراعة والأراضي', en: 'Agriculture & Land' },
-    EnvironmentalPolicy: { ar: 'السياسات والتشريعات البيئية', en: 'Environmental Policy' },
-  };
-  const entry = map[category];
-  return entry ? (isArabic ? entry.ar : entry.en) : category;
+export function getCategoryLabel(category: Category | string, isArabic: boolean): string {
+  const def = CANONICAL_CATEGORY_DEFINITIONS.find(c => c.value === category);
+  if (def) {
+    return isArabic ? def.labelAr : def.labelEn;
+  }
+  return category;
 }
 
 export function getCommunityCategoryLabel(categoryKey: string, isArabic: boolean): string {

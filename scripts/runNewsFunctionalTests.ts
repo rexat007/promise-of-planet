@@ -3,6 +3,12 @@
  * Polyfills in-memory storage for headless Node.js execution.
  */
 
+// Isolate test process environment BEFORE any module imports so Firebase remains unconfigured
+if (typeof process !== 'undefined' && process.env) {
+  delete process.env.VITE_FIREBASE_API_KEY;
+  delete process.env.VITE_FIREBASE_PROJECT_ID;
+}
+
 // Headless polyfill for localStorage
 if (typeof globalThis.localStorage === 'undefined') {
   const memoryStore = new Map<string, string>();
@@ -22,14 +28,22 @@ if (typeof globalThis.window === 'undefined') {
   };
 }
 
-import { runNewsFunctionalTests } from '../src/services/newsFunctionalTests';
-
 async function main() {
   console.log('=================================================================');
   console.log(' PROMISE OF PLANET — NEWS HUB FUNCTIONAL VERIFICATION');
   console.log('=================================================================\n');
 
   try {
+    const firebaseMod = await import('../src/services/firebase');
+    if (firebaseMod.isFirebaseConfigured !== false || firebaseMod.app !== null) {
+      console.error(
+        `FATAL SAFETY ABORT: Firebase client is configured in test runner (isFirebaseConfigured=${firebaseMod.isFirebaseConfigured}, app=${firebaseMod.app !== null ? 'non-null' : 'null'}). Aborting immediately to prevent live Firebase calls.`
+      );
+      process.exit(1);
+    }
+    console.log('[SAFETY] Firebase test isolation verified: isFirebaseConfigured === false, app === null\n');
+
+    const { runNewsFunctionalTests } = await import('../src/services/newsFunctionalTests');
     const results = await runNewsFunctionalTests();
     let allPassed = true;
 

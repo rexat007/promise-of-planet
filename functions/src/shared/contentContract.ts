@@ -14,6 +14,17 @@ export type Language = 'ar' | 'en';
  */
 export type ContentType = 'News' | 'Report' | 'Video';
 
+export type JournalisticType = 
+  | 'News'
+  | 'Report'
+  | 'Article'
+  | 'Investigation'
+  | 'Interview'
+  | 'Analysis'
+  | 'Opinion'
+  | 'Explainer'
+  | 'Feature';
+
 /**
  * General lifecycle status of a content item.
  * NOTE: 'Approved' is strictly decoupled and managed via ApprovalStatus.
@@ -336,6 +347,9 @@ export interface ContentItem {
  * News item model for time-sensitive environmental coverage.
  */
 export interface News extends ContentItem {
+  kickerAr?: string;
+  kickerEn?: string;
+  journalisticType?: JournalisticType;
   contentType: 'News';
   contentAr: string;
   contentEn?: string;

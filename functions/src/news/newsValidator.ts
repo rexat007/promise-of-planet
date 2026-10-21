@@ -1,3 +1,21 @@
+import { isCanonicalCategory, type JournalisticType, type Category } from '../shared/contentContract';
+
+export const VALID_JOURNALISTIC_TYPES: readonly JournalisticType[] = [
+  'News',
+  'Report',
+  'Article',
+  'Investigation',
+  'Interview',
+  'Analysis',
+  'Opinion',
+  'Explainer',
+  'Feature',
+] as const;
+
+export function isValidJournalisticType(val: any): val is JournalisticType {
+  return VALID_JOURNALISTIC_TYPES.includes(val);
+}
+
 import type { 
   NewsItemBackend, 
   WorkflowStateBackend, 
@@ -5,6 +23,15 @@ import type {
 } from './newsRepository';
 
 export class NewsValidator {
+  /**
+   * Validates that a category value is an authorized canonical environmental category.
+   */
+  public static validateCanonicalCategory(category: unknown): asserts category is Category {
+    if (typeof category !== 'string' || category.trim() === '' || !isCanonicalCategory(category)) {
+      throw new Error(`VALIDATION_ERROR: INVALID_CANONICAL_NEWS_CATEGORY '${category}'`);
+    }
+  }
+
   /**
    * Validates draft or article data for persistence.
    */
@@ -15,6 +42,15 @@ export class NewsValidator {
 
     if (!payload.author || typeof payload.author !== 'string' || payload.author.trim() === '') {
       throw new Error('VALIDATION_ERROR: Author is mandatory for news items');
+    }
+    if (payload.kickerAr !== undefined && typeof payload.kickerAr !== 'string') {
+      throw new Error('VALIDATION_ERROR: Arabic kicker (kickerAr) must be a string');
+    }
+    if (payload.kickerEn !== undefined && typeof payload.kickerEn !== 'string') {
+      throw new Error('VALIDATION_ERROR: English kicker (kickerEn) must be a string');
+    }
+    if (payload.journalisticType !== undefined && !isValidJournalisticType(payload.journalisticType)) {
+      throw new Error(`VALIDATION_ERROR: Invalid journalisticType '${payload.journalisticType}'. Must be one of: ${VALID_JOURNALISTIC_TYPES.join(', ')}`);
     }
   }
 

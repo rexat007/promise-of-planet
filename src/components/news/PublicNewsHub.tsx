@@ -21,7 +21,26 @@ import {
 import { PublicNewsClient } from '../../services/publicNewsClient';
 import { useDebounce } from '../../hooks/useDebounce';
 import { CANONICAL_CATEGORY_DEFINITIONS } from '../../types';
-import type { News, Language } from '../../types';
+import type { News, Language, JournalisticType } from '../../types';
+
+const PUBLIC_JOURNALISTIC_TYPE_LABELS: Readonly<Record<JournalisticType, { ar: string; en: string }>> = {
+  News: { ar: 'خبر', en: 'News' },
+  Report: { ar: 'تقرير', en: 'Report' },
+  Article: { ar: 'مقال', en: 'Article' },
+  Investigation: { ar: 'تحقيق استقصائي', en: 'Investigation' },
+  Interview: { ar: 'مقابلة', en: 'Interview' },
+  Analysis: { ar: 'تحليل', en: 'Analysis' },
+  Opinion: { ar: 'مقال رأي', en: 'Opinion' },
+  Explainer: { ar: 'مادة تفسيرية', en: 'Explainer' },
+  Feature: { ar: 'قصة معمقة', en: 'Feature' },
+};
+
+function getLocalizedKickerForArticle(article: News, isAr: boolean): string | undefined {
+  const isDisplayingEnglishTitle = !isAr && Boolean(article.titleEn);
+  const candidate = isDisplayingEnglishTitle ? article.kickerEn : article.kickerAr;
+  const trimmed = candidate?.trim();
+  return trimmed ? trimmed : undefined;
+}
 
 interface PublicNewsHubProps {
   initialArticleIdOrSlug?: string;
@@ -193,12 +212,21 @@ export function PublicNewsHub({ initialArticleIdOrSlug, onNavigate: _onNavigate 
   // Full article reader view
   if (selectedArticle) {
     const title = isAr ? selectedArticle.titleAr : (selectedArticle.titleEn || selectedArticle.titleAr);
+    const readerKicker = getLocalizedKickerForArticle(selectedArticle, isAr);
     const content = isAr ? selectedArticle.contentAr : (selectedArticle.contentEn || selectedArticle.contentAr);
     const excerpt = isAr ? selectedArticle.excerptAr : (selectedArticle.excerptEn || selectedArticle.excerptAr);
     const displayCategory = CANONICAL_CATEGORY_DEFINITIONS.find(c => c.value === selectedArticle.category);
     const categoryLabel = displayCategory 
       ? (isAr ? displayCategory.labelAr : displayCategory.labelEn)
       : selectedArticle.category;
+    const journalisticTypeEntry =
+      selectedArticle.journalisticType &&
+      Object.prototype.hasOwnProperty.call(PUBLIC_JOURNALISTIC_TYPE_LABELS, selectedArticle.journalisticType)
+        ? PUBLIC_JOURNALISTIC_TYPE_LABELS[selectedArticle.journalisticType]
+        : undefined;
+    const journalisticTypeLabel = journalisticTypeEntry
+      ? (isAr ? journalisticTypeEntry.ar : journalisticTypeEntry.en)
+      : undefined;
 
     const formattedDate = selectedArticle.publishedAt 
       ? new Date(selectedArticle.publishedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', {
@@ -230,6 +258,12 @@ export function PublicNewsHub({ initialArticleIdOrSlug, onNavigate: _onNavigate 
                   {categoryLabel}
                 </span>
 
+                {journalisticTypeLabel && (
+                  <span className="px-3 py-1 rounded-md text-xs font-semibold bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200/80 dark:border-gray-700/80">
+                    {journalisticTypeLabel}
+                  </span>
+                )}
+
                 {selectedArticle.urgencyLevel && selectedArticle.urgencyLevel !== 'Standard' && (
                   <span className={`px-3 py-1 rounded-full text-xs font-bold text-white shadow-xs ${
                     selectedArticle.urgencyLevel === 'Breaking' ? 'bg-red-600 animate-pulse' : 'bg-amber-600'
@@ -238,6 +272,15 @@ export function PublicNewsHub({ initialArticleIdOrSlug, onNavigate: _onNavigate 
                   </span>
                 )}
               </div>
+
+              {readerKicker && (
+                <p
+                  dir="auto"
+                  className="text-sm sm:text-base font-bold text-emerald-700 dark:text-emerald-400 leading-snug break-words"
+                >
+                  {readerKicker}
+                </p>
+              )}
 
               <h1 className="text-2xl sm:text-4xl lg:text-5xl font-extrabold text-gray-900 dark:text-white leading-tight tracking-tight">
                 {title}
@@ -517,7 +560,7 @@ export function PublicNewsHub({ initialArticleIdOrSlug, onNavigate: _onNavigate 
             {featuredArticle && (
               <div className="space-y-3">
                 <span className="text-xs font-bold uppercase tracking-wider text-emerald-800 dark:text-emerald-400">
-                  {isAr ? 'التحقيق البارز' : 'Featured Coverage'}
+                  {isAr ? 'التغطية البارزة' : 'Featured Coverage'}
                 </span>
                 <div 
                   onClick={() => setSelectedArticle(featuredArticle)}
@@ -548,6 +591,18 @@ export function PublicNewsHub({ initialArticleIdOrSlug, onNavigate: _onNavigate 
                         </span>
                       )}
                     </div>
+
+                    {(() => {
+                      const featuredKicker = getLocalizedKickerForArticle(featuredArticle, isAr);
+                      return featuredKicker ? (
+                        <p
+                          dir="auto"
+                          className="text-xs sm:text-sm font-bold text-emerald-700 dark:text-emerald-400 leading-snug line-clamp-2 break-words"
+                        >
+                          {featuredKicker}
+                        </p>
+                      ) : null;
+                    })()}
 
                     <h2 className="text-xl sm:text-3xl font-extrabold text-gray-900 dark:text-white leading-tight group-hover:text-emerald-700 dark:group-hover:text-emerald-400 transition-colors">
                       {isAr ? featuredArticle.titleAr : (featuredArticle.titleEn || featuredArticle.titleAr)}

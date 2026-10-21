@@ -5,6 +5,7 @@ import { ContentMeta } from './ContentMeta';
 export interface ContentCardProps {
   contentType: ContentType;
   title: string;
+  kicker?: string;
   excerpt: string;
   category: Category;
   publishedAt?: string;
@@ -22,6 +23,7 @@ export interface ContentCardProps {
 export const ContentCard: React.FC<ContentCardProps> = ({
   contentType,
   title,
+  kicker,
   excerpt,
   category,
   publishedAt,
@@ -36,6 +38,7 @@ export const ContentCard: React.FC<ContentCardProps> = ({
   className = '',
 }) => {
   const isInteractive = Boolean(onClick);
+  const trimmedKicker = kicker?.trim();
 
   return (
     <article
@@ -77,6 +80,16 @@ export const ContentCard: React.FC<ContentCardProps> = ({
           />
           {!featuredImage && badge && <div>{badge}</div>}
         </div>
+
+        {/* Introductory Headline (Kicker) */}
+        {trimmedKicker && (
+          <p
+            dir="auto"
+            className="text-xs sm:text-sm font-semibold text-emerald-700 dark:text-emerald-400 leading-snug mb-1.5 line-clamp-2 break-words"
+          >
+            {trimmedKicker}
+          </p>
+        )}
 
         {/* Title */}
         <h3 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white leading-snug mb-2 group-hover:text-emerald-700 dark:group-hover:text-emerald-400 transition-colors line-clamp-2">

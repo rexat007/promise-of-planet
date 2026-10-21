@@ -79,6 +79,9 @@ export class NewsAdminClient {
 
     if (item.titleAr !== undefined) payload.titleAr = item.titleAr.trim();
     if (item.titleEn !== undefined) payload.titleEn = item.titleEn.trim();
+    if (item.kickerAr !== undefined) payload.kickerAr = item.kickerAr;
+    if (item.kickerEn !== undefined) payload.kickerEn = item.kickerEn;
+    if (item.journalisticType !== undefined) payload.journalisticType = item.journalisticType;
     if (item.summaryAr !== undefined) payload.summaryAr = item.summaryAr.trim();
     if (item.summaryEn !== undefined) payload.summaryEn = item.summaryEn.trim();
     if (item.bodyAr !== undefined) payload.bodyAr = item.bodyAr;
@@ -100,7 +103,6 @@ export class NewsAdminClient {
       payload.summaryEn = payload.summaryEn || '';
       payload.bodyAr = payload.bodyAr || '';
       payload.bodyEn = payload.bodyEn || '';
-      payload.category = payload.category || 'Climate';
       payload.tags = payload.tags || [];
       payload.sources = payload.sources || [];
       payload.location = payload.location || 'Sudan / السودان';

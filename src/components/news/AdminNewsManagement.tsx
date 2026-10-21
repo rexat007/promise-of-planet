@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { NEWS_CATEGORIES } from '../../types/news';
 import type { NewsItem } from '../../types/news';
+import { CANONICAL_CATEGORY_DEFINITIONS, isCanonicalCategory } from '../../types';
+import type { JournalisticType } from '../../types';
 import { WorkflowState } from '../../types/workflow';
 import type { WorkflowTransitionConfig } from '../../types/workflow';
 import type { AdminUser } from '../../types/admin';
@@ -9,6 +10,8 @@ import { WorkflowEngine } from '../../services/workflowEngine';
 import { AdminAccessService } from '../../services/adminAccess';
 import { AdminPermission } from '../../types/admin';
 import { NewsAdminClient } from '../../services/newsAdminClient';
+import { RichTextEditor } from './editor/RichTextEditor';
+import { convertPlainTextToRichDocument } from '../../services/richNewsDocumentContract';
 import { 
   Newspaper, 
   Search, 
@@ -32,6 +35,28 @@ import {
   History,
   AlertCircle
 } from 'lucide-react';
+
+const JOURNALISTIC_TYPE_OPTIONS: readonly { value: JournalisticType; labelAr: string; labelEn: string }[] = [
+  { value: 'News', labelAr: 'خبر', labelEn: 'News' },
+  { value: 'Report', labelAr: 'تقرير', labelEn: 'Report' },
+  { value: 'Article', labelAr: 'مقال', labelEn: 'Article' },
+  { value: 'Investigation', labelAr: 'تحقيق استقصائي', labelEn: 'Investigation' },
+  { value: 'Interview', labelAr: 'مقابلة', labelEn: 'Interview' },
+  { value: 'Analysis', labelAr: 'تحليل', labelEn: 'Analysis' },
+  { value: 'Opinion', labelAr: 'مقال رأي', labelEn: 'Opinion' },
+  { value: 'Explainer', labelAr: 'مادة تفسيرية', labelEn: 'Explainer' },
+  { value: 'Feature', labelAr: 'قصة معمقة', labelEn: 'Feature' },
+];
+
+function getCategoryDisplayLabel(category: string, isAr: boolean): string {
+  if (isCanonicalCategory(category)) {
+    const def = CANONICAL_CATEGORY_DEFINITIONS.find(c => c.value === category);
+    if (def) {
+      return isAr ? def.labelAr : def.labelEn;
+    }
+  }
+  return category;
+}
 
 interface AdminNewsManagementProps {
   currentUser: AdminUser;
@@ -75,18 +100,17 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
 
   // Notification and error states
   const [successNotification, setSuccessNotification] = useState<string | null>(null);
-  const [notificationVisible, setNotificationVisible] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Auto-dismiss and animate success notification after 3 seconds within the single modal container
   useEffect(() => {
     if (isSaveSuccess) {
       const animFrame = requestAnimationFrame(() => {
-        setNotificationVisible(true);
+        
       });
 
       const dismissTimer = setTimeout(() => {
-        setNotificationVisible(false);
+        
         const cleanupTimer = setTimeout(() => {
           setIsSaveSuccess(false);
           setActiveItem(null);
@@ -101,12 +125,12 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
         clearTimeout(dismissTimer);
       };
     } else {
-      setNotificationVisible(false);
+      
     }
   }, [isSaveSuccess]);
 
   const handleCloseModal = () => {
-    setNotificationVisible(false);
+    
     setTimeout(() => {
       setIsSaveSuccess(false);
       setActiveItem(null);
@@ -120,7 +144,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   const [transitionComment, setTransitionComment] = useState('');
 
   // Form state for editor
-  const [editForm, setEditForm] = useState<Partial<NewsItem>>({});
+  const [editForm, setEditForm] = useState<Partial<NewsItem> & { bodyArHasEdited?: boolean; bodyEnHasEdited?: boolean; richBodyAr?: any; richBodyEn?: any }>({});
   const [tagsInput, setTagsInput] = useState<string>('');
   const [sourcesInput, setSourcesInput] = useState<string>('');
 
@@ -148,7 +172,13 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   // Open item for editing/viewing
   const handleOpenItem = (item: NewsItem) => {
     setActiveItem(item);
-    setEditForm({ ...item });
+    setEditForm({
+      ...item,
+      richBodyAr: item.richBodyAr ? JSON.parse(JSON.stringify(item.richBodyAr)) : convertPlainTextToRichDocument(item.bodyAr || '', 'rtl'),
+      richBodyEn: item.richBodyEn ? JSON.parse(JSON.stringify(item.richBodyEn)) : convertPlainTextToRichDocument(item.bodyEn || '', 'ltr'),
+      bodyArHasEdited: false,
+      bodyEnHasEdited: false,
+    });
     setTagsInput(Array.isArray(item.tags) ? item.tags.join(', ') : '');
     setSourcesInput(Array.isArray(item.sources) ? item.sources.join(', ') : '');
     setIsCreating(false);
@@ -168,8 +198,10 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
       summaryEn: '',
       bodyAr: '',
       bodyEn: '',
+      richBodyAr: convertPlainTextToRichDocument('', 'rtl'),
+      richBodyEn: convertPlainTextToRichDocument('', 'ltr'),
       author: currentUser.name,
-      category: NEWS_CATEGORIES[0].labelAr,
+      category: '',
       tags: [],
       sources: [],
       workflowState: WorkflowState.Draft,
@@ -178,7 +210,11 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
       history: [],
     };
     setActiveItem(newItem);
-    setEditForm({ ...newItem });
+    setEditForm({
+      ...newItem,
+      bodyArHasEdited: true,
+      bodyEnHasEdited: true,
+    });
     setTagsInput('');
     setSourcesInput('');
     setIsCreating(true);
@@ -204,8 +240,28 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
       return;
     }
 
+    if (!editForm.category?.trim()) {
+      setErrorMessage(isAr ? 'يرجى اختيار التصنيف البيئي' : 'Environmental category is required');
+      return;
+    }
+
     const parsedTags = tagsInput.split(',').map(t => t.trim()).filter(Boolean);
     const parsedSources = sourcesInput.split(',').map(s => s.trim()).filter(Boolean);
+
+    let richArPayload = undefined;
+    let richEnPayload = undefined;
+
+    if (editForm.bodyArHasEdited) {
+      richArPayload = editForm.richBodyAr;
+    } else if (activeItem?.richBodyAr) {
+      richArPayload = activeItem.richBodyAr;
+    }
+
+    if (editForm.bodyEnHasEdited) {
+      richEnPayload = editForm.richBodyEn;
+    } else if (activeItem?.richBodyEn) {
+      richEnPayload = activeItem.richBodyEn;
+    }
 
     try {
       let savedItem: NewsItem;
@@ -217,7 +273,12 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
           tags: parsedTags,
           sources: parsedSources,
           workflowState: WorkflowState.Draft,
+          richBodyAr: editForm.richBodyAr,
+          richBodyEn: editForm.richBodyEn,
         };
+        delete itemToSave.bodyAr;
+        delete itemToSave.bodyEn;
+
         savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser, true);
         setNewsList([savedItem, ...newsList]);
         setActiveItem(savedItem);
@@ -228,7 +289,12 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
           id: activeItem.id,
           tags: parsedTags,
           sources: parsedSources,
+          richBodyAr: richArPayload,
+          richBodyEn: richEnPayload,
         };
+        if (editForm.bodyArHasEdited) delete itemToSave.bodyAr;
+        if (editForm.bodyEnHasEdited) delete itemToSave.bodyEn;
+
         savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser, false);
         setNewsList(newsList.map(item => item.id === savedItem.id ? savedItem : item));
         setActiveItem(savedItem);
@@ -320,177 +386,121 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
 
   return (
     <div className="space-y-6" id="admin-news-management-view">
-      {/* Top Header Banner */}
-      <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl p-5 sm:p-6 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-start gap-4">
-          <div className="p-3 rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 shrink-0">
-            <Newspaper className="w-6 h-6" />
-          </div>
-          <div>
-            <h1 className="text-xl sm:text-2xl font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
-              <span>{isAr ? 'إدارة الأخبار والتغطيات البيئية' : 'Environmental Newsroom Management'}</span>
-              <span className="px-2 py-0.5 text-xs font-semibold bg-emerald-100 dark:bg-emerald-900/40 text-emerald-800 dark:text-emerald-300 rounded-md">
-                {isAr ? 'نواة الأخبار' : 'Newsroom Core'}
-              </span>
-            </h1>
-            <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mt-1 leading-relaxed">
-              {isAr 
-                ? 'إدارة وتقييم المقالات الإخبارية، والتقارير الميدانية من الولايات، وتوجيهها خلال دورة الاعتماد والنشر.'
-                : 'Manage news articles, regional environmental bulletins, and guide stories through the editorial workflow.'}
-            </p>
-          </div>
-        </div>
-
-        {canCreate && (
-          <button
-            onClick={handleStartCreate}
-            className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm shadow-sm inline-flex items-center justify-center gap-2 transition-all shrink-0 cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>{isAr ? 'إضافة خبر بيئي جديد' : 'New News Article'}</span>
-          </button>
-        )}
-      </div>
-
-      {/* Filter and Search Toolbar */}
-      <div data-responsive-guard className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-4 shadow-xs space-y-3 sm:space-y-0 sm:flex sm:items-center justify-between gap-3 w-full max-w-full min-w-0">
-        {/* Search Input */}
-        <div className="relative flex-1 min-w-0">
-          <Search className="w-4 h-4 text-gray-400 absolute top-1/2 -translate-y-1/2 start-3" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={isAr ? 'البحث بالعنوان، الكاتب، أو المضمون...' : 'Search by title, author, or content...'}
-            className="w-full ps-9 pe-4 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-lg text-xs sm:text-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-          />
-        </div>
-
-        {/* Filters Group */}
-        <div className="flex flex-wrap items-center gap-2 min-w-0">
-          {/* Status Filter */}
-          <div className="flex items-center gap-1.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-lg px-2.5 py-1.5 min-w-0">
-            <Filter className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-            <select
-              value={selectedStatus}
-              onChange={(e) => setSelectedStatus(e.target.value)}
-              className="bg-transparent text-xs font-semibold text-gray-700 dark:text-gray-300 focus:outline-none cursor-pointer truncate max-w-[140px]"
-            >
-              <option value="All">{isAr ? 'كافة الحالات' : 'All States'}</option>
-              <option value={WorkflowState.Draft}>{isAr ? 'مسودة' : 'Draft'}</option>
-              <option value={WorkflowState.InReview}>{isAr ? 'قيد المراجعة' : 'In Review'}</option>
-              <option value={WorkflowState.ChangesRequested}>{isAr ? 'تعديلات مطلوبة' : 'Changes Requested'}</option>
-              <option value={WorkflowState.Approved}>{isAr ? 'معتمد' : 'Approved'}</option>
-              <option value={WorkflowState.Published}>{isAr ? 'منشور' : 'Published'}</option>
-            </select>
-          </div>
-
-          {/* Category Filter */}
-          <div className="flex items-center gap-1.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-lg px-2.5 py-1.5 min-w-0">
-            <select
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
-              className="bg-transparent text-xs font-semibold text-gray-700 dark:text-gray-300 focus:outline-none cursor-pointer truncate max-w-[140px]"
-            >
-              <option value="All">{isAr ? 'كافة التصنيفات' : 'All Categories'}</option>
-              {NEWS_CATEGORIES.map(cat => (
-                <option key={cat.id} value={cat.labelAr}>
-                  {isAr ? cat.labelAr : cat.labelEn}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {/* News Management View (< 1280px Compact Cards, >= 1280px Dense Table) */}
-      <div data-responsive-guard className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl overflow-hidden shadow-xs w-full max-w-full min-w-0">
-        {filteredNews.length === 0 ? (
-          <div className="p-12 text-center text-gray-500 dark:text-gray-400 space-y-2">
-            <Newspaper className="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto" />
-            <p className="font-semibold text-sm">{isAr ? 'لا توجد أخبار تنطبق على محددات البحث' : 'No news articles match the selected filters'}</p>
-          </div>
-        ) : (
-          <>
-            {/* Compact Cards List (< 1280px) */}
-            <div className="block xl:hidden divide-y divide-gray-100 dark:divide-gray-800 w-full max-w-full min-w-0">
-              {filteredNews.map(item => (
-                <div key={item.id} className="p-4 sm:p-5 space-y-3 hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors w-full max-w-full min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-medium text-xs">
-                      {item.category}
-                    </span>
-                    {renderStatusBadge(item.workflowState)}
-                  </div>
-                  <div className="space-y-1">
-                    <h3 className="font-bold text-gray-900 dark:text-white text-sm sm:text-base leading-snug">
-                      {isAr ? item.titleAr : (item.titleEn || item.titleAr)}
-                    </h3>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
-                      {isAr ? (item.titleEn || item.summaryAr) : item.summaryEn}
-                    </p>
-                  </div>
-                  <div className="flex items-center justify-between pt-2 border-t border-gray-100 dark:border-gray-800 text-xs text-gray-500 dark:text-gray-400">
-                    <div>
-                      <span className="font-semibold text-gray-700 dark:text-gray-300">{item.author}</span>
-                      <span className="mx-2">•</span>
-                      <span>{new Date(item.updatedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
-                    </div>
-                    <button
-                      onClick={() => handleOpenItem(item)}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/60 dark:text-emerald-400 font-bold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      <span>{isAr ? 'العرض والتحرير' : 'View & Edit'}</span>
-                    </button>
-                  </div>
-                </div>
-              ))}
+      {!activeItem ? (
+        <>
+          {/* Top Header Banner */}
+          <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl p-5 sm:p-6 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <div className="p-3 rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400 shrink-0">
+                <Newspaper className="w-6 h-6" />
+              </div>
+              <div>
+                <h1 className="text-xl sm:text-2xl font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
+                  <span>{isAr ? 'إدارة الأخبار والتغطيات البيئية' : 'Environmental Newsroom Management'}</span>
+                  <span className="px-2 py-0.5 text-xs font-semibold bg-emerald-100 dark:bg-emerald-900/40 text-emerald-800 dark:text-emerald-300 rounded-md">
+                    {isAr ? 'نواة الأخبار' : 'Newsroom Core'}
+                  </span>
+                </h1>
+                <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mt-1 leading-relaxed">
+                  {isAr 
+                    ? 'إدارة وتقييم المقالات الإخبارية، والتقارير الميدانية من الولايات، وتوجيهها خلال دورة الاعتماد والنشر.'
+                    : 'Manage news articles, regional environmental bulletins, and guide stories through the editorial workflow.'}
+                </p>
+              </div>
             </div>
+            {canCreate && (
+              <button
+                onClick={handleStartCreate}
+                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm shadow-sm inline-flex items-center justify-center gap-2 transition-all shrink-0 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{isAr ? 'إضافة خبر بيئي جديد' : 'New News Article'}</span>
+              </button>
+            )}
+          </div>
 
-            {/* Dense Desktop Table View (>= 1280px) */}
-            <div className="hidden xl:block overflow-x-auto w-full max-w-full min-w-0">
-              <table className="w-full text-start text-xs sm:text-sm">
-                <thead className="bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800 text-gray-500 dark:text-gray-400 font-bold uppercase tracking-wider">
-                  <tr>
-                    <th className="p-3.5 text-start">{isAr ? 'عنوان الخبر البيئي' : 'News Article Title'}</th>
-                    <th className="p-3.5 text-start">{isAr ? 'التصنيف' : 'Category'}</th>
-                    <th className="p-3.5 text-start">{isAr ? 'الكاتب' : 'Author'}</th>
-                    <th className="p-3.5 text-start">{isAr ? 'حالة الاعتماد' : 'Workflow Status'}</th>
-                    <th className="p-3.5 text-start">{isAr ? 'آخر تحديث' : 'Last Updated'}</th>
-                    <th className="p-3.5 text-end">{isAr ? 'الإجراءات' : 'Actions'}</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+          {/* Filter and Search Toolbar */}
+          <div data-responsive-guard className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-4 shadow-xs space-y-3 sm:space-y-0 sm:flex sm:items-center justify-between gap-3 w-full max-w-full min-w-0">
+            {/* Search Input */}
+            <div className="relative flex-1 min-w-0">
+              <Search className="w-4 h-4 text-gray-400 absolute top-1/2 -translate-y-1/2 start-3" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={isAr ? 'البحث بالعنوان، الكاتب، أو المضمون...' : 'Search by title, author, or content...'}
+                className="w-full ps-9 pe-4 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-lg text-xs sm:text-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+            {/* Filters Group */}
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              {/* Status Filter */}
+              <div className="flex items-center gap-1.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-lg px-2.5 py-1.5 min-w-0">
+                <Filter className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                <select
+                  value={selectedStatus}
+                  onChange={(e) => setSelectedStatus(e.target.value)}
+                  className="bg-transparent text-xs font-semibold text-gray-700 dark:text-gray-300 focus:outline-none cursor-pointer truncate max-w-[140px]"
+                >
+                  <option value="All">{isAr ? 'كافة الحالات' : 'All States'}</option>
+                  <option value={WorkflowState.Draft}>{isAr ? 'مسودة' : 'Draft'}</option>
+                  <option value={WorkflowState.InReview}>{isAr ? 'قيد المراجعة' : 'In Review'}</option>
+                  <option value={WorkflowState.ChangesRequested}>{isAr ? 'تعديلات مطلوبة' : 'Changes Requested'}</option>
+                  <option value={WorkflowState.Approved}>{isAr ? 'معتمد' : 'Approved'}</option>
+                  <option value={WorkflowState.Published}>{isAr ? 'منشور' : 'Published'}</option>
+                </select>
+              </div>
+              {/* Category Filter */}
+              <div className="flex items-center gap-1.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-lg px-2.5 py-1.5 min-w-0">
+                <select
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
+                  className="bg-transparent text-xs font-semibold text-gray-700 dark:text-gray-300 focus:outline-none cursor-pointer truncate max-w-[140px]"
+                >
+                  <option value="All">{isAr ? 'كافة التصنيفات' : 'All Categories'}</option>
+                  {CANONICAL_CATEGORY_DEFINITIONS.map(cat => (
+                    <option key={cat.value} value={cat.value}>
+                      {isAr ? cat.labelAr : cat.labelEn}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* News Management View (< 1280px Compact Cards, >= 1280px Dense Table) */}
+          <div data-responsive-guard className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl overflow-hidden shadow-xs w-full max-w-full min-w-0">
+            {filteredNews.length === 0 ? (
+              <div className="p-12 text-center text-gray-500 dark:text-gray-400 space-y-2">
+                <Newspaper className="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto" />
+                <p className="font-semibold text-sm">{isAr ? 'لا توجد أخبار تنطبق على محددات البحث' : 'No news articles match the selected filters'}</p>
+              </div>
+            ) : (
+              <>
+                {/* Compact Cards List (< 1280px) */}
+                <div className="block xl:hidden divide-y divide-gray-100 dark:divide-gray-800 w-full max-w-full min-w-0">
                   {filteredNews.map(item => (
-                    <tr key={item.id} className="hover:bg-gray-50/60 dark:hover:bg-gray-800/30 transition-colors">
-                      <td className="p-3.5 max-w-xs sm:max-w-md">
-                        <p className="font-bold text-gray-900 dark:text-white line-clamp-1">
+                    <div key={item.id} className="p-4 sm:p-5 space-y-3 hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors w-full max-w-full min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-medium text-xs">
+                          {getCategoryDisplayLabel(item.category, isAr)}
+                        </span>
+                        {renderStatusBadge(item.workflowState)}
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="font-bold text-gray-900 dark:text-white text-sm sm:text-base leading-snug">
                           {isAr ? item.titleAr : (item.titleEn || item.titleAr)}
-                        </p>
-                        <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-1 mt-0.5">
+                        </h3>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-2">
                           {isAr ? (item.titleEn || item.summaryAr) : item.summaryEn}
                         </p>
-                      </td>
-                      <td className="p-3.5 whitespace-nowrap">
-                        <span className="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-medium text-xs">
-                          {item.category}
-                        </span>
-                      </td>
-                      <td className="p-3.5 whitespace-nowrap font-medium text-gray-700 dark:text-gray-300">
-                        {item.author}
-                      </td>
-                      <td className="p-3.5 whitespace-nowrap">
-                        {renderStatusBadge(item.workflowState)}
-                      </td>
-                      <td className="p-3.5 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
-                        {new Date(item.updatedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', {
-                          year: 'numeric',
-                          month: 'short',
-                          day: 'numeric'
-                        })}
-                      </td>
-                      <td className="p-3.5 whitespace-nowrap text-end">
+                      </div>
+                      <div className="flex items-center justify-between pt-2 border-t border-gray-100 dark:border-gray-800 text-xs text-gray-500 dark:text-gray-400">
+                        <div>
+                          <span className="font-semibold text-gray-700 dark:text-gray-300">{item.author}</span>
+                          <span className="mx-2">•</span>
+                          <span>{new Date(item.updatedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                        </div>
                         <button
                           onClick={() => handleOpenItem(item)}
                           className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/60 dark:text-emerald-400 font-bold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
@@ -498,86 +508,133 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                           <Eye className="w-3.5 h-3.5" />
                           <span>{isAr ? 'العرض والتحرير' : 'View & Edit'}</span>
                         </button>
-                      </td>
-                    </tr>
+                      </div>
+                    </div>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* Editor & Workflow Modal Layer */}
-      {activeItem && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto pop-motion-modal">
-          {isSaveSuccess ? (
-            /* SUCCESS CONFIRMATION CONTENT IN SAME OVERLAY */
-            <div 
-              className={`bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-3xl max-w-md w-full p-6 sm:p-8 flex flex-col items-center text-center shadow-2xl transition-all duration-[var(--pop-duration-modal)] ease-[var(--pop-ease-out)] transform my-auto ${
-                notificationVisible
-                  ? 'opacity-100 scale-100 translate-y-0'
-                  : 'opacity-0 scale-95 -translate-y-2 pointer-events-none'
-              }`}
-            >
-              <div className="w-14 h-14 rounded-2xl bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-100 dark:border-emerald-800 flex items-center justify-center text-emerald-600 dark:text-emerald-400 mb-4 shadow-inner">
-                <CheckCircle2 className="w-8 h-8" />
+                </div>
+                {/* Dense Desktop Table View (>= 1280px) */}
+                <div className="hidden xl:block overflow-x-auto w-full max-w-full min-w-0">
+                  <table className="w-full text-start text-xs sm:text-sm">
+                    <thead className="bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800 text-gray-500 dark:text-gray-400 font-bold uppercase tracking-wider">
+                      <tr>
+                        <th className="p-3.5 text-start">{isAr ? 'عنوان الخبر البيئي' : 'News Article Title'}</th>
+                        <th className="p-3.5 text-start">{isAr ? 'التصنيف' : 'Category'}</th>
+                        <th className="p-3.5 text-start">{isAr ? 'الكاتب' : 'Author'}</th>
+                        <th className="p-3.5 text-start">{isAr ? 'حالة الاعتماد' : 'Workflow Status'}</th>
+                        <th className="p-3.5 text-start">{isAr ? 'آخر تحديث' : 'Last Updated'}</th>
+                        <th className="p-3.5 text-end">{isAr ? 'الإجراءات' : 'Actions'}</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
+                      {filteredNews.map(item => (
+                        <tr key={item.id} className="hover:bg-gray-50/60 dark:hover:bg-gray-800/30 transition-colors">
+                          <td className="p-3.5 max-w-xs sm:max-w-md">
+                            <p className="font-bold text-gray-900 dark:text-white line-clamp-1">
+                              {isAr ? item.titleAr : (item.titleEn || item.titleAr)}
+                            </p>
+                            <p className="text-xs text-gray-500 dark:text-gray-400 line-clamp-1 mt-0.5">
+                              {isAr ? (item.titleEn || item.summaryAr) : item.summaryEn}
+                            </p>
+                          </td>
+                          <td className="p-3.5 whitespace-nowrap">
+                            <span className="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-medium text-xs">
+                              {getCategoryDisplayLabel(item.category, isAr)}
+                            </span>
+                          </td>
+                          <td className="p-3.5 whitespace-nowrap font-medium text-gray-700 dark:text-gray-300">
+                            {item.author}
+                          </td>
+                          <td className="p-3.5 whitespace-nowrap">
+                            {renderStatusBadge(item.workflowState)}
+                          </td>
+                          <td className="p-3.5 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                            {new Date(item.updatedAt).toLocaleDateString(isAr ? 'ar-SD' : 'en-US', {
+                              year: 'numeric',
+                              month: 'short',
+                              day: 'numeric'
+                            })}
+                          </td>
+                          <td className="p-3.5 whitespace-nowrap text-end">
+                            <button
+                              onClick={() => handleOpenItem(item)}
+                              className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:hover:bg-emerald-900/60 dark:text-emerald-400 font-bold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>{isAr ? 'العرض والتحرير' : 'View & Edit'}</span>
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      ) : isSaveSuccess ? (
+        <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-3xl max-w-md w-full mx-auto p-6 sm:p-8 flex flex-col items-center text-center shadow-xl my-12">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-100 dark:border-emerald-800 flex items-center justify-center text-emerald-600 dark:text-emerald-400 mb-4 shadow-inner">
+            <CheckCircle2 className="w-8 h-8" />
+          </div>
+          <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">
+            {isAr ? 'تم الحفظ بنجاح' : 'Successfully Saved'}
+          </h3>
+          <p className="text-sm text-gray-600 dark:text-gray-300 font-medium mb-6">
+            {successNotification}
+          </p>
+          <button
+            onClick={handleCloseModal}
+            className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-bold rounded-xl shadow-xs pop-motion-micro pop-hover-lift cursor-pointer flex items-center justify-center gap-2"
+          >
+            <span>{isAr ? 'موافق' : 'OK'}</span>
+          </button>
+        </div>
+      ) : (
+        <section
+          aria-label={isAr ? 'مساحة تحرير الخبر' : 'News editorial workspace'}
+          className="w-full min-w-0 flex flex-col bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl shadow-sm overflow-hidden"
+          style={{ height: 'calc(100vh - 7rem)', minHeight: '650px' }}
+        >
+            {/* Header */}
+            <div className="p-4 sm:p-5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-3 bg-gray-50/50 dark:bg-gray-800/40 shrink-0">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="p-2 rounded-xl bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400 shrink-0">
+                  <Newspaper className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-base sm:text-lg font-bold text-gray-900 dark:text-white truncate">
+                      {isCreating 
+                        ? (isAr ? 'إنشاء مقال خبري جديد' : 'Create New News Article')
+                        : (isAr ? activeItem.titleAr : (activeItem.titleEn || activeItem.titleAr))}
+                    </h2>
+                    {renderStatusBadge(activeItem.workflowState)}
+                  </div>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
+                    {isAr ? `الكاتب: ${activeItem.author}` : `Author: ${activeItem.author}`}
+                  </p>
+                </div>
               </div>
-              <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">
-                {isAr ? 'تم الحفظ بنجاح' : 'Successfully Saved'}
-              </h3>
-              <p className="text-sm text-gray-600 dark:text-gray-300 font-medium mb-6">
-                {successNotification}
-              </p>
+
               <button
                 onClick={handleCloseModal}
-                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-bold rounded-xl shadow-xs pop-motion-micro pop-hover-lift cursor-pointer flex items-center justify-center gap-2"
+                className="p-2 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer shrink-0"
               >
-                <span>{isAr ? 'موافق' : 'OK'}</span>
+                <X className="w-5 h-5" />
               </button>
             </div>
-          ) : (
-            /* EDIT CONTENT IN SAME OVERLAY */
-            <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden my-auto pop-motion-modal">
-              {/* Modal Header */}
-              <div className="p-4 sm:p-5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-3 bg-gray-50/50 dark:bg-gray-800/40">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="p-2 rounded-xl bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400 shrink-0">
-                    <Newspaper className="w-5 h-5" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h2 className="text-base sm:text-lg font-bold text-gray-900 dark:text-white truncate">
-                        {isCreating 
-                          ? (isAr ? 'إنشاء مقال خبري جديد' : 'Create New News Article')
-                          : (isAr ? activeItem.titleAr : (activeItem.titleEn || activeItem.titleAr))}
-                      </h2>
-                      {renderStatusBadge(activeItem.workflowState)}
-                    </div>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
-                      {isAr ? `الكاتب: ${activeItem.author}` : `Author: ${activeItem.author}`}
-                    </p>
-                  </div>
-                </div>
-
-                <button
-                  onClick={handleCloseModal}
-                  className="p-2 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer shrink-0"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
 
             {/* Error banner if present */}
             {errorMessage && (
-              <div className="bg-rose-50 dark:bg-rose-950/50 border-b border-rose-200 dark:border-rose-900 px-5 py-3 flex items-center gap-2 text-rose-700 dark:text-rose-300 text-xs font-semibold">
+              <div className="bg-rose-50 dark:bg-rose-950/50 border-b border-rose-200 dark:border-rose-900 px-5 py-3 flex items-center gap-2 text-rose-700 dark:text-rose-300 text-xs font-semibold shrink-0">
                 <AlertCircle className="w-4 h-4 shrink-0" />
                 <span>{errorMessage}</span>
               </div>
             )}
 
-            {/* Modal Tab Controls */}
-            <div className="border-b border-gray-100 dark:border-gray-800 px-5 flex items-center gap-6 bg-white dark:bg-gray-900">
+            {/* Tab Controls */}
+            <div className="border-b border-gray-100 dark:border-gray-800 px-5 flex items-center gap-6 bg-white dark:bg-gray-900 shrink-0">
               <button
                 onClick={() => setActiveTab('content')}
                 className={`py-3 text-xs sm:text-sm font-bold border-b-2 transition-colors cursor-pointer flex items-center gap-2 ${
@@ -608,9 +665,10 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
               </button>
             </div>
 
-            {/* Modal Body */}
-            <div className="p-5 overflow-y-auto flex-1 space-y-6">
-              {activeTab === 'content' ? (
+            {/* Scrollable Workspace Body */}
+            <div className="flex-1 min-h-0 min-w-0 w-full overflow-y-auto overscroll-contain">
+              <div className="w-full max-w-5xl mx-auto p-4 sm:p-8 space-y-6">
+                {activeTab === 'content' ? (
                 <div className="space-y-4">
                   {!isDraft && activeItem && (
                     <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200/60 dark:border-amber-800/50 flex items-center gap-2.5 text-xs text-amber-800 dark:text-amber-300 font-medium">
@@ -623,6 +681,23 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                     </div>
                   )}
 
+                  {/* Arabic Introductory Headline (Kicker) */}
+                  <div className="space-y-1.5">
+                    <label htmlFor="news-kicker-ar" className="text-xs font-bold text-gray-700 dark:text-gray-300 flex items-center gap-1">
+                      <span>{isAr ? 'العنوان التمهيدي (بالعربية)' : 'Arabic Introductory Headline'}</span>
+                    </label>
+                    <input
+                      id="news-kicker-ar"
+                      type="text"
+                      dir="rtl"
+                      value={editForm.kickerAr ?? ''}
+                      onChange={(e) => setEditForm({ ...editForm, kickerAr: e.target.value })}
+                      placeholder="عنوان تمهيدي قصير يظهر فوق العنوان الرئيسي..."
+                      disabled={!canSaveContent}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                    />
+                  </div>
+
                   {/* Arabic Title */}
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-700 dark:text-gray-300 flex items-center gap-1">
@@ -634,6 +709,23 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       value={editForm.titleAr || ''}
                       onChange={(e) => setEditForm({ ...editForm, titleAr: e.target.value })}
                       placeholder="عنوان المقال الخبري بالعربية..."
+                      disabled={!canSaveContent}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                    />
+                  </div>
+
+                  {/* English Introductory Headline (Kicker) */}
+                  <div className="space-y-1.5">
+                    <label htmlFor="news-kicker-en" className="text-xs font-bold text-gray-700 dark:text-gray-300 flex items-center gap-1">
+                      <span>{isAr ? 'العنوان التمهيدي (بالإنجليزية)' : 'English Introductory Headline'}</span>
+                    </label>
+                    <input
+                      id="news-kicker-en"
+                      type="text"
+                      dir="ltr"
+                      value={editForm.kickerEn ?? ''}
+                      onChange={(e) => setEditForm({ ...editForm, kickerEn: e.target.value })}
+                      placeholder="Short introductory kicker above primary title..."
                       disabled={!canSaveContent}
                       className="w-full px-3.5 py-2.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                     />
@@ -655,21 +747,62 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                     />
                   </div>
 
-                  {/* Category & Author Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Category, Journalistic Type & Author Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div className="space-y-1.5">
-                      <label className="text-xs font-bold text-gray-700 dark:text-gray-300">
+                      <label htmlFor="news-category" className="text-xs font-bold text-gray-700 dark:text-gray-300">
                         {isAr ? 'التصنيف البيئي' : 'Category'}
                       </label>
                       <select
-                        value={editForm.category || NEWS_CATEGORIES[0].labelAr}
+                        id="news-category"
+                        value={editForm.category || ''}
                         onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}
                         disabled={!canSaveContent}
                         className="w-full px-3.5 py-2.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60 cursor-pointer"
                       >
-                        {NEWS_CATEGORIES.map(cat => (
-                          <option key={cat.id} value={cat.labelAr}>
+                        <option value="" disabled>
+                          {isAr ? 'اختر التصنيف البيئي...' : 'Select environmental category...'}
+                        </option>
+                        {Boolean(editForm.category && !isCanonicalCategory(editForm.category)) && (
+                          <option value={editForm.category} disabled>
+                            {isAr ? `تصنيف قديم (غير قياسي): ${editForm.category}` : `Legacy Category (Non-canonical): ${editForm.category}`}
+                          </option>
+                        )}
+                        {CANONICAL_CATEGORY_DEFINITIONS.map(cat => (
+                          <option key={cat.value} value={cat.value}>
                             {isAr ? cat.labelAr : cat.labelEn}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label htmlFor="news-journalistic-type" className="text-xs font-bold text-gray-700 dark:text-gray-300">
+                        {isAr ? 'النوع الصحفي' : 'Journalistic Type'}
+                      </label>
+                      <select
+                        id="news-journalistic-type"
+                        value={editForm.journalisticType ?? ''}
+                        onChange={(e) => {
+                          const nextVal = e.target.value;
+                          const hasPersistedType = Boolean(!isCreating && activeItem?.journalisticType);
+                          if (!nextVal) {
+                            if (!hasPersistedType) {
+                              setEditForm({ ...editForm, journalisticType: undefined });
+                            }
+                            return;
+                          }
+                          setEditForm({ ...editForm, journalisticType: nextVal as JournalisticType });
+                        }}
+                        disabled={!canSaveContent}
+                        className="w-full px-3.5 py-2.5 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60 cursor-pointer"
+                      >
+                        <option value="" disabled={Boolean(!isCreating && activeItem?.journalisticType)}>
+                          {isAr ? 'غير محدد' : 'Not specified'}
+                        </option>
+                        {JOURNALISTIC_TYPE_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>
+                            {isAr ? opt.labelAr : opt.labelEn}
                           </option>
                         ))}
                       </select>
@@ -726,14 +859,10 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                     <label className="text-xs font-bold text-gray-700 dark:text-gray-300">
                       {isAr ? 'نص الخبر الكامل (بالعربية)' : 'Arabic Article Body'}
                     </label>
-                    <textarea
-                      dir="rtl"
-                      rows={5}
-                      value={editForm.bodyAr || ''}
-                      onChange={(e) => setEditForm({ ...editForm, bodyAr: e.target.value })}
-                      placeholder="المتن التفصيلي للمقال الخبري..."
-                      disabled={!canSaveContent}
-                      className="w-full px-3.5 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                    <RichTextEditor
+                      value={editForm.richBodyAr || convertPlainTextToRichDocument('', 'rtl')}
+                      onChange={(val) => setEditForm(prev => ({ ...prev, richBodyAr: val, bodyArHasEdited: true }))}
+                      readOnly={!canSaveContent}
                     />
                   </div>
 
@@ -742,14 +871,10 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                     <label className="text-xs font-bold text-gray-700 dark:text-gray-300">
                       {isAr ? 'نص الخبر الكامل (بالإنجليزية)' : 'English Article Body'}
                     </label>
-                    <textarea
-                      dir="ltr"
-                      rows={4}
-                      value={editForm.bodyEn || ''}
-                      onChange={(e) => setEditForm({ ...editForm, bodyEn: e.target.value })}
-                      placeholder="Full article body in English..."
-                      disabled={!canSaveContent}
-                      className="w-full px-3.5 py-2 bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl text-xs sm:text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                    <RichTextEditor
+                      value={editForm.richBodyEn || convertPlainTextToRichDocument('', 'ltr')}
+                      onChange={(val) => setEditForm(prev => ({ ...prev, richBodyEn: val, bodyEnHasEdited: true }))}
+                      readOnly={!canSaveContent}
                     />
                   </div>
 
@@ -957,30 +1082,31 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                   </div>
                 </div>
               )}
+              </div>
             </div>
 
-            {/* Modal Footer */}
-            <div className="p-4 border-t border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/40 flex items-center justify-between gap-3">
-              <button
-                onClick={handleCloseModal}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 dark:text-gray-300 hover:bg-gray-200/50 dark:hover:bg-gray-800 transition-colors cursor-pointer"
-              >
-                {isAr ? 'إغلاق' : 'Close'}
-              </button>
-
-              {canSaveContent && activeTab === 'content' && (
+            {/* Footer */}
+            <div className="border-t border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/40 shrink-0">
+              <div className="max-w-5xl mx-auto w-full p-4 sm:p-5 flex items-center justify-between gap-3">
                 <button
-                  onClick={handleSaveForm}
-                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                  onClick={handleCloseModal}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 dark:text-gray-300 hover:bg-gray-200/50 dark:hover:bg-gray-800 transition-colors cursor-pointer"
                 >
-                  <Save className="w-4 h-4" />
-                  <span>{isAr ? 'حفظ البيانات والتعديلات' : 'Save Changes'}</span>
+                  {isAr ? 'إغلاق' : 'Close'}
                 </button>
-              )}
+
+                {canSaveContent && activeTab === 'content' && (
+                  <button
+                    onClick={handleSaveForm}
+                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{isAr ? 'حفظ البيانات والتعديلات' : 'Save Changes'}</span>
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-          )}
-        </div>
+          </section>
       )}
     </div>
   );

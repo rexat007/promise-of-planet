@@ -1,3 +1,5 @@
+import type { JournalisticType } from '../shared/contentContract';
+
 export type WorkflowStateBackend = 
   | 'Draft' 
   | 'InReview' 
@@ -27,6 +29,9 @@ export interface NewsItemBackend {
   id: string;
   titleAr: string;
   titleEn?: string;
+  kickerAr?: string;
+  kickerEn?: string;
+  journalisticType?: JournalisticType;
   summaryAr: string;
   summaryEn?: string;
   bodyAr: string;
@@ -52,6 +57,9 @@ export interface SanitizedPublicNewsDTO {
   id: string;
   titleAr: string;
   titleEn?: string;
+  kickerAr?: string;
+  kickerEn?: string;
+  journalisticType?: JournalisticType;
   summaryAr: string;
   summaryEn?: string;
   bodyAr: string;

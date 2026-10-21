@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AppShell } from './components/layout/AppShell';
 import { Container } from './components/layout/Container';
@@ -24,6 +24,8 @@ import { PublicLibraryHub } from './components/library/PublicLibraryHub';
 import type { PublicPageKey } from './components/layout/Header';
 import type { Language } from './types';
 import './App.css';
+
+const ImageEditorSandbox = lazy(() => import('./components/news/editor/sandbox/ImageEditorSandbox'));
 
 function App() {
   const { t, i18n } = useTranslation();
@@ -53,6 +55,13 @@ function App() {
     return 'home';
   });
 
+  const [isImageSandboxOpen, setIsImageSandboxOpen] = useState(() => {
+    if (import.meta.env.DEV && typeof window !== 'undefined') {
+      return window.location.hash === '#img-f1-sandbox';
+    }
+    return false;
+  });
+
   const [initialNewsSlug, setInitialNewsSlug] = useState<string | undefined>(() => {
     if (typeof window !== 'undefined' && window.location.hash.startsWith('#news/')) {
       return window.location.hash.replace('#news/', '');
@@ -63,6 +72,12 @@ function App() {
   useEffect(() => {
     const handleHashChange = () => {
       const hash = window.location.hash;
+      if (import.meta.env.DEV && hash === '#img-f1-sandbox') {
+        setIsImageSandboxOpen(true);
+      } else {
+        setIsImageSandboxOpen(false);
+      }
+
       if (hash.startsWith('#news/')) {
         setActivePage('news');
         setInitialNewsSlug(hash.replace('#news/', ''));
@@ -89,7 +104,17 @@ function App() {
     <div id="app-root-container" dir={isAr ? 'rtl' : 'ltr'} className="min-h-screen w-full">
       <ResponsiveGuard />
       <ErrorBoundary isAr={isAr}>
-        <ViewTransition viewKey={isAdminOpen ? 'admin-workspace' : 'public-app'}>
+        {import.meta.env.DEV && isImageSandboxOpen ? (
+          <Suspense fallback={<div className="p-4 text-center text-xs text-gray-500">Loading Image Sandbox...</div>}>
+            <ImageEditorSandbox
+              onExit={() => {
+                setIsImageSandboxOpen(false);
+                window.location.hash = '';
+              }}
+            />
+          </Suspense>
+        ) : (
+          <ViewTransition viewKey={isAdminOpen ? 'admin-workspace' : 'public-app'}>
         {isAdminOpen ? (
           <AdminAccessGate 
             onExitAdmin={() => {
@@ -232,6 +257,7 @@ function App() {
           </AppShell>
         )}
       </ViewTransition>
+        )}
       </ErrorBoundary>
     </div>
   );

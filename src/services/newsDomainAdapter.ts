@@ -1,34 +1,36 @@
 import type { NewsItem } from '../types/news';
-import type { 
-  News, 
-  Category, 
-  ContentStatus, 
-  ApprovalStatus, 
-  ContentSource, 
-  ImageObject,
-  UrgencyLevel 
+import { 
+  type News, 
+  type Category, 
+  isCanonicalCategory,
+  type ContentStatus, 
+  type ApprovalStatus, 
+  type ContentSource, 
+  type ImageObject,
+  type UrgencyLevel,
+  type JournalisticType
 } from '../types';
 import { WorkflowState } from '../types/workflow';
 
 /**
- * Maps category labels or keys to canonical categories.
+ * Strictly maps category string to canonical Category if valid, otherwise returns null.
+ * Zero heuristic guessing, zero keyword inference, zero Climate fallback.
  */
-export function normalizeCategory(cat: string): Category {
-  const lower = (cat || '').toLowerCase().trim();
-  if (lower.includes('ماء') || lower.includes('نيل') || lower.includes('water')) return 'Water';
-  if (lower.includes('مناخ') || lower.includes('طقس') || lower.includes('climate')) return 'Climate';
-  if (lower.includes('نبات') || lower.includes('تصحر') || lower.includes('حيوي') || lower.includes('biodiversity')) return 'Biodiversity';
-  if (lower.includes('تلوث') || lower.includes('pollution')) return 'Pollution';
-  if (lower.includes('طاقة') || lower.includes('energy')) return 'Energy';
-  if (lower.includes('زراع') || lower.includes('agri')) return 'Agriculture';
-  if (lower.includes('سياس') || lower.includes('قانون') || lower.includes('policy')) return 'EnvironmentalPolicy';
-  return 'Climate';
+export function normalizeCategory(cat: unknown): Category | null {
+  if (isCanonicalCategory(cat)) {
+    return cat;
+  }
+  return null;
 }
 
 /**
  * Converts a workflow NewsItem into the canonical public News domain model.
  */
 export function toCanonicalNews(item: NewsItem): News {
+  if (!isCanonicalCategory(item.category)) {
+    throw new Error(`CATEGORY_INTEGRITY_ERROR: Non-canonical category '${item.category}' cannot be converted to canonical News domain model`);
+  }
+
   // Determine lifecycle and approval status from workflow state
   let status: ContentStatus = 'Draft';
   let approvalStatus: ApprovalStatus = 'Draft';
@@ -82,11 +84,14 @@ export function toCanonicalNews(item: NewsItem): News {
     contentType: 'News',
     titleAr: item.titleAr,
     titleEn: item.titleEn || undefined,
+    kickerAr: item.kickerAr,
+    kickerEn: item.kickerEn,
+    journalisticType: item.journalisticType,
     excerptAr: item.summaryAr,
     excerptEn: item.summaryEn || undefined,
     contentAr: item.bodyAr,
     contentEn: item.bodyEn || undefined,
-    category: normalizeCategory(item.category),
+    category: item.category,
     tags: item.tags || [],
     originalLanguage: 'ar',
     availableLanguages,
@@ -123,6 +128,9 @@ export function toWorkflowNewsItem(news: News): NewsItem {
     id: news.id,
     titleAr: news.titleAr,
     titleEn: news.titleEn || '',
+    kickerAr: news.kickerAr,
+    kickerEn: news.kickerEn,
+    journalisticType: news.journalisticType,
     summaryAr: news.excerptAr,
     summaryEn: news.excerptEn || '',
     bodyAr: news.contentAr,
@@ -149,12 +157,15 @@ export interface SanitizedPublicNewsDTO {
   id: string;
   titleAr: string;
   titleEn?: string;
+  kickerAr?: string;
+  kickerEn?: string;
+  journalisticType?: JournalisticType;
   summaryAr: string;
   summaryEn?: string;
   bodyAr: string;
   bodyEn?: string;
   author: string;
-  category: Category;
+  category: string;
   tags: string[];
   sources: string[];
   featuredImage?: string;
@@ -166,8 +177,8 @@ export interface SanitizedPublicNewsDTO {
 }
 
 export function sanitizeForPublic(item: NewsItem): SanitizedPublicNewsDTO | null {
-  // Only published items can be exposed publicly
-  if (item.workflowState !== WorkflowState.Published) {
+  // Only published items with canonical categories can be exposed publicly
+  if (item.workflowState !== WorkflowState.Published || !isCanonicalCategory(item.category)) {
     return null;
   }
 
@@ -175,12 +186,15 @@ export function sanitizeForPublic(item: NewsItem): SanitizedPublicNewsDTO | null
     id: item.id,
     titleAr: item.titleAr,
     titleEn: item.titleEn || undefined,
+    kickerAr: item.kickerAr,
+    kickerEn: item.kickerEn,
+    journalisticType: item.journalisticType,
     summaryAr: item.summaryAr,
     summaryEn: item.summaryEn || undefined,
     bodyAr: item.bodyAr,
     bodyEn: item.bodyEn || undefined,
     author: item.author,
-    category: normalizeCategory(item.category),
+    category: item.category,
     tags: item.tags || [],
     sources: item.sources || [],
     featuredImage: item.featuredImage,
@@ -197,6 +211,10 @@ export function sanitizeForPublic(item: NewsItem): SanitizedPublicNewsDTO | null
  * Does NOT fabricate approval records or editorial history.
  */
 export function publicDtoToCanonicalNews(dto: SanitizedPublicNewsDTO): News {
+  if (!isCanonicalCategory(dto.category)) {
+    throw new Error(`CATEGORY_INTEGRITY_ERROR: Non-canonical public DTO category '${dto.category}' cannot be converted to canonical News domain model`);
+  }
+
   const sources: ContentSource[] = (dto.sources || []).map((s, idx) => ({
     id: `src-${idx + 1}`,
     sourceName: s,
@@ -225,11 +243,14 @@ export function publicDtoToCanonicalNews(dto: SanitizedPublicNewsDTO): News {
     contentType: 'News',
     titleAr: dto.titleAr,
     titleEn: dto.titleEn || undefined,
+    kickerAr: dto.kickerAr,
+    kickerEn: dto.kickerEn,
+    journalisticType: dto.journalisticType,
     excerptAr: dto.summaryAr,
     excerptEn: dto.summaryEn || undefined,
     contentAr: dto.bodyAr,
     contentEn: dto.bodyEn || undefined,
-    category: normalizeCategory(dto.category),
+    category: dto.category,
     tags: dto.tags || [],
     originalLanguage: 'ar',
     availableLanguages,

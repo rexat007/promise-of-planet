@@ -1,3 +1,4 @@
+import type { JournalisticType } from '../shared/contentContract';
 import type { 
   NewsRepository, 
   NewsItemBackend, 
@@ -15,6 +16,9 @@ export interface SaveNewsInput {
   id?: string;
   titleAr: string;
   titleEn?: string;
+  kickerAr?: string;
+  kickerEn?: string;
+  journalisticType?: JournalisticType;
   summaryAr: string;
   summaryEn?: string;
   bodyAr: string;
@@ -56,6 +60,9 @@ export class NewsApplicationService {
    * Creates a new draft article.
    */
   async createDraft(input: SaveNewsInput, actor: ActorContext): Promise<NewsItemBackend> {
+    // Canonical environmental category is strictly required for new drafts
+    NewsValidator.validateCanonicalCategory(input.category);
+
     const now = new Date().toISOString();
     // Server-authoritative ID generation: client-supplied document IDs are never accepted as authoritative
     const id = `news-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
@@ -88,6 +95,9 @@ export class NewsApplicationService {
       id,
       titleAr: input.titleAr,
       titleEn: input.titleEn || '',
+      kickerAr: input.kickerAr !== undefined ? input.kickerAr : undefined,
+      kickerEn: input.kickerEn !== undefined ? input.kickerEn : undefined,
+      journalisticType: input.journalisticType !== undefined ? input.journalisticType : undefined,
       summaryAr: input.summaryAr || '',
       summaryEn: input.summaryEn || '',
       bodyAr,
@@ -172,18 +182,31 @@ export class NewsApplicationService {
       bodyEn = derived;
     }
 
+    let category = existing.category;
+    if (input.category !== undefined) {
+      if (typeof input.category === 'string' && input.category.trim() !== '' && input.category === existing.category) {
+        category = existing.category;
+      } else {
+        NewsValidator.validateCanonicalCategory(input.category);
+        category = input.category;
+      }
+    }
+
     const updated: NewsItemBackend = {
       ...existing,
       id: existing.id,
       titleAr: input.titleAr !== undefined ? input.titleAr : existing.titleAr,
       titleEn: input.titleEn !== undefined ? input.titleEn : existing.titleEn,
+      kickerAr: input.kickerAr !== undefined ? input.kickerAr : existing.kickerAr,
+      kickerEn: input.kickerEn !== undefined ? input.kickerEn : existing.kickerEn,
+      journalisticType: input.journalisticType !== undefined ? input.journalisticType : existing.journalisticType,
       summaryAr: input.summaryAr !== undefined ? input.summaryAr : existing.summaryAr,
       summaryEn: input.summaryEn !== undefined ? input.summaryEn : existing.summaryEn,
       bodyAr,
       bodyEn,
       richBodyAr,
       richBodyEn,
-      category: input.category !== undefined ? input.category : existing.category,
+      category,
       tags: input.tags !== undefined ? input.tags : existing.tags,
       sources: input.sources !== undefined ? input.sources : existing.sources,
       featuredImage: input.featuredImage !== undefined ? input.featuredImage : existing.featuredImage,
@@ -219,6 +242,12 @@ export class NewsApplicationService {
     }
 
     const action = NewsValidator.validateTransition(existing.workflowState, targetState, comment);
+
+    // Forward workflow transitions to InReview, Approved, or Published require a canonical category
+    if (targetState === 'InReview' || targetState === 'Approved' || targetState === 'Published') {
+      NewsValidator.validateCanonicalCategory(existing.category);
+    }
+
     const now = new Date().toISOString();
 
     const transitionRecord: WorkflowTransitionRecordBackend = {

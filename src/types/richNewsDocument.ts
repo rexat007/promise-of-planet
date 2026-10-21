@@ -129,3 +129,49 @@ export interface ValidationResult {
   valid: boolean;
   errors: string[];
 }
+
+/* ==========================================
+ * Schema Version 2 Definitions (Opt-In V2)
+ * ========================================== */
+
+export type ImageWidthV2 = "25%" | "50%" | "75%" | "100%";
+export type ImageLayoutV2 = "float-start" | "float-end" | "block-center" | "block-full";
+
+export interface EditorialImageNodeAttrsV2 {
+  assetId: string;
+  altAr: string;
+  width: ImageWidthV2;
+  layout: ImageLayoutV2;
+  altEn?: string;
+  captionAr?: string;
+  captionEn?: string;
+}
+
+export interface EditorialImageNodeV2 {
+  type: "editorialImage";
+  attrs: EditorialImageNodeAttrsV2;
+}
+
+export type BlockNodeV2 =
+  | ParagraphNode
+  | HeadingNode
+  | BlockquoteNode
+  | BulletListNode
+  | OrderedListNode
+  | ListItemNode
+  | HorizontalRuleNode
+  | EditorialImageNodeV2;
+
+export type ProseMirrorNodeV2 = BlockNodeV2 | InlineNode;
+
+export interface ProseMirrorDocV2 {
+  type: "doc";
+  content: BlockNodeV2[];
+}
+
+export interface RichNewsDocumentWrapperV2 {
+  schemaVersion: 2;
+  doc: ProseMirrorDocV2;
+  updatedAt?: string;
+}
+

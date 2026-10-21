@@ -1,7 +1,7 @@
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { app, isFirebaseConfigured } from './firebase';
-import type { News } from '../types';
-import { publicDtoToCanonicalNews, normalizeCategory } from './newsDomainAdapter';
+import { type News, isCanonicalCategory } from '../types';
+import { publicDtoToCanonicalNews } from './newsDomainAdapter';
 import type { SanitizedPublicNewsDTO } from './newsDomainAdapter';
 
 export interface PublicNewsFilterOptions {
@@ -74,10 +74,13 @@ export class PublicNewsClient {
       });
     }
 
-    // Category filter
+    // Category filter: exact canonical key match, non-canonical filter returns empty list
     if (options.category && options.category !== 'all') {
-      const normalizedReqCat = normalizeCategory(options.category);
-      canonicalItems = canonicalItems.filter(item => item.category === normalizedReqCat);
+      const filterCat = options.category;
+      if (!isCanonicalCategory(filterCat)) {
+        return [];
+      }
+      canonicalItems = canonicalItems.filter(item => item.category === filterCat);
     }
 
     // Search query filter
