@@ -14,6 +14,7 @@ import {
 } from '../types/editorialImageAsset';
 import {
   buildEditorialImageVariantStoragePath,
+  isValidCanonicalUtcTimestamp,
   validateAssetId,
 } from '../shared/editorialImageAssetContract';
 import { validateAndParseCanonicalStoragePath } from './gcsEditorialBinaryStorageAdapter';
@@ -224,50 +225,41 @@ export async function discoverUntrackedEditorialImageObjects(
     session.assetId
   );
 
-  // 3. Index existing tracked session objects across all three lists
+  // 3. Index existing tracked session objects across all three lists (preserving all duplicates)
   const trackedByPath = new Map<
     string,
-    {
+    Array<{
       readonly tracked: TrackedIntakeStorageObject;
       readonly trackedIn:
         | 'createdQuarantineObjects'
         | 'createdPrivateObjects'
         | 'pendingCleanupObjects';
-    }
+    }>
   >();
 
-  if (Array.isArray(session.createdQuarantineObjects)) {
-    for (const obj of session.createdQuarantineObjects) {
+  const registerTracked = (
+    list: readonly TrackedIntakeStorageObject[] | undefined,
+    trackedIn:
+      | 'createdQuarantineObjects'
+      | 'createdPrivateObjects'
+      | 'pendingCleanupObjects'
+  ) => {
+    if (!Array.isArray(list)) return;
+    for (const obj of list) {
       if (obj && typeof obj.storagePath === 'string') {
-        trackedByPath.set(obj.storagePath, {
-          tracked: obj,
-          trackedIn: 'createdQuarantineObjects',
-        });
+        const existing = trackedByPath.get(obj.storagePath);
+        if (existing) {
+          existing.push({ tracked: obj, trackedIn });
+        } else {
+          trackedByPath.set(obj.storagePath, [{ tracked: obj, trackedIn }]);
+        }
       }
     }
-  }
+  };
 
-  if (Array.isArray(session.createdPrivateObjects)) {
-    for (const obj of session.createdPrivateObjects) {
-      if (obj && typeof obj.storagePath === 'string') {
-        trackedByPath.set(obj.storagePath, {
-          tracked: obj,
-          trackedIn: 'createdPrivateObjects',
-        });
-      }
-    }
-  }
-
-  if (Array.isArray(session.pendingCleanupObjects)) {
-    for (const obj of session.pendingCleanupObjects) {
-      if (obj && typeof obj.storagePath === 'string') {
-        trackedByPath.set(obj.storagePath, {
-          tracked: obj,
-          trackedIn: 'pendingCleanupObjects',
-        });
-      }
-    }
-  }
+  registerTracked(session.createdQuarantineObjects, 'createdQuarantineObjects');
+  registerTracked(session.createdPrivateObjects, 'createdPrivateObjects');
+  registerTracked(session.pendingCleanupObjects, 'pendingCleanupObjects');
 
   const trackedResults: DiscoveredTrackedStorageObject[] = [];
   const untrackedResults: DiscoveredUntrackedStorageObject[] = [];
@@ -308,6 +300,15 @@ export async function discoverUntrackedEditorialImageObjects(
       });
     }
 
+    // A — Exact storage-path binding: returned metadata.storagePath MUST match requested candidatePath exactly
+    if (metadata.storagePath !== candidatePath) {
+      throw new EditorialBinaryIntakeError({
+        code: 'STORAGE_FAILURE',
+        message: `Storage metadata returned storagePath "${metadata.storagePath}" does not match requested candidatePath "${candidatePath}".`,
+        intakeId: validIntakeId,
+      });
+    }
+
     if (
       typeof metadata.generation !== 'string' ||
       metadata.generation.trim().length === 0
@@ -315,6 +316,37 @@ export async function discoverUntrackedEditorialImageObjects(
       throw new EditorialBinaryIntakeError({
         code: 'STORAGE_FAILURE',
         message: `Discovered object at "${candidatePath}" lacks a valid generation string.`,
+        intakeId: validIntakeId,
+      });
+    }
+
+    // D — Metadata integrity: etag, contentType, createdAtIso, sha256, sizeBytes, MIME compatibility
+    if (
+      typeof metadata.etag !== 'string' ||
+      metadata.etag.trim().length === 0
+    ) {
+      throw new EditorialBinaryIntakeError({
+        code: 'STORAGE_FAILURE',
+        message: `Discovered object at "${candidatePath}" lacks a valid non-empty etag.`,
+        intakeId: validIntakeId,
+      });
+    }
+
+    if (
+      typeof metadata.contentType !== 'string' ||
+      metadata.contentType.trim().length === 0
+    ) {
+      throw new EditorialBinaryIntakeError({
+        code: 'STORAGE_FAILURE',
+        message: `Discovered object at "${candidatePath}" lacks a valid non-empty contentType.`,
+        intakeId: validIntakeId,
+      });
+    }
+
+    if (!isValidCanonicalUtcTimestamp(metadata.createdAtIso)) {
+      throw new EditorialBinaryIntakeError({
+        code: 'STORAGE_FAILURE',
+        message: `Discovered object at "${candidatePath}" lacks a valid canonical UTC ISO-8601 createdAtIso timestamp.`,
         intakeId: validIntakeId,
       });
     }
@@ -342,6 +374,22 @@ export async function discoverUntrackedEditorialImageObjects(
       });
     }
 
+    // Verify MIME compatibility with candidate image extension
+    const pathDotIdx = candidatePath.lastIndexOf('.');
+    const ext = pathDotIdx >= 0 ? candidatePath.slice(pathDotIdx + 1).toLowerCase() : '';
+    const isMimeCompatible =
+      (ext === 'png' && metadata.contentType === 'image/png') ||
+      ((ext === 'jpg' || ext === 'jpeg') && metadata.contentType === 'image/jpeg') ||
+      (ext === 'webp' && metadata.contentType === 'image/webp');
+
+    if (!isMimeCompatible) {
+      throw new EditorialBinaryIntakeError({
+        code: 'STORAGE_FAILURE',
+        message: `Discovered object at "${candidatePath}" has contentType "${metadata.contentType}" incompatible with extension ".${ext}".`,
+        intakeId: validIntakeId,
+      });
+    }
+
     // Verify storage path conforms to canonical namespace rules
     const parsedPath = validateAndParseCanonicalStoragePath(metadata.storagePath);
     const expectedNamespace: EditorialBinaryStorageNamespace =
@@ -354,7 +402,7 @@ export async function discoverUntrackedEditorialImageObjects(
         Object.freeze({
           storagePath: candidatePath,
           conflictReason: 'NAMESPACE_MISMATCH',
-          details: `Object namespace "${parsedPath.namespace}" does not match expected "${expectedNamespace}".`,
+          details: `Object storagePath namespace "${parsedPath.namespace}" does not match expected "${expectedNamespace}".`,
           existingGeneration: metadata.generation,
         })
       );
@@ -369,6 +417,19 @@ export async function discoverUntrackedEditorialImageObjects(
         message: `Discovered object at "${candidatePath}" lacks ownership metadata.`,
         intakeId: validIntakeId,
       });
+    }
+
+    // B — Ownership namespace consistency: ownership.namespace MUST match expectedNamespace
+    if (ownership.namespace !== expectedNamespace) {
+      conflicts.push(
+        Object.freeze({
+          storagePath: candidatePath,
+          conflictReason: 'NAMESPACE_MISMATCH',
+          details: `Object ownership namespace "${ownership.namespace}" does not match expected candidate namespace "${expectedNamespace}".`,
+          existingGeneration: metadata.generation,
+        })
+      );
+      continue;
     }
 
     // Ownership verification against session identity
@@ -420,19 +481,39 @@ export async function discoverUntrackedEditorialImageObjects(
       continue;
     }
 
-    // 5. Compare against session tracked lists
-    const trackedEntry = trackedByPath.get(candidatePath);
+    // C — Compare against session tracked lists with duplicate receipt conflict detection
+    const trackedEntries = trackedByPath.get(candidatePath);
 
-    if (trackedEntry) {
-      // Already tracked in session: verify generation consistency
-      if (trackedEntry.tracked.generation !== metadata.generation) {
+    if (trackedEntries && trackedEntries.length > 0) {
+      // Check if all tracked receipts agree on generation
+      const firstGen = trackedEntries[0].tracked.generation;
+      const allGenerationsAgree = trackedEntries.every(
+        (e) => e.tracked.generation === firstGen
+      );
+
+      if (!allGenerationsAgree) {
+        // Conflicting duplicate receipts across session lists
         conflicts.push(
           Object.freeze({
             storagePath: candidatePath,
             conflictReason: 'GENERATION_MISMATCH',
-            details: `Tracked generation "${trackedEntry.tracked.generation}" differs from actual storage generation "${metadata.generation}".`,
+            details: `Session contains conflicting tracked receipts with contradictory generations for "${candidatePath}": [${trackedEntries.map((e) => e.tracked.generation).join(', ')}].`,
             existingGeneration: metadata.generation,
-            recordedGeneration: trackedEntry.tracked.generation,
+            recordedGeneration: trackedEntries.map((e) => e.tracked.generation).join(', '),
+          })
+        );
+        continue;
+      }
+
+      // All session copies agree on firstGen. Compare with actual storage generation:
+      if (firstGen !== metadata.generation) {
+        conflicts.push(
+          Object.freeze({
+            storagePath: candidatePath,
+            conflictReason: 'GENERATION_MISMATCH',
+            details: `Tracked generation "${firstGen}" differs from actual storage generation "${metadata.generation}".`,
+            existingGeneration: metadata.generation,
+            recordedGeneration: firstGen,
           })
         );
       } else {
@@ -445,7 +526,7 @@ export async function discoverUntrackedEditorialImageObjects(
             sha256Checksum: metadata.sha256Checksum,
             sizeBytes: metadata.sizeBytes,
             contentType: metadata.contentType,
-            trackedIn: trackedEntry.trackedIn,
+            trackedIn: trackedEntries[0].trackedIn,
           })
         );
       }

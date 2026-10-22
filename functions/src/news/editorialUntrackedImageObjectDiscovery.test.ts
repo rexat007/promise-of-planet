@@ -411,6 +411,279 @@ describe('IMG-F3-08A — discoverUntrackedEditorialImageObjects — Receipt Disc
     ).rejects.toThrow(EditorialBinaryIntakeError);
   });
 
+  it('fails closed when returned storagePath differs from requested candidatePath', async () => {
+    const session = createSampleSession('intake_2026_09', 'asset_2026_09');
+    const storageReader = new FakeStorageReader();
+
+    const candidatePath =
+      'editorial_images/private/asset_2026_09/thumbnail.webp';
+    // Reader returns metadata for a different path
+    const mismatchedPath =
+      'editorial_images/private/asset_2026_09/card.webp';
+
+    storageReader.objects.set(
+      candidatePath,
+      createSampleMetadata(mismatchedPath, {
+        ownership: {
+          createdByIntakeId: 'intake_2026_09',
+          targetKind: 'editorial_image_asset',
+          namespace: 'private',
+          assetId: 'asset_2026_09',
+          uploaderUid: 'editor_admin_01',
+        },
+      })
+    );
+
+    await expect(
+      discoverUntrackedEditorialImageObjects(session, storageReader)
+    ).rejects.toThrow(EditorialBinaryIntakeError);
+
+    try {
+      await discoverUntrackedEditorialImageObjects(session, storageReader);
+    } catch (err) {
+      expect(err).toBeInstanceOf(EditorialBinaryIntakeError);
+      const e = err as EditorialBinaryIntakeError;
+      expect(e.code).toBe('STORAGE_FAILURE');
+      expect(e.message).toContain('does not match requested candidatePath');
+    }
+  });
+
+  it('flags conflict when ownership namespace contradicts the candidate namespace', async () => {
+    const session = createSampleSession('intake_2026_10', 'asset_2026_10');
+    const storageReader = new FakeStorageReader();
+
+    const candidatePath =
+      'editorial_images/private/asset_2026_10/thumbnail.webp';
+
+    // Object is at private path, but ownership.namespace says 'quarantine'
+    storageReader.objects.set(
+      candidatePath,
+      createSampleMetadata(candidatePath, {
+        ownership: {
+          createdByIntakeId: 'intake_2026_10',
+          targetKind: 'editorial_image_asset',
+          namespace: 'quarantine', // CONTRADICTS PRIVATE CANONICAL PATH!
+          assetId: 'asset_2026_10',
+          uploaderUid: 'editor_admin_01',
+        },
+      })
+    );
+
+    const report = await discoverUntrackedEditorialImageObjects(
+      session,
+      storageReader
+    );
+
+    // Must NEVER be classified as owned or tracked
+    expect(report.hasUntrackedOwnedObjects).toBe(false);
+    expect(report.untrackedOwnedObjects).toHaveLength(0);
+    expect(report.trackedObjects).toHaveLength(0);
+
+    // Flagged as NAMESPACE_MISMATCH conflict
+    expect(report.hasConflicts).toBe(true);
+    expect(report.conflicts).toHaveLength(1);
+    expect(report.conflicts[0].conflictReason).toBe('NAMESPACE_MISMATCH');
+    expect(report.conflicts[0].storagePath).toBe(candidatePath);
+  });
+
+  it('flags generation conflict when same tracked path has contradictory generations in session lists', async () => {
+    const trackedPath =
+      'editorial_images/private/asset_2026_11/thumbnail.webp';
+
+    const sessionObjA: TrackedIntakeStorageObject = {
+      storagePath: trackedPath,
+      namespace: 'private',
+      generation: '176000000001',
+      etag: 'etag_1',
+      sha256Checksum:
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      sizeBytes: 1024,
+      contentType: 'image/webp',
+      createdByIntakeId: 'intake_2026_11',
+    };
+
+    const sessionObjB: TrackedIntakeStorageObject = {
+      ...sessionObjA,
+      generation: '176000000002', // CONTRADICTORY GENERATION IN CLEANUP LIST!
+    };
+
+    const session: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_2026_11', 'asset_2026_11'),
+      createdPrivateObjects: [sessionObjA],
+      pendingCleanupObjects: [sessionObjB],
+    };
+
+    const storageReader = new FakeStorageReader();
+    storageReader.objects.set(
+      trackedPath,
+      createSampleMetadata(trackedPath, {
+        generation: '176000000001',
+        ownership: {
+          createdByIntakeId: 'intake_2026_11',
+          targetKind: 'editorial_image_asset',
+          namespace: 'private',
+          assetId: 'asset_2026_11',
+          uploaderUid: 'editor_admin_01',
+        },
+      })
+    );
+
+    const report = await discoverUntrackedEditorialImageObjects(
+      session,
+      storageReader
+    );
+
+    // Must NOT arbitrarily pick one or classify as clean tracked/untracked
+    expect(report.trackedObjects).toHaveLength(0);
+    expect(report.untrackedOwnedObjects).toHaveLength(0);
+
+    // Explicit GENERATION_MISMATCH conflict
+    expect(report.hasConflicts).toBe(true);
+    expect(report.conflicts).toHaveLength(1);
+    expect(report.conflicts[0].conflictReason).toBe('GENERATION_MISMATCH');
+    expect(report.conflicts[0].details).toContain('conflicting tracked receipts');
+  });
+
+  it('preserves clean tracked classification when duplicate tracked receipts agree on generation', async () => {
+    const trackedPath =
+      'editorial_images/private/asset_2026_12/card.webp';
+    const agreedGen = '177000000001';
+
+    const sessionObjA: TrackedIntakeStorageObject = {
+      storagePath: trackedPath,
+      namespace: 'private',
+      generation: agreedGen,
+      etag: 'etag_agreed',
+      sha256Checksum:
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      sizeBytes: 2048,
+      contentType: 'image/webp',
+      createdByIntakeId: 'intake_2026_12',
+    };
+
+    // Appears in createdPrivateObjects AND pendingCleanupObjects with identical generation
+    const session: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_2026_12', 'asset_2026_12'),
+      createdPrivateObjects: [sessionObjA],
+      pendingCleanupObjects: [{ ...sessionObjA }],
+    };
+
+    const storageReader = new FakeStorageReader();
+    storageReader.objects.set(
+      trackedPath,
+      createSampleMetadata(trackedPath, {
+        generation: agreedGen,
+        ownership: {
+          createdByIntakeId: 'intake_2026_12',
+          targetKind: 'editorial_image_asset',
+          namespace: 'private',
+          assetId: 'asset_2026_12',
+          uploaderUid: 'editor_admin_01',
+        },
+      })
+    );
+
+    const report = await discoverUntrackedEditorialImageObjects(
+      session,
+      storageReader
+    );
+
+    expect(report.hasConflicts).toBe(false);
+    expect(report.untrackedOwnedObjects).toHaveLength(0);
+    expect(report.trackedObjects).toHaveLength(1);
+    expect(report.trackedObjects[0].storagePath).toBe(trackedPath);
+    expect(report.trackedObjects[0].generation).toBe(agreedGen);
+  });
+
+  it('fails closed when etag, contentType, createdAtIso, or MIME compatibility is invalid', async () => {
+    const session = createSampleSession('intake_2026_13', 'asset_2026_13');
+    const path = 'editorial_images/private/asset_2026_13/thumbnail.webp';
+
+    // 1. Missing etag
+    {
+      const reader = new FakeStorageReader();
+      reader.objects.set(
+        path,
+        createSampleMetadata(path, {
+          etag: '',
+          ownership: {
+            createdByIntakeId: 'intake_2026_13',
+            targetKind: 'editorial_image_asset',
+            namespace: 'private',
+            assetId: 'asset_2026_13',
+            uploaderUid: 'editor_admin_01',
+          },
+        })
+      );
+      await expect(
+        discoverUntrackedEditorialImageObjects(session, reader)
+      ).rejects.toThrow(EditorialBinaryIntakeError);
+    }
+
+    // 2. Missing contentType
+    {
+      const reader = new FakeStorageReader();
+      reader.objects.set(
+        path,
+        createSampleMetadata(path, {
+          contentType: '   ',
+          ownership: {
+            createdByIntakeId: 'intake_2026_13',
+            targetKind: 'editorial_image_asset',
+            namespace: 'private',
+            assetId: 'asset_2026_13',
+            uploaderUid: 'editor_admin_01',
+          },
+        })
+      );
+      await expect(
+        discoverUntrackedEditorialImageObjects(session, reader)
+      ).rejects.toThrow(EditorialBinaryIntakeError);
+    }
+
+    // 3. Invalid createdAtIso timestamp
+    {
+      const reader = new FakeStorageReader();
+      reader.objects.set(
+        path,
+        createSampleMetadata(path, {
+          createdAtIso: 'invalid-date-string',
+          ownership: {
+            createdByIntakeId: 'intake_2026_13',
+            targetKind: 'editorial_image_asset',
+            namespace: 'private',
+            assetId: 'asset_2026_13',
+            uploaderUid: 'editor_admin_01',
+          },
+        })
+      );
+      await expect(
+        discoverUntrackedEditorialImageObjects(session, reader)
+      ).rejects.toThrow(EditorialBinaryIntakeError);
+    }
+
+    // 4. Incompatible MIME with path extension (.webp path but contentType is image/png)
+    {
+      const reader = new FakeStorageReader();
+      reader.objects.set(
+        path,
+        createSampleMetadata(path, {
+          contentType: 'image/png', // INCOMPATIBLE WITH .webp EXTENSION!
+          ownership: {
+            createdByIntakeId: 'intake_2026_13',
+            targetKind: 'editorial_image_asset',
+            namespace: 'private',
+            assetId: 'asset_2026_13',
+            uploaderUid: 'editor_admin_01',
+          },
+        })
+      );
+      await expect(
+        discoverUntrackedEditorialImageObjects(session, reader)
+      ).rejects.toThrow(EditorialBinaryIntakeError);
+    }
+  });
+
   it('strictly adheres to the 18-lookup bound and performs zero write or delete operations', async () => {
     const session = createSampleSession('intake_2026_08', 'asset_2026_08');
     const storageReader = new FakeStorageReader();
