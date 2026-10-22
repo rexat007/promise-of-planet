@@ -40,6 +40,11 @@ import {
   inspectRightsEvidenceBinary,
   RightsEvidenceBinaryVerifiedResult,
 } from './editorialBinaryInspector';
+import {
+  processEditorialImageVariants,
+  EditorialImageVariantProcessingError,
+  type ProcessEditorialImageVariantsResult,
+} from './editorialImageVariantProcessor';
 
 export const EDITORIAL_IMAGE_ASSET_REQUIRED_VARIANT_KEYS: readonly EditorialImageAssetVariantKey[] =
   Object.freeze([
@@ -318,14 +323,13 @@ export interface EditorialImageBinaryIntakeResult {
   readonly intakeId: string;
   readonly sessionStatus: 'Completed' | 'CleanupPending';
   readonly binaryInspectionStatus: 'PRELIMINARY_VERIFIED';
-  readonly fullPixelDecodePerformed: false;
-  readonly reencodedOrStripped: false;
+  readonly fullPixelDecodePerformed: true;
+  readonly reencodedOrStripped: true;
   /**
-   * Explicitly discloses that all required variant keys currently point to
-   * preliminarily inspected copies of the original binary until a native
-   * media worker is introduced in a subsequent phase.
+   * Discloses that genuine WebP variants were produced via Sharp native pipeline
+   * rather than provisional identical copies.
    */
-  readonly provisionalIdenticalVariants: true;
+  readonly provisionalIdenticalVariants: false;
   readonly assetRecord: EditorialImageAssetRepositoryRecord;
   readonly inspection: EditorialImageBinaryVerifiedResult;
 }
@@ -1365,6 +1369,40 @@ export class EditorialBinaryIntakeService {
       });
     }
 
+    // Process genuine WebP variants using Sharp native pipeline
+    let variantProcessingResult: ProcessEditorialImageVariantsResult;
+    try {
+      variantProcessingResult = await processEditorialImageVariants({
+        assetId: rawInput.assetId,
+        binary: binaryBuffer,
+        claimedMimeType: rawInput.claimedMimeType,
+        claimedFilenameOrExtension: rawInput.claimedFilenameOrExtension,
+      });
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Editorial image variant processing failed.';
+      const rejectionCode =
+        err instanceof EditorialImageVariantProcessingError
+          ? err.rejectionCode
+          : undefined;
+      session = await this.rollbackUnregisteredIntakeSession(
+        session,
+        'BINARY_REJECTED',
+        msg,
+        Boolean(fault?.failDuringRollbackCleanup),
+        rejectionCode
+      );
+      throw new EditorialBinaryIntakeError({
+        code: 'BINARY_REJECTED',
+        message: msg,
+        intakeId,
+        sessionStatus: session.status,
+        rejectionCode,
+      });
+    }
+
     // Transition to Promoting and write private variant objects with create-if-absent
     session = await this.sessionStore.updateSession(
       {
@@ -1380,7 +1418,7 @@ export class EditorialBinaryIntakeService {
 
     for (
       let i = 0;
-      i < EDITORIAL_IMAGE_ASSET_REQUIRED_VARIANT_KEYS.length;
+      i < variantProcessingResult.variants.length;
       i += 1
     ) {
       if (
@@ -1409,22 +1447,16 @@ export class EditorialBinaryIntakeService {
         });
       }
 
-      const variantKey: EditorialImageAssetVariantKey =
-        EDITORIAL_IMAGE_ASSET_REQUIRED_VARIANT_KEYS[i];
-      const privatePath = buildEditorialImageVariantStoragePath(
-        rawInput.assetId,
-        variantKey,
-        inspection.detectedMimeType,
-        this.limits
-      );
+      const variant = variantProcessingResult.variants[i];
+      const privatePath = variant.storagePath;
 
       let privateWrite: StorageWriteIfAbsentOutcome;
       try {
         privateWrite = await this.storage.writeIfAbsent({
           storagePath: privatePath,
-          bytes: binaryBuffer,
-          contentType: inspection.detectedMimeType,
-          sha256Checksum: inspection.sha256Checksum,
+          bytes: variant.bytes,
+          contentType: variant.mimeType,
+          sha256Checksum: variant.sha256Checksum,
           ownership: {
             createdByIntakeId: intakeId,
             targetKind: 'editorial_image_asset',
@@ -1437,7 +1469,7 @@ export class EditorialBinaryIntakeService {
         const msg =
           err instanceof Error
             ? err.message
-            : `Failed writing private variant "${variantKey}".`;
+            : `Failed writing private variant "${variant.variantKey}".`;
         session = await this.sessionStore.updateSession(
           {
             ...session,
@@ -1496,14 +1528,14 @@ export class EditorialBinaryIntakeService {
         createdByIntakeId: intakeId,
       });
 
-      variantsMap[variantKey] = {
-        variantKey,
+      variantsMap[variant.variantKey] = {
+        variantKey: variant.variantKey,
         storagePath: privatePath,
-        width: inspection.width,
-        height: inspection.height,
-        sizeBytes: inspection.sizeBytes,
-        mimeType: inspection.detectedMimeType,
-        sha256Checksum: inspection.sha256Checksum,
+        width: variant.width,
+        height: variant.height,
+        sizeBytes: variant.sizeBytes,
+        mimeType: variant.mimeType,
+        sha256Checksum: variant.sha256Checksum,
       };
     }
 
@@ -1727,9 +1759,9 @@ export class EditorialBinaryIntakeService {
       intakeId,
       sessionStatus: finalStatus,
       binaryInspectionStatus: 'PRELIMINARY_VERIFIED',
-      fullPixelDecodePerformed: false,
-      reencodedOrStripped: false,
-      provisionalIdenticalVariants: true,
+      fullPixelDecodePerformed: true,
+      reencodedOrStripped: true,
+      provisionalIdenticalVariants: false,
       assetRecord: registeredAssetEnvelope,
       inspection,
     };

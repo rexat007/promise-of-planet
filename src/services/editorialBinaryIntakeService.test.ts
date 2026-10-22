@@ -1,5 +1,7 @@
 import { Buffer } from 'node:buffer';
+import { deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
+import sharp from 'sharp';
 import {
   computeCrc32,
   computeSha256Hex,
@@ -13,6 +15,7 @@ import {
   buildQuarantineImageStoragePath,
   EditorialBinaryIntakeError,
   EditorialBinaryIntakeService,
+  EDITORIAL_IMAGE_ASSET_REQUIRED_VARIANT_KEYS,
   InMemoryEditorialBinaryStorageAdapter,
   InMemoryIntakeSessionStore,
 } from '../../functions/src/news/editorialBinaryIntakeService';
@@ -73,8 +76,27 @@ function buildValidPngBuffer(options?: {
     buildPngChunk(c.type, c.data)
   );
 
-  // Minimal non-empty zlib stream bytes inside IDAT
-  const idatData = Buffer.from([0x78, 0x9c, 0x63, 0x60, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01]);
+  let idatData: Buffer;
+  const totalPixels = width * height;
+  if (
+    totalPixels > 2_000_000 ||
+    options?.corruptIhdrCrc ||
+    (options?.extraChunksBeforeIdat && options.extraChunksBeforeIdat.length > 0)
+  ) {
+    idatData = Buffer.from([
+      0x78, 0x9c, 0x63, 0x60, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
+    ]);
+  } else {
+    try {
+      const rowBytes = 1 + width * 4;
+      const rawScanlines = Buffer.alloc(rowBytes * height);
+      idatData = deflateSync(rawScanlines);
+    } catch {
+      idatData = Buffer.from([
+        0x78, 0x9c, 0x63, 0x60, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
+      ]);
+    }
+  }
   const idatChunk = buildPngChunk('IDAT', idatData);
   const iendChunk = buildPngChunk('IEND', Buffer.alloc(0));
 
@@ -725,9 +747,9 @@ describe('IMG-F3-05 — Recoverable Binary Intake Saga & Reconciliation (Editori
 
     expect(imageIntakeRes.sessionStatus).toBe('Completed');
     expect(imageIntakeRes.binaryInspectionStatus).toBe('PRELIMINARY_VERIFIED');
-    expect(imageIntakeRes.provisionalIdenticalVariants).toBe(true);
-    expect(imageIntakeRes.fullPixelDecodePerformed).toBe(false);
-    expect(imageIntakeRes.reencodedOrStripped).toBe(false);
+    expect(imageIntakeRes.provisionalIdenticalVariants).toBe(false);
+    expect(imageIntakeRes.fullPixelDecodePerformed).toBe(true);
+    expect(imageIntakeRes.reencodedOrStripped).toBe(true);
     expect(imageIntakeRes.assetRecord.asset.assetId).toBe('asset_coral_001');
     expect(imageIntakeRes.assetRecord.asset.createdByUid).toBe(
       CONTENT_EDITOR_ADMIN.id
@@ -746,6 +768,20 @@ describe('IMG-F3-05 — Recoverable Binary Intake Saga & Reconciliation (Editori
     );
     expect(await storageAdapter.readMetadata(quarantineImgPath)).toBeNull();
     expect(storageAdapter.getStoredObjectCount()).toBe(5);
+
+    // Verify all 5 private variant objects exist as genuine WebP
+    for (const vKey of EDITORIAL_IMAGE_ASSET_REQUIRED_VARIANT_KEYS) {
+      const vPath = buildEditorialImageVariantStoragePath(
+        'asset_coral_001',
+        vKey,
+        'image/webp'
+      );
+      const readVar = await storageAdapter.readBytes(vPath);
+      expect(readVar).not.toBeNull();
+      expect(readVar!.metadata.contentType).toBe('image/webp');
+      expect(readVar!.metadata.sha256Checksum).not.toBe(computeSha256Hex(pngBytes));
+      expect(readVar!.bytes).not.toEqual(pngBytes);
+    }
 
     const persistedAsset = await assetRepo.getById('asset_coral_001');
     expect(persistedAsset.status).toBe('FOUND');
@@ -1038,11 +1074,12 @@ describe('IMG-F3-05 — Recoverable Binary Intake Saga & Reconciliation (Editori
     const thumbPath = buildEditorialImageVariantStoragePath(
       'asset_collision_1',
       'thumbnail',
-      'image/png'
+      'image/webp'
     );
     const beforeMeta = await storageAdapter.readMetadata(thumbPath);
     expect(beforeMeta).not.toBeNull();
     expect(beforeMeta?.ownership.createdByIntakeId).toBe('intake_first_owner');
+    expect(beforeMeta?.contentType).toBe('image/webp');
 
     // Second intake with a new intakeId attempts to target the same assetId
     await expect(
@@ -1066,18 +1103,19 @@ describe('IMG-F3-05 — Recoverable Binary Intake Saga & Reconciliation (Editori
     expect(storageAdapter.getStoredObjectCount()).toBe(5);
     const afterMeta = await storageAdapter.readMetadata(thumbPath);
     expect(afterMeta?.generation).toBe(beforeMeta?.generation);
-    expect(afterMeta?.sha256Checksum).toBe(computeSha256Hex(originalPng));
+    expect(afterMeta?.sha256Checksum).toBe(beforeMeta?.sha256Checksum);
+    expect(afterMeta?.sha256Checksum).not.toBe(computeSha256Hex(originalPng));
 
     // Also test direct storage path collision before repository commit (e.g., pre-existing object at variant #3)
     const preOccupiedPath = buildEditorialImageVariantStoragePath(
       'asset_storage_collision_2',
       'article_inline',
-      'image/png'
+      'image/webp'
     );
     const preSeededWrite = await storageAdapter.writeIfAbsent({
       storagePath: preOccupiedPath,
       bytes: originalPng,
-      contentType: 'image/png',
+      contentType: 'image/webp',
       sha256Checksum: computeSha256Hex(originalPng),
       ownership: {
         createdByIntakeId: 'other_concurrent_intake',
@@ -1352,12 +1390,12 @@ describe('IMG-F3-05 — Recoverable Binary Intake Saga & Reconciliation (Editori
     const thumbPath = buildEditorialImageVariantStoragePath(
       'asset_abandoned_promoting',
       'thumbnail',
-      'image/png'
+      'image/webp'
     );
     const cardPath = buildEditorialImageVariantStoragePath(
       'asset_abandoned_promoting',
       'card',
-      'image/png'
+      'image/webp'
     );
     const thumbTracked = abandonedSession!.createdPrivateObjects.find(
       (o) => o.storagePath === thumbPath
@@ -1370,7 +1408,7 @@ describe('IMG-F3-05 — Recoverable Binary Intake Saga & Reconciliation (Editori
     const foreignWrite = await storageAdapter.writeIfAbsent({
       storagePath: thumbPath,
       bytes: pngBytes,
-      contentType: 'image/png',
+      contentType: 'image/webp',
       sha256Checksum: computeSha256Hex(pngBytes),
       ownership: {
         createdByIntakeId: 'other_legitimate_intake',
@@ -1592,5 +1630,137 @@ describe('IMG-F3-05 — Recoverable Binary Intake Saga & Reconciliation (Editori
       'pdf'
     );
     expect(await storageAdapter.readMetadata(privateEvPath2)).not.toBeNull();
+  });
+
+  describe('IMG-F3-09/A — Real WebP Variant Pipeline Integration', () => {
+    it('produces all five genuine WebP variants whose bytes differ from source image, and writes verified WebP metadata into private storage and canonical asset', async () => {
+      const {
+        intakeService,
+        assetRepo,
+        storageAdapter,
+        sessionStore,
+      } = createTestHarness();
+
+      // Input is a genuine 1600x1200 PNG image
+      const sourcePng = buildValidPngBuffer({ width: 1600, height: 1200 });
+      const sourceSha = computeSha256Hex(sourcePng);
+
+      const res = await intakeService.ingestEditorialImageBinary(
+        makeAuthContext(CONTENT_EDITOR_ADMIN.id),
+        {
+          intakeId: 'intake_f309a_webp_real',
+          assetId: 'asset_f309a_webp_real',
+          binary: sourcePng,
+          originalFilename: 'marine_real.png',
+          origin: 'news_article',
+          altAr: 'صورة مرجانية حقيقية مع معالجة حقيقية',
+        }
+      );
+
+      // Verify intake result flags
+      expect(res.sessionStatus).toBe('Completed');
+      expect(res.fullPixelDecodePerformed).toBe(true);
+      expect(res.reencodedOrStripped).toBe(true);
+      expect(res.provisionalIdenticalVariants).toBe(false);
+
+      // Verify canonical asset record in repository
+      const assetRecord = res.assetRecord;
+      expect(assetRecord.asset.assetId).toBe('asset_f309a_webp_real');
+      expect(assetRecord.asset.sha256Checksum).toBe(sourceSha);
+      expect(assetRecord.asset.mimeType).toBe('image/png'); // Original MIME preserved
+
+      // Verify all 5 required variants exist
+      const variantKeys = EDITORIAL_IMAGE_ASSET_REQUIRED_VARIANT_KEYS;
+      expect(Object.keys(assetRecord.asset.variants).sort()).toEqual([...variantKeys].sort());
+
+      // Verify session tracked objects
+      const session = await sessionStore.getSessionById('intake_f309a_webp_real');
+      expect(session?.status).toBe('Completed');
+      expect(session?.createdQuarantineObjects).toHaveLength(1);
+      expect(session?.createdPrivateObjects).toHaveLength(5);
+      expect(session?.pendingCleanupObjects).toHaveLength(0);
+
+      // Verify each variant in private storage
+      for (const key of variantKeys) {
+        const variant = assetRecord.asset.variants[key];
+        expect(variant).toBeDefined();
+        expect(variant.variantKey).toBe(key);
+        expect(variant.mimeType).toBe('image/webp');
+        expect(variant.storagePath).toBe(
+          `editorial_images/private/asset_f309a_webp_real/${key}.webp`
+        );
+
+        // Read stored bytes directly from storage adapter
+        const stored = await storageAdapter.readBytes(variant.storagePath);
+        expect(stored).not.toBeNull();
+        expect(stored!.metadata.contentType).toBe('image/webp');
+        expect(stored!.metadata.sha256Checksum).toBe(variant.sha256Checksum);
+        expect(stored!.metadata.sizeBytes).toBe(variant.sizeBytes);
+
+        // Stored bytes MUST differ from source PNG bytes (not a placeholder copy!)
+        expect(stored!.bytes).not.toEqual(sourcePng);
+        expect(stored!.bytes.length).not.toBe(sourcePng.length);
+        expect(stored!.metadata.sha256Checksum).not.toBe(sourceSha);
+
+        // Sharp must decode the stored buffer as valid WebP
+        const sharpMeta = await sharp(stored!.bytes).metadata();
+        expect(sharpMeta.format).toBe('webp');
+        expect(sharpMeta.width).toBe(variant.width);
+        expect(sharpMeta.height).toBe(variant.height);
+
+        // Verify width constraints per target spec
+        if (key === 'thumbnail') expect(variant.width).toBeLessThanOrEqual(320);
+        if (key === 'card') expect(variant.width).toBeLessThanOrEqual(720);
+        if (key === 'article_inline') expect(variant.width).toBeLessThanOrEqual(1280);
+        if (key === 'article_cover') expect(variant.width).toBeLessThanOrEqual(1920);
+        if (key === 'original_processed') expect(variant.width).toBeLessThanOrEqual(2560);
+      }
+
+      // Quarantine object was cleanly deleted
+      expect(storageAdapter.getStoredObjectCount()).toBe(5);
+    });
+
+    it('fails closed and rolls back to Failed when variant processor fails, registering no canonical asset and leaving zero private objects', async () => {
+      const {
+        intakeService,
+        assetRepo,
+        storageAdapter,
+        sessionStore,
+      } = createTestHarness();
+
+      // Handcrafted PNG with corrupt pixel stream that passes magic check but fails Sharp decode
+      const corruptPng = buildValidPngBuffer({ corruptIhdrCrc: true });
+
+      await expect(
+        intakeService.ingestEditorialImageBinary(
+          makeAuthContext(CONTENT_EDITOR_ADMIN.id),
+          {
+            intakeId: 'intake_f309a_fail_corrupt',
+            assetId: 'asset_f309a_fail_corrupt',
+            binary: corruptPng,
+            originalFilename: 'corrupt.png',
+            origin: 'news_article',
+            altAr: 'صورة معطوبة تفشل في المعالجة',
+          }
+        )
+      ).rejects.toMatchObject({
+        code: 'BINARY_REJECTED',
+        sessionStatus: 'Failed',
+      });
+
+      // No canonical asset registered
+      const readResult = await assetRepo.getById('asset_f309a_fail_corrupt');
+      expect(readResult.status).toBe('NOT_FOUND');
+
+      // Zero private or quarantine objects remain in storage
+      expect(storageAdapter.getStoredObjectCount()).toBe(0);
+
+      // Session transitioned to Failed with lastErrorCode and rejectionCode
+      const failedSession = await sessionStore.getSessionById('intake_f309a_fail_corrupt');
+      expect(failedSession?.status).toBe('Failed');
+      expect(failedSession?.lastErrorCode).toBe('BINARY_REJECTED');
+      expect(failedSession?.createdPrivateObjects).toHaveLength(0);
+      expect(failedSession?.pendingCleanupObjects).toHaveLength(0);
+    });
   });
 });
