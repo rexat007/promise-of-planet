@@ -6,8 +6,8 @@ import {
   EDITORIAL_IMAGE_VARIANT_TARGET_SPECS,
   EditorialImageVariantProcessingError,
   processEditorialImageVariants,
-} from '../../functions/src/news/editorialImageVariantProcessor';
-import { buildEditorialImageVariantStoragePath } from '../../functions/src/shared/editorialImageAssetContract';
+} from './editorialImageVariantProcessor';
+import { buildEditorialImageVariantStoragePath } from '../shared/editorialImageAssetContract';
 
 /**
  * IMG-F3-07 — Real Sharp Variant Processor Tests
