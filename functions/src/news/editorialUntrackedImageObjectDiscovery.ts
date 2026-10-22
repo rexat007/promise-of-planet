@@ -86,7 +86,22 @@ export type DiscoveredConflictReason =
   | 'NAMESPACE_MISMATCH'
   | 'TARGET_KIND_MISMATCH'
   | 'ASSET_ID_MISMATCH'
-  | 'UPLOADER_MISMATCH';
+  | 'UPLOADER_MISMATCH'
+  | 'RECEIPT_METADATA_MISMATCH';
+
+export const CANONICAL_RECEIPT_IDENTITY_FIELDS = [
+  'storagePath',
+  'namespace',
+  'generation',
+  'etag',
+  'sha256Checksum',
+  'sizeBytes',
+  'contentType',
+  'createdByIntakeId',
+] as const;
+
+export type CanonicalReceiptIdentityField =
+  (typeof CANONICAL_RECEIPT_IDENTITY_FIELDS)[number];
 
 export interface DiscoveredStorageObjectConflict {
   readonly storagePath: string;
@@ -481,18 +496,31 @@ export async function discoverUntrackedEditorialImageObjects(
       continue;
     }
 
-    // C — Compare against session tracked lists with duplicate receipt conflict detection
+    // C — Compare against session tracked lists with duplicate receipt consistency & metadata verification
     const trackedEntries = trackedByPath.get(candidatePath);
 
     if (trackedEntries && trackedEntries.length > 0) {
-      // Check if all tracked receipts agree on generation
-      const firstGen = trackedEntries[0].tracked.generation;
-      const allGenerationsAgree = trackedEntries.every(
-        (e) => e.tracked.generation === firstGen
-      );
+      const firstEntry = trackedEntries[0];
+      const firstReceipt = firstEntry.tracked;
 
-      if (!allGenerationsAgree) {
-        // Conflicting duplicate receipts across session lists
+      let hasGenerationMismatch = false;
+      const differingMetadataFields = new Set<CanonicalReceiptIdentityField>();
+
+      for (let i = 1; i < trackedEntries.length; i++) {
+        const candidateReceipt = trackedEntries[i].tracked;
+        for (const field of CANONICAL_RECEIPT_IDENTITY_FIELDS) {
+          if (firstReceipt[field] !== candidateReceipt[field]) {
+            if (field === 'generation') {
+              hasGenerationMismatch = true;
+            } else {
+              differingMetadataFields.add(field);
+            }
+          }
+        }
+      }
+
+      if (hasGenerationMismatch) {
+        // Conflicting duplicate receipts across session lists with contradictory generations
         conflicts.push(
           Object.freeze({
             storagePath: candidatePath,
@@ -505,31 +533,93 @@ export async function discoverUntrackedEditorialImageObjects(
         continue;
       }
 
-      // All session copies agree on firstGen. Compare with actual storage generation:
-      if (firstGen !== metadata.generation) {
+      if (differingMetadataFields.size > 0) {
+        // Conflicting duplicate receipts with same generation but differing metadata
+        const diffList = Array.from(differingMetadataFields).sort().join(', ');
+        conflicts.push(
+          Object.freeze({
+            storagePath: candidatePath,
+            conflictReason: 'RECEIPT_METADATA_MISMATCH',
+            details: `Session contains conflicting tracked receipts with contradictory metadata for "${candidatePath}": differing fields [${diffList}].`,
+            existingGeneration: metadata.generation,
+            recordedGeneration: firstReceipt.generation,
+          })
+        );
+        continue;
+      }
+
+      // All session duplicate receipts agree on all canonical fields.
+      // Compare receipt generation against actual storage generation:
+      if (firstReceipt.generation !== metadata.generation) {
         conflicts.push(
           Object.freeze({
             storagePath: candidatePath,
             conflictReason: 'GENERATION_MISMATCH',
-            details: `Tracked generation "${firstGen}" differs from actual storage generation "${metadata.generation}".`,
+            details: `Tracked generation "${firstReceipt.generation}" differs from actual storage generation "${metadata.generation}".`,
             existingGeneration: metadata.generation,
-            recordedGeneration: firstGen,
+            recordedGeneration: firstReceipt.generation,
           })
         );
-      } else {
-        trackedResults.push(
+        continue;
+      }
+
+      // Compare relevant stored receipt fields with returned GCS storage metadata
+      const receiptStorageDiffs: string[] = [];
+      if (firstReceipt.storagePath !== metadata.storagePath) {
+        receiptStorageDiffs.push('storagePath');
+      }
+      if (
+        firstReceipt.namespace !== expectedNamespace ||
+        firstReceipt.namespace !== metadata.ownership.namespace
+      ) {
+        receiptStorageDiffs.push('namespace');
+      }
+      if (firstReceipt.etag !== metadata.etag) {
+        receiptStorageDiffs.push('etag');
+      }
+      if (firstReceipt.sha256Checksum !== metadata.sha256Checksum) {
+        receiptStorageDiffs.push('sha256Checksum');
+      }
+      if (firstReceipt.sizeBytes !== metadata.sizeBytes) {
+        receiptStorageDiffs.push('sizeBytes');
+      }
+      if (firstReceipt.contentType !== metadata.contentType) {
+        receiptStorageDiffs.push('contentType');
+      }
+      if (
+        firstReceipt.createdByIntakeId !== validIntakeId ||
+        firstReceipt.createdByIntakeId !== metadata.ownership.createdByIntakeId
+      ) {
+        receiptStorageDiffs.push('createdByIntakeId');
+      }
+
+      if (receiptStorageDiffs.length > 0) {
+        const diffList = receiptStorageDiffs.sort().join(', ');
+        conflicts.push(
           Object.freeze({
             storagePath: candidatePath,
-            namespace: expectedNamespace,
-            generation: metadata.generation,
-            etag: metadata.etag,
-            sha256Checksum: metadata.sha256Checksum,
-            sizeBytes: metadata.sizeBytes,
-            contentType: metadata.contentType,
-            trackedIn: trackedEntries[0].trackedIn,
+            conflictReason: 'RECEIPT_METADATA_MISMATCH',
+            details: `Tracked receipt metadata disagrees with actual storage metadata for "${candidatePath}": differing fields [${diffList}].`,
+            existingGeneration: metadata.generation,
+            recordedGeneration: firstReceipt.generation,
           })
         );
+        continue;
       }
+
+      // All duplicate receipts agree AND match live storage metadata completely: cleanly tracked
+      trackedResults.push(
+        Object.freeze({
+          storagePath: candidatePath,
+          namespace: expectedNamespace,
+          generation: metadata.generation,
+          etag: metadata.etag,
+          sha256Checksum: metadata.sha256Checksum,
+          sizeBytes: metadata.sizeBytes,
+          contentType: metadata.contentType,
+          trackedIn: firstEntry.trackedIn,
+        })
+      );
     } else {
       // Matching owned object not tracked in session (lost receipt discovered)
       untrackedResults.push(

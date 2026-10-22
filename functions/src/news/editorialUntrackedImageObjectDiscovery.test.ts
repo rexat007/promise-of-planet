@@ -243,6 +243,8 @@ describe('IMG-F3-08A — discoverUntrackedEditorialImageObjects — Receipt Disc
       trackedPath,
       createSampleMetadata(trackedPath, {
         generation: trackedGeneration,
+        etag: `etag_${trackedGeneration}`,
+        sizeBytes: 2048,
         ownership: {
           createdByIntakeId: 'intake_2026_03',
           targetKind: 'editorial_image_asset',
@@ -573,6 +575,8 @@ describe('IMG-F3-08A — discoverUntrackedEditorialImageObjects — Receipt Disc
       trackedPath,
       createSampleMetadata(trackedPath, {
         generation: agreedGen,
+        etag: 'etag_agreed',
+        sizeBytes: 2048,
         ownership: {
           createdByIntakeId: 'intake_2026_12',
           targetKind: 'editorial_image_asset',
@@ -593,6 +597,304 @@ describe('IMG-F3-08A — discoverUntrackedEditorialImageObjects — Receipt Disc
     expect(report.trackedObjects).toHaveLength(1);
     expect(report.trackedObjects[0].storagePath).toBe(trackedPath);
     expect(report.trackedObjects[0].generation).toBe(agreedGen);
+  });
+
+  it('flags conflict when duplicate receipts have same generation but different SHA-256', async () => {
+    const trackedPath =
+      'editorial_images/private/asset_2026_14/card.webp';
+    const agreedGen = '178000000001';
+
+    const sessionObjA: TrackedIntakeStorageObject = {
+      storagePath: trackedPath,
+      namespace: 'private',
+      generation: agreedGen,
+      etag: 'etag_178',
+      sha256Checksum:
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      sizeBytes: 2048,
+      contentType: 'image/webp',
+      createdByIntakeId: 'intake_2026_14',
+    };
+
+    const sessionObjB: TrackedIntakeStorageObject = {
+      ...sessionObjA,
+      sha256Checksum:
+        'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', // CONTRADICTORY SHA-256!
+    };
+
+    const session: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_2026_14', 'asset_2026_14'),
+      createdPrivateObjects: [sessionObjA],
+      pendingCleanupObjects: [sessionObjB],
+    };
+
+    const storageReader = new FakeStorageReader();
+    storageReader.objects.set(
+      trackedPath,
+      createSampleMetadata(trackedPath, {
+        generation: agreedGen,
+        etag: 'etag_178',
+        sha256Checksum: sessionObjA.sha256Checksum,
+        sizeBytes: 2048,
+        contentType: 'image/webp',
+        ownership: {
+          createdByIntakeId: 'intake_2026_14',
+          targetKind: 'editorial_image_asset',
+          namespace: 'private',
+          assetId: 'asset_2026_14',
+          uploaderUid: 'editor_admin_01',
+        },
+      })
+    );
+
+    const report = await discoverUntrackedEditorialImageObjects(
+      session,
+      storageReader
+    );
+
+    expect(report.trackedObjects).toHaveLength(0);
+    expect(report.untrackedOwnedObjects).toHaveLength(0);
+    expect(report.hasConflicts).toBe(true);
+    expect(report.conflicts).toHaveLength(1);
+    expect(report.conflicts[0].conflictReason).toBe('RECEIPT_METADATA_MISMATCH');
+    expect(report.conflicts[0].details).toContain('sha256Checksum');
+  });
+
+  it('flags conflict when duplicate receipts have same generation but different size', async () => {
+    const trackedPath =
+      'editorial_images/private/asset_2026_15/thumbnail.webp';
+    const agreedGen = '179000000001';
+
+    const sessionObjA: TrackedIntakeStorageObject = {
+      storagePath: trackedPath,
+      namespace: 'private',
+      generation: agreedGen,
+      etag: 'etag_179',
+      sha256Checksum:
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      sizeBytes: 1024,
+      contentType: 'image/webp',
+      createdByIntakeId: 'intake_2026_15',
+    };
+
+    const sessionObjB: TrackedIntakeStorageObject = {
+      ...sessionObjA,
+      sizeBytes: 9999, // CONTRADICTORY SIZE!
+    };
+
+    const session: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_2026_15', 'asset_2026_15'),
+      createdPrivateObjects: [sessionObjA],
+      pendingCleanupObjects: [sessionObjB],
+    };
+
+    const storageReader = new FakeStorageReader();
+    storageReader.objects.set(
+      trackedPath,
+      createSampleMetadata(trackedPath, {
+        generation: agreedGen,
+        etag: 'etag_179',
+        sha256Checksum: sessionObjA.sha256Checksum,
+        sizeBytes: 1024,
+        contentType: 'image/webp',
+        ownership: {
+          createdByIntakeId: 'intake_2026_15',
+          targetKind: 'editorial_image_asset',
+          namespace: 'private',
+          assetId: 'asset_2026_15',
+          uploaderUid: 'editor_admin_01',
+        },
+      })
+    );
+
+    const report = await discoverUntrackedEditorialImageObjects(
+      session,
+      storageReader
+    );
+
+    expect(report.trackedObjects).toHaveLength(0);
+    expect(report.untrackedOwnedObjects).toHaveLength(0);
+    expect(report.hasConflicts).toBe(true);
+    expect(report.conflicts).toHaveLength(1);
+    expect(report.conflicts[0].conflictReason).toBe('RECEIPT_METADATA_MISMATCH');
+    expect(report.conflicts[0].details).toContain('sizeBytes');
+  });
+
+  it('flags conflict when duplicate receipts have contradictory ownership or namespace', async () => {
+    const trackedPath =
+      'editorial_images/private/asset_2026_16/article_cover.webp';
+    const agreedGen = '180000000001';
+
+    // 1. Contradictory ownership (createdByIntakeId)
+    {
+      const sessionObjA: TrackedIntakeStorageObject = {
+        storagePath: trackedPath,
+        namespace: 'private',
+        generation: agreedGen,
+        etag: 'etag_180',
+        sha256Checksum:
+          'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        sizeBytes: 4096,
+        contentType: 'image/webp',
+        createdByIntakeId: 'intake_2026_16',
+      };
+
+      const sessionObjB: TrackedIntakeStorageObject = {
+        ...sessionObjA,
+        createdByIntakeId: 'intake_other_session', // CONTRADICTORY INTAKE ID!
+      };
+
+      const session: EditorialBinaryIntakeSession = {
+        ...createSampleSession('intake_2026_16', 'asset_2026_16'),
+        createdPrivateObjects: [sessionObjA],
+        pendingCleanupObjects: [sessionObjB],
+      };
+
+      const storageReader = new FakeStorageReader();
+      storageReader.objects.set(
+        trackedPath,
+        createSampleMetadata(trackedPath, {
+          generation: agreedGen,
+          etag: 'etag_180',
+          sha256Checksum: sessionObjA.sha256Checksum,
+          sizeBytes: 4096,
+          contentType: 'image/webp',
+          ownership: {
+            createdByIntakeId: 'intake_2026_16',
+            targetKind: 'editorial_image_asset',
+            namespace: 'private',
+            assetId: 'asset_2026_16',
+            uploaderUid: 'editor_admin_01',
+          },
+        })
+      );
+
+      const report = await discoverUntrackedEditorialImageObjects(
+        session,
+        storageReader
+      );
+
+      expect(report.trackedObjects).toHaveLength(0);
+      expect(report.untrackedOwnedObjects).toHaveLength(0);
+      expect(report.hasConflicts).toBe(true);
+      expect(report.conflicts).toHaveLength(1);
+      expect(report.conflicts[0].conflictReason).toBe('RECEIPT_METADATA_MISMATCH');
+      expect(report.conflicts[0].details).toContain('createdByIntakeId');
+    }
+
+    // 2. Contradictory namespace
+    {
+      const sessionObjA: TrackedIntakeStorageObject = {
+        storagePath: trackedPath,
+        namespace: 'private',
+        generation: agreedGen,
+        etag: 'etag_180',
+        sha256Checksum:
+          'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        sizeBytes: 4096,
+        contentType: 'image/webp',
+        createdByIntakeId: 'intake_2026_16',
+      };
+
+      const sessionObjB: TrackedIntakeStorageObject = {
+        ...sessionObjA,
+        namespace: 'quarantine', // CONTRADICTORY NAMESPACE!
+      };
+
+      const session: EditorialBinaryIntakeSession = {
+        ...createSampleSession('intake_2026_16', 'asset_2026_16'),
+        createdPrivateObjects: [sessionObjA],
+        pendingCleanupObjects: [sessionObjB],
+      };
+
+      const storageReader = new FakeStorageReader();
+      storageReader.objects.set(
+        trackedPath,
+        createSampleMetadata(trackedPath, {
+          generation: agreedGen,
+          etag: 'etag_180',
+          sha256Checksum: sessionObjA.sha256Checksum,
+          sizeBytes: 4096,
+          contentType: 'image/webp',
+          ownership: {
+            createdByIntakeId: 'intake_2026_16',
+            targetKind: 'editorial_image_asset',
+            namespace: 'private',
+            assetId: 'asset_2026_16',
+            uploaderUid: 'editor_admin_01',
+          },
+        })
+      );
+
+      const report = await discoverUntrackedEditorialImageObjects(
+        session,
+        storageReader
+      );
+
+      expect(report.trackedObjects).toHaveLength(0);
+      expect(report.untrackedOwnedObjects).toHaveLength(0);
+      expect(report.hasConflicts).toBe(true);
+      expect(report.conflicts).toHaveLength(1);
+      expect(report.conflicts[0].conflictReason).toBe('RECEIPT_METADATA_MISMATCH');
+      expect(report.conflicts[0].details).toContain('namespace');
+    }
+  });
+
+  it('flags conflict when single tracked receipt matches generation but conflicts with returned storage metadata', async () => {
+    const trackedPath =
+      'editorial_images/private/asset_2026_17/article_inline.webp';
+    const agreedGen = '181000000001';
+
+    const sessionObj: TrackedIntakeStorageObject = {
+      storagePath: trackedPath,
+      namespace: 'private',
+      generation: agreedGen,
+      etag: 'etag_receipt',
+      sha256Checksum:
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      sizeBytes: 2048,
+      contentType: 'image/webp',
+      createdByIntakeId: 'intake_2026_17',
+    };
+
+    const session: EditorialBinaryIntakeSession = {
+      ...createSampleSession('intake_2026_17', 'asset_2026_17'),
+      createdPrivateObjects: [sessionObj],
+    };
+
+    // Storage object has same generation but DIFFERENT checksum and size in storage!
+    const storageReader = new FakeStorageReader();
+    storageReader.objects.set(
+      trackedPath,
+      createSampleMetadata(trackedPath, {
+        generation: agreedGen,
+        etag: 'etag_storage',
+        sha256Checksum:
+          '1111111111111111111111111111111111111111111111111111111111111111',
+        sizeBytes: 4096,
+        contentType: 'image/webp',
+        ownership: {
+          createdByIntakeId: 'intake_2026_17',
+          targetKind: 'editorial_image_asset',
+          namespace: 'private',
+          assetId: 'asset_2026_17',
+          uploaderUid: 'editor_admin_01',
+        },
+      })
+    );
+
+    const report = await discoverUntrackedEditorialImageObjects(
+      session,
+      storageReader
+    );
+
+    // Must NOT be classified as cleanly tracked, and must NOT be classified as untrackedOwned
+    expect(report.trackedObjects).toHaveLength(0);
+    expect(report.untrackedOwnedObjects).toHaveLength(0);
+    expect(report.hasConflicts).toBe(true);
+    expect(report.conflicts).toHaveLength(1);
+    expect(report.conflicts[0].conflictReason).toBe('RECEIPT_METADATA_MISMATCH');
+    expect(report.conflicts[0].details).toContain('differing fields');
   });
 
   it('fails closed when etag, contentType, createdAtIso, or MIME compatibility is invalid', async () => {
