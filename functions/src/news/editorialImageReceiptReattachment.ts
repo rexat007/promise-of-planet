@@ -219,6 +219,42 @@ function createHoldResult(
 }
 
 /**
+ * Validates that an intake session status belongs to the approved B2 whitelist
+ * (Created, Quarantined, PreliminarilyVerified, Promoting), and enforces
+ * quarantine-only receipt namespace eligibility for non-Promoting statuses.
+ */
+export function validateSessionStatusAndReceiptNamespaceEligibility(
+  session: EditorialBinaryIntakeSession,
+  receiptsToCheck: {
+    readonly hasPrivateObjects: boolean;
+  }
+): { eligible: true } | { eligible: false; reasonCode: string; details: string } {
+  if (!ELIGIBLE_REATTACHMENT_SESSION_STATUSES.includes(session.status)) {
+    return {
+      eligible: false,
+      reasonCode: 'SESSION_STATUS_NOT_ELIGIBLE',
+      details: `Session status "${session.status}" is not eligible for receipt reattachment.`,
+    };
+  }
+
+  if (
+    session.status === 'Created' ||
+    session.status === 'Quarantined' ||
+    session.status === 'PreliminarilyVerified'
+  ) {
+    if (receiptsToCheck.hasPrivateObjects) {
+      return {
+        eligible: false,
+        reasonCode: 'OBJECT_NAMESPACE_INCOMPATIBLE_WITH_STATUS',
+        details: `Session status "${session.status}" only permits quarantine receipts; private variant objects found.`,
+      };
+    }
+  }
+
+  return { eligible: true };
+}
+
+/**
  * Reattaches discovered uncommitted GCS receipts to an eligible intake session
  * using a single atomic CAS update.
  */
@@ -325,6 +361,22 @@ export async function reattachDiscoveredEditorialImageReceipts(
         'SESSION_SNAPSHOT_MISMATCH',
         'Session snapshot mutated between reads during idempotency verification.',
         initialSnapshot,
+        lookupsAttempted
+      );
+    }
+
+    // Enforce status and receipt namespace eligibility on fresh session for NO_OP
+    const idempotencyEligibility = validateSessionStatusAndReceiptNamespaceEligibility(
+      freshSession,
+      { hasPrivateObjects: freshSession.createdPrivateObjects.length > 0 }
+    );
+
+    if (!idempotencyEligibility.eligible) {
+      return createHoldResult(
+        validIntakeId,
+        idempotencyEligibility.reasonCode,
+        idempotencyEligibility.details,
+        freshSession,
         lookupsAttempted
       );
     }
@@ -491,35 +543,21 @@ export async function reattachDiscoveredEditorialImageReceipts(
     );
   }
 
-  // 5. Check Session Status Whitelist
-  if (!ELIGIBLE_REATTACHMENT_SESSION_STATUSES.includes(initialSnapshot.status)) {
+  // 5. Check Session Status Whitelist & Object Namespace Compatibility
+  const candidateObjects = b1Assessment.discoveryReport.untrackedOwnedObjects;
+  const initialEligibility = validateSessionStatusAndReceiptNamespaceEligibility(
+    initialSnapshot,
+    { hasPrivateObjects: candidateObjects.some((c) => c.namespace === 'private') }
+  );
+
+  if (!initialEligibility.eligible) {
     return createHoldResult(
       validIntakeId,
-      'SESSION_STATUS_NOT_ELIGIBLE',
-      `Session status "${initialSnapshot.status}" is not eligible for receipt reattachment.`,
+      initialEligibility.reasonCode,
+      initialEligibility.details,
       initialSnapshot,
       lookupsAttempted
     );
-  }
-
-  const candidateObjects = b1Assessment.discoveryReport.untrackedOwnedObjects;
-
-  // In Created, Quarantined, PreliminarilyVerified: quarantine objects ONLY
-  if (
-    initialSnapshot.status === 'Created' ||
-    initialSnapshot.status === 'Quarantined' ||
-    initialSnapshot.status === 'PreliminarilyVerified'
-  ) {
-    const hasPrivateCandidate = candidateObjects.some((c) => c.namespace === 'private');
-    if (hasPrivateCandidate) {
-      return createHoldResult(
-        validIntakeId,
-        'OBJECT_NAMESPACE_INCOMPATIBLE_WITH_STATUS',
-        `Session status "${initialSnapshot.status}" only permits quarantine receipts; private variant objects discovered.`,
-        initialSnapshot,
-        lookupsAttempted
-      );
-    }
   }
 
   // 6. Pre-mutation Fresh Re-read of Session & Canonical Asset
@@ -552,6 +590,21 @@ export async function reattachDiscoveredEditorialImageReceipts(
       'SESSION_SNAPSHOT_MISMATCH',
       'Session mutated between discovery and pre-mutation re-read.',
       initialSnapshot,
+      lookupsAttempted
+    );
+  }
+
+  const freshEligibility = validateSessionStatusAndReceiptNamespaceEligibility(
+    freshSession,
+    { hasPrivateObjects: candidateObjects.some((c) => c.namespace === 'private') }
+  );
+
+  if (!freshEligibility.eligible) {
+    return createHoldResult(
+      validIntakeId,
+      freshEligibility.reasonCode,
+      freshEligibility.details,
+      freshSession,
       lookupsAttempted
     );
   }

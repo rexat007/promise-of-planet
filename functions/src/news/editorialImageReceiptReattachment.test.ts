@@ -3,6 +3,8 @@ import {
   type EditorialImageReceiptReattachmentDependencies,
   reattachDiscoveredEditorialImageReceipts,
   MAX_REATTACHMENT_METADATA_LOOKUPS,
+  validateSessionStatusAndReceiptNamespaceEligibility,
+  ELIGIBLE_REATTACHMENT_SESSION_STATUSES,
 } from './editorialImageReceiptReattachment';
 import {
   type EditorialBinaryIntakeSession,
@@ -654,5 +656,311 @@ describe('IMG-F3-08B/B2 — reattachDiscoveredEditorialImageReceipts', () => {
     expect((result as any).shouldDelete).toBeUndefined();
     expect((result as any).safeToDelete).toBeUndefined();
     expect((result as any).deletionPlan).toBeUndefined();
+  });
+
+  describe('IMG-F3-08B/B2-C1: Status whitelist & namespace eligibility enforcement for NO_OP_ALREADY_TRACKED', () => {
+    it('returns NO_OP_ALREADY_TRACKED for verified tracked receipts in eligible statuses (Created, Quarantined, PreliminarilyVerified)', async () => {
+      const eligibleStatuses: EditorialBinaryIntakeSession['status'][] = [
+        'Created',
+        'Quarantined',
+        'PreliminarilyVerified',
+      ];
+
+      for (const st of eligibleStatuses) {
+        const sessionStore = new MockIntakeSessionStore();
+        const assetRepository = new MockAssetRepository();
+        const storageAdapter = new MockStorageAdapter();
+        const deps = { sessionStore, assetRepository, storageAdapter };
+
+        const intakeId = `intake_2026_noop_${st.toLowerCase()}`;
+        const assetId = `asset_2026_noop_${st.toLowerCase()}`;
+        const qPath = `editorial_intake_quarantine/images/${intakeId}/source.png`;
+
+        const receipt: TrackedIntakeStorageObject = {
+          storagePath: qPath,
+          namespace: 'quarantine',
+          generation: '170000000100',
+          etag: 'etag_170000000100',
+          sha256Checksum:
+            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+          sizeBytes: 1024,
+          contentType: 'image/png',
+          createdByIntakeId: intakeId,
+        };
+
+        const session: EditorialBinaryIntakeSession = {
+          ...createSampleSession(intakeId, assetId, st),
+          revision: 2,
+          createdQuarantineObjects: [receipt],
+        };
+        sessionStore.sessions.set(intakeId, session);
+
+        storageAdapter.objects.set(
+          qPath,
+          createSampleStorageMetadata(qPath, intakeId, assetId)
+        );
+
+        const result = await reattachDiscoveredEditorialImageReceipts(intakeId, deps);
+        expect(result.outcome).toBe('NO_OP_ALREADY_TRACKED');
+        expect(result.reasonCode).toBe('ALL_RECEIPTS_ALREADY_TRACKED_AND_VERIFIED');
+        expect(result.reattachedCount).toBe(0);
+        expect(sessionStore.updateCount).toBe(0);
+      }
+    });
+
+    it('returns NO_OP_ALREADY_TRACKED for verified tracked receipts in eligible Promoting status (with quarantine and private receipts)', async () => {
+      const sessionStore = new MockIntakeSessionStore();
+      const assetRepository = new MockAssetRepository();
+      const storageAdapter = new MockStorageAdapter();
+      const deps = { sessionStore, assetRepository, storageAdapter };
+
+      const intakeId = 'intake_2026_noop_promoting';
+      const assetId = 'asset_2026_noop_promoting';
+      const qPath = `editorial_intake_quarantine/images/${intakeId}/source.png`;
+      const pPath = `editorial_images/private/${assetId}/thumbnail.webp`;
+
+      const qReceipt: TrackedIntakeStorageObject = {
+        storagePath: qPath,
+        namespace: 'quarantine',
+        generation: '170000000100',
+        etag: 'etag_170000000100',
+        sha256Checksum:
+          'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        sizeBytes: 1024,
+        contentType: 'image/png',
+        createdByIntakeId: intakeId,
+      };
+
+      const pReceipt: TrackedIntakeStorageObject = {
+        storagePath: pPath,
+        namespace: 'private',
+        generation: '170000000100',
+        etag: 'etag_170000000100',
+        sha256Checksum:
+          'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        sizeBytes: 1024,
+        contentType: 'image/webp',
+        createdByIntakeId: intakeId,
+      };
+
+      const session: EditorialBinaryIntakeSession = {
+        ...createSampleSession(intakeId, assetId, 'Promoting'),
+        revision: 3,
+        createdQuarantineObjects: [qReceipt],
+        createdPrivateObjects: [pReceipt],
+      };
+      sessionStore.sessions.set(intakeId, session);
+
+      storageAdapter.objects.set(
+        qPath,
+        createSampleStorageMetadata(qPath, intakeId, assetId)
+      );
+      storageAdapter.objects.set(
+        pPath,
+        createSampleStorageMetadata(pPath, intakeId, assetId)
+      );
+
+      const result = await reattachDiscoveredEditorialImageReceipts(intakeId, deps);
+      expect(result.outcome).toBe('NO_OP_ALREADY_TRACKED');
+      expect(result.reasonCode).toBe('ALL_RECEIPTS_ALREADY_TRACKED_AND_VERIFIED');
+      expect(result.reattachedCount).toBe(0);
+      expect(sessionStore.updateCount).toBe(0);
+    });
+
+    it('never returns NO_OP_ALREADY_TRACKED for terminal sessions (Failed, Completed), returning HOLD with SESSION_STATUS_NOT_ELIGIBLE', async () => {
+      const terminalStatuses: EditorialBinaryIntakeSession['status'][] = ['Failed', 'Completed'];
+
+      for (const st of terminalStatuses) {
+        const sessionStore = new MockIntakeSessionStore();
+        const assetRepository = new MockAssetRepository();
+        const storageAdapter = new MockStorageAdapter();
+        const deps = { sessionStore, assetRepository, storageAdapter };
+
+        const intakeId = `intake_2026_terminal_${st.toLowerCase()}`;
+        const assetId = `asset_2026_terminal_${st.toLowerCase()}`;
+        const qPath = `editorial_intake_quarantine/images/${intakeId}/source.png`;
+
+        const receipt: TrackedIntakeStorageObject = {
+          storagePath: qPath,
+          namespace: 'quarantine',
+          generation: '170000000100',
+          etag: 'etag_170000000100',
+          sha256Checksum:
+            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+          sizeBytes: 1024,
+          contentType: 'image/png',
+          createdByIntakeId: intakeId,
+        };
+
+        const session: EditorialBinaryIntakeSession = {
+          ...createSampleSession(intakeId, assetId, st),
+          revision: 2,
+          createdQuarantineObjects: [receipt],
+        };
+        sessionStore.sessions.set(intakeId, session);
+
+        storageAdapter.objects.set(
+          qPath,
+          createSampleStorageMetadata(qPath, intakeId, assetId)
+        );
+
+        const result = await reattachDiscoveredEditorialImageReceipts(intakeId, deps);
+        expect(result.outcome).toBe('HOLD');
+        expect(result.reasonCode).toBe('SESSION_STATUS_NOT_ELIGIBLE');
+        expect(result.details).toContain(st);
+        expect(sessionStore.updateCount).toBe(0);
+      }
+    });
+
+    it('never returns NO_OP_ALREADY_TRACKED for ineligible non-terminal sessions (Registering, Registered, CleanupPending, NeedsReconciliation)', async () => {
+      const nonTerminalIneligible: EditorialBinaryIntakeSession['status'][] = [
+        'Registering',
+        'Registered',
+        'CleanupPending',
+        'NeedsReconciliation',
+      ];
+
+      for (const st of nonTerminalIneligible) {
+        const sessionStore = new MockIntakeSessionStore();
+        const assetRepository = new MockAssetRepository();
+        const storageAdapter = new MockStorageAdapter();
+        const deps = { sessionStore, assetRepository, storageAdapter };
+
+        const intakeId = `intake_2026_inelig_${st.toLowerCase()}`;
+        const assetId = `asset_2026_inelig_${st.toLowerCase()}`;
+        const qPath = `editorial_intake_quarantine/images/${intakeId}/source.png`;
+
+        const receipt: TrackedIntakeStorageObject = {
+          storagePath: qPath,
+          namespace: 'quarantine',
+          generation: '170000000100',
+          etag: 'etag_170000000100',
+          sha256Checksum:
+            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+          sizeBytes: 1024,
+          contentType: 'image/png',
+          createdByIntakeId: intakeId,
+        };
+
+        const session: EditorialBinaryIntakeSession = {
+          ...createSampleSession(intakeId, assetId, st),
+          revision: 2,
+          createdQuarantineObjects: [receipt],
+        };
+        sessionStore.sessions.set(intakeId, session);
+
+        storageAdapter.objects.set(
+          qPath,
+          createSampleStorageMetadata(qPath, intakeId, assetId)
+        );
+
+        const result = await reattachDiscoveredEditorialImageReceipts(intakeId, deps);
+        expect(result.outcome).toBe('HOLD');
+        expect(result.reasonCode).toBe('SESSION_STATUS_NOT_ELIGIBLE');
+        expect(result.details).toContain(st);
+        expect(sessionStore.updateCount).toBe(0);
+      }
+    });
+
+    it('never returns NO_OP_ALREADY_TRACKED when private tracked receipts exist in Created, Quarantined, or PreliminarilyVerified status', async () => {
+      const quarantineOnlyStatuses: EditorialBinaryIntakeSession['status'][] = [
+        'Created',
+        'Quarantined',
+        'PreliminarilyVerified',
+      ];
+
+      for (const st of quarantineOnlyStatuses) {
+        const sessionStore = new MockIntakeSessionStore();
+        const assetRepository = new MockAssetRepository();
+        const storageAdapter = new MockStorageAdapter();
+        const deps = { sessionStore, assetRepository, storageAdapter };
+
+        const intakeId = `intake_2026_priv_${st.toLowerCase()}`;
+        const assetId = `asset_2026_priv_${st.toLowerCase()}`;
+        const pPath = `editorial_images/private/${assetId}/thumbnail.webp`;
+
+        const pReceipt: TrackedIntakeStorageObject = {
+          storagePath: pPath,
+          namespace: 'private',
+          generation: '170000000100',
+          etag: 'etag_170000000100',
+          sha256Checksum:
+            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+          sizeBytes: 1024,
+          contentType: 'image/webp',
+          createdByIntakeId: intakeId,
+        };
+
+        const session: EditorialBinaryIntakeSession = {
+          ...createSampleSession(intakeId, assetId, st),
+          revision: 2,
+          createdPrivateObjects: [pReceipt],
+        };
+        sessionStore.sessions.set(intakeId, session);
+
+        storageAdapter.objects.set(
+          pPath,
+          createSampleStorageMetadata(pPath, intakeId, assetId)
+        );
+
+        const result = await reattachDiscoveredEditorialImageReceipts(intakeId, deps);
+        expect(result.outcome).toBe('HOLD');
+        expect(result.reasonCode).toBe('OBJECT_NAMESPACE_INCOMPATIBLE_WITH_STATUS');
+        expect(result.details).toContain(st);
+        expect(sessionStore.updateCount).toBe(0);
+      }
+    });
+
+    it('directly verifies validateSessionStatusAndReceiptNamespaceEligibility behavior', () => {
+      const baseSession = createSampleSession('intake_val', 'asset_val', 'Created');
+
+      // Eligible statuses without private objects
+      for (const status of ELIGIBLE_REATTACHMENT_SESSION_STATUSES) {
+        const res = validateSessionStatusAndReceiptNamespaceEligibility(
+          { ...baseSession, status },
+          { hasPrivateObjects: false }
+        );
+        expect(res.eligible).toBe(true);
+      }
+
+      // Promoting with private objects is eligible
+      const promotingRes = validateSessionStatusAndReceiptNamespaceEligibility(
+        { ...baseSession, status: 'Promoting' },
+        { hasPrivateObjects: true }
+      );
+      expect(promotingRes.eligible).toBe(true);
+
+      // Created, Quarantined, PreliminarilyVerified with private objects must reject
+      for (const status of ['Created', 'Quarantined', 'PreliminarilyVerified'] as const) {
+        const res = validateSessionStatusAndReceiptNamespaceEligibility(
+          { ...baseSession, status },
+          { hasPrivateObjects: true }
+        );
+        expect(res.eligible).toBe(false);
+        if (!res.eligible) {
+          expect(res.reasonCode).toBe('OBJECT_NAMESPACE_INCOMPATIBLE_WITH_STATUS');
+        }
+      }
+
+      // Ineligible statuses must reject
+      const ineligibleStatuses: EditorialBinaryIntakeSession['status'][] = [
+        'Failed',
+        'Completed',
+        'Registering',
+        'Registered',
+        'CleanupPending',
+        'NeedsReconciliation',
+      ];
+      for (const status of ineligibleStatuses) {
+        const res = validateSessionStatusAndReceiptNamespaceEligibility(
+          { ...baseSession, status },
+          { hasPrivateObjects: false }
+        );
+        expect(res.eligible).toBe(false);
+        if (!res.eligible) {
+          expect(res.reasonCode).toBe('SESSION_STATUS_NOT_ELIGIBLE');
+        }
+      }
+    });
   });
 });
