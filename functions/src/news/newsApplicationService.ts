@@ -8,7 +8,7 @@ import type {
 import { FirestoreNewsRepository } from './firestoreNewsRepository';
 import { NewsValidator } from './newsValidator';
 import { 
-  validateRichNewsDocument, 
+  validateRichNewsDocumentByVersion, 
   extractPlainTextFromRichDocument 
 } from '../shared/richNewsDocumentContract';
 
@@ -71,8 +71,8 @@ export class NewsApplicationService {
     let bodyAr = input.bodyAr || '';
     let bodyEn = input.bodyEn || '';
 
-    if (input.richBodyAr) {
-      const v = validateRichNewsDocument(input.richBodyAr);
+    if (input.richBodyAr !== undefined) {
+      const v = validateRichNewsDocumentByVersion(input.richBodyAr);
       if (!v.valid) throw new Error(`INVALID_RICH_DOCUMENT_AR: ${v.errors.join('; ')}`);
       const derived = extractPlainTextFromRichDocument(input.richBodyAr);
       if (input.bodyAr && input.bodyAr.trim() !== derived.trim()) {
@@ -81,8 +81,8 @@ export class NewsApplicationService {
       bodyAr = derived;
     }
 
-    if (input.richBodyEn) {
-      const v = validateRichNewsDocument(input.richBodyEn);
+    if (input.richBodyEn !== undefined) {
+      const v = validateRichNewsDocumentByVersion(input.richBodyEn);
       if (!v.valid) throw new Error(`INVALID_RICH_DOCUMENT_EN: ${v.errors.join('; ')}`);
       const derived = extractPlainTextFromRichDocument(input.richBodyEn);
       if (input.bodyEn && input.bodyEn.trim() !== derived.trim()) {
@@ -161,7 +161,7 @@ export class NewsApplicationService {
 
     // Contradiction checks and derivation
     if (input.richBodyAr !== undefined) {
-      const v = validateRichNewsDocument(input.richBodyAr);
+      const v = validateRichNewsDocumentByVersion(input.richBodyAr);
       if (!v.valid) throw new Error(`INVALID_RICH_DOCUMENT_AR: ${v.errors.join('; ')}`);
       const derived = extractPlainTextFromRichDocument(input.richBodyAr);
       
@@ -172,7 +172,7 @@ export class NewsApplicationService {
     }
 
     if (input.richBodyEn !== undefined) {
-      const v = validateRichNewsDocument(input.richBodyEn);
+      const v = validateRichNewsDocumentByVersion(input.richBodyEn);
       if (!v.valid) throw new Error(`INVALID_RICH_DOCUMENT_EN: ${v.errors.join('; ')}`);
       const derived = extractPlainTextFromRichDocument(input.richBodyEn);
       

@@ -1,10 +1,13 @@
 import type {
   RichNewsDocumentWrapper,
+  RichNewsDocumentWrapperV2,
   ValidationLimits,
   ValidationResult,
   TextDirection,
   Alignment,
   ParagraphNode,
+  ProseMirrorNode,
+  ProseMirrorNodeV2,
 } from "../types/richNewsDocument";
 import { DEFAULT_VALIDATION_LIMITS } from "../types/richNewsDocument";
 
@@ -303,18 +306,49 @@ export function convertPlainTextToRichDocument(
   };
 }
 
+export function validateRichNewsDocumentByVersion(
+  input: unknown,
+  customLimits: Partial<ValidationLimits> = {}
+): ValidationResult {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { valid: false, errors: ["Document wrapper must be a non-null object."] };
+  }
+
+  const wrapper = input as Record<string, unknown>;
+
+  if (wrapper.schemaVersion === 1) {
+    return validateRichNewsDocument(input, customLimits);
+  }
+
+  if (wrapper.schemaVersion === 2) {
+    return validateRichNewsDocumentV2(input, customLimits);
+  }
+
+  return {
+    valid: false,
+    errors: [
+      `Unsupported or missing schemaVersion: expected 1 or 2, received ${String(wrapper.schemaVersion)}.`,
+    ],
+  };
+}
+
 export function extractPlainTextFromRichDocument(input: unknown): string {
-  if (!input || typeof input !== "object") return "";
+  const validation = validateRichNewsDocumentByVersion(input);
+  if (!validation.valid) {
+    return "";
+  }
 
-  const wrapper = input as Record<string, any>;
-  const doc = wrapper.doc || (wrapper.type === "doc" ? wrapper : null);
-
-  if (!doc || !Array.isArray(doc.content)) return "";
+  const wrapper = input as RichNewsDocumentWrapper | RichNewsDocumentWrapperV2;
+  const doc = wrapper.doc;
 
   const blockTexts: string[] = [];
 
-  function collectText(node: any): string {
+  function collectText(node: ProseMirrorNode | ProseMirrorNodeV2): string {
     if (!node || typeof node !== "object") return "";
+
+    if (node.type === "editorialImage") {
+      return "";
+    }
 
     if (node.type === "text" && typeof node.text === "string") {
       return node.text;
@@ -324,7 +358,7 @@ export function extractPlainTextFromRichDocument(input: unknown): string {
       return "\n";
     }
 
-    if (Array.isArray(node.content)) {
+    if ("content" in node && Array.isArray(node.content)) {
       return node.content.map(collectText).join("");
     }
 
