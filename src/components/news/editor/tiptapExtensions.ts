@@ -3,6 +3,10 @@ import Underline from "@tiptap/extension-underline";
 import Link from "@tiptap/extension-link";
 import TextAlign from "@tiptap/extension-text-align";
 import { Extension } from "@tiptap/core";
+import {
+  EditorialImageExtension,
+  type EditorialImageExtensionOptions,
+} from "./editorialImageExtension";
 
 export const DirectionExtension = Extension.create({
   name: "direction",
@@ -25,7 +29,9 @@ export const DirectionExtension = Extension.create({
   },
 });
 
-export function getE1CTiptapExtensions() {
+export function getE1CTiptapExtensions(
+  editorialImageOptions?: EditorialImageExtensionOptions
+) {
   return [
     StarterKit.configure({
       codeBlock: false,
@@ -60,5 +66,9 @@ export function getE1CTiptapExtensions() {
       alignments: ["right", "left", "center", "justify"],
     }),
     DirectionExtension,
+    editorialImageOptions
+      ? EditorialImageExtension.configure(editorialImageOptions)
+      : EditorialImageExtension,
   ];
 }
+
