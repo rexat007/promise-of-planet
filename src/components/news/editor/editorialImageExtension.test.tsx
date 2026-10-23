@@ -14,7 +14,12 @@ import {
   ALLOWED_EDITORIAL_IMAGE_LAYOUTS,
   ALLOWED_EDITORIAL_IMAGE_WIDTHS,
   EDITORIAL_IMAGE_LAYOUT_CSS,
+  NARROW_EDITOR_CONTAINER_MAX_PX,
+  WIDE_EDITOR_CONTAINER_MIN_PX,
+  MIN_READABLE_PARAGRAPH_WIDTH_PX,
+  COMPACT_TOOLBAR_MAX_CONTAINER_PX,
   validateCanonicalEditorialImageAttrs,
+  resolveEditorialImageResponsivePresentation,
   computeEditorialImageFloatStyle,
   computeToolbarClampedPosition,
   createEditorialImageNodeActions,
@@ -51,12 +56,31 @@ function createMockNodeViewProps(
     attrs?: Record<string, unknown>;
     selected?: boolean;
     dir?: "rtl" | "ltr";
+    editorWidth?: number;
+    editorRect?: {
+      top: number;
+      bottom: number;
+      left: number;
+      right: number;
+      width: number;
+      height: number;
+    };
     updateAttributes?: (attrs: Record<string, unknown>) => void;
     deleteNode?: () => void;
     extensionOptions?: Record<string, unknown>;
   } = {}
 ): any {
   const dir = overrides.dir ?? "rtl";
+  const width = overrides.editorWidth ?? 800;
+  const rect = overrides.editorRect ?? {
+    top: 100,
+    bottom: 700,
+    left: 100,
+    right: 100 + width,
+    width,
+    height: 600,
+  };
+
   return {
     node: {
       type: { name: "editorialImage" },
@@ -82,14 +106,7 @@ function createMockNodeViewProps(
       view: {
         dom: {
           getAttribute: (name: string) => (name === "dir" ? dir : null),
-          getBoundingClientRect: () => ({
-            top: 100,
-            bottom: 700,
-            left: 100,
-            right: 900,
-            width: 800,
-            height: 600,
-          }),
+          getBoundingClientRect: () => rect,
         },
       },
     },
@@ -101,7 +118,7 @@ function createMockNodeViewProps(
   };
 }
 
-describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () => {
+describe("IMG-F3-09/D2-A & D2-C1 — Canonical Inline Image NodeView, Toolbar Containment & Container-Responsive Wrapping", () => {
   // 1. Canonical V2 serialization via editor.getJSON()
   it("1. serializes canonical V2 editorialImage node via editor.getJSON() without extra HTML img attributes", () => {
     const v2Wrapper: RichNewsDocumentWrapperV2 = {
@@ -394,21 +411,24 @@ describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () =>
     }
   });
 
-  // 6. Text wrapping and mobile layout rules
-  it("6. includes responsive text wrapping and mobile collapse (<640px) CSS rules and figure layout classes", () => {
+  // 6. Text wrapping and container-collapse layout rules
+  it("6. includes responsive text wrapping and container-collapse CSS rules and figure layout classes", () => {
     expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain('[dir="rtl"] .pop-layout-float-start');
     expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain('[dir="rtl"] .pop-layout-float-end');
     expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain('[dir="ltr"] .pop-layout-float-start');
     expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain('[dir="ltr"] .pop-layout-float-end');
+    expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain('figure[data-float-collapsed="true"]');
     expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain("@media (max-width: 640px)");
     expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain("float: none !important;");
-    expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain("width: 100% !important;");
+    expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain("margin-left: auto !important;");
+    expect(EDITORIAL_IMAGE_LAYOUT_CSS).toContain("margin-right: auto !important;");
 
     const html = renderToStaticMarkup(
       <EditorialImageLocaleContext.Provider value={{ lang: "ar", dir: "rtl" }}>
         <EditorialImageNodeView
           {...createMockNodeViewProps({
             attrs: { layout: "float-end", width: "50%" },
+            editorWidth: 1024,
           })}
         />
       </EditorialImageLocaleContext.Provider>
@@ -421,7 +441,7 @@ describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () =>
   });
 
   // 7. Toolbar bounds and selected-state behavior
-  it("7. clamps contextual toolbar horizontally within editor bounds and switches between above/below placement", () => {
+  it("7. clamps contextual toolbar horizontally within editor bounds and switches between above/below/inside-top placement", () => {
     const editorRect = {
       top: 100,
       bottom: 700,
@@ -439,6 +459,8 @@ describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () =>
     });
     expect(centered.shiftX).toBe(0);
     expect(centered.placement).toBe("above");
+    expect(centered.clampedLeft).toBeGreaterThanOrEqual(editorRect.left + 8);
+    expect(centered.clampedRight).toBeLessThanOrEqual(editorRect.right - 8);
 
     // Near left boundary -> positive shiftX to prevent left overflow
     const nearLeft = computeToolbarClampedPosition({
@@ -449,6 +471,8 @@ describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () =>
     });
     expect(nearLeft.shiftX).toBeGreaterThan(0);
     expect(nearLeft.placement).toBe("above");
+    expect(nearLeft.clampedLeft).toBe(editorRect.left + 8);
+    expect(nearLeft.clampedRight).toBeLessThanOrEqual(editorRect.right - 8);
 
     // Near right boundary -> negative shiftX to prevent right overflow
     const nearRight = computeToolbarClampedPosition({
@@ -459,6 +483,8 @@ describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () =>
     });
     expect(nearRight.shiftX).toBeLessThan(0);
     expect(nearRight.placement).toBe("above");
+    expect(nearRight.clampedRight).toBe(editorRect.right - 8);
+    expect(nearRight.clampedLeft).toBeGreaterThanOrEqual(editorRect.left + 8);
 
     // Near top of editor -> flips placement to "below"
     const nearTop = computeToolbarClampedPosition({
@@ -468,6 +494,15 @@ describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () =>
       toolbarHeight: 40,
     });
     expect(nearTop.placement).toBe("below");
+
+    // Tall figure filling both top and bottom of editor -> falls back to "inside-top" to avoid overflow-hidden clipping
+    const tallFigure = computeToolbarClampedPosition({
+      figureRect: { top: 105, bottom: 695, left: 200, right: 400, width: 200 },
+      editorRect,
+      toolbarWidth: 240,
+      toolbarHeight: 40,
+    });
+    expect(tallFigure.placement).toBe("inside-top");
 
     // Selected vs unselected toolbar visibility in rendered markup
     const unselectedHtml = renderToStaticMarkup(
@@ -630,8 +665,8 @@ describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () =>
     expect(isSafeRuntimePreviewUrl("data:image/png;base64,iVBORw0KGgo=")).toBe(true);
   });
 
-  // 12. No mutation of Sandbox files
-  it("12. leaves Sandbox source files completely untouched with their exact baseline Git blob SHA-1", () => {
+  // 12. Preserves read-only Sandbox, RichTextEditor, and unpushed D2-C visual harness files untouched
+  it("12. leaves Sandbox, RichTextEditor, tiptapExtensions, and D2-C visual harness files untouched with their exact Git blob SHA-1", () => {
     const computeBlobSha1 = (relPath: string) => {
       const fullPath = path.resolve(process.cwd(), relPath);
       const buf = fs.readFileSync(fullPath);
@@ -650,11 +685,21 @@ describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () =>
 
     expect(
       computeBlobSha1("src/components/news/editor/RichTextEditor.tsx")
-    ).toBe("2bd669f5744101b33cfc3330fa98eb0c0fa33546");
+    ).toBe("4ad0783dda0c7a7735947c25ee3899567190c1eb");
 
     expect(
       computeBlobSha1("src/components/news/editor/tiptapExtensions.ts")
-    ).toBe("81be9540e527d2e1ba3a397d3590414f5bbac8f1");
+    ).toBe("e9a613019d6cf4862100257f02e894c5535971a4");
+
+    expect(computeBlobSha1("src/App.tsx")).toBe(
+      "ad709a1429da07ba23d09c2dc564d01903dd64d6"
+    );
+
+    expect(
+      computeBlobSha1(
+        "src/components/news/editor/dev/RichTextEditorV2VisualHarness.tsx"
+      )
+    ).toBe("a5737566bb1386681e3bce1633b6b083982d995b");
   });
 
   // 13. Existing rich news adapter compatibility
@@ -716,5 +761,274 @@ describe("IMG-F3-09/D2-A — Canonical Inline Image NodeView & Extension", () =>
     expect(plainText).toBe("عنوان فرعي للتقرير\n\nفقرة ختامية بعد الصورة.");
 
     editor.destroy();
+  });
+
+  // 14. D2-C1 Correction A — Toolbar containment across 320, 375, 390, 600, 640, 768, 1024 and 1440px in RTL and LTR
+  it("14. [D2-C1 Correction A] keeps toolbar strictly inside visible editor content bounds across 320, 375, 390, 600, 640, 768, 1024, and 1440px widths in RTL and LTR, including when natural toolbar width exceeds container width", () => {
+    const requiredEditorWidths = [320, 375, 390, 600, 640, 768, 1024, 1440];
+    const naturalToolbarWidthsToTest = [260, 330, 420];
+
+    for (const editorWidth of requiredEditorWidths) {
+      const editorRect = {
+        top: 100,
+        bottom: 700,
+        left: 50,
+        right: 50 + editorWidth,
+        width: editorWidth,
+        height: 600,
+      };
+      const minAllowedLeft = editorRect.left + 8;
+      const maxAllowedRight = editorRect.right - 8;
+      const availableWidth = maxAllowedRight - minAllowedLeft;
+
+      for (const toolbarWidth of naturalToolbarWidthsToTest) {
+        // Test left-edge figure (LTR float-start / RTL float-end), right-edge figure (RTL float-start / LTR float-end), and centered figure
+        const figureWidth = Math.min(editorWidth, Math.round(editorWidth * 0.5));
+        const placements = [
+          {
+            label: "left-aligned edge",
+            left: editorRect.left,
+            right: editorRect.left + figureWidth,
+          },
+          {
+            label: "right-aligned edge",
+            left: editorRect.right - figureWidth,
+            right: editorRect.right,
+          },
+          {
+            label: "centered",
+            left: editorRect.left + (editorWidth - figureWidth) / 2,
+            right: editorRect.left + (editorWidth + figureWidth) / 2,
+          },
+        ];
+
+        for (const pos of placements) {
+          const computed = computeToolbarClampedPosition({
+            figureRect: {
+              top: 220,
+              bottom: 420,
+              left: pos.left,
+              right: pos.right,
+              width: figureWidth,
+            },
+            editorRect,
+            toolbarWidth,
+            toolbarHeight: 40,
+          });
+
+          expect(computed.maxWidthPx).toBe(availableWidth);
+          expect(computed.effectiveToolbarWidth).toBeLessThanOrEqual(availableWidth);
+          expect(computed.clampedLeft).toBeGreaterThanOrEqual(minAllowedLeft - 0.01);
+          expect(computed.clampedRight).toBeLessThanOrEqual(maxAllowedRight + 0.01);
+
+          if (
+            availableWidth < COMPACT_TOOLBAR_MAX_CONTAINER_PX ||
+            toolbarWidth > availableWidth
+          ) {
+            expect(computed.isCompact).toBe(true);
+          } else {
+            expect(computed.isCompact).toBe(false);
+          }
+        }
+      }
+
+      // Verify rendered NodeView markup at this editorWidth in both RTL and LTR preserves all controls and sets max-width
+      for (const dir of ["rtl", "ltr"] as const) {
+        const html = renderToStaticMarkup(
+          <EditorialImageLocaleContext.Provider
+            value={{ lang: dir === "rtl" ? "ar" : "en", dir }}
+          >
+            <EditorialImageNodeView
+              {...createMockNodeViewProps({
+                selected: true,
+                dir,
+                editorWidth,
+                attrs: { width: "50%", layout: "float-start" },
+              })}
+            />
+          </EditorialImageLocaleContext.Provider>
+        );
+
+        expect(html).toContain(`data-toolbar-max-width="${availableWidth}"`);
+        expect(html).toContain(`max-width:${availableWidth}px`);
+        expect(html).toContain(
+          `data-toolbar-compact="${availableWidth < COMPACT_TOOLBAR_MAX_CONTAINER_PX ? "true" : "false"}"`
+        );
+
+        // Confirm zero controls were removed
+        expect(html).toContain('data-testid="editorial-image-drag-handle"');
+        for (const w of ALLOWED_EDITORIAL_IMAGE_WIDTHS) {
+          expect(html).toContain(`data-testid="editorial-image-width-${w}"`);
+        }
+        for (const l of ALLOWED_EDITORIAL_IMAGE_LAYOUTS) {
+          expect(html).toContain(`data-testid="editorial-image-layout-${l}"`);
+        }
+        expect(html).toContain('data-testid="editorial-image-delete"');
+      }
+    }
+  });
+
+  // 15. D2-C1 Correction B — Container-aware responsive float collapse across 320, 375, 390, 600, 640, 768, 1024 and 1440px
+  it("15. [D2-C1 Correction B] enforces container-aware float policy across 320, 375, 390, 600, 640, 768, 1024, and 1440px without mutating canonical V2 attributes", () => {
+    expect(NARROW_EDITOR_CONTAINER_MAX_PX).toBe(640);
+    expect(WIDE_EDITOR_CONTAINER_MIN_PX).toBe(1024);
+    expect(MIN_READABLE_PARAGRAPH_WIDTH_PX).toBe(320);
+
+    // 15a. Narrow containers (< 640px): 320, 375, 390, 600 -> all floated images (25%, 50%, 75%) collapse to centered blocks
+    for (const narrowWidth of [320, 375, 390, 600]) {
+      for (const floatLayout of ["float-start", "float-end"] as const) {
+        for (const widthPreset of ["25%", "50%", "75%"] as const) {
+          for (const isRtl of [true, false]) {
+            const pres = resolveEditorialImageResponsivePresentation(
+              floatLayout,
+              widthPreset,
+              isRtl,
+              narrowWidth
+            );
+
+            expect(pres.containerTier).toBe("narrow");
+            expect(pres.isFloatCollapsed).toBe(true);
+            expect(pres.effectiveRenderLayout).toBe("block-center");
+            // Canonical V2 attributes are preserved unchanged
+            expect(pres.canonicalLayout).toBe(floatLayout);
+            expect(pres.canonicalWidth).toBe(widthPreset);
+            // Style renders centered independent block with no float
+            expect(pres.style.float).toBe("none");
+            expect(pres.style.display).toBe("block");
+            expect(pres.style.clear).toBe("both");
+            expect(pres.style.marginLeft).toBe("auto");
+            expect(pres.style.marginRight).toBe("auto");
+            expect(pres.style.width).toBe(widthPreset);
+          }
+        }
+      }
+
+      // Verify rendered NodeView in narrow container preserves canonical data-layout & data-width while setting data-float-collapsed="true"
+      const narrowHtml = renderToStaticMarkup(
+        <EditorialImageNodeView
+          {...createMockNodeViewProps({
+            editorWidth: narrowWidth,
+            attrs: { width: "50%", layout: "float-start" },
+          })}
+        />
+      );
+      expect(narrowHtml).toContain('data-layout="float-start"');
+      expect(narrowHtml).toContain('data-width="50%"');
+      expect(narrowHtml).toContain('data-container-tier="narrow"');
+      expect(narrowHtml).toContain('data-float-collapsed="true"');
+      expect(narrowHtml).toContain('data-presentation-layout="block-center"');
+      expect(narrowHtml).toContain("float:none");
+      expect(narrowHtml).toContain("margin-left:auto");
+      expect(narrowHtml).toContain("margin-right:auto");
+    }
+
+    // 15b. Medium container at 640px:
+    // - 25% leaves 640 * 0.75 - 20 = 460px (>= 320px) -> wraps!
+    // - 50% leaves 640 * 0.50 - 20 = 300px (< 320px) -> collapses to centered block!
+    // - 75% leaves 640 * 0.25 - 20 = 140px (< 320px) -> collapses to centered block!
+    const med640_25 = resolveEditorialImageResponsivePresentation(
+      "float-start",
+      "25%",
+      true,
+      640
+    );
+    expect(med640_25.containerTier).toBe("medium");
+    expect(med640_25.remainingTextWidthPx).toBe(460);
+    expect(med640_25.isFloatCollapsed).toBe(false);
+    expect(med640_25.style.float).toBe("right");
+
+    const med640_50 = resolveEditorialImageResponsivePresentation(
+      "float-start",
+      "50%",
+      true,
+      640
+    );
+    expect(med640_50.containerTier).toBe("medium");
+    expect(med640_50.remainingTextWidthPx).toBe(300);
+    expect(med640_50.isFloatCollapsed).toBe(true);
+    expect(med640_50.style.float).toBe("none");
+    expect(med640_50.style.marginLeft).toBe("auto");
+    expect(med640_50.canonicalLayout).toBe("float-start");
+
+    const med640_75 = resolveEditorialImageResponsivePresentation(
+      "float-end",
+      "75%",
+      false,
+      640
+    );
+    expect(med640_75.containerTier).toBe("medium");
+    expect(med640_75.remainingTextWidthPx).toBe(140);
+    expect(med640_75.isFloatCollapsed).toBe(true);
+    expect(med640_75.style.float).toBe("none");
+    expect(med640_75.canonicalLayout).toBe("float-end");
+
+    // 15c. Medium container at 768px:
+    // - 25% leaves 768 * 0.75 - 20 = 556px (>= 320px) -> wraps!
+    // - 50% leaves 768 * 0.50 - 20 = 364px (>= 320px) -> wraps!
+    // - 75% leaves 768 * 0.25 - 20 = 172px (< 320px) -> collapses to centered block!
+    const med768_25 = resolveEditorialImageResponsivePresentation(
+      "float-start",
+      "25%",
+      false,
+      768
+    );
+    expect(med768_25.containerTier).toBe("medium");
+    expect(med768_25.remainingTextWidthPx).toBe(556);
+    expect(med768_25.isFloatCollapsed).toBe(false);
+    expect(med768_25.style.float).toBe("left");
+
+    const med768_50 = resolveEditorialImageResponsivePresentation(
+      "float-start",
+      "50%",
+      true,
+      768
+    );
+    expect(med768_50.containerTier).toBe("medium");
+    expect(med768_50.remainingTextWidthPx).toBe(364);
+    expect(med768_50.isFloatCollapsed).toBe(false);
+    expect(med768_50.style.float).toBe("right");
+
+    const med768_75 = resolveEditorialImageResponsivePresentation(
+      "float-start",
+      "75%",
+      true,
+      768
+    );
+    expect(med768_75.containerTier).toBe("medium");
+    expect(med768_75.remainingTextWidthPx).toBe(172);
+    expect(med768_75.isFloatCollapsed).toBe(true);
+    expect(med768_75.style.float).toBe("none");
+    expect(med768_75.style.marginLeft).toBe("auto");
+    expect(med768_75.canonicalLayout).toBe("float-start");
+    expect(med768_75.canonicalWidth).toBe("75%");
+
+    // 15d. Wide containers (>= 1024px): 1024 and 1440 -> honor saved canonical float layout for 25%, 50%, and 75%
+    for (const wideWidth of [1024, 1440]) {
+      for (const widthPreset of ["25%", "50%", "75%"] as const) {
+        const rtlStart = resolveEditorialImageResponsivePresentation(
+          "float-start",
+          widthPreset,
+          true,
+          wideWidth
+        );
+        expect(rtlStart.containerTier).toBe("wide");
+        expect(rtlStart.isFloatCollapsed).toBe(false);
+        expect(rtlStart.effectiveRenderLayout).toBe("float-start");
+        expect(rtlStart.style.float).toBe("right");
+        expect(rtlStart.style.width).toBe(widthPreset);
+
+        const ltrEnd = resolveEditorialImageResponsivePresentation(
+          "float-end",
+          widthPreset,
+          false,
+          wideWidth
+        );
+        expect(ltrEnd.containerTier).toBe("wide");
+        expect(ltrEnd.isFloatCollapsed).toBe(false);
+        expect(ltrEnd.effectiveRenderLayout).toBe("float-end");
+        expect(ltrEnd.style.float).toBe("right");
+        expect(ltrEnd.style.width).toBe(widthPreset);
+      }
+    }
   });
 });

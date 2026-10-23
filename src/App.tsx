@@ -26,6 +26,9 @@ import type { Language } from './types';
 import './App.css';
 
 const ImageEditorSandbox = lazy(() => import('./components/news/editor/sandbox/ImageEditorSandbox'));
+const RichTextEditorV2VisualHarness = lazy(
+  () => import('./components/news/editor/dev/RichTextEditorV2VisualHarness')
+);
 
 function App() {
   const { t, i18n } = useTranslation();
@@ -62,6 +65,13 @@ function App() {
     return false;
   });
 
+  const [isV2VisualHarnessOpen, setIsV2VisualHarnessOpen] = useState(() => {
+    if (import.meta.env.DEV && typeof window !== 'undefined') {
+      return window.location.hash === '#img-f3-v2-visual';
+    }
+    return false;
+  });
+
   const [initialNewsSlug, setInitialNewsSlug] = useState<string | undefined>(() => {
     if (typeof window !== 'undefined' && window.location.hash.startsWith('#news/')) {
       return window.location.hash.replace('#news/', '');
@@ -76,6 +86,12 @@ function App() {
         setIsImageSandboxOpen(true);
       } else {
         setIsImageSandboxOpen(false);
+      }
+
+      if (import.meta.env.DEV && hash === '#img-f3-v2-visual') {
+        setIsV2VisualHarnessOpen(true);
+      } else {
+        setIsV2VisualHarnessOpen(false);
       }
 
       if (hash.startsWith('#news/')) {
@@ -109,6 +125,15 @@ function App() {
             <ImageEditorSandbox
               onExit={() => {
                 setIsImageSandboxOpen(false);
+                window.location.hash = '';
+              }}
+            />
+          </Suspense>
+        ) : import.meta.env.DEV && isV2VisualHarnessOpen ? (
+          <Suspense fallback={<div className="p-4 text-center text-xs text-gray-500">Loading V2 Visual Harness...</div>}>
+            <RichTextEditorV2VisualHarness
+              onExit={() => {
+                setIsV2VisualHarnessOpen(false);
                 window.location.hash = '';
               }}
             />

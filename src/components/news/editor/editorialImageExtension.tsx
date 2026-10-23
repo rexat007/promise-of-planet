@@ -382,15 +382,42 @@ export function createOwnedPreviewUrlRegistry(
 }
 
 /* ==========================================
- * Layout, Float & Toolbar Clamping Helpers
+ * Container-Responsive Layout & Toolbar Clamping Helpers
  * ========================================== */
 
 /**
- * Responsive text-wrapping and mobile-collapse CSS carried over from the accepted Sandbox.
+ * Container-width thresholds for article editor content (in px).
+ * - Narrow (< 640px): floated images render as centered independent blocks with no text wrapping.
+ * - Medium (640px to < 1024px): floated images wrap only when at least MIN_READABLE_PARAGRAPH_WIDTH_PX
+ *   of horizontal width remains for adjacent text; otherwise they render as centered blocks.
+ * - Wide (>= 1024px): floated images honor their saved canonical float layout.
+ */
+export const NARROW_EDITOR_CONTAINER_MAX_PX = 640;
+export const WIDE_EDITOR_CONTAINER_MIN_PX = 1024;
+export const MIN_READABLE_PARAGRAPH_WIDTH_PX = 320;
+export const EDITORIAL_IMAGE_FLOAT_GAP_PX = 20;
+export const COMPACT_TOOLBAR_MAX_CONTAINER_PX = 360;
+
+export type EditorialImageContainerTier = "narrow" | "medium" | "wide";
+
+export interface EditorialImageResponsivePresentation {
+  canonicalLayout: EditorialImageLayoutV2;
+  canonicalWidth: EditorialImageWidthV2;
+  effectiveRenderLayout: EditorialImageLayoutV2;
+  containerTier: EditorialImageContainerTier;
+  isFloatCollapsed: boolean;
+  remainingTextWidthPx: number | null;
+  style: React.CSSProperties;
+}
+
+/**
+ * Responsive text-wrapping and container-collapse CSS.
+ * Respects `data-float-collapsed="true"` for container-aware collapse while preserving
+ * canonical `data-layout` and `data-width` attributes untouched.
  */
 export const EDITORIAL_IMAGE_LAYOUT_CSS = `
-  [dir="rtl"] .pop-layout-float-start,
-  [dir="rtl"] figure[data-layout="float-start"] {
+  [dir="rtl"] .pop-layout-float-start:not([data-float-collapsed="true"]),
+  [dir="rtl"] figure[data-layout="float-start"]:not([data-float-collapsed="true"]) {
     float: right;
     margin-left: 1.25rem;
     margin-right: 0;
@@ -398,8 +425,8 @@ export const EDITORIAL_IMAGE_LAYOUT_CSS = `
     margin-top: 0.25rem;
   }
 
-  [dir="rtl"] .pop-layout-float-end,
-  [dir="rtl"] figure[data-layout="float-end"] {
+  [dir="rtl"] .pop-layout-float-end:not([data-float-collapsed="true"]),
+  [dir="rtl"] figure[data-layout="float-end"]:not([data-float-collapsed="true"]) {
     float: left;
     margin-right: 1.25rem;
     margin-left: 0;
@@ -407,8 +434,8 @@ export const EDITORIAL_IMAGE_LAYOUT_CSS = `
     margin-top: 0.25rem;
   }
 
-  [dir="ltr"] .pop-layout-float-start,
-  [dir="ltr"] figure[data-layout="float-start"] {
+  [dir="ltr"] .pop-layout-float-start:not([data-float-collapsed="true"]),
+  [dir="ltr"] figure[data-layout="float-start"]:not([data-float-collapsed="true"]) {
     float: left;
     margin-right: 1.25rem;
     margin-left: 0;
@@ -416,8 +443,8 @@ export const EDITORIAL_IMAGE_LAYOUT_CSS = `
     margin-top: 0.25rem;
   }
 
-  [dir="ltr"] .pop-layout-float-end,
-  [dir="ltr"] figure[data-layout="float-end"] {
+  [dir="ltr"] .pop-layout-float-end:not([data-float-collapsed="true"]),
+  [dir="ltr"] figure[data-layout="float-end"]:not([data-float-collapsed="true"]) {
     float: right;
     margin-left: 1.25rem;
     margin-right: 0;
@@ -426,7 +453,8 @@ export const EDITORIAL_IMAGE_LAYOUT_CSS = `
   }
 
   .pop-layout-block-center,
-  figure[data-layout="block-center"] {
+  figure[data-layout="block-center"],
+  figure[data-float-collapsed="true"] {
     float: none !important;
     display: block !important;
     clear: both !important;
@@ -450,123 +478,220 @@ export const EDITORIAL_IMAGE_LAYOUT_CSS = `
   }
 
   @media (max-width: 640px) {
-    .editorial-image-node-wrapper,
-    .pop-editorial-figure {
+    .editorial-image-node-wrapper[data-layout="float-start"],
+    .editorial-image-node-wrapper[data-layout="float-end"],
+    .pop-editorial-figure[data-layout="float-start"],
+    .pop-editorial-figure[data-layout="float-end"] {
       float: none !important;
-      width: 100% !important;
+      display: block !important;
       max-width: 100% !important;
-      margin-left: 0 !important;
-      margin-right: 0 !important;
-      margin-bottom: 1rem !important;
+      margin-left: auto !important;
+      margin-right: auto !important;
+      margin-bottom: 0.75rem !important;
       clear: both !important;
     }
   }
 `;
 
+function parseCanonicalWidthRatio(width: EditorialImageWidthV2): number {
+  switch (width) {
+    case "25%":
+      return 0.25;
+    case "50%":
+      return 0.5;
+    case "75%":
+      return 0.75;
+    case "100%":
+      return 1;
+  }
+}
+
+/**
+ * Resolves container-aware presentation for an editorialImage node without mutating
+ * its saved canonical V2 `layout` or `width` attributes.
+ */
+export function resolveEditorialImageResponsivePresentation(
+  layout: EditorialImageLayoutV2,
+  width: EditorialImageWidthV2,
+  isRtl: boolean,
+  containerWidthPx?: number | null
+): EditorialImageResponsivePresentation {
+  const canonicalLayout: EditorialImageLayoutV2 =
+    ALLOWED_EDITORIAL_IMAGE_LAYOUTS.includes(layout) ? layout : "float-start";
+  const canonicalWidth: EditorialImageWidthV2 =
+    ALLOWED_EDITORIAL_IMAGE_WIDTHS.includes(width) ? width : "50%";
+
+  const hasMeasuredContainer =
+    typeof containerWidthPx === "number" &&
+    Number.isFinite(containerWidthPx) &&
+    containerWidthPx > 0;
+
+  const containerTier: EditorialImageContainerTier = !hasMeasuredContainer
+    ? "wide"
+    : containerWidthPx < NARROW_EDITOR_CONTAINER_MAX_PX
+      ? "narrow"
+      : containerWidthPx < WIDE_EDITOR_CONTAINER_MIN_PX
+        ? "medium"
+        : "wide";
+
+  const isFloatIntent =
+    canonicalLayout === "float-start" || canonicalLayout === "float-end";
+
+  if (canonicalLayout === "block-full" || (isFloatIntent && canonicalWidth === "100%")) {
+    return {
+      canonicalLayout,
+      canonicalWidth,
+      effectiveRenderLayout: "block-full",
+      containerTier,
+      isFloatCollapsed: false,
+      remainingTextWidthPx: null,
+      style: {
+        float: "none",
+        display: "block",
+        clear: "both",
+        width: "100%",
+        maxWidth: "100%",
+        marginLeft: "0",
+        marginRight: "0",
+        marginTop: isFloatIntent ? undefined : "0.75rem",
+        marginBottom: "0.75rem",
+      },
+    };
+  }
+
+  if (canonicalLayout === "block-center") {
+    return {
+      canonicalLayout,
+      canonicalWidth,
+      effectiveRenderLayout: "block-center",
+      containerTier,
+      isFloatCollapsed: false,
+      remainingTextWidthPx: null,
+      style: {
+        float: "none",
+        display: "block",
+        clear: "both",
+        width: canonicalWidth,
+        maxWidth: "100%",
+        marginLeft: "auto",
+        marginRight: "auto",
+        marginTop: "0.75rem",
+        marginBottom: "0.75rem",
+      },
+    };
+  }
+
+  // Float layout (float-start or float-end) with width 25%, 50%, or 75%
+  const widthRatio = parseCanonicalWidthRatio(canonicalWidth);
+  const remainingTextWidthPx = hasMeasuredContainer
+    ? Math.max(
+        0,
+        Math.round(
+          containerWidthPx * (1 - widthRatio) - EDITORIAL_IMAGE_FLOAT_GAP_PX
+        )
+      )
+    : null;
+
+  const shouldCollapseFloat =
+    containerTier === "narrow" ||
+    (containerTier === "medium" &&
+      remainingTextWidthPx !== null &&
+      remainingTextWidthPx < MIN_READABLE_PARAGRAPH_WIDTH_PX);
+
+  if (shouldCollapseFloat) {
+    return {
+      canonicalLayout,
+      canonicalWidth,
+      effectiveRenderLayout: "block-center",
+      containerTier,
+      isFloatCollapsed: true,
+      remainingTextWidthPx,
+      style: {
+        float: "none",
+        display: "block",
+        clear: "both",
+        width: canonicalWidth,
+        maxWidth: "100%",
+        marginLeft: "auto",
+        marginRight: "auto",
+        marginTop: "0.75rem",
+        marginBottom: "0.75rem",
+      },
+    };
+  }
+
+  if (canonicalLayout === "float-start") {
+    return {
+      canonicalLayout,
+      canonicalWidth,
+      effectiveRenderLayout: "float-start",
+      containerTier,
+      isFloatCollapsed: false,
+      remainingTextWidthPx,
+      style: isRtl
+        ? {
+            float: "right",
+            width: canonicalWidth,
+            maxWidth: "100%",
+            marginLeft: "1.25rem",
+            marginRight: "0",
+            marginBottom: "0.75rem",
+          }
+        : {
+            float: "left",
+            width: canonicalWidth,
+            maxWidth: "100%",
+            marginRight: "1.25rem",
+            marginLeft: "0",
+            marginBottom: "0.75rem",
+          },
+    };
+  }
+
+  // float-end
+  return {
+    canonicalLayout,
+    canonicalWidth,
+    effectiveRenderLayout: "float-end",
+    containerTier,
+    isFloatCollapsed: false,
+    remainingTextWidthPx,
+    style: isRtl
+      ? {
+          float: "left",
+          width: canonicalWidth,
+          maxWidth: "100%",
+          marginRight: "1.25rem",
+          marginLeft: "0",
+          marginBottom: "0.75rem",
+        }
+      : {
+          float: "right",
+          width: canonicalWidth,
+          maxWidth: "100%",
+          marginLeft: "1.25rem",
+          marginRight: "0",
+          marginBottom: "0.75rem",
+        },
+  };
+}
+
 /**
  * Computes inline float and margin styles for RTL and LTR article flow,
- * preserving the accepted Sandbox behavior.
+ * honoring container-aware responsive collapse when `containerWidthPx` is provided.
  */
 export function computeEditorialImageFloatStyle(
   layout: EditorialImageLayoutV2,
   width: EditorialImageWidthV2,
-  isRtl: boolean
+  isRtl: boolean,
+  containerWidthPx?: number | null
 ): React.CSSProperties {
-  const effectiveLayout: EditorialImageLayoutV2 =
-    ALLOWED_EDITORIAL_IMAGE_LAYOUTS.includes(layout) ? layout : "float-start";
-  const effectiveWidth: EditorialImageWidthV2 =
-    ALLOWED_EDITORIAL_IMAGE_WIDTHS.includes(width) ? width : "50%";
-
-  if (effectiveLayout === "float-start") {
-    if (effectiveWidth === "100%") {
-      return {
-        float: "none",
-        display: "block",
-        clear: "both",
-        width: "100%",
-        maxWidth: "100%",
-        marginLeft: "0",
-        marginRight: "0",
-        marginBottom: "0.75rem",
-      };
-    }
-    return isRtl
-      ? {
-          float: "right",
-          width: effectiveWidth,
-          maxWidth: "100%",
-          marginLeft: "1.25rem",
-          marginRight: "0",
-          marginBottom: "0.75rem",
-        }
-      : {
-          float: "left",
-          width: effectiveWidth,
-          maxWidth: "100%",
-          marginRight: "1.25rem",
-          marginLeft: "0",
-          marginBottom: "0.75rem",
-        };
-  }
-
-  if (effectiveLayout === "float-end") {
-    if (effectiveWidth === "100%") {
-      return {
-        float: "none",
-        display: "block",
-        clear: "both",
-        width: "100%",
-        maxWidth: "100%",
-        marginLeft: "0",
-        marginRight: "0",
-        marginBottom: "0.75rem",
-      };
-    }
-    return isRtl
-      ? {
-          float: "left",
-          width: effectiveWidth,
-          maxWidth: "100%",
-          marginRight: "1.25rem",
-          marginLeft: "0",
-          marginBottom: "0.75rem",
-        }
-      : {
-          float: "right",
-          width: effectiveWidth,
-          maxWidth: "100%",
-          marginLeft: "1.25rem",
-          marginRight: "0",
-          marginBottom: "0.75rem",
-        };
-  }
-
-  if (effectiveLayout === "block-center") {
-    return {
-      float: "none",
-      display: "block",
-      clear: "both",
-      width: effectiveWidth,
-      maxWidth: "100%",
-      marginLeft: "auto",
-      marginRight: "auto",
-      marginTop: "0.75rem",
-      marginBottom: "0.75rem",
-    };
-  }
-
-  // block-full
-  return {
-    float: "none",
-    display: "block",
-    clear: "both",
-    width: "100%",
-    maxWidth: "100%",
-    marginLeft: "0",
-    marginRight: "0",
-    marginTop: "0.75rem",
-    marginBottom: "0.75rem",
-  };
+  return resolveEditorialImageResponsivePresentation(
+    layout,
+    width,
+    isRtl,
+    containerWidthPx
+  ).style;
 }
 
 export interface ToolbarBoundsInput {
@@ -574,43 +699,98 @@ export interface ToolbarBoundsInput {
   editorRect: { top: number; bottom: number; left: number; right: number; width: number };
   toolbarWidth: number;
   toolbarHeight: number;
+  edgePadding?: number;
 }
 
 export interface ToolbarBoundsComputation {
   shiftX: number;
-  placement: "above" | "below";
+  placement: "above" | "below" | "inside-top";
+  maxWidthPx: number;
+  effectiveToolbarWidth: number;
+  isCompact: boolean;
+  clampedLeft: number;
+  clampedRight: number;
 }
 
 /**
- * Clamps the contextual toolbar horizontally within editor bounds and
- * flips placement from "above" to "below" when near the top boundary.
+ * Clamps the contextual toolbar horizontally within the visible editor content area,
+ * caps its maximum width when the editor is narrower than the natural toolbar width,
+ * and flips placement from "above" to "below" (or "inside-top" when both vertical edges are tight)
+ * to prevent ancestor overflow clipping.
  */
 export function computeToolbarClampedPosition({
   figureRect,
   editorRect,
   toolbarWidth,
   toolbarHeight,
+  edgePadding = 8,
 }: ToolbarBoundsInput): ToolbarBoundsComputation {
-  const figureCenterX = figureRect.left + figureRect.width / 2;
-  const idealLeft = figureCenterX - toolbarWidth / 2;
-  const idealRight = figureCenterX + toolbarWidth / 2;
+  const padding =
+    typeof edgePadding === "number" && Number.isFinite(edgePadding) && edgePadding >= 0
+      ? edgePadding
+      : 8;
 
-  const minLeftBoundary = editorRect.left + 8;
-  const maxRightBoundary = editorRect.right - 8;
+  const minLeftBoundary = editorRect.left + padding;
+  const maxRightBoundary = Math.max(minLeftBoundary, editorRect.right - padding);
+  const availableEditorWidth = Math.max(0, maxRightBoundary - minLeftBoundary);
+  const maxWidthPx = availableEditorWidth;
+
+  const safeToolbarWidth = Math.max(0, toolbarWidth);
+  const effectiveToolbarWidth =
+    availableEditorWidth > 0
+      ? Math.min(safeToolbarWidth, availableEditorWidth)
+      : safeToolbarWidth;
+
+  const isCompact =
+    (availableEditorWidth > 0 &&
+      availableEditorWidth < COMPACT_TOOLBAR_MAX_CONTAINER_PX) ||
+    (availableEditorWidth > 0 && safeToolbarWidth > availableEditorWidth);
+
+  const figureCenterX = figureRect.left + figureRect.width / 2;
+  const idealLeft = figureCenterX - effectiveToolbarWidth / 2;
+  const idealRight = figureCenterX + effectiveToolbarWidth / 2;
 
   let shiftX = 0;
-  if (idealLeft < minLeftBoundary) {
+  if (availableEditorWidth > 0 && effectiveToolbarWidth >= availableEditorWidth) {
+    const editorCenterX = (minLeftBoundary + maxRightBoundary) / 2;
+    shiftX = editorCenterX - figureCenterX;
+  } else if (idealLeft < minLeftBoundary) {
     shiftX = minLeftBoundary - idealLeft;
   } else if (idealRight > maxRightBoundary) {
     shiftX = maxRightBoundary - idealRight;
   }
 
-  const availableTopSpace = figureRect.top - editorRect.top;
-  const requiredTopSpace = Math.max(toolbarHeight, 36) + 12;
-  const placement: "above" | "below" =
-    availableTopSpace < requiredTopSpace ? "below" : "above";
+  const clampedLeft = idealLeft + shiftX;
+  const clampedRight = idealRight + shiftX;
 
-  return { shiftX, placement };
+  const availableTopSpace = figureRect.top - editorRect.top;
+  const availableBottomSpace = editorRect.bottom - figureRect.bottom;
+  const requiredVerticalSpace = Math.max(toolbarHeight, 36) + 12;
+
+  let placement: "above" | "below" | "inside-top" = "above";
+  if (availableTopSpace < requiredVerticalSpace) {
+    if (
+      availableBottomSpace >= requiredVerticalSpace ||
+      availableBottomSpace >= availableTopSpace
+    ) {
+      placement =
+        availableBottomSpace < 24 && availableTopSpace < 24
+          ? "inside-top"
+          : "below";
+    } else {
+      placement = "inside-top";
+    }
+  }
+
+  return {
+    shiftX,
+    placement,
+    maxWidthPx,
+    effectiveToolbarWidth,
+    isCompact,
+    clampedLeft,
+    clampedRight,
+  };
 }
 
 /* ==========================================
@@ -727,17 +907,39 @@ export function EditorialImageNodeView(props: NodeViewProps) {
   const previewCtx = useContext(EditorialImagePreviewContext);
 
   const [isHovered, setIsHovered] = useState(false);
+  const [measuredContainerWidth, setMeasuredContainerWidth] = useState<
+    number | null
+  >(null);
   const [toolbarShiftX, setToolbarShiftX] = useState(0);
-  const [toolbarPlacement, setToolbarPlacement] = useState<"above" | "below">(
-    "above"
-  );
+  const [toolbarPlacement, setToolbarPlacement] = useState<
+    "above" | "below" | "inside-top"
+  >("above");
+  const [toolbarMaxWidthPx, setToolbarMaxWidthPx] = useState<number | null>(null);
+  const [isToolbarCompact, setIsToolbarCompact] = useState(false);
 
   const figureRef = useRef<HTMLElement | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
 
-  const domDir = editor?.view?.dom?.getAttribute("dir");
+  const domDir = editor?.view?.dom?.getAttribute?.("dir");
   const isRtl = domDir ? domDir === "rtl" : localeCtx.dir === "rtl";
   const isAr = domDir ? domDir === "rtl" : localeCtx.lang === "ar";
+
+  // Resolve initial editor rect synchronously when available (supports SSR/static test harnesses and first paint)
+  const fallbackEditorRect = (() => {
+    try {
+      return editor?.view?.dom?.getBoundingClientRect?.() ?? null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const effectiveContainerWidth =
+    measuredContainerWidth ??
+    (fallbackEditorRect &&
+    typeof fallbackEditorRect.width === "number" &&
+    fallbackEditorRect.width > 0
+      ? Math.round(fallbackEditorRect.width)
+      : null);
 
   // Resolve runtime-only preview URL strictly by assetId
   const extensionOptions = (extension?.options ||
@@ -759,27 +961,84 @@ export function EditorialImageNodeView(props: NodeViewProps) {
 
   const showToolbar = Boolean(selected || isHovered);
 
-  const recalculateToolbarPosition = useCallback(() => {
+  const recalculateLayoutAndToolbar = useCallback(() => {
+    const editorDom = editor?.view?.dom;
+    const editorRect = editorDom?.getBoundingClientRect?.();
+    if (
+      editorRect &&
+      typeof editorRect.width === "number" &&
+      editorRect.width > 0
+    ) {
+      const nextContainerWidth = Math.round(editorRect.width);
+      setMeasuredContainerWidth((prev) =>
+        prev === nextContainerWidth ? prev : nextContainerWidth
+      );
+    }
+
     const figureEl = figureRef.current;
     const toolbarEl = toolbarRef.current;
-    const editorDom = editor?.view?.dom;
-    if (!figureEl || !toolbarEl || !editorDom) return;
+    if (!figureEl || !toolbarEl || !editorRect) return;
 
     const figureRect = figureEl.getBoundingClientRect();
     const toolbarRect = toolbarEl.getBoundingClientRect();
-    const editorRect = editorDom.getBoundingClientRect();
 
-    const { shiftX, placement } = computeToolbarClampedPosition({
+    const computed = computeToolbarClampedPosition({
       figureRect,
       editorRect,
       toolbarWidth: toolbarRect.width,
       toolbarHeight: toolbarRect.height,
     });
 
-    setToolbarShiftX(shiftX);
-    setToolbarPlacement(placement);
+    const nextShiftX = Math.round(computed.shiftX);
+    const nextMaxWidthPx = Math.round(computed.maxWidthPx);
+
+    setToolbarShiftX((prev) => (prev === nextShiftX ? prev : nextShiftX));
+    setToolbarPlacement((prev) =>
+      prev === computed.placement ? prev : computed.placement
+    );
+    setToolbarMaxWidthPx((prev) =>
+      prev === nextMaxWidthPx ? prev : nextMaxWidthPx
+    );
+    setIsToolbarCompact((prev) =>
+      prev === computed.isCompact ? prev : computed.isCompact
+    );
   }, [editor]);
 
+  // Observe editor content container and figure resize events for container-aware responsive layout
+  useEffect(() => {
+    recalculateLayoutAndToolbar();
+
+    const editorDom = editor?.view?.dom;
+    const figureEl = figureRef.current;
+
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(() => {
+        recalculateLayoutAndToolbar();
+      });
+      if (editorDom && typeof Node !== "undefined" && editorDom instanceof globalThis.Element) {
+        resizeObserver.observe(editorDom);
+      }
+      if (figureEl && typeof Node !== "undefined" && figureEl instanceof globalThis.Element) {
+        resizeObserver.observe(figureEl);
+      }
+    }
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("resize", recalculateLayoutAndToolbar);
+    }
+
+    return () => {
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
+      if (typeof window !== "undefined") {
+        window.removeEventListener("resize", recalculateLayoutAndToolbar);
+      }
+    };
+  }, [editor, effectiveWidth, effectiveLayout, isRtl, recalculateLayoutAndToolbar]);
+
+  // Recalculate toolbar clamping on selection/hover and scroll
   useEffect(() => {
     if (!showToolbar) {
       setToolbarShiftX(0);
@@ -787,17 +1046,32 @@ export function EditorialImageNodeView(props: NodeViewProps) {
       return;
     }
 
-    recalculateToolbarPosition();
-    const rafId = requestAnimationFrame(recalculateToolbarPosition);
-    window.addEventListener("resize", recalculateToolbarPosition);
-    window.addEventListener("scroll", recalculateToolbarPosition, true);
+    recalculateLayoutAndToolbar();
+    const rafId =
+      typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame(recalculateLayoutAndToolbar)
+        : null;
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("scroll", recalculateLayoutAndToolbar, true);
+    }
 
     return () => {
-      cancelAnimationFrame(rafId);
-      window.removeEventListener("resize", recalculateToolbarPosition);
-      window.removeEventListener("scroll", recalculateToolbarPosition, true);
+      if (rafId !== null && typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(rafId);
+      }
+      if (typeof window !== "undefined") {
+        window.removeEventListener("scroll", recalculateLayoutAndToolbar, true);
+      }
     };
-  }, [showToolbar, effectiveWidth, effectiveLayout, isRtl, recalculateToolbarPosition]);
+  }, [
+    showToolbar,
+    effectiveWidth,
+    effectiveLayout,
+    isRtl,
+    effectiveContainerWidth,
+    recalculateLayoutAndToolbar,
+  ]);
 
   const {
     handleSetWidth,
@@ -812,12 +1086,42 @@ export function EditorialImageNodeView(props: NodeViewProps) {
     deleteNode,
   });
 
-  const floatStyle = computeEditorialImageFloatStyle(
+  const presentation = resolveEditorialImageResponsivePresentation(
     effectiveLayout,
     effectiveWidth,
-    isRtl
+    isRtl,
+    effectiveContainerWidth
   );
-  const layoutClass = `pop-layout-${effectiveLayout}`;
+  const floatStyle = presentation.style;
+  const layoutClass = `pop-layout-${presentation.effectiveRenderLayout}`;
+
+  const fallbackAvailableToolbarWidth =
+    fallbackEditorRect &&
+    typeof fallbackEditorRect.right === "number" &&
+    typeof fallbackEditorRect.left === "number" &&
+    fallbackEditorRect.right > fallbackEditorRect.left
+      ? Math.max(
+          0,
+          Math.round(fallbackEditorRect.right - fallbackEditorRect.left - 16)
+        )
+      : effectiveContainerWidth !== null
+        ? Math.max(0, effectiveContainerWidth - 16)
+        : null;
+
+  const activeToolbarMaxWidthPx =
+    toolbarMaxWidthPx ?? fallbackAvailableToolbarWidth;
+  const activeIsToolbarCompact =
+    isToolbarCompact ||
+    (activeToolbarMaxWidthPx !== null &&
+      activeToolbarMaxWidthPx > 0 &&
+      activeToolbarMaxWidthPx < COMPACT_TOOLBAR_MAX_CONTAINER_PX);
+
+  const toolbarVerticalClass =
+    toolbarPlacement === "below"
+      ? "top-full mt-2"
+      : toolbarPlacement === "inside-top"
+        ? "top-2"
+        : "bottom-full mb-2";
 
   return (
     <NodeViewWrapper
@@ -829,6 +1133,9 @@ export function EditorialImageNodeView(props: NodeViewProps) {
       data-asset-id={assetId}
       data-layout={effectiveLayout}
       data-width={effectiveWidth}
+      data-presentation-layout={presentation.effectiveRenderLayout}
+      data-container-tier={presentation.containerTier}
+      data-float-collapsed={presentation.isFloatCollapsed ? "true" : "false"}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       style={floatStyle}
@@ -846,15 +1153,28 @@ export function EditorialImageNodeView(props: NodeViewProps) {
         data-testid="editorial-image-toolbar"
         data-toolbar-placement={toolbarPlacement}
         data-toolbar-visible={showToolbar ? "true" : "false"}
+        data-toolbar-compact={activeIsToolbarCompact ? "true" : "false"}
+        data-toolbar-max-width={
+          activeToolbarMaxWidthPx !== null && activeToolbarMaxWidthPx > 0
+            ? String(activeToolbarMaxWidthPx)
+            : undefined
+        }
         contentEditable={false}
         style={{
+          left: "50%",
+          right: "auto",
+          width: "max-content",
+          maxWidth:
+            activeToolbarMaxWidthPx !== null && activeToolbarMaxWidthPx > 0
+              ? `${activeToolbarMaxWidthPx}px`
+              : "calc(100vw - 2rem)",
           transform: `translateX(calc(-50% + ${Math.round(toolbarShiftX)}px))`,
         }}
-        className={`absolute ${
-          toolbarPlacement === "below"
-            ? "top-full mt-2"
-            : "bottom-full mb-2"
-        } left-1/2 z-30 flex items-center gap-1 bg-gray-900/95 text-white px-2.5 py-1.5 rounded-lg shadow-xl text-xs whitespace-nowrap transition-opacity duration-150 ${
+        className={`absolute ${toolbarVerticalClass} left-1/2 z-30 flex flex-wrap items-center justify-center ${
+          activeIsToolbarCompact
+            ? "gap-0.5 px-1.5 py-1"
+            : "gap-1 px-2.5 py-1.5"
+        } bg-gray-900/95 text-white rounded-lg shadow-xl text-xs transition-opacity duration-150 ${
           showToolbar ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
@@ -862,16 +1182,16 @@ export function EditorialImageNodeView(props: NodeViewProps) {
         <span
           data-drag-handle=""
           data-testid="editorial-image-drag-handle"
-          className="cursor-grab active:cursor-grabbing text-gray-400 hover:text-white px-1 flex items-center"
+          className="cursor-grab active:cursor-grabbing text-gray-400 hover:text-white px-1 flex items-center shrink-0"
           title={isAr ? "اسحب لتحريك الصورة" : "Drag to move image"}
         >
           <GripVertical className="w-3.5 h-3.5" />
         </span>
 
-        <div className="w-px h-4 bg-gray-700 mx-0.5" />
+        <div className="w-px h-4 bg-gray-700 mx-0.5 shrink-0" />
 
         {/* Width Presets */}
-        <div className="flex items-center gap-0.5">
+        <div className="flex items-center gap-0.5 shrink-0">
           {ALLOWED_EDITORIAL_IMAGE_WIDTHS.map((w) => (
             <button
               key={w}
@@ -893,10 +1213,10 @@ export function EditorialImageNodeView(props: NodeViewProps) {
           ))}
         </div>
 
-        <div className="w-px h-4 bg-gray-700 mx-1" />
+        <div className="w-px h-4 bg-gray-700 mx-0.5 shrink-0" />
 
         {/* Logical Alignment / Wrapping Controls */}
-        <div className="flex items-center gap-0.5">
+        <div className="flex items-center gap-0.5 shrink-0">
           <button
             type="button"
             data-testid="editorial-image-layout-float-start"
@@ -986,7 +1306,7 @@ export function EditorialImageNodeView(props: NodeViewProps) {
           </button>
         </div>
 
-        <div className="w-px h-4 bg-gray-700 mx-1" />
+        <div className="w-px h-4 bg-gray-700 mx-0.5 shrink-0" />
 
         {/* Delete Image Node */}
         <button
@@ -996,7 +1316,7 @@ export function EditorialImageNodeView(props: NodeViewProps) {
             e.stopPropagation();
             handleDeleteNode();
           }}
-          className="p-1 rounded text-red-400 hover:bg-red-950/60 hover:text-red-300 transition-colors cursor-pointer"
+          className="p-1 rounded text-red-400 hover:bg-red-950/60 hover:text-red-300 transition-colors cursor-pointer shrink-0"
           title={isAr ? "حذف الصورة من المقال" : "Remove image from article"}
         >
           <Trash2 className="w-3.5 h-3.5" />
