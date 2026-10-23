@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NewsItem } from '../../types/news';
 import { CANONICAL_CATEGORY_DEFINITIONS, isCanonicalCategory } from '../../types';
@@ -9,7 +10,14 @@ import type { AdminUser } from '../../types/admin';
 import { WorkflowEngine } from '../../services/workflowEngine';
 import { AdminAccessService } from '../../services/adminAccess';
 import { AdminPermission } from '../../types/admin';
-import { NewsAdminClient } from '../../services/newsAdminClient';
+import {
+  NewsAdminClient,
+  NewsEditorImageSessionController,
+  type HaltedAmbiguousImageUpload,
+  type NewsImageBinaryFileLike,
+  type NewsImageMetadataFormInput,
+  type RetainedCompletedImageUpload,
+} from '../../services/newsAdminClient';
 import { RichTextEditor } from './editor/RichTextEditor';
 import { convertPlainTextToRichDocument } from '../../services/richNewsDocumentContract';
 import { 
@@ -33,7 +41,10 @@ import {
   ShieldAlert, 
   Check, 
   History,
-  AlertCircle
+  AlertCircle,
+  Image as ImageIcon,
+  Upload,
+  Trash2
 } from 'lucide-react';
 
 const JOURNALISTIC_TYPE_OPTIONS: readonly { value: JournalisticType; labelAr: string; labelEn: string }[] = [
@@ -62,6 +73,15 @@ interface AdminNewsManagementProps {
   currentUser: AdminUser;
 }
 
+const INITIAL_IMAGE_METADATA: NewsImageMetadataFormInput = {
+  altAr: '',
+  altEn: '',
+  captionAr: '',
+  captionEn: '',
+  photographerCredit: '',
+  licensingInfo: '',
+};
+
 export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
@@ -71,6 +91,39 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<string>('All');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
+
+  // Featured image session controller & UI state
+  const imageSessionRef = useRef<NewsEditorImageSessionController>(
+    new NewsEditorImageSessionController()
+  );
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [selectedImageFile, setSelectedImageFile] = useState<NewsImageBinaryFileLike | null>(null);
+  const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null);
+  const [imageMetadata, setImageMetadata] = useState<NewsImageMetadataFormInput>(INITIAL_IMAGE_METADATA);
+  const [retainedUpload, setRetainedUpload] = useState<RetainedCompletedImageUpload | null>(null);
+  const [haltedUpload, setHaltedUpload] = useState<HaltedAmbiguousImageUpload | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const resetImageEditorSession = () => {
+    imageSessionRef.current.resetSession();
+    setSelectedImageFile(null);
+    setLocalPreviewUrl(null);
+    setImageMetadata(INITIAL_IMAGE_METADATA);
+    setRetainedUpload(null);
+    setHaltedUpload(null);
+    setIsSaving(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  // Ensure temporary object URLs are always released on unmount
+  useEffect(() => {
+    const sessionController = imageSessionRef.current;
+    return () => {
+      sessionController.resetSession();
+    };
+  }, []);
 
   // Load articles from backend on mount
   useEffect(() => {
@@ -112,6 +165,12 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
       const dismissTimer = setTimeout(() => {
         
         const cleanupTimer = setTimeout(() => {
+          imageSessionRef.current.resetSession();
+          setSelectedImageFile(null);
+          setLocalPreviewUrl(null);
+          setImageMetadata(INITIAL_IMAGE_METADATA);
+          setRetainedUpload(null);
+          setHaltedUpload(null);
           setIsSaveSuccess(false);
           setActiveItem(null);
           setIsCreating(false);
@@ -130,7 +189,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   }, [isSaveSuccess]);
 
   const handleCloseModal = () => {
-    
+    resetImageEditorSession();
     setTimeout(() => {
       setIsSaveSuccess(false);
       setActiveItem(null);
@@ -171,6 +230,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
 
   // Open item for editing/viewing
   const handleOpenItem = (item: NewsItem) => {
+    resetImageEditorSession();
     setActiveItem(item);
     setEditForm({
       ...item,
@@ -190,6 +250,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
 
   // Start creating new article
   const handleStartCreate = () => {
+    resetImageEditorSession();
     const newItem: NewsItem = {
       id: `news-sudan-${Date.now()}`,
       titleAr: '',
@@ -224,90 +285,101 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
     setErrorMessage(null);
   };
 
-  // Save article edits
+  const handleSelectImageFile = (event: ChangeEvent<HTMLInputElement>) => {
+    if (!canSaveContent || imageSessionRef.current.isSaving()) {
+      return;
+    }
+    const file = event.target.files?.[0] ?? null;
+    const { previewObjectUrl } = imageSessionRef.current.selectFile(file);
+    setSelectedImageFile(file);
+    setLocalPreviewUrl(previewObjectUrl);
+    setRetainedUpload(null);
+    setHaltedUpload(null);
+    setErrorMessage(null);
+  };
+
+  const handleClearSelectedImageFile = () => {
+    if (!canSaveContent || imageSessionRef.current.isSaving()) {
+      return;
+    }
+    imageSessionRef.current.selectFile(null);
+    setSelectedImageFile(null);
+    setLocalPreviewUrl(null);
+    setRetainedUpload(null);
+    setHaltedUpload(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleUpdateImageMetadata = (patch: Partial<NewsImageMetadataFormInput>) => {
+    if (!canSaveContent || imageSessionRef.current.isSaving()) {
+      return;
+    }
+    const updated = imageSessionRef.current.setImageMetadata(patch);
+    setImageMetadata(updated);
+  };
+
+  // Save article edits (including optional binary image intake before draft persistence)
   const handleSaveForm = async () => {
-    if (!isDraft) {
-      setErrorMessage(
-        isAr
-          ? 'لا يمكن تعديل محتوى المقال خارج مرحلة المسودة.'
-          : 'Content cannot be edited outside Draft state.'
-      );
+    if (imageSessionRef.current.isSaving()) {
       return;
     }
 
-    if (!editForm.titleAr?.trim()) {
-      setErrorMessage(isAr ? 'يرجى كتابة عنوان المقال باللغة العربية' : 'Arabic title is required');
-      return;
-    }
+    setIsSaving(true);
+    const outcome = await imageSessionRef.current.executeSaveWorkflow({
+      isDraft,
+      isCreating,
+      activeItem,
+      editForm,
+      tagsInput,
+      sourcesInput,
+      currentUser,
+      isAr,
+    });
+    setIsSaving(false);
 
-    if (!editForm.category?.trim()) {
-      setErrorMessage(isAr ? 'يرجى اختيار التصنيف البيئي' : 'Environmental category is required');
-      return;
-    }
+    setRetainedUpload(imageSessionRef.current.getRetainedCompletedUpload());
+    setHaltedUpload(imageSessionRef.current.getHaltedAmbiguousUpload());
 
-    const parsedTags = tagsInput.split(',').map(t => t.trim()).filter(Boolean);
-    const parsedSources = sourcesInput.split(',').map(s => s.trim()).filter(Boolean);
-
-    let richArPayload = undefined;
-    let richEnPayload = undefined;
-
-    if (editForm.bodyArHasEdited) {
-      richArPayload = editForm.richBodyAr;
-    } else if (activeItem?.richBodyAr) {
-      richArPayload = activeItem.richBodyAr;
-    }
-
-    if (editForm.bodyEnHasEdited) {
-      richEnPayload = editForm.richBodyEn;
-    } else if (activeItem?.richBodyEn) {
-      richEnPayload = activeItem.richBodyEn;
-    }
-
-    try {
-      let savedItem: NewsItem;
-      if (isCreating) {
-        // For new articles, omit the provisional client-generated ID so the server executes createDraft
-        const { id: _provisionalId, ...rest } = editForm as NewsItem;
-        const itemToSave: Partial<NewsItem> = {
-          ...rest,
-          tags: parsedTags,
-          sources: parsedSources,
-          workflowState: WorkflowState.Draft,
-          richBodyAr: editForm.richBodyAr,
-          richBodyEn: editForm.richBodyEn,
-        };
-        delete itemToSave.bodyAr;
-        delete itemToSave.bodyEn;
-
-        savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser, true);
-        setNewsList([savedItem, ...newsList]);
-        setActiveItem(savedItem);
-        setIsCreating(false);
-      } else if (activeItem) {
-        const itemToSave: Partial<NewsItem> = {
-          ...(editForm as NewsItem),
-          id: activeItem.id,
-          tags: parsedTags,
-          sources: parsedSources,
-          richBodyAr: richArPayload,
-          richBodyEn: richEnPayload,
-        };
-        if (editForm.bodyArHasEdited) delete itemToSave.bodyAr;
-        if (editForm.bodyEnHasEdited) delete itemToSave.bodyEn;
-
-        savedItem = await NewsAdminClient.saveNewsItem(itemToSave, currentUser, false);
-        setNewsList(newsList.map(item => item.id === savedItem.id ? savedItem : item));
-        setActiveItem(savedItem);
+    if (!outcome.ok) {
+      if (outcome.reasonCode !== 'DUPLICATE_SUBMISSION_BLOCKED') {
+        setErrorMessage(outcome.errorMessage);
       }
-
-      setErrorMessage(null);
-      setSuccessNotification(
-        isAr ? 'تم حفظ التعديلات بنجاح' : 'Article changes saved successfully'
-      );
-      setIsSaveSuccess(true);
-    } catch (err: any) {
-      setErrorMessage(err.message || (isAr ? 'فشل حفظ المقال' : 'Failed to save article'));
+      return;
     }
+
+    const savedItem = outcome.savedItem;
+    setSelectedImageFile(null);
+    setLocalPreviewUrl(null);
+    setImageMetadata(INITIAL_IMAGE_METADATA);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+
+    if (isCreating) {
+      setNewsList([savedItem, ...newsList]);
+      setActiveItem(savedItem);
+      setEditForm((prev) => ({
+        ...prev,
+        id: savedItem.id,
+        featuredImage: savedItem.featuredImage,
+      }));
+      setIsCreating(false);
+    } else {
+      setNewsList(newsList.map(item => item.id === savedItem.id ? savedItem : item));
+      setActiveItem(savedItem);
+      setEditForm((prev) => ({
+        ...prev,
+        featuredImage: savedItem.featuredImage,
+      }));
+    }
+
+    setErrorMessage(null);
+    setSuccessNotification(
+      isAr ? 'تم حفظ التعديلات بنجاح' : 'Article changes saved successfully'
+    );
+    setIsSaveSuccess(true);
   };
 
   // Execute workflow transition on activeItem
@@ -912,6 +984,332 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       />
                     </div>
                   </div>
+
+                  {/* Featured Editorial Image Intake & Metadata Section (IMG-F3-09/C) */}
+                  <div
+                    data-testid="news-featured-image-section"
+                    className="bg-gray-50/70 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700/80 rounded-2xl p-4 sm:p-5 space-y-4 mt-2"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-200/70 dark:border-gray-700/70 pb-3">
+                      <div className="flex items-center gap-2">
+                        <ImageIcon className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                        <h3 className="text-xs sm:text-sm font-extrabold text-gray-900 dark:text-white">
+                          {isAr ? 'الصورة البارزة للخبر (استيعاب ثنائي آمن)' : 'Featured News Image (Secure Binary Intake)'}
+                        </h3>
+                      </div>
+                      <span className="text-[11px] font-mono tabular-nums text-gray-500 dark:text-gray-400">
+                        {isAr
+                          ? 'PNG / JPEG / WebP • الحد الأقصى 15,000,000 بايت'
+                          : 'PNG / JPEG / WebP • Max 15,000,000 bytes'}
+                      </span>
+                    </div>
+
+                    {/* Upload Endpoint Availability Warning */}
+                    {!NewsAdminClient.isImageUploadAvailable() && (
+                      <div
+                        data-testid="news-image-endpoint-unconfigured"
+                        className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 text-amber-800 dark:text-amber-300 text-xs flex items-start gap-2"
+                      >
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>
+                          {isAr
+                            ? 'رفع الصور غير متاح حالياً لعدم توفر رابط خدمة الرفع الآمنة (VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL). يمكنك حفظ المسودة النصية بدون رفع صورة جديدة.'
+                            : 'Image upload is currently unavailable because the verified upload endpoint URL (VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL) is not configured. You may still save draft text changes without uploading a new image.'}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Existing Persisted Asset Reference Placeholder (when reopening draft with featuredImage and no new local file selected) */}
+                    {!selectedImageFile && editForm.featuredImage && (
+                      <div
+                        data-testid="news-existing-asset-placeholder"
+                        className="p-3.5 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 text-xs font-bold text-gray-800 dark:text-gray-200">
+                            <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                            <span>
+                              {isAr
+                                ? 'معرف الأصل الصوري المرتبط بالمسودة:'
+                                : 'Linked Editorial Image Asset ID:'}
+                            </span>
+                            <code
+                              dir="ltr"
+                              data-testid="news-existing-asset-id"
+                              className="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 font-mono tabular-nums text-[11px] text-emerald-700 dark:text-emerald-300"
+                            >
+                              {editForm.featuredImage}
+                            </code>
+                          </div>
+                          <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                            {isAr
+                              ? 'معاينة المتصفح من التخزين الخاص غير مفعلة في هذه المرحلة؛ يظل اعتماد حقوق النشر والتسليم العام منفصلين.'
+                              : 'Private storage browser preview is not enabled in this unit; rights approval and public delivery remain governed separately.'}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Retained Completed Upload Banner (when binary upload succeeded earlier in session, awaiting draft save retry) */}
+                    {retainedUpload && (
+                      <div
+                        data-testid="news-retained-completed-upload"
+                        className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-300 text-xs space-y-1"
+                      >
+                        <div className="font-bold flex items-center gap-1.5">
+                          <Check className="w-4 h-4 shrink-0" />
+                          <span>
+                            {isAr
+                              ? 'تم استيعاب الصورة بنجاح في هذه الجلسة — جاهزة للربط عند حفظ المسودة دون إعادة الرفع:'
+                              : 'Image binary intake completed in this session — ready to link on Save Changes without re-upload:'}
+                          </span>
+                        </div>
+                        <div dir="ltr" className="font-mono tabular-nums text-[11px] opacity-90">
+                          assetId: {retainedUpload.assetId} | intakeId: {retainedUpload.intakeId}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Halted Ambiguous / Non-Completed Outcome Banner */}
+                    {haltedUpload && (
+                      <div
+                        data-testid="news-halted-ambiguous-upload"
+                        className="p-3 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800/60 text-red-700 dark:text-red-300 text-xs space-y-1"
+                      >
+                        <div className="font-bold flex items-center gap-1.5">
+                          <AlertCircle className="w-4 h-4 shrink-0" />
+                          <span>
+                            {isAr
+                              ? `توقف الربط التلقائي للصورة (الحالة: ${haltedUpload.status}) لمنع تكرار الرفع بمعرفات جديدة.`
+                              : `Automatic image re-upload is halted (status: ${haltedUpload.status}) to prevent duplicate intake identities.`}
+                          </span>
+                        </div>
+                        <div dir="ltr" className="font-mono tabular-nums text-[11px] opacity-90">
+                          assetId: {haltedUpload.assetId} | intakeId: {haltedUpload.intakeId}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* File Picker & Temporary Local Preview */}
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
+                      <div className="md:col-span-5 space-y-2.5">
+                        <label
+                          htmlFor="news-featured-image-file-input"
+                          className="text-xs font-bold text-gray-700 dark:text-gray-300 block"
+                        >
+                          {isAr ? 'اختيار ملف الصورة (PNG / JPEG / WebP)' : 'Select Image File (PNG / JPEG / WebP)'}
+                        </label>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label
+                            htmlFor="news-featured-image-file-input"
+                            className={`px-3.5 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-xs font-bold text-gray-800 dark:text-gray-200 inline-flex items-center gap-1.5 transition-colors ${
+                              !canSaveContent || isSaving
+                                ? 'opacity-60 cursor-not-allowed'
+                                : 'hover:border-emerald-500 cursor-pointer'
+                            }`}
+                          >
+                            <Upload className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>{isAr ? 'اختر ملف صورة...' : 'Choose Image File...'}</span>
+                          </label>
+                          <input
+                            ref={fileInputRef}
+                            id="news-featured-image-file-input"
+                            data-testid="news-featured-image-file-input"
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            disabled={!canSaveContent || isSaving}
+                            onChange={(e) => {
+                              handleSelectImageFile(e);
+                              e.target.value = '';
+                            }}
+                            className="sr-only"
+                          />
+
+                          {selectedImageFile && (
+                            <button
+                              type="button"
+                              data-testid="news-clear-selected-image-btn"
+                              disabled={!canSaveContent || isSaving}
+                              onClick={handleClearSelectedImageFile}
+                              className="px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 text-xs font-bold text-gray-600 dark:text-gray-300 hover:text-red-600 dark:hover:text-red-400 inline-flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>{isAr ? 'إزالة الملف المختار' : 'Clear Selection'}</span>
+                            </button>
+                          )}
+                        </div>
+
+                        {selectedImageFile && (
+                          <div
+                            data-testid="news-selected-file-summary"
+                            className="text-[11px] font-mono tabular-nums text-gray-600 dark:text-gray-400 space-y-0.5 bg-white dark:bg-gray-900 p-2.5 rounded-xl border border-gray-200/80 dark:border-gray-700/80"
+                          >
+                            <div className="truncate font-semibold text-gray-800 dark:text-gray-200">
+                              {selectedImageFile.name}
+                            </div>
+                            <div>
+                              {selectedImageFile.type || 'unknown'} • {selectedImageFile.size.toLocaleString('en-US')} bytes
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Temporary Local Preview */}
+                        {localPreviewUrl && selectedImageFile && (
+                          <div
+                            data-testid="news-temporary-local-preview"
+                            className="rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 p-2 space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between text-[10px] font-bold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2 py-1 rounded-lg">
+                              <span>
+                                {isAr
+                                  ? 'معاينة محلية مؤقتة فقط (لا تُحفظ كرابط عام)'
+                                  : 'Temporary Local Preview Only (Not a public URL)'}
+                              </span>
+                            </div>
+                            <img
+                              src={localPreviewUrl}
+                              alt={imageMetadata.altAr || selectedImageFile.name}
+                              className="w-full max-h-40 object-contain rounded-lg bg-gray-100 dark:bg-gray-800"
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Metadata Fields for Editorial Image Upload */}
+                      <div className="md:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {/* Required Arabic Alt Text */}
+                        <div className="sm:col-span-2 space-y-1">
+                          <label
+                            htmlFor="news-image-alt-ar"
+                            className="text-xs font-bold text-gray-700 dark:text-gray-300 block"
+                          >
+                            {isAr
+                              ? 'النص البديل للصورة بالعربية (إلزامي لرفع الصورة) *'
+                              : 'Arabic Alt Text (Required for Image Upload) *'}
+                          </label>
+                          <input
+                            id="news-image-alt-ar"
+                            data-testid="news-image-alt-ar"
+                            type="text"
+                            dir="rtl"
+                            value={imageMetadata.altAr}
+                            onChange={(e) => handleUpdateImageMetadata({ altAr: e.target.value })}
+                            placeholder="وصف دقيق لمحتوى الصورة بالعربية لأغراض الوصول..."
+                            disabled={!canSaveContent || isSaving}
+                            className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                          />
+                        </div>
+
+                        {/* Optional English Alt Text */}
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="news-image-alt-en"
+                            className="text-xs font-bold text-gray-700 dark:text-gray-300 block"
+                          >
+                            {isAr ? 'النص البديل بالإنجليزية (اختياري)' : 'English Alt Text (Optional)'}
+                          </label>
+                          <input
+                            id="news-image-alt-en"
+                            data-testid="news-image-alt-en"
+                            type="text"
+                            dir="ltr"
+                            value={imageMetadata.altEn || ''}
+                            onChange={(e) => handleUpdateImageMetadata({ altEn: e.target.value })}
+                            placeholder="Descriptive alt text in English..."
+                            disabled={!canSaveContent || isSaving}
+                            className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                          />
+                        </div>
+
+                        {/* Optional Photographer / Source Credit */}
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="news-image-photographer-credit"
+                            className="text-xs font-bold text-gray-700 dark:text-gray-300 block"
+                          >
+                            {isAr ? 'اسم المصور / جهة المصدر (اختياري)' : 'Photographer / Credit (Optional)'}
+                          </label>
+                          <input
+                            id="news-image-photographer-credit"
+                            data-testid="news-image-photographer-credit"
+                            type="text"
+                            value={imageMetadata.photographerCredit || ''}
+                            onChange={(e) => handleUpdateImageMetadata({ photographerCredit: e.target.value })}
+                            placeholder={isAr ? 'مثال: وحدة التوثيق الميداني' : 'e.g. Field Documentation Unit'}
+                            disabled={!canSaveContent || isSaving}
+                            className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                          />
+                        </div>
+
+                        {/* Optional Arabic Caption */}
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="news-image-caption-ar"
+                            className="text-xs font-bold text-gray-700 dark:text-gray-300 block"
+                          >
+                            {isAr ? 'التعليق التوضيحي بالعربية (اختياري)' : 'Arabic Caption (Optional)'}
+                          </label>
+                          <input
+                            id="news-image-caption-ar"
+                            data-testid="news-image-caption-ar"
+                            type="text"
+                            dir="rtl"
+                            value={imageMetadata.captionAr || ''}
+                            onChange={(e) => handleUpdateImageMetadata({ captionAr: e.target.value })}
+                            placeholder="تعليق توضيحي أسفل الصورة..."
+                            disabled={!canSaveContent || isSaving}
+                            className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                          />
+                        </div>
+
+                        {/* Optional English Caption */}
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="news-image-caption-en"
+                            className="text-xs font-bold text-gray-700 dark:text-gray-300 block"
+                          >
+                            {isAr ? 'التعليق التوضيحي بالإنجليزية (اختياري)' : 'English Caption (Optional)'}
+                          </label>
+                          <input
+                            id="news-image-caption-en"
+                            data-testid="news-image-caption-en"
+                            type="text"
+                            dir="ltr"
+                            value={imageMetadata.captionEn || ''}
+                            onChange={(e) => handleUpdateImageMetadata({ captionEn: e.target.value })}
+                            placeholder="Image caption in English..."
+                            disabled={!canSaveContent || isSaving}
+                            className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                          />
+                        </div>
+
+                        {/* Optional Licensing Info */}
+                        <div className="sm:col-span-2 space-y-1">
+                          <label
+                            htmlFor="news-image-licensing-info"
+                            className="text-xs font-bold text-gray-700 dark:text-gray-300 block"
+                          >
+                            {isAr ? 'بيانات الترخيص والحقوق الأولية (اختياري)' : 'Licensing & Rights Note (Optional)'}
+                          </label>
+                          <input
+                            id="news-image-licensing-info"
+                            data-testid="news-image-licensing-info"
+                            type="text"
+                            value={imageMetadata.licensingInfo || ''}
+                            onChange={(e) => handleUpdateImageMetadata({ licensingInfo: e.target.value })}
+                            placeholder={
+                              isAr
+                                ? 'ملاحظة أولية للحقوق (لا تُعد موافقة نشر نهائية)...'
+                                : 'Initial rights note (does not constitute final publication rights approval)...'
+                            }
+                            disabled={!canSaveContent || isSaving}
+                            className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               ) : (
                 /* WORKFLOW & AUDIT TRAIL TAB */
@@ -1097,8 +1495,10 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
 
                 {canSaveContent && activeTab === 'content' && (
                   <button
+                    data-testid="news-save-changes-btn"
+                    disabled={isSaving}
                     onClick={handleSaveForm}
-                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-sm inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold text-xs shadow-sm inline-flex items-center gap-1.5 transition-colors cursor-pointer"
                   >
                     <Save className="w-4 h-4" />
                     <span>{isAr ? 'حفظ البيانات والتعديلات' : 'Save Changes'}</span>
