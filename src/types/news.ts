@@ -1,4 +1,5 @@
 import type { JournalisticType } from '../types';
+import type { RichNewsDocument } from './richNewsDocument';
 import { WorkflowState } from './workflow';
 import type { WorkflowTransitionRecord } from './workflow';
 
@@ -13,8 +14,8 @@ export interface NewsItem {
   summaryEn: string;
   bodyAr: string;
   bodyEn: string;
-  richBodyAr?: any;
-  richBodyEn?: any;
+  richBodyAr?: RichNewsDocument;
+  richBodyEn?: RichNewsDocument;
   author: string;
   category: string;
   tags: string[];

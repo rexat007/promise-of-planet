@@ -175,3 +175,6 @@ export interface RichNewsDocumentWrapperV2 {
   updatedAt?: string;
 }
 
+export type RichNewsDocument =
+  | RichNewsDocumentWrapper
+  | RichNewsDocumentWrapperV2;

@@ -7,6 +7,7 @@ import {
   type EditorialImageAssetValidationLimits,
 } from '../types/editorialImageAsset';
 import type { NewsItem } from '../types/news';
+import type { RichNewsDocument } from '../types/richNewsDocument';
 import { WorkflowState } from '../types/workflow';
 import type { AdminUser } from '../types/admin';
 
@@ -1310,8 +1311,8 @@ export interface DraftSaveWithImageInput {
   readonly editForm: Partial<NewsItem> & {
     readonly bodyArHasEdited?: boolean;
     readonly bodyEnHasEdited?: boolean;
-    readonly richBodyAr?: any;
-    readonly richBodyEn?: any;
+    readonly richBodyAr?: RichNewsDocument;
+    readonly richBodyEn?: RichNewsDocument;
   };
   readonly tagsInput: string;
   readonly sourcesInput: string;
