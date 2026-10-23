@@ -223,3 +223,123 @@ export function richDocumentV2ToTiptapJson(wrapper: RichNewsDocumentWrapperV2): 
   return JSON.parse(JSON.stringify(wrapper.doc));
 }
 
+function containsEditorialImageNode(node: unknown): boolean {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return false;
+  }
+
+  const candidate = node as { type?: unknown; content?: unknown };
+  if (candidate.type === "editorialImage") {
+    return true;
+  }
+
+  if (Array.isArray(candidate.content)) {
+    return candidate.content.some(containsEditorialImageNode);
+  }
+
+  return false;
+}
+
+function assertNoNestedEditorialImageNodes(docNode: unknown): void {
+  if (!docNode || typeof docNode !== "object" || Array.isArray(docNode)) {
+    return;
+  }
+
+  const rootContent = (docNode as { content?: unknown }).content;
+  if (!Array.isArray(rootContent)) {
+    return;
+  }
+
+  function inspectChild(node: unknown, parentType: string): void {
+    if (!node || typeof node !== "object" || Array.isArray(node)) {
+      return;
+    }
+
+    const candidate = node as { type?: unknown; content?: unknown };
+    if (candidate.type === "editorialImage") {
+      throw new Error(
+        `TIPTAP_ADAPTER_ERROR: editorialImage must be a top-level block node; cannot be nested inside "${parentType}".`
+      );
+    }
+
+    if (Array.isArray(candidate.content)) {
+      const nextParent = typeof candidate.type === "string" ? candidate.type : parentType;
+      for (const grandChild of candidate.content) {
+        inspectChild(grandChild, nextParent);
+      }
+    }
+  }
+
+  for (const topLevelBlock of rootContent) {
+    if (!topLevelBlock || typeof topLevelBlock !== "object" || Array.isArray(topLevelBlock)) {
+      continue;
+    }
+    const blockCandidate = topLevelBlock as { type?: unknown; content?: unknown };
+    if (blockCandidate.type !== "editorialImage" && Array.isArray(blockCandidate.content)) {
+      const parentType = typeof blockCandidate.type === "string" ? blockCandidate.type : "block";
+      for (const child of blockCandidate.content) {
+        inspectChild(child, parentType);
+      }
+    }
+  }
+}
+
+/**
+ * Converts a validated V1 or V2 RichNewsDocumentWrapper into a native Tiptap JSON document.
+ * Dispatches strictly by schemaVersion (1 -> V1 adapter, 2 -> V2 adapter), fails closed for
+ * missing or unknown versions, and returns an independent clone that never mutates the input.
+ */
+export function richDocumentToTiptapJsonByVersion(
+  wrapper: RichNewsDocumentWrapper | RichNewsDocumentWrapperV2
+): TiptapDocJson {
+  if (!wrapper || typeof wrapper !== "object" || Array.isArray(wrapper)) {
+    throw new Error("TIPTAP_ADAPTER_ERROR: Invalid RichNewsDocumentWrapper: root must be a plain object.");
+  }
+
+  if (wrapper.schemaVersion === 1) {
+    const doc = richDocumentToTiptapJson(wrapper);
+    return JSON.parse(JSON.stringify(doc)) as TiptapDocJson;
+  }
+
+  if (wrapper.schemaVersion === 2) {
+    assertNoNestedEditorialImageNodes(wrapper.doc);
+    return richDocumentV2ToTiptapJson(wrapper);
+  }
+
+  const unknownVersion = (wrapper as { schemaVersion?: unknown }).schemaVersion;
+  throw new Error(
+    `TIPTAP_ADAPTER_ERROR: Unsupported or missing RichNewsDocument schemaVersion: expected 1 or 2, received ${String(unknownVersion)}.`
+  );
+}
+
+/**
+ * Converts a native Tiptap JSON document into a canonical RichNewsDocumentWrapper (V1 or V2).
+ * Produces schemaVersion 1 for text-only documents by default, upgrades to schemaVersion 2 when
+ * editorialImage nodes are present or minimumSchemaVersion === 2 is explicitly requested, and
+ * fails closed without silently stripping invalid or disallowed attributes.
+ */
+export function tiptapJsonToRichDocumentByVersion(
+  tiptapJson: TiptapDocJson,
+  minimumSchemaVersion?: 1 | 2
+): RichNewsDocumentWrapper | RichNewsDocumentWrapperV2 {
+  if (
+    minimumSchemaVersion !== undefined &&
+    minimumSchemaVersion !== 1 &&
+    minimumSchemaVersion !== 2
+  ) {
+    throw new Error(
+      `TIPTAP_ADAPTER_ERROR: Unsupported minimumSchemaVersion: expected 1 or 2, received ${String(minimumSchemaVersion)}.`
+    );
+  }
+
+  if (!tiptapJson || typeof tiptapJson !== "object" || Array.isArray(tiptapJson) || tiptapJson.type !== "doc") {
+    throw new Error('TIPTAP_ADAPTER_ERROR: Invalid Tiptap document: root must be an object with type="doc".');
+  }
+
+  if (minimumSchemaVersion === 2 || containsEditorialImageNode(tiptapJson)) {
+    assertNoNestedEditorialImageNodes(tiptapJson);
+    return tiptapJsonToRichDocumentV2(tiptapJson);
+  }
+
+  return tiptapJsonToRichDocument(tiptapJson);
+}
