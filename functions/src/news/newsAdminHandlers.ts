@@ -1,5 +1,13 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { getFirestore } from 'firebase-admin/firestore';
 import { NewsApplicationService } from './newsApplicationService';
+import { FirestoreNewsRepository } from './firestoreNewsRepository';
+import {
+  FirestoreEditorialImageAssetRepository,
+  type EditorialImageFirestoreDatabase,
+  type EditorialImageFirestoreTransaction,
+} from './firestoreEditorialImageAssetRepository';
+import type { EditorialImageAssetRepository } from './editorialImageAssetRepository';
 import { PublicNewsRepository } from './publicNewsRepository';
 import type { AdminRepository } from '../admin/adminRepository';
 import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
@@ -12,6 +20,30 @@ export interface AdminRequestContext {
     uid: string;
   };
   data?: any;
+}
+
+function createProductionEditorialImageAssetRepository(): EditorialImageAssetRepository {
+  return new FirestoreEditorialImageAssetRepository({
+    collection(collectionName: string) {
+      const db = getFirestore() as unknown as EditorialImageFirestoreDatabase;
+      return db.collection(collectionName);
+    },
+    runTransaction<T>(
+      updateFunction: (
+        transaction: EditorialImageFirestoreTransaction
+      ) => Promise<T>
+    ): Promise<T> {
+      const db = getFirestore() as unknown as EditorialImageFirestoreDatabase;
+      return db.runTransaction(updateFunction);
+    },
+  });
+}
+
+export function createProductionNewsApplicationService(): NewsApplicationService {
+  return new NewsApplicationService(
+    new FirestoreNewsRepository(),
+    createProductionEditorialImageAssetRepository()
+  );
 }
 
 async function authenticateAndAuthorize(
@@ -50,7 +82,7 @@ async function authenticateAndAuthorize(
 export async function executeManageNewsRequest(
   requestContext: AdminRequestContext,
   adminRepo: AdminRepository = new FirestoreAdminRepository(),
-  newsService: NewsApplicationService = new NewsApplicationService()
+  newsService: NewsApplicationService = createProductionNewsApplicationService()
 ): Promise<any> {
   const data = requestContext.data || {};
   const action = data.action;

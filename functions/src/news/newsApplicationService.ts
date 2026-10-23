@@ -11,6 +11,101 @@ import {
   validateRichNewsDocumentByVersion, 
   extractPlainTextFromRichDocument 
 } from '../shared/richNewsDocumentContract';
+import {
+  DEFAULT_ASSET_VALIDATION_LIMITS,
+  type EditorialImageAssetVariantKey,
+} from '../types/editorialImageAsset';
+import {
+  validateEditorialImageAsset,
+  validateEditorialImageAssetVariant,
+} from '../shared/editorialImageAssetContract';
+import {
+  EditorialImageAssetRepositoryError,
+  type EditorialImageAssetRepository,
+} from './editorialImageAssetRepository';
+
+export const REQUIRED_EDITORIAL_IMAGE_VARIANT_KEYS: readonly EditorialImageAssetVariantKey[] =
+  Object.freeze([
+    'thumbnail',
+    'card',
+    'article_inline',
+    'article_cover',
+    'original_processed',
+  ]);
+
+/**
+ * Extracts unique `editorialImage.attrs.assetId` references in deterministic
+ * document-traversal order from a validated V2 rich news document wrapper.
+ * Returns an empty array for V1, undefined, or non-V2 documents.
+ */
+export function extractEditorialImageAssetIdsFromRichDocument(
+  richDoc: unknown
+): string[] {
+  if (!richDoc || typeof richDoc !== 'object' || Array.isArray(richDoc)) {
+    return [];
+  }
+
+  const wrapper = richDoc as Record<string, unknown>;
+  if (wrapper.schemaVersion !== 2) {
+    return [];
+  }
+
+  const doc = wrapper.doc as Record<string, unknown> | undefined;
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc.type !== 'doc') {
+    return [];
+  }
+
+  if (!Array.isArray(doc.content)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+
+  function walkNodes(nodes: unknown[]): void {
+    for (const node of nodes) {
+      if (!node || typeof node !== 'object' || Array.isArray(node)) {
+        continue;
+      }
+      const record = node as Record<string, unknown>;
+      if (record.type === 'editorialImage') {
+        const attrs = record.attrs as Record<string, unknown> | undefined;
+        if (
+          attrs &&
+          typeof attrs === 'object' &&
+          !Array.isArray(attrs) &&
+          typeof attrs.assetId === 'string' &&
+          attrs.assetId.length > 0
+        ) {
+          seen.add(attrs.assetId);
+        }
+      }
+      if (Array.isArray(record.content)) {
+        walkNodes(record.content);
+      }
+    }
+  }
+
+  walkNodes(doc.content);
+  return Array.from(seen);
+}
+
+/**
+ * Collects unique `editorialImage.attrs.assetId` references across both
+ * Arabic and English rich document bodies in deterministic order.
+ */
+export function collectUniqueEditorialImageAssetIds(
+  richBodyAr: unknown,
+  richBodyEn: unknown
+): string[] {
+  const combined = new Set<string>();
+  for (const id of extractEditorialImageAssetIdsFromRichDocument(richBodyAr)) {
+    combined.add(id);
+  }
+  for (const id of extractEditorialImageAssetIdsFromRichDocument(richBodyEn)) {
+    combined.add(id);
+  }
+  return Array.from(combined);
+}
 
 export interface SaveNewsInput {
   id?: string;
@@ -43,9 +138,135 @@ export interface ActorContext {
 
 export class NewsApplicationService {
   private repo: NewsRepository;
+  private assetRepo?: EditorialImageAssetRepository;
 
-  constructor(repo?: NewsRepository) {
+  constructor(
+    repo?: NewsRepository,
+    assetRepo?: EditorialImageAssetRepository
+  ) {
     this.repo = repo || new FirestoreNewsRepository();
+    this.assetRepo = assetRepo;
+  }
+
+  /**
+   * Authoritatively verifies that every newly introduced V2 `editorialImage`
+   * asset reference exists in `EditorialImageAssetRepository` and is eligible
+   * for private draft linkage (`status === 'active'`, `rights.status` in
+   * `'PendingReview' | 'Approved'`, and all 5 canonical variants present).
+   */
+  private async verifyNewlyIntroducedEditorialImageAssets(
+    newAssetIds: readonly string[]
+  ): Promise<void> {
+    if (newAssetIds.length === 0) {
+      return;
+    }
+
+    if (!this.assetRepo) {
+      throw new Error(
+        `UNVERIFIED_EDITORIAL_IMAGE_ASSET_REPO_MISSING: EditorialImageAssetRepository is required to verify newly introduced editorial image asset "${newAssetIds[0]}".`
+      );
+    }
+
+    for (const assetId of newAssetIds) {
+      let readResult;
+      try {
+        readResult = await this.assetRepo.getById(assetId);
+      } catch (err: unknown) {
+        if (
+          err instanceof EditorialImageAssetRepositoryError &&
+          err.code === 'INVALID_ASSET'
+        ) {
+          throw new Error(
+            `INVALID_EDITORIAL_IMAGE_ASSET_RECORD: Editorial image asset "${assetId}" has an invalid or corrupted repository record: ${err.message}`
+          );
+        }
+        const message =
+          err instanceof Error
+            ? err.message
+            : 'Unknown asset repository error.';
+        throw new Error(
+          `EDITORIAL_IMAGE_ASSET_REPOSITORY_ERROR: Failed to read editorial image asset "${assetId}" from repository: ${message}`
+        );
+      }
+
+      if (
+        !readResult ||
+        readResult.ok !== true ||
+        readResult.status !== 'FOUND' ||
+        !readResult.asset
+      ) {
+        throw new Error(
+          `UNVERIFIED_EDITORIAL_IMAGE_ASSET_NOT_FOUND: Editorial image asset "${assetId}" does not exist in the canonical asset repository.`
+        );
+      }
+
+      const asset = readResult.asset;
+
+      if (
+        !asset ||
+        typeof asset !== 'object' ||
+        Array.isArray(asset) ||
+        asset.assetId !== assetId
+      ) {
+        throw new Error(
+          `INVALID_EDITORIAL_IMAGE_ASSET_RECORD: Editorial image asset "${assetId}" has a malformed or mismatched asset envelope.`
+        );
+      }
+
+      // Check lifecycle and rights status before full variant inspection so ineligible lifecycle/rights states report deterministic status codes
+      if (asset.status !== 'active') {
+        throw new Error(
+          `INELIGIBLE_EDITORIAL_IMAGE_ASSET_STATUS: Editorial image asset "${assetId}" has lifecycle status "${String(asset.status)}"; only "active" assets may be newly linked to drafts.`
+        );
+      }
+
+      const rightsStatus = asset.rights?.status;
+      if (rightsStatus !== 'PendingReview' && rightsStatus !== 'Approved') {
+        throw new Error(
+          `INELIGIBLE_EDITORIAL_IMAGE_ASSET_RIGHTS: Editorial image asset "${assetId}" has rights status "${String(rightsStatus)}"; only "PendingReview" or "Approved" assets may be newly linked to private drafts.`
+        );
+      }
+
+      // Verify all 5 required canonical variants are present and valid
+      const variants = asset.variants as
+        | Record<string, unknown>
+        | undefined;
+      if (!variants || typeof variants !== 'object' || Array.isArray(variants)) {
+        throw new Error(
+          `INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS: Editorial image asset "${assetId}" is missing a valid variants map.`
+        );
+      }
+
+      for (const requiredKey of REQUIRED_EDITORIAL_IMAGE_VARIANT_KEYS) {
+        const candidateVariant = variants[requiredKey];
+        if (!candidateVariant) {
+          throw new Error(
+            `INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS: Editorial image asset "${assetId}" is missing required canonical variant "${requiredKey}".`
+          );
+        }
+        const variantCheck = validateEditorialImageAssetVariant(
+          candidateVariant,
+          requiredKey,
+          DEFAULT_ASSET_VALIDATION_LIMITS,
+          assetId
+        );
+        if (!variantCheck.valid) {
+          throw new Error(
+            `INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS: Editorial image asset "${assetId}" has invalid variant "${requiredKey}": ${variantCheck.errors.join('; ')}`
+          );
+        }
+      }
+
+      const fullAssetCheck = validateEditorialImageAsset(
+        asset,
+        DEFAULT_ASSET_VALIDATION_LIMITS
+      );
+      if (!fullAssetCheck.valid) {
+        throw new Error(
+          `INVALID_EDITORIAL_IMAGE_ASSET_RECORD: Editorial image asset "${assetId}" failed canonical contract validation: ${fullAssetCheck.errors.join('; ')}`
+        );
+      }
+    }
   }
 
   async listAll(): Promise<NewsItemBackend[]> {
@@ -130,6 +351,13 @@ export class NewsApplicationService {
     };
 
     NewsValidator.validateNewsPayload(item);
+
+    const newAssetIds = collectUniqueEditorialImageAssetIds(
+      item.richBodyAr,
+      item.richBodyEn
+    );
+    await this.verifyNewlyIntroducedEditorialImageAssets(newAssetIds);
+
     await this.repo.save(item);
     return item;
   }
@@ -222,6 +450,24 @@ export class NewsApplicationService {
     };
 
     NewsValidator.validateNewsPayload(updated);
+
+    const existingPersistedAssetIds = new Set(
+      collectUniqueEditorialImageAssetIds(
+        existing.richBodyAr,
+        existing.richBodyEn
+      )
+    );
+    const effectiveNextAssetIds = collectUniqueEditorialImageAssetIds(
+      updated.richBodyAr,
+      updated.richBodyEn
+    );
+    const newlyIntroducedAssetIds = effectiveNextAssetIds.filter(
+      (assetId) => !existingPersistedAssetIds.has(assetId)
+    );
+    await this.verifyNewlyIntroducedEditorialImageAssets(
+      newlyIntroducedAssetIds
+    );
+
     await this.repo.save(updated);
     return updated;
   }

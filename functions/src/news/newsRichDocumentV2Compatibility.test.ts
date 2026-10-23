@@ -10,12 +10,62 @@ import {
   validateRichNewsDocumentByVersion,
   extractPlainTextFromRichDocument,
 } from '../shared/richNewsDocumentContract';
+import {
+  buildEditorialImageVariantStoragePath,
+  createEditorialImageAssetRecord,
+} from '../shared/editorialImageAssetContract';
+import type {
+  EditorialImageAssetMetadata,
+  EditorialImageAssetVariant,
+  EditorialImageAssetVariantKey,
+} from '../types/editorialImageAsset';
 import type {
   RichNewsDocumentWrapper,
   RichNewsDocumentWrapperV2,
 } from '../types/richNewsDocument';
 import type { NewsItemBackend, NewsRepository } from './newsRepository';
+import { InMemoryEditorialImageAssetRepository } from './inMemoryEditorialImageAssetRepository';
 import { NewsApplicationService, type ActorContext } from './newsApplicationService';
+
+const CANONICAL_VARIANT_KEYS: readonly EditorialImageAssetVariantKey[] = [
+  'thumbnail',
+  'card',
+  'article_inline',
+  'article_cover',
+  'original_processed',
+];
+
+function createCanonicalTestAsset(assetId: string): EditorialImageAssetMetadata {
+  const variants: Record<string, EditorialImageAssetVariant> = {};
+  for (const key of CANONICAL_VARIANT_KEYS) {
+    variants[key] = {
+      variantKey: key,
+      storagePath: buildEditorialImageVariantStoragePath(assetId, key, 'image/webp'),
+      mimeType: 'image/webp',
+      width: 800,
+      height: 600,
+      sizeBytes: 24576,
+      sha256Checksum: 'a'.repeat(64),
+    };
+  }
+
+  return createEditorialImageAssetRecord({
+    assetId,
+    createdByUid: 'admin-editor-01',
+    createdAtIso: '2026-03-20T10:00:00.000Z',
+    updatedAtIso: '2026-03-20T10:00:00.000Z',
+    origin: 'news_article',
+    originalFilename: `${assetId}.webp`,
+    mimeType: 'image/webp',
+    originalSizeBytes: 49152,
+    originalWidth: 1600,
+    originalHeight: 1200,
+    sha256Checksum: 'b'.repeat(64),
+    variants,
+    altAr: 'صورة ميدانية لغرس أشجار السنط على ضفاف النيل',
+    altEn: 'Field photo of planting Acacia trees along the Nile bank',
+  });
+}
 
 class InMemoryTestNewsRepository implements NewsRepository {
   private readonly store = new Map<string, NewsItemBackend>();
@@ -46,6 +96,7 @@ class InMemoryTestNewsRepository implements NewsRepository {
 
 describe('IMG-F3-09/D1-A — V1/V2 Rich News Validation & Plain-Text Compatibility', () => {
   let repo: InMemoryTestNewsRepository;
+  let assetRepo: InMemoryEditorialImageAssetRepository;
   let service: NewsApplicationService;
 
   const editorActor: ActorContext = {
@@ -181,9 +232,16 @@ describe('IMG-F3-09/D1-A — V1/V2 Rich News Validation & Plain-Text Compatibili
     },
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     repo = new InMemoryTestNewsRepository();
-    service = new NewsApplicationService(repo);
+    assetRepo = new InMemoryEditorialImageAssetRepository();
+    await assetRepo.createIfAbsent(
+      createCanonicalTestAsset('asset_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c')
+    );
+    await assetRepo.createIfAbsent(
+      createCanonicalTestAsset('asset_abcdef0123456789abcdef0123456789')
+    );
+    service = new NewsApplicationService(repo, assetRepo);
   });
 
   describe('1. Validator & Plain-Text Extraction Contract', () => {
