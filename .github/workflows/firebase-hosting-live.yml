@@ -10,6 +10,46 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+      - name: Validate Editorial Image Upload URL
+        env:
+          UPLOAD_URL: ${{ vars.VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL }}
+        run: |
+          if [ -z "$UPLOAD_URL" ]; then
+            echo "::error::Repository variable VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL is missing or empty. Please configure it with the deployed Cloud Functions HTTPS URL."
+            exit 1
+          fi
+          node -e '
+            const raw = process.env.UPLOAD_URL;
+            if (typeof raw !== "string" || !raw.trim()) {
+              console.error("::error::VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL is empty.");
+              process.exit(1);
+            }
+            const trimmed = raw.trim();
+            if (trimmed !== raw || /\s/.test(trimmed)) {
+              console.error("::error::VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL must not contain leading, trailing, or internal whitespace.");
+              process.exit(1);
+            }
+            if (trimmed.includes("?") || trimmed.includes("#")) {
+              console.error("::error::VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL must not include query parameters or URL fragments.");
+              process.exit(1);
+            }
+            let parsed;
+            try {
+              parsed = new URL(trimmed);
+            } catch (err) {
+              console.error("::error::VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL is not a syntactically valid URL: " + err.message);
+              process.exit(1);
+            }
+            if (parsed.protocol !== "https:") {
+              console.error("::error::VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL must use the https protocol. Received: " + parsed.protocol);
+              process.exit(1);
+            }
+            if (!parsed.hostname || parsed.hostname.length === 0) {
+              console.error("::error::VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL must have a valid hostname.");
+              process.exit(1);
+            }
+            console.log("Validated VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL: " + parsed.origin + parsed.pathname);
+          '
       - run: npx vite build
         env:
           VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
@@ -17,6 +57,7 @@ jobs:
           VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
           VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
           VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL: ${{ vars.VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL }}
       - uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: '${{ secrets.GITHUB_TOKEN }}'
