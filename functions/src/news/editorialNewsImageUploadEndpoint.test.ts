@@ -640,6 +640,100 @@ describe('IMG-F3-09/B — HTTP Method, Content-Type, and Trusted Origin / CORS E
     expect(preflightRes.headers.get('vary')).toBe('Origin');
   });
 
+  it('allows production hosting origins (https://promiseofplanet-bb325.web.app and https://promiseofplanet-bb325.firebaseapp.com) via CORS preflight while preserving auth gate for POST', async () => {
+    const harness = await createEndpointHarness();
+
+    const productionOrigins = [
+      'https://promiseofplanet-bb325.web.app',
+      'https://promiseofplanet-bb325.firebaseapp.com',
+    ];
+
+    for (const origin of productionOrigins) {
+      // 1. OPTIONS preflight succeeds with 204 and exact Access-Control-Allow-Origin
+      const preflightRes = new MockResponseCapture();
+      await executeEditorialNewsImageUploadEndpoint(
+        {
+          method: 'OPTIONS',
+          headers: {
+            Origin: origin,
+            'Access-Control-Request-Method': 'POST',
+          },
+        },
+        preflightRes,
+        harness.deps
+      );
+      expect(preflightRes.statusCode).toBe(204);
+      expect(preflightRes.ended).toBe(true);
+      expect(preflightRes.headers.get('access-control-allow-origin')).toBe(origin);
+      expect(preflightRes.headers.get('vary')).toBe('Origin');
+      expect(preflightRes.headers.get('access-control-allow-methods')).toBe('POST, OPTIONS');
+
+      // 2. POST from production origin without auth header is rejected with 401 UNAUTHENTICATED
+      const unauthPostRes = new MockResponseCapture();
+      await executeEditorialNewsImageUploadEndpoint(
+        {
+          method: 'POST',
+          headers: {
+            Origin: origin,
+            'Content-Type': 'image/png',
+          },
+          rawBody: validPngBuffer,
+        },
+        unauthPostRes,
+        harness.deps
+      );
+      expect(unauthPostRes.statusCode).toBe(401);
+      expect(unauthPostRes.headers.get('access-control-allow-origin')).toBe(origin);
+      expect(unauthPostRes.body?.errorCode).toBe('UNAUTHENTICATED');
+
+      // 3. POST from production origin with viewer-only role is rejected with 403 PERMISSION_DENIED
+      const viewerPostRes = new MockResponseCapture();
+      await executeEditorialNewsImageUploadEndpoint(
+        {
+          method: 'POST',
+          headers: {
+            Origin: origin,
+            Authorization: 'Bearer viewer_only_token',
+            'Content-Type': 'image/png',
+          },
+          rawBody: validPngBuffer,
+        },
+        viewerPostRes,
+        harness.deps
+      );
+      expect(viewerPostRes.statusCode).toBe(403);
+      expect(viewerPostRes.headers.get('access-control-allow-origin')).toBe(origin);
+      expect(viewerPostRes.body?.errorCode).toBe('PERMISSION_DENIED');
+    }
+
+    // 4. Unknown Origin remains rejected with HTTP 403 and no CORS headers
+    for (const badOrigin of [
+      'https://promiseofplanet-bb325.other.com',
+      'https://malicious-site.example.org',
+      'https://bb325.web.app',
+    ]) {
+      const badOriginRes = new MockResponseCapture();
+      await executeEditorialNewsImageUploadEndpoint(
+        {
+          method: 'OPTIONS',
+          headers: {
+            Origin: badOrigin,
+            'Access-Control-Request-Method': 'POST',
+          },
+        },
+        badOriginRes,
+        harness.deps
+      );
+      expect(badOriginRes.statusCode).toBe(403);
+      expect(badOriginRes.headers.get('access-control-allow-origin')).toBeUndefined();
+      expect(badOriginRes.body).toEqual({
+        ok: false,
+        status: 'Rejected',
+        errorCode: 'CORS_ORIGIN_FORBIDDEN',
+      });
+    }
+  });
+
   it('rejects JSON, base64, multipart, or missing Content-Type headers with 415 UNSUPPORTED_CONTENT_TYPE', async () => {
     const harness = await createEndpointHarness();
 

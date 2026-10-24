@@ -78,6 +78,8 @@ export const MAX_METADATA_HEADER_BYTES = 16_384 as const;
 export const DEFAULT_TRUSTED_UPLOAD_ORIGINS: ReadonlySet<string> = new Set([
   'https://promiseofplanet.org',
   'https://www.promiseofplanet.org',
+  'https://promiseofplanet-bb325.web.app',
+  'https://promiseofplanet-bb325.firebaseapp.com',
   'https://promise-of-planet.web.app',
   'https://promise-of-planet.firebaseapp.com',
   'http://localhost:3000',
