@@ -28,6 +28,11 @@ import {
 } from './editor/EditorialInlineImageModal';
 import type { EditorialImageNodeAttrsV2 } from '../../types/richNewsDocument';
 import { convertPlainTextToRichDocument } from '../../services/richNewsDocumentContract';
+import {
+  createEditorialDraftPreviewSessionController,
+  mergePersistedAndStagedPreviewUrlMaps,
+  type EditorialDraftPreviewSessionController,
+} from '../../services/editorialImagePreviewService';
 import { 
   Newspaper, 
   Search, 
@@ -125,8 +130,32 @@ export function AdminNewsManagement({
   } | null>(null);
   const [isImageModalOpen, setIsImageModalOpen] = useState(false);
   const [inlinePreviewUrls, setInlinePreviewUrls] = useState<Readonly<Record<string, string>>>({});
+  const persistedPreviewSessionRef = useRef<EditorialDraftPreviewSessionController>(
+    createEditorialDraftPreviewSessionController()
+  );
+  const [persistedPreviewUrls, setPersistedPreviewUrls] = useState<Readonly<Record<string, string>>>({});
+
+  const triggerPersistedPreviewsForArticle = (
+    richBodyAr: unknown,
+    richBodyEn: unknown
+  ) => {
+    void persistedPreviewSessionRef.current
+      .loadPersistedPreviewsForDraft({
+        richBodyAr,
+        richBodyEn,
+        getStagedSessionPreviewMap: () =>
+          imageSessionRef.current.getInlinePreviewUrlMap(),
+        onPreviewMapUpdated: (nextMap) => {
+          setPersistedPreviewUrls(nextMap);
+        },
+      })
+      .catch(() => {
+        // Fail closed without unhandled promise rejection
+      });
+  };
 
   const resetImageEditorSession = () => {
+    persistedPreviewSessionRef.current.resetAndRevokeAll();
     imageSessionRef.current.resetSession();
     setSelectedImageFile(null);
     setLocalPreviewUrl(null);
@@ -134,6 +163,7 @@ export function AdminNewsManagement({
     setRetainedUpload(null);
     setHaltedUpload(null);
     setInlinePreviewUrls({});
+    setPersistedPreviewUrls({});
     setIsImageModalOpen(false);
     setActiveInsertionRequest(null);
     setIsSaving(false);
@@ -142,12 +172,25 @@ export function AdminNewsManagement({
     }
   };
 
-  // Ensure temporary object URLs are always released on unmount
+  // Ensure temporary object URLs and pending preview requests are always released on unmount
   useEffect(() => {
     const sessionController = imageSessionRef.current;
+    const persistedPreviewController = persistedPreviewSessionRef.current;
     return () => {
+      persistedPreviewController.resetAndRevokeAll();
       sessionController.resetSession();
     };
+  }, []);
+
+  // Load persisted image previews if opened directly with an initialActiveItem draft
+  useEffect(() => {
+    if (initialActiveItem && !initialIsCreating) {
+      triggerPersistedPreviewsForArticle(
+        initialActiveItem.richBodyAr,
+        initialActiveItem.richBodyEn
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Load articles from backend on mount
@@ -214,6 +257,7 @@ export function AdminNewsManagement({
       const dismissTimer = setTimeout(() => {
         
         const cleanupTimer = setTimeout(() => {
+          persistedPreviewSessionRef.current.resetAndRevokeAll();
           imageSessionRef.current.resetSession();
           setSelectedImageFile(null);
           setLocalPreviewUrl(null);
@@ -221,6 +265,7 @@ export function AdminNewsManagement({
           setRetainedUpload(null);
           setHaltedUpload(null);
           setInlinePreviewUrls({});
+          setPersistedPreviewUrls({});
           setIsImageModalOpen(false);
           setActiveInsertionRequest(null);
           setIsSaveSuccess(false);
@@ -303,14 +348,25 @@ export function AdminNewsManagement({
     return matchesSearch && matchesStatus && matchesCategory;
   });
 
+  const effectiveEditorPreviewUrls = mergePersistedAndStagedPreviewUrlMaps(
+    persistedPreviewUrls,
+    inlinePreviewUrls
+  );
+
   // Open item for editing/viewing
   const handleOpenItem = (item: NewsItem) => {
     resetImageEditorSession();
+    const nextRichBodyAr = item.richBodyAr
+      ? JSON.parse(JSON.stringify(item.richBodyAr))
+      : convertPlainTextToRichDocument(item.bodyAr || '', 'rtl');
+    const nextRichBodyEn = item.richBodyEn
+      ? JSON.parse(JSON.stringify(item.richBodyEn))
+      : convertPlainTextToRichDocument(item.bodyEn || '', 'ltr');
     setActiveItem(item);
     setEditForm({
       ...item,
-      richBodyAr: item.richBodyAr ? JSON.parse(JSON.stringify(item.richBodyAr)) : convertPlainTextToRichDocument(item.bodyAr || '', 'rtl'),
-      richBodyEn: item.richBodyEn ? JSON.parse(JSON.stringify(item.richBodyEn)) : convertPlainTextToRichDocument(item.bodyEn || '', 'ltr'),
+      richBodyAr: nextRichBodyAr,
+      richBodyEn: nextRichBodyEn,
       bodyArHasEdited: false,
       bodyEnHasEdited: false,
     });
@@ -321,6 +377,7 @@ export function AdminNewsManagement({
     setSuccessNotification(null);
     setActiveTab('content');
     setErrorMessage(null);
+    triggerPersistedPreviewsForArticle(nextRichBodyAr, nextRichBodyEn);
   };
 
   // Start creating new article
@@ -1170,7 +1227,7 @@ export function AdminNewsManagement({
                       readOnly={!canSaveContent}
                       lang="ar"
                       dir="rtl"
-                      previewUrlsByAssetId={inlinePreviewUrls}
+                      previewUrlsByAssetId={effectiveEditorPreviewUrls}
                       onRequestInsertInlineImage={(req) => handleRequestInsertInlineImage('ar', req)}
                     />
                   </div>
@@ -1186,7 +1243,7 @@ export function AdminNewsManagement({
                       readOnly={!canSaveContent}
                       lang="en"
                       dir="ltr"
-                      previewUrlsByAssetId={inlinePreviewUrls}
+                      previewUrlsByAssetId={effectiveEditorPreviewUrls}
                       onRequestInsertInlineImage={(req) => handleRequestInsertInlineImage('en', req)}
                     />
                   </div>
