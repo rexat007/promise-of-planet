@@ -18,7 +18,15 @@ import {
   type NewsImageMetadataFormInput,
   type RetainedCompletedImageUpload,
 } from '../../services/newsAdminClient';
-import { RichTextEditor } from './editor/RichTextEditor';
+import {
+  RichTextEditor,
+  type EditorialImageInsertionRequest,
+} from './editor/RichTextEditor';
+import {
+  EditorialInlineImageModal,
+  type PreparedEditorialImage,
+} from './editor/EditorialInlineImageModal';
+import type { EditorialImageNodeAttrsV2 } from '../../types/richNewsDocument';
 import { convertPlainTextToRichDocument } from '../../services/richNewsDocumentContract';
 import { 
   Newspaper, 
@@ -43,8 +51,8 @@ import {
   History,
   AlertCircle,
   Image as ImageIcon,
-  Upload,
-  Trash2
+  Trash2,
+  Crop
 } from 'lucide-react';
 
 const JOURNALISTIC_TYPE_OPTIONS: readonly { value: JournalisticType; labelAr: string; labelEn: string }[] = [
@@ -71,6 +79,8 @@ function getCategoryDisplayLabel(category: string, isAr: boolean): string {
 
 interface AdminNewsManagementProps {
   currentUser: AdminUser;
+  initialActiveItem?: NewsItem | null;
+  initialIsCreating?: boolean;
 }
 
 const INITIAL_IMAGE_METADATA: NewsImageMetadataFormInput = {
@@ -82,7 +92,11 @@ const INITIAL_IMAGE_METADATA: NewsImageMetadataFormInput = {
   licensingInfo: '',
 };
 
-export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
+export function AdminNewsManagement({
+  currentUser,
+  initialActiveItem = null,
+  initialIsCreating = false,
+}: AdminNewsManagementProps) {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
 
@@ -104,6 +118,14 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   const [haltedUpload, setHaltedUpload] = useState<HaltedAmbiguousImageUpload | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
+  // Active inline image insertion request & preparation modal state (IMG-F3-09/D2-D2B3A)
+  const [activeInsertionRequest, setActiveInsertionRequest] = useState<{
+    targetEditor: 'ar' | 'en';
+    request: EditorialImageInsertionRequest;
+  } | null>(null);
+  const [isImageModalOpen, setIsImageModalOpen] = useState(false);
+  const [inlinePreviewUrls, setInlinePreviewUrls] = useState<Readonly<Record<string, string>>>({});
+
   const resetImageEditorSession = () => {
     imageSessionRef.current.resetSession();
     setSelectedImageFile(null);
@@ -111,6 +133,9 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
     setImageMetadata(INITIAL_IMAGE_METADATA);
     setRetainedUpload(null);
     setHaltedUpload(null);
+    setInlinePreviewUrls({});
+    setIsImageModalOpen(false);
+    setActiveInsertionRequest(null);
     setIsSaving(false);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -146,8 +171,32 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   }, [isAr]);
   
   // Modal state
-  const [activeItem, setActiveItem] = useState<NewsItem | null>(null);
-  const [isCreating, setIsCreating] = useState(false);
+  const [activeItem, setActiveItem] = useState<NewsItem | null>(() => {
+    if (initialActiveItem) return initialActiveItem;
+    if (initialIsCreating) {
+      return {
+        id: 'news-sudan-initial',
+        titleAr: '',
+        titleEn: '',
+        summaryAr: '',
+        summaryEn: '',
+        bodyAr: '',
+        bodyEn: '',
+        richBodyAr: convertPlainTextToRichDocument('', 'rtl'),
+        richBodyEn: convertPlainTextToRichDocument('', 'ltr'),
+        author: currentUser.name,
+        category: '',
+        tags: [],
+        sources: [],
+        workflowState: WorkflowState.Draft,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        history: [],
+      };
+    }
+    return null;
+  });
+  const [isCreating, setIsCreating] = useState(initialIsCreating);
   const [isSaveSuccess, setIsSaveSuccess] = useState(false);
   const [activeTab, setActiveTab] = useState<'content' | 'workflow'>('content');
 
@@ -171,6 +220,9 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
           setImageMetadata(INITIAL_IMAGE_METADATA);
           setRetainedUpload(null);
           setHaltedUpload(null);
+          setInlinePreviewUrls({});
+          setIsImageModalOpen(false);
+          setActiveInsertionRequest(null);
           setIsSaveSuccess(false);
           setActiveItem(null);
           setIsCreating(false);
@@ -203,7 +255,30 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
   const [transitionComment, setTransitionComment] = useState('');
 
   // Form state for editor
-  const [editForm, setEditForm] = useState<Partial<NewsItem> & { bodyArHasEdited?: boolean; bodyEnHasEdited?: boolean; richBodyAr?: any; richBodyEn?: any }>({});
+  const [editForm, setEditForm] = useState<Partial<NewsItem> & { bodyArHasEdited?: boolean; bodyEnHasEdited?: boolean; richBodyAr?: any; richBodyEn?: any }>(() => {
+    if (initialActiveItem) return { ...initialActiveItem };
+    if (initialIsCreating) {
+      return {
+        id: 'news-sudan-initial',
+        titleAr: '',
+        titleEn: '',
+        summaryAr: '',
+        summaryEn: '',
+        bodyAr: '',
+        bodyEn: '',
+        richBodyAr: convertPlainTextToRichDocument('', 'rtl'),
+        richBodyEn: convertPlainTextToRichDocument('', 'ltr'),
+        author: currentUser.name,
+        category: '',
+        tags: [],
+        sources: [],
+        workflowState: WorkflowState.Draft,
+        bodyArHasEdited: true,
+        bodyEnHasEdited: true,
+      };
+    }
+    return {};
+  });
   const [tagsInput, setTagsInput] = useState<string>('');
   const [sourcesInput, setSourcesInput] = useState<string>('');
 
@@ -320,6 +395,153 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
     setImageMetadata(updated);
   };
 
+  // Image preparation modal handlers (IMG-F3-09/D2-D2B3A)
+  const handleRequestInsertInlineImage = (
+    targetEditor: 'ar' | 'en',
+    request: EditorialImageInsertionRequest
+  ) => {
+    if (!canSaveContent || imageSessionRef.current.isSaving() || isSaving) {
+      return;
+    }
+    setActiveInsertionRequest({ targetEditor, request });
+    setIsImageModalOpen(true);
+    setErrorMessage(null);
+  };
+
+  const handleOpenImageModalForCover = () => {
+    if (!canSaveContent || imageSessionRef.current.isSaving() || isSaving) {
+      return;
+    }
+    setActiveInsertionRequest(null);
+    setIsImageModalOpen(true);
+    setErrorMessage(null);
+  };
+
+  const handleCloseImageModal = () => {
+    setIsImageModalOpen(false);
+    setActiveInsertionRequest(null);
+  };
+
+  const handleConfirmImageModal = (prepared: PreparedEditorialImage): boolean => {
+    // Guards: readOnly, active save, unavailable session
+    if (!canSaveContent || imageSessionRef.current.isSaving() || isSaving) {
+      setErrorMessage(
+        isAr
+          ? 'لا يمكن تعديل الصور أثناء حفظ التغييرات أو في وضع القراءة فقط.'
+          : 'Cannot modify images while save is in flight or in read-only mode.'
+      );
+      return false;
+    }
+
+    // Both usage safety (Section 5)
+    if (prepared.usage === 'both') {
+      setErrorMessage(
+        isAr
+          ? 'خيار استخدام الصورة كغلاف وضمن النص معاً غير مفعل حالياً لمنع تكرار الرفع. يرجى اختيار "ضمن النص" أو "غلاف فقط".'
+          : 'Using the image as both cover and inline is currently disabled to prevent duplicate uploads. Please select "Article Body" or "Cover Only".'
+      );
+      return false;
+    }
+
+    // Cover-only integration (Section 4)
+    if (prepared.usage === 'cover') {
+      const selectRes = imageSessionRef.current.selectFile(prepared.file);
+      if (!selectRes || !selectRes.boundIds) {
+        setErrorMessage(
+          isAr
+            ? 'فشلت جلسة محرر الصور في استيعاب صورة الغلاف المختارة.'
+            : 'Editor session failed to accept selected cover image.'
+        );
+        return false;
+      }
+      setSelectedImageFile(prepared.file);
+      setLocalPreviewUrl(selectRes.previewObjectUrl);
+      const updatedMeta = imageSessionRef.current.setImageMetadata(prepared.metadata);
+      setImageMetadata(updatedMeta);
+      setRetainedUpload(null);
+      setHaltedUpload(null);
+      setErrorMessage(null);
+      setIsImageModalOpen(false);
+      setActiveInsertionRequest(null);
+      return true;
+    }
+
+    // Inline integration (Section 3)
+    if (prepared.usage === 'inline') {
+      if (!activeInsertionRequest || activeInsertionRequest.request.isConsumed()) {
+        setErrorMessage(
+          isAr
+            ? 'انتهت صلاحية طلب إدراج الصورة في المحرر. يرجى إعادة النقر على زر إدراج صورة داخل المحرر.'
+            : 'Editor image insertion request is stale or expired. Please click the editor image button again.'
+        );
+        return false;
+      }
+
+      // 1. Call stageInlineImage(prepared.file, prepared.metadata)
+      const stageResult = imageSessionRef.current.stageInlineImage(
+        prepared.file,
+        prepared.metadata
+      );
+
+      // 2. On staging failure, show the actual bilingual error and return false
+      if (!stageResult.ok) {
+        setErrorMessage(isAr ? stageResult.errorAr : stageResult.errorEn);
+        return false;
+      }
+
+      // 3. On successful staging, insert a canonical V2 editorialImage using the one-shot insertion request
+      const candidateAttrs: EditorialImageNodeAttrsV2 = {
+        assetId: stageResult.assetId,
+        altAr: prepared.metadata.altAr,
+        width: prepared.inlineFormatting?.width ?? '50%',
+        layout: prepared.inlineFormatting?.layout ?? 'float-start',
+        ...(prepared.metadata.altEn ? { altEn: prepared.metadata.altEn } : {}),
+        ...(prepared.metadata.captionAr ? { captionAr: prepared.metadata.captionAr } : {}),
+        ...(prepared.metadata.captionEn ? { captionEn: prepared.metadata.captionEn } : {}),
+      };
+
+      const insertResult = activeInsertionRequest.request.insertCanonicalImage(candidateAttrs);
+
+      // 4. If insertion fails, safely roll back the staged image using the existing verified removal API and return false
+      if (!insertResult.ok) {
+        imageSessionRef.current.removeInlineImage(stageResult.assetId);
+        setInlinePreviewUrls(imageSessionRef.current.getInlinePreviewUrlMap());
+        setErrorMessage(
+          isAr
+            ? `تعذر إدراج الصورة في المحرر (${insertResult.error}). تم التراجع عن تجهيز الصورة.`
+            : `Failed to insert image into editor (${insertResult.error}). Staged image was rolled back.`
+        );
+        return false;
+      }
+
+      // 5. Refresh session-owned preview state
+      setInlinePreviewUrls(imageSessionRef.current.getInlinePreviewUrlMap());
+
+      // Update the originating editor's richBody in editForm
+      if (activeInsertionRequest.targetEditor === 'ar') {
+        setEditForm((prev) => ({
+          ...prev,
+          richBodyAr: insertResult.wrapper,
+          bodyArHasEdited: true,
+        }));
+      } else {
+        setEditForm((prev) => ({
+          ...prev,
+          richBodyEn: insertResult.wrapper,
+          bodyEnHasEdited: true,
+        }));
+      }
+
+      // 6. Close modal only after successful insertion
+      setIsImageModalOpen(false);
+      setActiveInsertionRequest(null);
+      setErrorMessage(null);
+      return true;
+    }
+
+    return false;
+  };
+
   // Save article edits (including optional binary image intake before draft persistence)
   const handleSaveForm = async () => {
     if (imageSessionRef.current.isSaving()) {
@@ -341,6 +563,7 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
 
     setRetainedUpload(imageSessionRef.current.getRetainedCompletedUpload());
     setHaltedUpload(imageSessionRef.current.getHaltedAmbiguousUpload());
+    setInlinePreviewUrls(imageSessionRef.current.getInlinePreviewUrlMap());
 
     if (!outcome.ok) {
       if (outcome.reasonCode !== 'DUPLICATE_SUBMISSION_BLOCKED') {
@@ -926,6 +1149,16 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                     />
                   </div>
 
+                  {/* Mobile responsive rule: on narrow viewports (<= 640px), inline images expand to full content width while preserving canonical attributes */}
+                  <style>{`
+                    @media (max-width: 640px) {
+                      .pop-editorial-figure {
+                        width: 100% !important;
+                        max-width: 100% !important;
+                      }
+                    }
+                  `}</style>
+
                   {/* Arabic Body */}
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-700 dark:text-gray-300">
@@ -935,6 +1168,10 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       value={editForm.richBodyAr || convertPlainTextToRichDocument('', 'rtl')}
                       onChange={(val) => setEditForm(prev => ({ ...prev, richBodyAr: val, bodyArHasEdited: true }))}
                       readOnly={!canSaveContent}
+                      lang="ar"
+                      dir="rtl"
+                      previewUrlsByAssetId={inlinePreviewUrls}
+                      onRequestInsertInlineImage={(req) => handleRequestInsertInlineImage('ar', req)}
                     />
                   </div>
 
@@ -947,6 +1184,10 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                       value={editForm.richBodyEn || convertPlainTextToRichDocument('', 'ltr')}
                       onChange={(val) => setEditForm(prev => ({ ...prev, richBodyEn: val, bodyEnHasEdited: true }))}
                       readOnly={!canSaveContent}
+                      lang="en"
+                      dir="ltr"
+                      previewUrlsByAssetId={inlinePreviewUrls}
+                      onRequestInsertInlineImage={(req) => handleRequestInsertInlineImage('en', req)}
                     />
                   </div>
 
@@ -1101,23 +1342,30 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
                         </label>
 
                         <div className="flex flex-wrap items-center gap-2">
-                          <label
-                            htmlFor="news-featured-image-file-input"
-                            className={`px-3.5 py-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-xs font-bold text-gray-800 dark:text-gray-200 inline-flex items-center gap-1.5 transition-colors ${
+                          {/* Single Primary Cover-Image Preparation Action */}
+                          <button
+                            type="button"
+                            data-testid="news-prepare-featured-image-btn"
+                            disabled={!canSaveContent || isSaving}
+                            onClick={handleOpenImageModalForCover}
+                            className={`px-3.5 py-2 rounded-xl border border-emerald-600 bg-emerald-600 hover:bg-emerald-700 text-xs font-bold text-white inline-flex items-center gap-1.5 transition-colors shadow-sm ${
                               !canSaveContent || isSaving
                                 ? 'opacity-60 cursor-not-allowed'
-                                : 'hover:border-emerald-500 cursor-pointer'
+                                : 'cursor-pointer'
                             }`}
                           >
-                            <Upload className="w-3.5 h-3.5 text-emerald-600" />
-                            <span>{isAr ? 'اختر ملف صورة...' : 'Choose Image File...'}</span>
-                          </label>
+                            <Crop className="w-3.5 h-3.5 text-white" />
+                            <span>{isAr ? 'إعداد وقص صورة الخبر...' : 'Prepare & Crop Cover Image...'}</span>
+                          </button>
+
+                          {/* Accessible Fallback Input (visually hidden, maintains DOM id and accessibility for test automation and screen readers) */}
                           <input
                             ref={fileInputRef}
                             id="news-featured-image-file-input"
                             data-testid="news-featured-image-file-input"
                             type="file"
                             accept="image/png,image/jpeg,image/webp"
+                            aria-label={isAr ? 'اختيار ملف صورة الغلاف' : 'Cover image file input'}
                             disabled={!canSaveContent || isSaving}
                             onChange={(e) => {
                               handleSelectImageFile(e);
@@ -1508,6 +1756,19 @@ export function AdminNewsManagement({ currentUser }: AdminNewsManagementProps) {
             </div>
           </section>
       )}
+
+      {/* Editorial Image Preparation Modal (IMG-F3-09/D2-D2B3A) */}
+      <EditorialInlineImageModal
+        isOpen={isImageModalOpen}
+        onClose={handleCloseImageModal}
+        onConfirm={handleConfirmImageModal}
+        errorMessage={errorMessage}
+        lang={activeInsertionRequest ? activeInsertionRequest.request.editorLang : (isAr ? 'ar' : 'en')}
+        dir={activeInsertionRequest ? activeInsertionRequest.request.editorDir : (isAr ? 'rtl' : 'ltr')}
+        readOnly={!canSaveContent}
+        busy={isSaving}
+        initialUsage={activeInsertionRequest ? 'inline' : 'cover'}
+      />
     </div>
   );
 }

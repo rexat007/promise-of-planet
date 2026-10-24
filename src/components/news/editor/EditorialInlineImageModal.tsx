@@ -66,10 +66,22 @@ export interface PreparedEditorialImage {
   readonly sizeBytes: number;
 }
 
+export type EditorialInlineImageConfirmationResult =
+  | boolean
+  | {
+      readonly ok: boolean;
+      readonly error?: string;
+      readonly errorAr?: string;
+      readonly errorEn?: string;
+    };
+
 export interface EditorialInlineImageModalProps {
   readonly isOpen: boolean;
   readonly onClose: () => void;
-  readonly onConfirm: (prepared: PreparedEditorialImage) => void;
+  readonly onConfirm: (
+    prepared: PreparedEditorialImage
+  ) => boolean | EditorialInlineImageConfirmationResult | Promise<boolean>;
+  readonly errorMessage?: string | null;
   readonly lang?: "ar" | "en";
   readonly dir?: "rtl" | "ltr";
   readonly readOnly?: boolean;
@@ -386,6 +398,7 @@ export function EditorialInlineImageModal({
   isOpen,
   onClose,
   onConfirm,
+  errorMessage,
   lang = "ar",
   dir,
   readOnly = false,
@@ -404,6 +417,7 @@ export function EditorialInlineImageModal({
   const [isCropperOpen, setIsCropperOpen] = useState<boolean>(false);
   const [isOptimizing, setIsOptimizing] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const isConfirmingRef = useRef(false);
 
   // Optimization feedback
   const [optimizationStatus, setOptimizationStatus] = useState<string | null>(
@@ -500,6 +514,7 @@ export function EditorialInlineImageModal({
       target: dashboardContainerRef.current,
       height: 280,
       width: "100%",
+      hideUploadButton: true,
       hideProgressDetails: false,
       proudlyDisplayPoweredByUppy: false,
       theme: "light",
@@ -585,21 +600,55 @@ export function EditorialInlineImageModal({
     };
   }, [isOpen, isAr, modalId, updateActiveFileAndPreview]);
 
-  // Clean up component-owned object URLs on close or unmount
+  // Reopen isolation & lifecycle cleanup (IMG-F3-09/D2-D2B3A-R2)
+  const prevIsOpenRef = useRef(false);
+
   useEffect(() => {
-    if (!isOpen) {
+    if (isOpen && !prevIsOpenRef.current) {
+      // Transition from closed to open: initialize brand-new preparation session
+      setUsage(initialUsage);
+      setWidth(initialWidth);
+      setLayout(initialLayout);
+      setAltAr("");
+      setAltEn("");
+      setCaptionAr("");
+      setCaptionEn("");
+      setPhotographerCredit("");
+      setLicensingInfo("");
+      setActiveFile(null);
+      setPreviewUrl(null);
+      setIsCropperOpen(false);
+      setIsOptimizing(false);
+      setIsSubmitting(false);
+      isConfirmingRef.current = false;
+      setOptimizationStatus(null);
+      setValidationError(null);
+    } else if (!isOpen && prevIsOpenRef.current) {
+      // Transition from open to closed: clean up session state and revoke internal URLs
       revokeAllOwnedUrls();
       setActiveFile(null);
       setPreviewUrl(null);
       setIsCropperOpen(false);
       setIsSubmitting(false);
+      isConfirmingRef.current = false;
       setOptimizationStatus(null);
       setValidationError(null);
+      setAltAr("");
+      setAltEn("");
+      setCaptionAr("");
+      setCaptionEn("");
+      setPhotographerCredit("");
+      setLicensingInfo("");
     }
+    prevIsOpenRef.current = isOpen;
+  }, [isOpen, initialUsage, initialWidth, initialLayout, revokeAllOwnedUrls]);
+
+  // Clean up component-owned object URLs unconditionally on unmount
+  useEffect(() => {
     return () => {
       revokeAllOwnedUrls();
     };
-  }, [isOpen, revokeAllOwnedUrls]);
+  }, [revokeAllOwnedUrls]);
 
   // Trigger web optimization on active binary
   const handleOptimizeForWeb = async () => {
@@ -654,6 +703,7 @@ export function EditorialInlineImageModal({
       !activeFile ||
       isCropperOpen ||
       isSubmitting ||
+      isConfirmingRef.current ||
       isOptimizing ||
       readOnly ||
       busy
@@ -693,8 +743,10 @@ export function EditorialInlineImageModal({
       return;
     }
 
-    // Set submission lock
+    // Set synchronous duplicate-confirmation guard and submission lock
+    isConfirmingRef.current = true;
     setIsSubmitting(true);
+    setValidationError(null);
 
     const preparedResult: PreparedEditorialImage = {
       file: norm.file,
@@ -711,8 +763,68 @@ export function EditorialInlineImageModal({
       sizeBytes: norm.file.size,
     };
 
-    onConfirm(preparedResult);
-    onClose();
+    let accepted = false;
+    try {
+      const res = onConfirm(preparedResult);
+      if (typeof res === "boolean") {
+        accepted = res;
+      } else if (res && typeof res === "object") {
+        if ("then" in res && typeof (res as any).then === "function") {
+          (res as Promise<boolean>).then(
+            (asyncAccepted) => {
+              isConfirmingRef.current = false;
+              if (asyncAccepted === true) {
+                onClose();
+              } else {
+                setIsSubmitting(false);
+              }
+            },
+            (err) => {
+              isConfirmingRef.current = false;
+              setIsSubmitting(false);
+              setValidationError(
+                err instanceof Error
+                  ? err.message
+                  : isAr
+                  ? "حدث خطأ غير متوقع أثناء اعتماد الصورة"
+                  : "An unexpected error occurred while confirming the image"
+              );
+            }
+          );
+          return;
+        } else if ((res as any).ok === true) {
+          accepted = true;
+        } else if ((res as any).ok === false) {
+          accepted = false;
+          const msg = isAr
+            ? (res as any).errorAr || (res as any).error || "تعذر اعتماد الصورة"
+            : (res as any).errorEn || (res as any).error || "Image confirmation was rejected";
+          setValidationError(msg);
+        } else {
+          accepted = false;
+        }
+      } else {
+        // Do not treat undefined or missing acceptance as success
+        accepted = false;
+      }
+    } catch (err) {
+      accepted = false;
+      const errorMsg =
+        err instanceof Error
+          ? err.message
+          : isAr
+          ? "حدث خطأ غير متوقع أثناء اعتماد الصورة"
+          : "An unexpected error occurred while confirming the image";
+      setValidationError(errorMsg);
+    }
+
+    if (accepted) {
+      isConfirmingRef.current = false;
+      onClose();
+    } else {
+      isConfirmingRef.current = false;
+      setIsSubmitting(false);
+    }
   };
 
   const handleCancel = () => {
@@ -1091,14 +1203,14 @@ export function EditorialInlineImageModal({
               </div>
             </div>
 
-            {/* Validation Error Alert */}
-            {validationError && (
+            {/* Validation or Host Error Alert */}
+            {(validationError || errorMessage) && (
               <div
                 data-testid="editorial-modal-validation-error"
                 className="p-3 bg-red-50 border border-red-200 rounded-xl flex items-start gap-2 text-xs text-red-800"
               >
                 <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                <span>{validationError}</span>
+                <span>{validationError || errorMessage}</span>
               </div>
             )}
           </div>
