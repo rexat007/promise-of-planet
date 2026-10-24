@@ -665,8 +665,8 @@ describe("IMG-F3-09/D2-A & D2-C1 — Canonical Inline Image NodeView, Toolbar Co
     expect(isSafeRuntimePreviewUrl("data:image/png;base64,iVBORw0KGgo=")).toBe(true);
   });
 
-  // 12. Preserves read-only Sandbox, RichTextEditor, and unpushed D2-C visual harness files untouched
-  it("12. leaves Sandbox, RichTextEditor, tiptapExtensions, and D2-C visual harness files untouched with their exact Git blob SHA-1", () => {
+  // 12. Preserves read-only Sandbox, D2-D2B1 RichTextEditor, and visual harness files with verified Git blob SHA-1
+  it("12. verifies Git blob SHA-1 convergence for Sandbox, D2-D2B1 RichTextEditor, tiptapExtensions, App, and visual harness files", () => {
     const computeBlobSha1 = (relPath: string) => {
       const fullPath = path.resolve(process.cwd(), relPath);
       const buf = fs.readFileSync(fullPath);
@@ -685,7 +685,7 @@ describe("IMG-F3-09/D2-A & D2-C1 — Canonical Inline Image NodeView, Toolbar Co
 
     expect(
       computeBlobSha1("src/components/news/editor/RichTextEditor.tsx")
-    ).toBe("4ad0783dda0c7a7735947c25ee3899567190c1eb");
+    ).toBe("d3e098e376e3e57ad71fddbc88d39d98463c1383");
 
     expect(
       computeBlobSha1("src/components/news/editor/tiptapExtensions.ts")
