@@ -1,6 +1,13 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
-import sharp, { type Metadata as SharpMetadata } from 'sharp';
+import * as sharpNamespace from 'sharp';
+import type { Metadata as SharpMetadata } from 'sharp';
+
+const sharp = (
+  typeof sharpNamespace === 'function'
+    ? sharpNamespace
+    : sharpNamespace.default
+) as unknown as typeof sharpNamespace.default;
 import {
   buildEditorialImageVariantStoragePath,
   validateAssetId,

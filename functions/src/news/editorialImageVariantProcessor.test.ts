@@ -85,6 +85,31 @@ describe('IMG-F3-07 — Sharp Native Runtime Environment Verification', () => {
     expect(sharp.versions.png).toBeDefined();
     expect(sharp.versions.mozjpeg).toBeDefined();
   });
+
+  it('verifies CommonJS runtime import resilience against sharp_1.default missing export', async () => {
+    // Regression test for IMG-F3-09/D2-E2-R3:
+    // In Node.js CommonJS runtime, require('sharp') is the function itself without a .default property.
+    const sharpDirect = require('sharp');
+    expect(typeof sharpDirect).toBe('function');
+    expect(sharpDirect.default).toBeUndefined();
+
+    // Verify calling sharp directly decodes image metadata without throwing
+    const testBuf = await sharpDirect({
+      create: {
+        width: 100,
+        height: 100,
+        channels: 3,
+        background: { r: 10, g: 20, b: 30 },
+      },
+    })
+      .png()
+      .toBuffer();
+
+    const meta = await sharpDirect(testBuf).metadata();
+    expect(meta.format).toBe('png');
+    expect(meta.width).toBe(100);
+    expect(meta.height).toBe(100);
+  });
 });
 
 describe('IMG-F3-07 — processEditorialImageVariants — Core Decoding & 5-Variant Encoding', () => {

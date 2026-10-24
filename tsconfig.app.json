@@ -23,5 +23,11 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src"],
-  "exclude": ["src/services/*Tests.ts", "src/services/*FoundationTests.ts"]
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/tests/**/*",
+    "src/services/*Tests.ts",
+    "src/services/*FoundationTests.ts"
+  ]
 }
