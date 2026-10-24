@@ -1448,7 +1448,6 @@ export function inspectRightsEvidenceBinary(
   }
 
   const detectedMimeType = magic.mimeType;
-  const canonicalExtension = magic.canonicalExtension;
 
   if (options?.claimedMimeType !== undefined) {
     const normalizedClaimedMime = options.claimedMimeType.trim().toLowerCase();

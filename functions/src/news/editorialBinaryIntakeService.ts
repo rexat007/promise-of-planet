@@ -9,7 +9,6 @@ import {
 import { AdminRepository } from '../admin/adminRepository';
 import type { CallableRequestContext } from './editorialImageRightsReviewService';
 import {
-  buildEditorialImageVariantStoragePath,
   createEditorialImageAssetRecord,
   validateAssetId,
 } from '../shared/editorialImageAssetContract';
