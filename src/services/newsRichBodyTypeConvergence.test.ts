@@ -241,6 +241,37 @@ describe('IMG-F3-09/D1-C2 — News Rich-Body Type Safety Convergence', () => {
 
   it('4. V2 editorialImage attributes (assetId, altAr, altEn, captionAr, captionEn, width, layout) survive NewsAdminClient draft payload assembly', async () => {
     const capturedPayloads: Partial<NewsItem>[] = [];
+    const uploadedAssetIds: string[] = [];
+
+    const inlineIds1 = {
+      intakeId: 'intake_news_1710000000000_inline01',
+      assetId: 'asset_news_1710000000000_inline01',
+    };
+    const inlineIds2 = {
+      intakeId: 'intake_news_1710000000000_inline02',
+      assetId: 'asset_news_1710000000000_inline02',
+    };
+    const idQueue = [inlineIds1, inlineIds2];
+
+    NewsAdminClient.setImageUploadRuntime({
+      endpointUrl: 'https://us-central1-promise-of-planet.cloudfunctions.net/editorialNewsImageUpload',
+      isAuthenticated: () => true,
+      getAuthenticatedIdToken: async () => 'valid-token-c2-inline',
+      fetchImpl: vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        const decoded = JSON.parse(decodeURIComponent(headers['X-Editorial-Image-Metadata']));
+        uploadedAssetIds.push(decoded.assetId);
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            status: 'Completed',
+            intakeId: decoded.intakeId,
+            assetId: decoded.assetId,
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } }
+        );
+      }),
+    });
 
     NewsAdminClient.setTransport(async (action, payload) => {
       if (action === 'saveDraft') {
@@ -277,8 +308,41 @@ describe('IMG-F3-09/D1-C2 — News Rich-Body Type Safety Convergence', () => {
     expect(capturedPayloads[0].richBodyAr).toEqual(VALID_V2_WRAPPER_AR);
     expect(capturedPayloads[0].richBodyEn).toEqual(VALID_V2_WRAPPER_EN);
 
-    // Case B: NewsEditorImageSessionController.executeSaveWorkflow (create mode & update mode)
-    const controller = new NewsEditorImageSessionController();
+    // Case B: NewsEditorImageSessionController.executeSaveWorkflow (create mode with staged/completed inline images)
+    const controller = new NewsEditorImageSessionController({
+      idFactory: () => idQueue.shift() ?? createCanonicalNewsImageUploadIds(),
+      urlAdapter: {
+        createObjectURL: () => 'blob:https://example.org/c2-inline-preview',
+        revokeObjectURL: vi.fn(),
+      },
+    });
+
+    const pngBytes = new Uint8Array(1024);
+    pngBytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    const inlineFile1 = new File([pngBytes], 'inline-ar.png', {
+      type: 'image/png',
+      lastModified: 1710000000001,
+    });
+    const inlineFile2 = new File([pngBytes], 'inline-en.png', {
+      type: 'image/png',
+      lastModified: 1710000000002,
+    });
+
+    const staged1 = controller.stageInlineImage(inlineFile1, {
+      altAr: 'صورة ميدانية لمنسوب النيل الأزرق',
+      altEn: 'Field photo of Blue Nile water level',
+      captionAr: 'قياس المناسيب في محطة الرصد - الخرطوم',
+      captionEn: 'Water level measurement at Khartoum station',
+    });
+    const staged2 = controller.stageInlineImage(inlineFile2, {
+      altAr: 'صورة توثيقية للغطاء النباتي',
+      altEn: 'Documentary photo of vegetation cover',
+      captionAr: 'رصد الغطاء النباتي',
+      captionEn: 'Monitoring vegetation cover',
+    });
+
+    expect(staged1.ok).toBe(true);
+    expect(staged2.ok).toBe(true);
 
     const createOutcome = await controller.executeSaveWorkflow({
       isDraft: true,
@@ -303,7 +367,12 @@ describe('IMG-F3-09/D1-C2 — News Rich-Body Type Safety Convergence', () => {
     if (createOutcome.ok) {
       expect(createOutcome.savedItem.richBodyAr).toEqual(VALID_V2_WRAPPER_AR);
       expect(createOutcome.savedItem.richBodyEn).toEqual(VALID_V2_WRAPPER_EN);
+      expect(createOutcome.linkedInlineAssetIds).toEqual([
+        inlineIds1.assetId,
+        inlineIds2.assetId,
+      ]);
     }
+    expect(uploadedAssetIds).toEqual([inlineIds1.assetId, inlineIds2.assetId]);
 
     const createPayload = capturedPayloads[1];
     expect(createPayload.richBodyAr).toEqual(VALID_V2_WRAPPER_AR);
@@ -325,14 +394,15 @@ describe('IMG-F3-09/D1-C2 — News Rich-Body Type Safety Convergence', () => {
       },
     });
 
-    // Case C: Reopened draft where bodyArHasEdited is false preserves existing activeItem V2 richBodyAr
+    // Case C: Reopened draft with previously persisted V2 documents in activeItem preserves V2 without re-uploading
+    const updateController = new NewsEditorImageSessionController();
     const existingV2Draft = createBaseNewsItem({
       id: 'news-existing-v2-99',
       richBodyAr: VALID_V2_WRAPPER_AR,
-      richBodyEn: VALID_V1_WRAPPER,
+      richBodyEn: VALID_V2_WRAPPER_EN,
     });
 
-    const updateOutcome = await controller.executeSaveWorkflow({
+    const updateOutcome = await updateController.executeSaveWorkflow({
       isDraft: true,
       isCreating: false,
       activeItem: existingV2Draft,
@@ -350,12 +420,13 @@ describe('IMG-F3-09/D1-C2 — News Rich-Body Type Safety Convergence', () => {
     });
 
     expect(updateOutcome.ok).toBe(true);
+    expect(uploadedAssetIds).toHaveLength(2); // Zero additional uploads for already-persisted baseline assets
     const updatePayload = capturedPayloads[2];
     expect(updatePayload.richBodyAr).toEqual(VALID_V2_WRAPPER_AR);
     expect(updatePayload.richBodyEn).toEqual(VALID_V2_WRAPPER_EN);
   });
 
-  it('5. Existing featuredImage upload and single-Save behavior remain unchanged alongside V2 richBody', async () => {
+  it('5. Existing featuredImage upload and single-Save behavior remain unchanged alongside persisted V2 richBody', async () => {
     const fixedIds = createCanonicalNewsImageUploadIds(1710000000000, 'c2feat01');
     const capturedPayloads: Partial<NewsItem>[] = [];
 
@@ -382,7 +453,7 @@ describe('IMG-F3-09/D1-C2 — News Rich-Body Type Safety Convergence', () => {
         capturedPayloads.push(itemPayload);
         return {
           item: {
-            ...createBaseNewsItem(),
+            ...createBaseNewsItem({ richBodyAr: VALID_V2_WRAPPER_AR }),
             ...itemPayload,
           },
         };
@@ -408,12 +479,16 @@ describe('IMG-F3-09/D1-C2 — News Rich-Body Type Safety Convergence', () => {
       altEn: 'Featured article image',
     });
 
+    const existingPersistedDraft = createBaseNewsItem({
+      richBodyAr: VALID_V2_WRAPPER_AR,
+    });
+
     const outcome = await controller.executeSaveWorkflow({
       isDraft: true,
       isCreating: false,
-      activeItem: createBaseNewsItem(),
+      activeItem: existingPersistedDraft,
       editForm: {
-        ...createBaseNewsItem(),
+        ...existingPersistedDraft,
         bodyArHasEdited: true,
         richBodyAr: VALID_V2_WRAPPER_AR,
       },
@@ -433,4 +508,86 @@ describe('IMG-F3-09/D1-C2 — News Rich-Body Type Safety Convergence', () => {
     expect(capturedPayloads[0].featuredImage).toBe(fixedIds.assetId);
     expect(capturedPayloads[0].richBodyAr).toEqual(VALID_V2_WRAPPER_AR);
   });
+
+  it('6. Rejects unknown/unverified new V2 editorialImage assetIds that are neither staged in session nor in persisted activeItem baseline', async () => {
+    const transportSpy = vi.fn();
+    const fetchSpy = vi.fn();
+
+    NewsAdminClient.setTransport(transportSpy);
+    NewsAdminClient.setImageUploadRuntime({
+      endpointUrl: 'https://us-central1-promise-of-planet.cloudfunctions.net/editorialNewsImageUpload',
+      isAuthenticated: () => true,
+      getAuthenticatedIdToken: async () => 'valid-token-c2',
+      fetchImpl: fetchSpy as unknown as typeof fetch,
+    });
+
+    const controller = new NewsEditorImageSessionController();
+
+    // 1. Create mode referencing an unverified V2 inline image not staged in session
+    const unverifiedCreate = await controller.executeSaveWorkflow({
+      isDraft: true,
+      isCreating: true,
+      activeItem: createBaseNewsItem({ id: 'news-sudan-1710000000000' }),
+      editForm: {
+        id: 'news-sudan-1710000000000',
+        titleAr: 'خبر جديد بصورة غير موثقة',
+        category: 'Climate',
+        bodyArHasEdited: true,
+        richBodyAr: VALID_V2_WRAPPER_AR,
+      },
+      tagsInput: '',
+      sourcesInput: '',
+      currentUser: TEST_ADMIN,
+      isAr: false,
+    });
+
+    expect(unverifiedCreate.ok).toBe(false);
+    if (!unverifiedCreate.ok) {
+      expect(unverifiedCreate.reasonCode).toBe('VALIDATION_FAILED');
+      expect(unverifiedCreate.unverifiedInlineAssetId).toBe(
+        'asset_news_1710000000000_inline01'
+      );
+      expect(unverifiedCreate.errorMessage).toContain(
+        'UNVERIFIED_INLINE_IMAGE_ASSET'
+      );
+    }
+
+    // 2. Update mode keeping persisted AR image but introducing an unverified EN image not in activeItem or session
+    const existingArOnlyDraft = createBaseNewsItem({
+      id: 'news-existing-v2-ar-only',
+      richBodyAr: VALID_V2_WRAPPER_AR,
+      richBodyEn: VALID_V1_WRAPPER,
+    });
+
+    const unverifiedUpdate = await controller.executeSaveWorkflow({
+      isDraft: true,
+      isCreating: false,
+      activeItem: existingArOnlyDraft,
+      editForm: {
+        ...existingArOnlyDraft,
+        bodyArHasEdited: false,
+        bodyEnHasEdited: true,
+        richBodyEn: VALID_V2_WRAPPER_EN,
+      },
+      tagsInput: '',
+      sourcesInput: '',
+      currentUser: TEST_ADMIN,
+      isAr: false,
+    });
+
+    expect(unverifiedUpdate.ok).toBe(false);
+    if (!unverifiedUpdate.ok) {
+      expect(unverifiedUpdate.reasonCode).toBe('VALIDATION_FAILED');
+      expect(unverifiedUpdate.unverifiedInlineAssetId).toBe(
+        'asset_news_1710000000000_inline02'
+      );
+      expect(unverifiedUpdate.errorMessage).toContain(
+        'UNVERIFIED_INLINE_IMAGE_ASSET'
+      );
+    }
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(transportSpy).not.toHaveBeenCalled();
+  });
 });
+

@@ -10,6 +10,7 @@ import type { NewsItem } from '../types/news';
 import type { RichNewsDocument } from '../types/richNewsDocument';
 import { WorkflowState } from '../types/workflow';
 import type { AdminUser } from '../types/admin';
+import { validateRichNewsDocumentByVersion } from './richNewsDocumentContract';
 
 export type NewsAdminTransport = (action: string, payload?: any) => Promise<any>;
 
@@ -1283,6 +1284,80 @@ export class NewsAdminClient {
   }
 }
 
+/**
+ * Extracts unique `editorialImage.attrs.assetId` references in deterministic
+ * document-traversal order from a V2 rich news document wrapper.
+ * Returns an empty array for V1, undefined, or non-V2 documents.
+ */
+export function extractEditorialImageAssetIdsFromRichDocument(
+  richDoc: unknown
+): string[] {
+  if (!richDoc || typeof richDoc !== 'object' || Array.isArray(richDoc)) {
+    return [];
+  }
+
+  const wrapper = richDoc as Record<string, unknown>;
+  if (wrapper.schemaVersion !== 2) {
+    return [];
+  }
+
+  const doc = wrapper.doc as Record<string, unknown> | undefined;
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc.type !== 'doc') {
+    return [];
+  }
+
+  if (!Array.isArray(doc.content)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+
+  function walkNodes(nodes: unknown[]): void {
+    for (const node of nodes) {
+      if (!node || typeof node !== 'object' || Array.isArray(node)) {
+        continue;
+      }
+      const record = node as Record<string, unknown>;
+      if (record.type === 'editorialImage') {
+        const attrs = record.attrs as Record<string, unknown> | undefined;
+        if (
+          attrs &&
+          typeof attrs === 'object' &&
+          !Array.isArray(attrs) &&
+          typeof attrs.assetId === 'string' &&
+          attrs.assetId.length > 0
+        ) {
+          seen.add(attrs.assetId);
+        }
+      }
+      if (Array.isArray(record.content)) {
+        walkNodes(record.content);
+      }
+    }
+  }
+
+  walkNodes(doc.content);
+  return Array.from(seen);
+}
+
+/**
+ * Collects unique `editorialImage.attrs.assetId` references across both
+ * Arabic and English rich document bodies in deterministic order.
+ */
+export function collectUniqueEditorialImageAssetIds(
+  richBodyAr: unknown,
+  richBodyEn: unknown
+): string[] {
+  const combined = new Set<string>();
+  for (const id of extractEditorialImageAssetIdsFromRichDocument(richBodyAr)) {
+    combined.add(id);
+  }
+  for (const id of extractEditorialImageAssetIdsFromRichDocument(richBodyEn)) {
+    combined.add(id);
+  }
+  return Array.from(combined);
+}
+
 export interface ObjectUrlLifecycleAdapter {
   createObjectURL(blob: Blob | MediaSource): string;
   revokeObjectURL(url: string): void;
@@ -1303,6 +1378,96 @@ const defaultObjectUrlAdapter: ObjectUrlLifecycleAdapter = {
     }
   },
 };
+
+export type InlineImageSessionUploadStatus =
+  | 'Staged'
+  | NewsImageUploadOutcomeStatus;
+
+export interface HaltedInlineImageUpload {
+  readonly intakeId: string;
+  readonly assetId: string;
+  readonly fileSignature: string;
+  readonly status: Exclude<NewsImageUploadOutcomeStatus, 'Completed'>;
+  readonly errorCode: string;
+  readonly rejectionCode?: string;
+  readonly httpStatus?: number;
+  readonly messageAr: string;
+  readonly messageEn: string;
+}
+
+export interface StagedInlineImageAssetState {
+  readonly intakeId: string;
+  readonly assetId: string;
+  readonly file: NewsImageBinaryFileLike;
+  readonly fileSignature: string;
+  readonly metadata: NewsImageMetadataFormInput;
+  readonly previewObjectUrl: string | null;
+  readonly status: InlineImageSessionUploadStatus;
+  readonly uploadAttemptCount: number;
+  readonly retainedCompletedUpload: RetainedCompletedImageUpload | null;
+  readonly haltedAmbiguousUpload: HaltedAmbiguousImageUpload | null;
+  readonly haltedInlineUpload: HaltedInlineImageUpload | null;
+  readonly lastUploadOutcome: UploadEditorialNewsImageOutcome | null;
+}
+
+export type StageInlineImageResult =
+  | {
+      readonly ok: true;
+      readonly intakeId: string;
+      readonly assetId: string;
+      readonly previewObjectUrl: string | null;
+      readonly assetState: StagedInlineImageAssetState;
+    }
+  | {
+      readonly ok: false;
+      readonly reasonCode:
+        | 'VALIDATION_FAILED'
+        | 'SAVE_IN_FLIGHT'
+        | 'INVALID_GENERATED_IDS';
+      readonly errors: readonly string[];
+      readonly errorAr: string;
+      readonly errorEn: string;
+    };
+
+export type ReplaceInlineImageFileResult =
+  | {
+      readonly ok: true;
+      readonly intakeId: string;
+      readonly assetId: string;
+      readonly previewObjectUrl: string | null;
+      readonly assetState: StagedInlineImageAssetState;
+    }
+  | {
+      readonly ok: false;
+      readonly reasonCode:
+        | 'ASSET_NOT_FOUND'
+        | 'REPLACE_FORBIDDEN_AFTER_UPLOAD_ATTEMPT'
+        | 'SAVE_IN_FLIGHT'
+        | 'VALIDATION_FAILED';
+      readonly errors: readonly string[];
+      readonly errorAr: string;
+      readonly errorEn: string;
+    };
+
+export type UpdateInlineImageMetadataResult =
+  | {
+      readonly ok: true;
+      readonly intakeId: string;
+      readonly assetId: string;
+      readonly metadata: NewsImageMetadataFormInput;
+      readonly assetState: StagedInlineImageAssetState;
+    }
+  | {
+      readonly ok: false;
+      readonly reasonCode:
+        | 'ASSET_NOT_FOUND'
+        | 'UPDATE_FORBIDDEN_AFTER_UPLOAD_ATTEMPT'
+        | 'SAVE_IN_FLIGHT'
+        | 'VALIDATION_FAILED';
+      readonly errors: readonly string[];
+      readonly errorAr: string;
+      readonly errorEn: string;
+    };
 
 export interface DraftSaveWithImageInput {
   readonly isDraft: boolean;
@@ -1326,6 +1491,8 @@ export type DraftSaveWithImageOutcome =
       readonly savedItem: NewsItem;
       readonly linkedAssetId?: string;
       readonly reusedRetainedUpload: boolean;
+      readonly linkedInlineAssetIds?: readonly string[];
+      readonly reusedRetainedInlineAssetIds?: readonly string[];
     }
   | {
       readonly ok: false;
@@ -1339,12 +1506,34 @@ export type DraftSaveWithImageOutcome =
       readonly errorMessage: string;
       readonly retainedCompletedUpload: RetainedCompletedImageUpload | null;
       readonly haltedAmbiguousUpload: HaltedAmbiguousImageUpload | null;
+      readonly haltedInlineUpload?: HaltedInlineImageUpload | null;
+      readonly failedInlineAssetId?: string;
+      readonly unverifiedInlineAssetId?: string;
+      readonly retainedCompletedInlineUploads?: readonly RetainedCompletedImageUpload[];
+      readonly haltedAmbiguousInlineUploads?: readonly HaltedAmbiguousImageUpload[];
+      readonly haltedInlineUploads?: readonly HaltedInlineImageUpload[];
     };
 
+interface MutableStagedInlineImageEntry {
+  readonly intakeId: string;
+  readonly assetId: string;
+  file: NewsImageBinaryFileLike;
+  fileSignature: string;
+  metadata: NewsImageMetadataFormInput;
+  previewObjectUrl: string | null;
+  status: InlineImageSessionUploadStatus;
+  uploadAttemptCount: number;
+  retainedCompletedUpload: RetainedCompletedImageUpload | null;
+  haltedAmbiguousUpload: HaltedAmbiguousImageUpload | null;
+  haltedInlineUpload: HaltedInlineImageUpload | null;
+  lastUploadOutcome: UploadEditorialNewsImageOutcome | null;
+}
+
 /**
- * Manages the per-editor-session state for featured image selection, temporary browser
- * object URL lifecycle, canonical intake/asset ID binding, retained Completed upload reuse
- * on draft-save failure, ambiguous upload retry prevention, and single-save lock.
+ * Manages the per-editor-session state for featured image selection, multi-asset inline
+ * editorial image staging, temporary browser object URL lifecycle, canonical intake/asset ID
+ * binding, retained Completed upload reuse on draft-save failure, fail-closed inline upload
+ * retry prevention, client-side asset provenance, and single-save lock.
  */
 export class NewsEditorImageSessionController {
   private selectedFile: NewsImageBinaryFileLike | null = null;
@@ -1360,6 +1549,8 @@ export class NewsEditorImageSessionController {
     photographerCredit: '',
     licensingInfo: '',
   };
+  private readonly inlineAssets = new Map<string, MutableStagedInlineImageEntry>();
+  private readonly ownedObjectUrls = new Set<string>();
   private isSaveInFlight = false;
   private readonly urlAdapter: ObjectUrlLifecycleAdapter;
   private readonly idFactory: () => { readonly intakeId: string; readonly assetId: string };
@@ -1370,6 +1561,72 @@ export class NewsEditorImageSessionController {
   }) {
     this.urlAdapter = options?.urlAdapter ?? defaultObjectUrlAdapter;
     this.idFactory = options?.idFactory ?? (() => createCanonicalNewsImageUploadIds());
+  }
+
+  private createSessionOwnedObjectUrl(file: NewsImageBinaryFileLike): string | null {
+    let created: string | null = null;
+    if (typeof Blob !== 'undefined' && file instanceof Blob) {
+      created = this.urlAdapter.createObjectURL(file);
+    } else {
+      try {
+        created = this.urlAdapter.createObjectURL(file as unknown as Blob);
+      } catch {
+        created = null;
+      }
+    }
+    if (created && typeof created === 'string' && created.length > 0) {
+      this.ownedObjectUrls.add(created);
+      return created;
+    }
+    return null;
+  }
+
+  private revokeSessionOwnedObjectUrl(url: string | null | undefined): void {
+    if (!url || !this.ownedObjectUrls.has(url)) {
+      return;
+    }
+    this.ownedObjectUrls.delete(url);
+    this.urlAdapter.revokeObjectURL(url);
+  }
+
+  private cloneMetadata(meta: NewsImageMetadataFormInput): NewsImageMetadataFormInput {
+    return {
+      altAr: meta.altAr,
+      ...(meta.altEn !== undefined ? { altEn: meta.altEn } : {}),
+      ...(meta.captionAr !== undefined ? { captionAr: meta.captionAr } : {}),
+      ...(meta.captionEn !== undefined ? { captionEn: meta.captionEn } : {}),
+      ...(meta.photographerCredit !== undefined
+        ? { photographerCredit: meta.photographerCredit }
+        : {}),
+      ...(meta.licensingInfo !== undefined ? { licensingInfo: meta.licensingInfo } : {}),
+    };
+  }
+
+  private toInlineAssetStateSnapshot(
+    entry: MutableStagedInlineImageEntry
+  ): StagedInlineImageAssetState {
+    return {
+      intakeId: entry.intakeId,
+      assetId: entry.assetId,
+      file: entry.file,
+      fileSignature: entry.fileSignature,
+      metadata: this.cloneMetadata(entry.metadata),
+      previewObjectUrl: entry.previewObjectUrl,
+      status: entry.status,
+      uploadAttemptCount: entry.uploadAttemptCount,
+      retainedCompletedUpload: entry.retainedCompletedUpload
+        ? { ...entry.retainedCompletedUpload }
+        : null,
+      haltedAmbiguousUpload: entry.haltedAmbiguousUpload
+        ? { ...entry.haltedAmbiguousUpload }
+        : null,
+      haltedInlineUpload: entry.haltedInlineUpload
+        ? { ...entry.haltedInlineUpload }
+        : null,
+      lastUploadOutcome: entry.lastUploadOutcome
+        ? { ...entry.lastUploadOutcome }
+        : null,
+    };
   }
 
   public getSelectedFile(): NewsImageBinaryFileLike | null {
@@ -1409,8 +1666,8 @@ export class NewsEditorImageSessionController {
   }
 
   /**
-   * Selects or replaces the local image file, immediately revoking any previous temporary object URL
-   * and binding a single canonical `{ intakeId, assetId }` pair to the new selection.
+   * Selects or replaces the local featured image file, immediately revoking any previous
+   * temporary object URL and binding a single canonical `{ intakeId, assetId }` pair.
    */
   public selectFile(file: NewsImageBinaryFileLike | null): {
     readonly previewObjectUrl: string | null;
@@ -1428,18 +1685,7 @@ export class NewsEditorImageSessionController {
 
     this.selectedFile = file;
     this.boundIds = this.idFactory();
-
-    if (typeof Blob !== 'undefined' && file instanceof Blob) {
-      this.previewObjectUrl = this.urlAdapter.createObjectURL(file);
-    } else {
-      try {
-        this.previewObjectUrl = this.urlAdapter.createObjectURL(
-          file as unknown as Blob
-        );
-      } catch {
-        this.previewObjectUrl = null;
-      }
-    }
+    this.previewObjectUrl = this.createSessionOwnedObjectUrl(file);
 
     return {
       previewObjectUrl: this.previewObjectUrl,
@@ -1451,12 +1697,394 @@ export class NewsEditorImageSessionController {
     if (this.previewObjectUrl) {
       const toRevoke = this.previewObjectUrl;
       this.previewObjectUrl = null;
-      this.urlAdapter.revokeObjectURL(toRevoke);
+      this.revokeSessionOwnedObjectUrl(toRevoke);
+    }
+  }
+
+  /**
+   * Stages a validated inline editorial image binary and its upload metadata in the session.
+   * Binds canonical `{ intakeId, assetId }` once and creates a session-owned runtime preview URL.
+   * Does NOT perform any network upload at staging/insertion time.
+   */
+  public stageInlineImage(
+    file: NewsImageBinaryFileLike | null | undefined,
+    metadata: NewsImageMetadataFormInput
+  ): StageInlineImageResult {
+    if (this.isSaveInFlight) {
+      return {
+        ok: false,
+        reasonCode: 'SAVE_IN_FLIGHT',
+        errors: ['Cannot stage a new inline image while a save operation is in progress.'],
+        errorAr: 'لا يمكن تجهيز صورة مضمنة جديدة أثناء حفظ التعديلات.',
+        errorEn: 'Cannot stage a new inline image while a save operation is in progress.',
+      };
+    }
+
+    const validation = validateNewsImageSelectionAndMetadata(
+      metadata,
+      file ?? null,
+      DEFAULT_ASSET_VALIDATION_LIMITS
+    );
+    if (!validation.valid || !file) {
+      return {
+        ok: false,
+        reasonCode: 'VALIDATION_FAILED',
+        errors: validation.errors,
+        errorAr: validation.errorAr || 'بيانات الصورة المضمنة أو الملف المختار غير صالحة.',
+        errorEn: validation.errorEn || 'Inline image file or metadata is invalid.',
+      };
+    }
+
+    let generatedIds: { readonly intakeId: string; readonly assetId: string };
+    try {
+      generatedIds = this.idFactory();
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to generate canonical inline image upload IDs.';
+      return {
+        ok: false,
+        reasonCode: 'INVALID_GENERATED_IDS',
+        errors: [msg],
+        errorAr: 'تعذر إنشاء معرفات قياسية صالحة للصورة المضمنة.',
+        errorEn: msg,
+      };
+    }
+
+    const intakeCheck = validateClientIntakeId(generatedIds?.intakeId);
+    const assetCheck = validateAssetId(
+      generatedIds?.assetId,
+      DEFAULT_ASSET_VALIDATION_LIMITS
+    );
+    if (
+      !intakeCheck.valid ||
+      !assetCheck.valid ||
+      isForbiddenFeaturedImagePersistenceValue(generatedIds.assetId) ||
+      this.inlineAssets.has(generatedIds.assetId) ||
+      (this.boundIds && this.boundIds.assetId === generatedIds.assetId)
+    ) {
+      return {
+        ok: false,
+        reasonCode: 'INVALID_GENERATED_IDS',
+        errors: [
+          ...intakeCheck.errors,
+          ...assetCheck.errors,
+          'Generated intakeId/assetId is invalid or collides with an existing session asset.',
+        ],
+        errorAr: 'معرف الأصل المُنشأ للصورة المضمنة غير صالح أو مكرر في الجلسة الحالية.',
+        errorEn: 'Generated inline image assetId/intakeId is invalid or already exists in session.',
+      };
+    }
+
+    const previewObjectUrl = this.createSessionOwnedObjectUrl(file);
+    const entry: MutableStagedInlineImageEntry = {
+      intakeId: generatedIds.intakeId,
+      assetId: generatedIds.assetId,
+      file,
+      fileSignature: computeNewsImageFileSignature(file),
+      metadata: this.cloneMetadata(metadata),
+      previewObjectUrl,
+      status: 'Staged',
+      uploadAttemptCount: 0,
+      retainedCompletedUpload: null,
+      haltedAmbiguousUpload: null,
+      haltedInlineUpload: null,
+      lastUploadOutcome: null,
+    };
+
+    this.inlineAssets.set(entry.assetId, entry);
+    const snapshot = this.toInlineAssetStateSnapshot(entry);
+
+    return {
+      ok: true,
+      intakeId: entry.intakeId,
+      assetId: entry.assetId,
+      previewObjectUrl: entry.previewObjectUrl,
+      assetState: snapshot,
+    };
+  }
+
+  /**
+   * Replaces the binary file of a staged inline asset before any upload attempt,
+   * preserving its bound `{ intakeId, assetId }` and revoking its previous temporary preview URL.
+   */
+  public replaceInlineImageFile(
+    assetId: string,
+    file: NewsImageBinaryFileLike | null | undefined
+  ): ReplaceInlineImageFileResult {
+    if (this.isSaveInFlight) {
+      return {
+        ok: false,
+        reasonCode: 'SAVE_IN_FLIGHT',
+        errors: ['Cannot replace staged inline image file while a save operation is in progress.'],
+        errorAr: 'لا يمكن استبدال ملف الصورة المضمنة أثناء حفظ التعديلات.',
+        errorEn: 'Cannot replace staged inline image file while a save operation is in progress.',
+      };
+    }
+
+    const entry = this.inlineAssets.get(assetId);
+    if (!entry) {
+      return {
+        ok: false,
+        reasonCode: 'ASSET_NOT_FOUND',
+        errors: [`Staged inline image asset "${assetId}" was not found in the current session.`],
+        errorAr: 'لم يتم العثور على الصورة المضمنة في الجلسة الحالية.',
+        errorEn: `Staged inline image asset "${assetId}" was not found in the current session.`,
+      };
+    }
+
+    if (
+      entry.uploadAttemptCount > 0 ||
+      entry.status !== 'Staged' ||
+      entry.retainedCompletedUpload !== null ||
+      entry.haltedAmbiguousUpload !== null ||
+      entry.haltedInlineUpload !== null
+    ) {
+      return {
+        ok: false,
+        reasonCode: 'REPLACE_FORBIDDEN_AFTER_UPLOAD_ATTEMPT',
+        errors: [
+          `Cannot replace binary file for inline asset "${assetId}" after an upload attempt has occurred.`,
+        ],
+        errorAr: 'لا يمكن استبدال ملف الصورة المضمنة لنفس المعرف بعد بدء محاولة الرفع.',
+        errorEn: `Cannot replace binary file for inline asset "${assetId}" after an upload attempt has occurred.`,
+      };
+    }
+
+    const validation = validateNewsImageSelectionAndMetadata(
+      entry.metadata,
+      file ?? null,
+      DEFAULT_ASSET_VALIDATION_LIMITS
+    );
+    if (!validation.valid || !file) {
+      return {
+        ok: false,
+        reasonCode: 'VALIDATION_FAILED',
+        errors: validation.errors,
+        errorAr: validation.errorAr || 'ملف الصورة البديل غير صالح.',
+        errorEn: validation.errorEn || 'Replacement inline image file is invalid.',
+      };
+    }
+
+    const previousUrl = entry.previewObjectUrl;
+    this.revokeSessionOwnedObjectUrl(previousUrl);
+
+    const nextPreviewUrl = this.createSessionOwnedObjectUrl(file);
+    entry.file = file;
+    entry.fileSignature = computeNewsImageFileSignature(file);
+    entry.previewObjectUrl = nextPreviewUrl;
+
+    const snapshot = this.toInlineAssetStateSnapshot(entry);
+    return {
+      ok: true,
+      intakeId: entry.intakeId,
+      assetId: entry.assetId,
+      previewObjectUrl: entry.previewObjectUrl,
+      assetState: snapshot,
+    };
+  }
+
+  /**
+   * Updates upload metadata for a staged inline image before any upload attempt.
+   */
+  public updateInlineImageMetadata(
+    assetId: string,
+    patch: Partial<NewsImageMetadataFormInput>
+  ): UpdateInlineImageMetadataResult {
+    if (this.isSaveInFlight) {
+      return {
+        ok: false,
+        reasonCode: 'SAVE_IN_FLIGHT',
+        errors: ['Cannot update inline image metadata while a save operation is in progress.'],
+        errorAr: 'لا يمكن تحديث البيانات الوصفية للصورة المضمنة أثناء حفظ التعديلات.',
+        errorEn: 'Cannot update inline image metadata while a save operation is in progress.',
+      };
+    }
+
+    const entry = this.inlineAssets.get(assetId);
+    if (!entry) {
+      return {
+        ok: false,
+        reasonCode: 'ASSET_NOT_FOUND',
+        errors: [`Staged inline image asset "${assetId}" was not found in the current session.`],
+        errorAr: 'لم يتم العثور على الصورة المضمنة في الجلسة الحالية.',
+        errorEn: `Staged inline image asset "${assetId}" was not found in the current session.`,
+      };
+    }
+
+    if (
+      entry.uploadAttemptCount > 0 ||
+      entry.status !== 'Staged' ||
+      entry.retainedCompletedUpload !== null ||
+      entry.haltedAmbiguousUpload !== null ||
+      entry.haltedInlineUpload !== null
+    ) {
+      return {
+        ok: false,
+        reasonCode: 'UPDATE_FORBIDDEN_AFTER_UPLOAD_ATTEMPT',
+        errors: [
+          `Cannot update upload metadata for inline asset "${assetId}" after an upload attempt has occurred.`,
+        ],
+        errorAr: 'لا يمكن تعديل بيانات الرفع للصورة المضمنة بعد بدء محاولة الرفع.',
+        errorEn: `Cannot update upload metadata for inline asset "${assetId}" after an upload attempt has occurred.`,
+      };
+    }
+
+    const mergedMetadata: NewsImageMetadataFormInput = {
+      ...entry.metadata,
+      ...patch,
+    };
+
+    const validation = validateNewsImageSelectionAndMetadata(
+      mergedMetadata,
+      entry.file,
+      DEFAULT_ASSET_VALIDATION_LIMITS
+    );
+    if (!validation.valid) {
+      return {
+        ok: false,
+        reasonCode: 'VALIDATION_FAILED',
+        errors: validation.errors,
+        errorAr: validation.errorAr || 'البيانات الوصفية المحدثة للصورة المضمنة غير صالحة.',
+        errorEn: validation.errorEn || 'Updated inline image metadata is invalid.',
+      };
+    }
+
+    entry.metadata = this.cloneMetadata(mergedMetadata);
+    const snapshot = this.toInlineAssetStateSnapshot(entry);
+
+    return {
+      ok: true,
+      intakeId: entry.intakeId,
+      assetId: entry.assetId,
+      metadata: snapshot.metadata,
+      assetState: snapshot,
+    };
+  }
+
+  /**
+   * Removes a never-uploaded staged inline image asset and revokes its session-owned preview URL.
+   * Never silently deletes an already uploaded or halted/failed asset record.
+   */
+  public removeInlineImage(assetId: string): boolean {
+    if (this.isSaveInFlight) {
+      return false;
+    }
+
+    const entry = this.inlineAssets.get(assetId);
+    if (!entry) {
+      return false;
+    }
+
+    if (
+      entry.uploadAttemptCount > 0 ||
+      entry.status !== 'Staged' ||
+      entry.retainedCompletedUpload !== null ||
+      entry.haltedAmbiguousUpload !== null ||
+      entry.haltedInlineUpload !== null
+    ) {
+      return false;
+    }
+
+    this.revokeSessionOwnedObjectUrl(entry.previewObjectUrl);
+    entry.previewObjectUrl = null;
+    this.inlineAssets.delete(assetId);
+    return true;
+  }
+
+  /**
+   * Returns the runtime preview object URL for a staged inline assetId, or null if unavailable.
+   */
+  public getInlinePreviewUrl(assetId: string): string | null {
+    const entry = this.inlineAssets.get(assetId);
+    return entry?.previewObjectUrl ?? null;
+  }
+
+  /**
+   * Returns a read-only map of `assetId -> previewObjectUrl` for all staged inline assets
+   * that currently have an active session-owned preview URL.
+   */
+  public getInlinePreviewUrlMap(): Readonly<Record<string, string>> {
+    const map: Record<string, string> = {};
+    for (const [assetId, entry] of this.inlineAssets.entries()) {
+      if (entry.previewObjectUrl) {
+        map[assetId] = entry.previewObjectUrl;
+      }
+    }
+    return Object.freeze(map);
+  }
+
+  /**
+   * Inspects the full state of a single staged inline image asset.
+   */
+  public getInlineImageState(assetId: string): StagedInlineImageAssetState | null {
+    const entry = this.inlineAssets.get(assetId);
+    return entry ? this.toInlineAssetStateSnapshot(entry) : null;
+  }
+
+  /**
+   * Inspects the upload status of a single staged inline image asset.
+   */
+  public getInlineUploadStatus(assetId: string): InlineImageSessionUploadStatus | null {
+    const entry = this.inlineAssets.get(assetId);
+    return entry ? entry.status : null;
+  }
+
+  /**
+   * Returns snapshots of all staged inline image assets in registration order.
+   */
+  public getAllInlineImageStates(): readonly StagedInlineImageAssetState[] {
+    return Array.from(this.inlineAssets.values()).map((entry) =>
+      this.toInlineAssetStateSnapshot(entry)
+    );
+  }
+
+  public getRetainedCompletedInlineUploads(): readonly RetainedCompletedImageUpload[] {
+    const list: RetainedCompletedImageUpload[] = [];
+    for (const entry of this.inlineAssets.values()) {
+      if (entry.retainedCompletedUpload) {
+        list.push({ ...entry.retainedCompletedUpload });
+      }
+    }
+    return list;
+  }
+
+  public getHaltedAmbiguousInlineUploads(): readonly HaltedAmbiguousImageUpload[] {
+    const list: HaltedAmbiguousImageUpload[] = [];
+    for (const entry of this.inlineAssets.values()) {
+      if (entry.haltedAmbiguousUpload) {
+        list.push({ ...entry.haltedAmbiguousUpload });
+      }
+    }
+    return list;
+  }
+
+  public getHaltedInlineUploads(): readonly HaltedInlineImageUpload[] {
+    const list: HaltedInlineImageUpload[] = [];
+    for (const entry of this.inlineAssets.values()) {
+      if (entry.haltedInlineUpload) {
+        list.push({ ...entry.haltedInlineUpload });
+      }
+    }
+    return list;
+  }
+
+  /**
+   * Revokes all session-owned inline image preview object URLs without deleting
+   * retained Completed upload receipts.
+   */
+  public disposeInlinePreviews(): void {
+    for (const entry of this.inlineAssets.values()) {
+      if (entry.previewObjectUrl) {
+        const url = entry.previewObjectUrl;
+        entry.previewObjectUrl = null;
+        this.revokeSessionOwnedObjectUrl(url);
+      }
     }
   }
 
   public resetSession(): void {
     this.revokeCurrentPreviewUrl();
+    this.disposeInlinePreviews();
+    this.inlineAssets.clear();
     this.selectedFile = null;
     this.boundIds = null;
     this.retainedCompletedUpload = null;
@@ -1473,7 +2101,8 @@ export class NewsEditorImageSessionController {
   }
 
   /**
-   * Executes the unified single-button Save workflow for a news draft.
+   * Executes the unified single-button Save workflow for a news draft,
+   * orchestrating both featured image upload and referenced staged inline V2 image uploads.
    */
   public async executeSaveWorkflow(
     input: DraftSaveWithImageInput
@@ -1489,6 +2118,9 @@ export class NewsEditorImageSessionController {
           : 'A save operation is already in progress. Please wait.',
         retainedCompletedUpload: this.retainedCompletedUpload,
         haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+        retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+        haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+        haltedInlineUploads: this.getHaltedInlineUploads(),
       };
     }
 
@@ -1505,6 +2137,31 @@ export class NewsEditorImageSessionController {
           : 'Content and featured image cannot be edited outside Draft state.',
         retainedCompletedUpload: this.retainedCompletedUpload,
         haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+        retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+        haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+        haltedInlineUploads: this.getHaltedInlineUploads(),
+      };
+    }
+
+    if (
+      !input.isCreating &&
+      (!input.activeItem ||
+        typeof input.activeItem.id !== 'string' ||
+        input.activeItem.id.trim().length === 0 ||
+        input.activeItem.id.startsWith('news-sudan-provisional-') ||
+        input.activeItem.id.startsWith('temp-'))
+    ) {
+      return {
+        ok: false,
+        reasonCode: 'VALIDATION_FAILED',
+        errorMessage: isAr
+          ? 'بيانات المسودة الأساسية غير مكتملة للتحقق من مرجعية الصور المحفوظة.'
+          : 'Authoritative activeItem draft context is required when updating an existing draft.',
+        retainedCompletedUpload: this.retainedCompletedUpload,
+        haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+        retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+        haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+        haltedInlineUploads: this.getHaltedInlineUploads(),
       };
     }
 
@@ -1517,6 +2174,9 @@ export class NewsEditorImageSessionController {
           : 'Arabic title is required',
         retainedCompletedUpload: this.retainedCompletedUpload,
         haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+        retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+        haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+        haltedInlineUploads: this.getHaltedInlineUploads(),
       };
     }
 
@@ -1529,12 +2189,160 @@ export class NewsEditorImageSessionController {
           : 'Environmental category is required',
         retainedCompletedUpload: this.retainedCompletedUpload,
         haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+        retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+        haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+        haltedInlineUploads: this.getHaltedInlineUploads(),
       };
     }
 
-    // If a file is selected, validate image selection & metadata BEFORE any remote call
+    // Resolve effective rich documents for Arabic and English bodies
+    const arWasEdited =
+      input.isCreating ||
+      input.editForm.bodyArHasEdited === true ||
+      (input.editForm.bodyArHasEdited === undefined &&
+        input.editForm.richBodyAr !== undefined &&
+        input.editForm.richBodyAr !== input.activeItem?.richBodyAr);
+
+    const enWasEdited =
+      input.isCreating ||
+      input.editForm.bodyEnHasEdited === true ||
+      (input.editForm.bodyEnHasEdited === undefined &&
+        input.editForm.richBodyEn !== undefined &&
+        input.editForm.richBodyEn !== input.activeItem?.richBodyEn);
+
+    const effectiveRichBodyAr = input.isCreating
+      ? input.editForm.richBodyAr
+      : arWasEdited
+        ? input.editForm.richBodyAr
+        : input.activeItem?.richBodyAr;
+
+    const effectiveRichBodyEn = input.isCreating
+      ? input.editForm.richBodyEn
+      : enWasEdited
+        ? input.editForm.richBodyEn
+        : input.activeItem?.richBodyEn;
+
+    // Validate effective rich documents before any network upload
+    if (effectiveRichBodyAr !== undefined) {
+      const checkAr = validateRichNewsDocumentByVersion(effectiveRichBodyAr);
+      if (!checkAr.valid) {
+        return {
+          ok: false,
+          reasonCode: 'VALIDATION_FAILED',
+          errorMessage: isAr
+            ? `محتوى المقال العربي غير صالح: ${checkAr.errors.join('؛ ')}`
+            : `INVALID_RICH_DOCUMENT_AR: ${checkAr.errors.join('; ')}`,
+          retainedCompletedUpload: this.retainedCompletedUpload,
+          haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+          retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+          haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+          haltedInlineUploads: this.getHaltedInlineUploads(),
+        };
+      }
+    }
+
+    if (effectiveRichBodyEn !== undefined) {
+      const checkEn = validateRichNewsDocumentByVersion(effectiveRichBodyEn);
+      if (!checkEn.valid) {
+        return {
+          ok: false,
+          reasonCode: 'VALIDATION_FAILED',
+          errorMessage: isAr
+            ? `محتوى المقال الإنجليزي غير صالح: ${checkEn.errors.join('؛ ')}`
+            : `INVALID_RICH_DOCUMENT_EN: ${checkEn.errors.join('; ')}`,
+          retainedCompletedUpload: this.retainedCompletedUpload,
+          haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+          retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+          haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+          haltedInlineUploads: this.getHaltedInlineUploads(),
+        };
+      }
+    }
+
+    // Validate existing activeItem rich document baseline when updating an existing draft
+    if (!input.isCreating && input.activeItem) {
+      if (input.activeItem.richBodyAr !== undefined) {
+        const baselineArCheck = validateRichNewsDocumentByVersion(
+          input.activeItem.richBodyAr
+        );
+        if (!baselineArCheck.valid) {
+          return {
+            ok: false,
+            reasonCode: 'VALIDATION_FAILED',
+            errorMessage: isAr
+              ? 'بيانات المسودة المحفوظة مسبقاً (بالعربية) غير صالحة.'
+              : `INVALID_BASELINE_RICH_DOCUMENT_AR: ${baselineArCheck.errors.join('; ')}`,
+            retainedCompletedUpload: this.retainedCompletedUpload,
+            haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+            retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+            haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+            haltedInlineUploads: this.getHaltedInlineUploads(),
+          };
+        }
+      }
+      if (input.activeItem.richBodyEn !== undefined) {
+        const baselineEnCheck = validateRichNewsDocumentByVersion(
+          input.activeItem.richBodyEn
+        );
+        if (!baselineEnCheck.valid) {
+          return {
+            ok: false,
+            reasonCode: 'VALIDATION_FAILED',
+            errorMessage: isAr
+              ? 'بيانات المسودة المحفوظة مسبقاً (بالإنجليزية) غير صالحة.'
+              : `INVALID_BASELINE_RICH_DOCUMENT_EN: ${baselineEnCheck.errors.join('; ')}`,
+            retainedCompletedUpload: this.retainedCompletedUpload,
+            haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+            retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+            haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+            haltedInlineUploads: this.getHaltedInlineUploads(),
+          };
+        }
+      }
+    }
+
+    // Discover deduplicated canonical editorialImage assetIds in deterministic order
+    const referencedInlineAssetIds = collectUniqueEditorialImageAssetIds(
+      effectiveRichBodyAr,
+      effectiveRichBodyEn
+    );
+    const persistedBaselineAssetIds = new Set<string>(
+      !input.isCreating && input.activeItem
+        ? collectUniqueEditorialImageAssetIds(
+            input.activeItem.richBodyAr,
+            input.activeItem.richBodyEn
+          )
+        : []
+    );
+
+    const referencedStagedEntries: MutableStagedInlineImageEntry[] = [];
+    for (const assetId of referencedInlineAssetIds) {
+      const stagedEntry = this.inlineAssets.get(assetId);
+      if (stagedEntry) {
+        referencedStagedEntries.push(stagedEntry);
+        continue;
+      }
+      if (persistedBaselineAssetIds.has(assetId)) {
+        continue;
+      }
+      // Neither staged in the current session nor present in the persisted activeItem baseline
+      return {
+        ok: false,
+        reasonCode: 'VALIDATION_FAILED',
+        unverifiedInlineAssetId: assetId,
+        errorMessage: isAr
+          ? `UNVERIFIED_INLINE_IMAGE_ASSET: الصورة المضمنة "${assetId}" غير مسجلة في جلسة الرفع الحالية وليست محفوظة مسبقاً في المسودة.`
+          : `UNVERIFIED_INLINE_IMAGE_ASSET: Inline editorial image "${assetId}" is neither staged in the current session nor present in the persisted draft baseline.`,
+        retainedCompletedUpload: this.retainedCompletedUpload,
+        haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+        retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+        haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+        haltedInlineUploads: this.getHaltedInlineUploads(),
+      };
+    }
+
+    // If a featured image file is selected, validate selection & metadata BEFORE any remote call
     if (this.selectedFile) {
-      // Block automatic retry if a previous upload attempt for this file halted in an ambiguous state
       if (
         this.haltedAmbiguousUpload &&
         this.haltedAmbiguousUpload.fileSignature ===
@@ -1548,6 +2356,9 @@ export class NewsEditorImageSessionController {
             : this.haltedAmbiguousUpload.messageEn,
           retainedCompletedUpload: this.retainedCompletedUpload,
           haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+          retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+          haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+          haltedInlineUploads: this.getHaltedInlineUploads(),
         };
       }
 
@@ -1565,6 +2376,77 @@ export class NewsEditorImageSessionController {
             : imageValidation.errorEn || 'Selected image metadata is invalid.',
           retainedCompletedUpload: this.retainedCompletedUpload,
           haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+          retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+          haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+          haltedInlineUploads: this.getHaltedInlineUploads(),
+        };
+      }
+    }
+
+    // Validate each referenced staged inline image entry BEFORE any remote call
+    for (const entry of referencedStagedEntries) {
+      if (
+        entry.haltedAmbiguousUpload &&
+        entry.haltedAmbiguousUpload.fileSignature ===
+          computeNewsImageFileSignature(entry.file)
+      ) {
+        return {
+          ok: false,
+          reasonCode: 'UPLOAD_HALTED_AMBIGUOUS',
+          failedInlineAssetId: entry.assetId,
+          errorMessage: isAr
+            ? entry.haltedAmbiguousUpload.messageAr
+            : entry.haltedAmbiguousUpload.messageEn,
+          retainedCompletedUpload: this.retainedCompletedUpload,
+          haltedAmbiguousUpload: entry.haltedAmbiguousUpload,
+          haltedInlineUpload: entry.haltedInlineUpload,
+          retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+          haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+          haltedInlineUploads: this.getHaltedInlineUploads(),
+        };
+      }
+
+      if (
+        entry.haltedInlineUpload ||
+        (entry.uploadAttemptCount > 0 && entry.status !== 'Completed')
+      ) {
+        const halted = entry.haltedInlineUpload;
+        const fallbackAr = `تم إيقاف إعادة الرفع التلقائي للصورة المضمنة (${entry.assetId}) لمنع تعارض جلسة الرفع أو فقدان المرجعية. للمتابعة، يرجى حذف هذه الصورة المضمنة من محتوى المقال باللغتين العربية والإنجليزية ثم إدراج صورة جديدة عند الحاجة قبل حفظ التعديلات.`;
+        const fallbackEn = `Automatic retry for inline image (${entry.assetId}) has been halted to prevent intake session conflict. To continue saving, remove this failed inline image from both the Arabic and English article bodies and insert a new image if needed.`;
+        return {
+          ok: false,
+          reasonCode: 'UPLOAD_FAILED',
+          failedInlineAssetId: entry.assetId,
+          errorMessage: isAr
+            ? halted?.messageAr || fallbackAr
+            : halted?.messageEn || fallbackEn,
+          retainedCompletedUpload: this.retainedCompletedUpload,
+          haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+          haltedInlineUpload: halted,
+          retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+          haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+          haltedInlineUploads: this.getHaltedInlineUploads(),
+        };
+      }
+
+      const inlineValidation = validateNewsImageSelectionAndMetadata(
+        entry.metadata,
+        entry.file,
+        DEFAULT_ASSET_VALIDATION_LIMITS
+      );
+      if (!inlineValidation.valid) {
+        return {
+          ok: false,
+          reasonCode: 'VALIDATION_FAILED',
+          failedInlineAssetId: entry.assetId,
+          errorMessage: isAr
+            ? inlineValidation.errorAr || 'بيانات الصورة المضمنة غير صالحة.'
+            : inlineValidation.errorEn || 'Staged inline image metadata is invalid.',
+          retainedCompletedUpload: this.retainedCompletedUpload,
+          haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+          retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+          haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+          haltedInlineUploads: this.getHaltedInlineUploads(),
         };
       }
     }
@@ -1580,6 +2462,14 @@ export class NewsEditorImageSessionController {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
+
+      const associatedArticleIds =
+        !input.isCreating &&
+        input.activeItem?.id &&
+        !input.activeItem.id.startsWith('news-sudan-') &&
+        !input.activeItem.id.startsWith('temp-')
+          ? [input.activeItem.id]
+          : undefined;
 
       let resolvedFeaturedImage: string | undefined = input.editForm.featuredImage;
       let reusedRetainedUpload = false;
@@ -1601,14 +2491,6 @@ export class NewsEditorImageSessionController {
           if (!this.boundIds) {
             this.boundIds = this.idFactory();
           }
-
-          const associatedArticleIds =
-            !input.isCreating &&
-            input.activeItem?.id &&
-            !input.activeItem.id.startsWith('news-sudan-') &&
-            !input.activeItem.id.startsWith('temp-')
-              ? [input.activeItem.id]
-              : undefined;
 
           const uploadOutcome = await NewsAdminClient.uploadEditorialNewsImage({
             intakeId: this.boundIds.intakeId,
@@ -1646,6 +2528,9 @@ export class NewsEditorImageSessionController {
                 : uploadOutcome.messageEn,
               retainedCompletedUpload: null,
               haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+              retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+              haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+              haltedInlineUploads: this.getHaltedInlineUploads(),
             };
           }
 
@@ -1664,19 +2549,131 @@ export class NewsEditorImageSessionController {
         }
       }
 
-      let richArPayload = undefined;
-      let richEnPayload = undefined;
+      // Upload each referenced staged inline image sequentially in deterministic order
+      const linkedInlineAssetIds: string[] = [];
+      const reusedRetainedInlineAssetIds: string[] = [];
 
-      if (input.editForm.bodyArHasEdited) {
-        richArPayload = input.editForm.richBodyAr;
-      } else if (input.activeItem?.richBodyAr) {
-        richArPayload = input.activeItem.richBodyAr;
-      }
+      for (const entry of referencedStagedEntries) {
+        if (
+          entry.retainedCompletedUpload &&
+          entry.retainedCompletedUpload.intakeId === entry.intakeId &&
+          entry.retainedCompletedUpload.assetId === entry.assetId &&
+          validateRetainedCompletedUpload(
+            entry.retainedCompletedUpload,
+            entry.file,
+            DEFAULT_ASSET_VALIDATION_LIMITS
+          )
+        ) {
+          entry.status = 'Completed';
+          linkedInlineAssetIds.push(entry.assetId);
+          reusedRetainedInlineAssetIds.push(entry.assetId);
+          continue;
+        }
 
-      if (input.editForm.bodyEnHasEdited) {
-        richEnPayload = input.editForm.richBodyEn;
-      } else if (input.activeItem?.richBodyEn) {
-        richEnPayload = input.activeItem.richBodyEn;
+        entry.retainedCompletedUpload = null;
+        entry.uploadAttemptCount += 1;
+
+        const inlineOutcome = await NewsAdminClient.uploadEditorialNewsImage({
+          intakeId: entry.intakeId,
+          assetId: entry.assetId,
+          file: entry.file,
+          metadata: entry.metadata,
+          origin: 'news_article',
+          tags: parsedTags,
+          associatedArticleIds,
+        });
+
+        entry.lastUploadOutcome = inlineOutcome;
+
+        if (
+          !inlineOutcome.ok ||
+          inlineOutcome.status !== 'Completed' ||
+          inlineOutcome.httpStatus !== 201 ||
+          inlineOutcome.intakeId !== entry.intakeId ||
+          inlineOutcome.assetId !== entry.assetId
+        ) {
+          const failureStatus: Exclude<NewsImageUploadOutcomeStatus, 'Completed'> =
+            inlineOutcome.ok ? 'Ambiguous' : inlineOutcome.status;
+          entry.status = failureStatus;
+
+          const errorCode = inlineOutcome.ok
+            ? 'RESPONSE_IDENTITY_MISMATCH'
+            : inlineOutcome.errorCode;
+          const baseMessageAr = inlineOutcome.ok
+            ? 'عدم تطابق في معرف الأصل المرجع من الخادم.'
+            : inlineOutcome.messageAr;
+          const baseMessageEn = inlineOutcome.ok
+            ? 'Server response identity mismatch for inline image upload.'
+            : inlineOutcome.messageEn;
+
+          const recoveryMessageAr = `${baseMessageAr} تم إيقاف إعادة الرفع التلقائي للصورة المضمنة (${entry.assetId}) لمنع تعارض جلسة الرفع أو فقدان المرجعية. للمتابعة، يرجى حذف هذه الصورة المضمنة من محتوى المقال باللغتين العربية والإنجليزية ثم إدراج صورة جديدة عند الحاجة قبل حفظ التعديلات.`;
+          const recoveryMessageEn = `${baseMessageEn} Automatic retry for inline image (${entry.assetId}) has been halted to prevent intake session conflict. To continue saving, remove this failed inline image from both the Arabic and English article bodies and insert a new image if needed.`;
+
+          const fileSignature = computeNewsImageFileSignature(entry.file);
+
+          entry.haltedInlineUpload = {
+            intakeId: entry.intakeId,
+            assetId: entry.assetId,
+            fileSignature,
+            status: failureStatus,
+            errorCode,
+            ...(!inlineOutcome.ok && inlineOutcome.rejectionCode !== undefined
+              ? { rejectionCode: inlineOutcome.rejectionCode }
+              : {}),
+            ...(inlineOutcome.httpStatus !== undefined
+              ? { httpStatus: inlineOutcome.httpStatus }
+              : {}),
+            messageAr: recoveryMessageAr,
+            messageEn: recoveryMessageEn,
+          };
+
+          if (
+            failureStatus === 'CleanupPending' ||
+            failureStatus === 'NeedsReconciliation' ||
+            failureStatus === 'Ambiguous'
+          ) {
+            entry.haltedAmbiguousUpload = {
+              intakeId: entry.intakeId,
+              assetId: entry.assetId,
+              fileSignature,
+              status: failureStatus,
+              errorCode,
+              messageAr: recoveryMessageAr,
+              messageEn: recoveryMessageEn,
+            };
+          } else {
+            entry.haltedAmbiguousUpload = null;
+          }
+
+          return {
+            ok: false,
+            reasonCode: 'UPLOAD_FAILED',
+            failedInlineAssetId: entry.assetId,
+            errorMessage: isAr ? recoveryMessageAr : recoveryMessageEn,
+            retainedCompletedUpload: this.retainedCompletedUpload,
+            haltedAmbiguousUpload:
+              entry.haltedAmbiguousUpload ?? this.haltedAmbiguousUpload,
+            haltedInlineUpload: entry.haltedInlineUpload,
+            retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+            haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+            haltedInlineUploads: this.getHaltedInlineUploads(),
+          };
+        }
+
+        entry.status = 'Completed';
+        entry.haltedAmbiguousUpload = null;
+        entry.haltedInlineUpload = null;
+        entry.retainedCompletedUpload = {
+          intakeId: inlineOutcome.intakeId,
+          assetId: inlineOutcome.assetId,
+          status: 'Completed',
+          fileSignature: computeNewsImageFileSignature(entry.file),
+          originalFilename: entry.file.name,
+          mimeType: entry.file.type.trim().toLowerCase() as AllowedNewsImageMimeType,
+          sizeBytes: entry.file.size,
+          completedAtIso: new Date().toISOString(),
+        };
+        linkedInlineAssetIds.push(entry.assetId);
       }
 
       let savedItem: NewsItem;
@@ -1686,12 +2683,12 @@ export class NewsEditorImageSessionController {
           ...rest,
           tags: parsedTags,
           sources: parsedSources,
-           ...(resolvedFeaturedImage !== undefined
+          ...(resolvedFeaturedImage !== undefined
             ? { featuredImage: resolvedFeaturedImage }
             : {}),
           workflowState: WorkflowState.Draft,
-          richBodyAr: input.editForm.richBodyAr,
-          richBodyEn: input.editForm.richBodyEn,
+          richBodyAr: effectiveRichBodyAr,
+          richBodyEn: effectiveRichBodyEn,
         };
         delete itemToSave.bodyAr;
         delete itemToSave.bodyEn;
@@ -1710,11 +2707,11 @@ export class NewsEditorImageSessionController {
           ...(resolvedFeaturedImage !== undefined
             ? { featuredImage: resolvedFeaturedImage }
             : {}),
-          richBodyAr: richArPayload,
-          richBodyEn: richEnPayload,
+          richBodyAr: effectiveRichBodyAr,
+          richBodyEn: effectiveRichBodyEn,
         };
-        if (input.editForm.bodyArHasEdited) delete itemToSave.bodyAr;
-        if (input.editForm.bodyEnHasEdited) delete itemToSave.bodyEn;
+        if (arWasEdited) delete itemToSave.bodyAr;
+        if (enWasEdited) delete itemToSave.bodyEn;
 
         savedItem = await NewsAdminClient.saveNewsItem(
           itemToSave,
@@ -1725,27 +2722,55 @@ export class NewsEditorImageSessionController {
         throw new Error('No active article draft available to save.');
       }
 
-      // Draft save succeeded -> release temporary preview URL and clear transient upload state
+      // Draft save succeeded -> release temporary featured preview URL and clear transient featured upload state
       this.revokeCurrentPreviewUrl();
       this.selectedFile = null;
       this.boundIds = null;
       this.retainedCompletedUpload = null;
       this.haltedAmbiguousUpload = null;
 
+      // Clean up any unreferenced never-uploaded inline staged assets and release their previews
+      const referencedSet = new Set(referencedInlineAssetIds);
+      for (const [assetId, entry] of Array.from(this.inlineAssets.entries())) {
+        if (
+          !referencedSet.has(assetId) &&
+          entry.uploadAttemptCount === 0 &&
+          entry.status === 'Staged' &&
+          !entry.retainedCompletedUpload &&
+          !entry.haltedAmbiguousUpload &&
+          !entry.haltedInlineUpload
+        ) {
+          this.revokeSessionOwnedObjectUrl(entry.previewObjectUrl);
+          entry.previewObjectUrl = null;
+          this.inlineAssets.delete(assetId);
+        }
+      }
+
       return {
         ok: true,
         savedItem,
         ...(resolvedFeaturedImage ? { linkedAssetId: resolvedFeaturedImage } : {}),
-        reusedRetainedUpload,
+        reusedRetainedUpload:
+          reusedRetainedUpload || reusedRetainedInlineAssetIds.length > 0,
+        linkedInlineAssetIds,
+        reusedRetainedInlineAssetIds,
       };
     } catch (err: any) {
       const baseMsg =
         err?.message || (isAr ? 'فشل حفظ المقال' : 'Failed to save article');
-      const errorMessage = this.retainedCompletedUpload
-        ? isAr
-          ? `تم رفع الصورة بنجاح (${this.retainedCompletedUpload.assetId}) ولكن فشل حفظ مسودة المقال: ${baseMsg}. عند الضغط على "حفظ البيانات والتعديلات" مجدداً سيتم استخدام الصورة المرفوعة دون إعادة رفعها.`
-          : `Image uploaded successfully (${this.retainedCompletedUpload.assetId}), but saving the draft article failed: ${baseMsg}. Clicking Save Changes again will safely reuse the uploaded image without re-uploading.`
-        : baseMsg;
+      const retainedInline = this.getRetainedCompletedInlineUploads();
+      const retainedAssetIds = [
+        ...(this.retainedCompletedUpload
+          ? [this.retainedCompletedUpload.assetId]
+          : []),
+        ...retainedInline.map((r) => r.assetId),
+      ];
+      const errorMessage =
+        retainedAssetIds.length > 0
+          ? isAr
+            ? `تم رفع الصورة بنجاح (${retainedAssetIds.join(', ')}) ولكن فشل حفظ مسودة المقال: ${baseMsg}. عند الضغط على "حفظ البيانات والتعديلات" مجدداً سيتم استخدام الصورة المرفوعة دون إعادة رفعها.`
+            : `Image uploaded successfully (${retainedAssetIds.join(', ')}), but saving the draft article failed: ${baseMsg}. Clicking Save Changes again will safely reuse the uploaded image without re-uploading.`
+          : baseMsg;
 
       return {
         ok: false,
@@ -1753,10 +2778,14 @@ export class NewsEditorImageSessionController {
         errorMessage,
         retainedCompletedUpload: this.retainedCompletedUpload,
         haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+        retainedCompletedInlineUploads: retainedInline,
+        haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+        haltedInlineUploads: this.getHaltedInlineUploads(),
       };
     } finally {
       this.isSaveInFlight = false;
     }
   }
 }
+
 
