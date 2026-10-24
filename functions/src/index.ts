@@ -16,6 +16,7 @@ export { peiaNonAdvisoryOutcomeSubmission } from "./peia/firebaseNonAdvisoryOutc
 export { PublicMediaRepository } from "./media/publicMediaRepository";
 export { manageNews, getPublicNews } from "./news/newsAdminHandlers";
 export { editorialNewsImageUpload } from "./news/editorialNewsImageUploadEndpoint";
+export { editorialImagePreviewEndpoint } from "./news/editorialImagePreviewEndpoint";
 export { submitCitizenReport, manageCitizenSubmissions } from "./community/communityHandlers";
 
 /**
