@@ -1,4 +1,4 @@
-name: Deploy Editorial Image Upload Function Live
+name: Deploy Editorial Image Functions Live
 
 # PREREQUISITE NOTICE FOR PROJECT OWNER:
 # Before triggering this workflow, ensure that the Google Cloud Artifact Registry cleanup policy
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   deploy_editorial_image_function:
-    name: Deploy editorialNewsImageUpload
+    name: Deploy editorialNewsImageUpload and editorialImagePreviewEndpoint
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
 
@@ -77,6 +77,6 @@ jobs:
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
-      - name: Deploy Editorial Image Upload Function to Firebase
+      - name: Deploy Editorial Image Functions to Firebase
         run: |
-          firebase deploy --project promiseofplanet-bb325 --only "functions:editorialNewsImageUpload" --non-interactive
+          firebase deploy --project promiseofplanet-bb325 --only "functions:editorialNewsImageUpload,functions:editorialImagePreviewEndpoint" --non-interactive
