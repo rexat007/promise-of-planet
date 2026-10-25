@@ -33,6 +33,7 @@ import {
   mergePersistedAndStagedPreviewUrlMaps,
   type EditorialDraftPreviewSessionController,
 } from '../../services/editorialImagePreviewService';
+import { EditorialImageRightsReviewPanel } from './EditorialImageRightsReviewPanel';
 import { 
   Newspaper, 
   Search, 
@@ -1345,6 +1346,21 @@ export function AdminNewsManagement({
                               : 'Private storage browser preview is not enabled in this unit; rights approval and public delivery remain governed separately.'}
                           </p>
                         </div>
+                        {activeItem && !isCreating && (
+                          <button
+                            type="button"
+                            data-testid="news-open-image-rights-panel-btn"
+                            onClick={() => setActiveTab('workflow')}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60 transition-colors shrink-0"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                            <span>
+                              {isAr
+                                ? 'مراجعة حقوق الصور في سير العمل'
+                                : 'Review Image Rights in Workflow'}
+                            </span>
+                          </button>
+                        )}
                       </div>
                     )}
 
@@ -1743,6 +1759,24 @@ export function AdminNewsManagement({
                       </div>
                     </div>
                   )}
+
+                  {/* Editorial Image Rights Review Panel (Single Canonical Surface) */}
+                  <EditorialImageRightsReviewPanel
+                    currentUser={currentUser}
+                    articleId={
+                      activeItem && !isCreating && !activeItem.id.startsWith('news-sudan-')
+                        ? activeItem.id
+                        : undefined
+                    }
+                    featuredImage={editForm.featuredImage ?? activeItem?.featuredImage}
+                    richBodyAr={editForm.richBodyAr ?? activeItem?.richBodyAr}
+                    richBodyEn={editForm.richBodyEn ?? activeItem?.richBodyEn}
+                    unsavedLocalAssetIds={imageSessionRef.current
+                      .getAllInlineImageStates()
+                      .filter((s) => s.status === 'Staged' && !s.retainedCompletedUpload)
+                      .map((s) => s.assetId)}
+                    isAr={isAr}
+                  />
 
                   {/* Audit Log / History */}
                   <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 p-5 rounded-2xl space-y-4">
