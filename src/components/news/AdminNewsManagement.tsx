@@ -83,10 +83,104 @@ function getCategoryDisplayLabel(category: string, isAr: boolean): string {
   return category;
 }
 
+/**
+ * Mirrors the server's canonical `transitionWorkflow` permission rule in `newsAdminHandlers.ts`:
+ * - `AdminPermission.Approve` for `WorkflowState.Approved`
+ * - `AdminPermission.Publish` for `WorkflowState.Published`
+ * - `AdminPermission.Edit` for every other target workflow state
+ */
+export function getServerRequiredNewsTransitionPermission(
+  targetState: WorkflowState
+): AdminPermission {
+  if (targetState === WorkflowState.Approved) {
+    return AdminPermission.Approve;
+  }
+  if (targetState === WorkflowState.Published) {
+    return AdminPermission.Publish;
+  }
+  return AdminPermission.Edit;
+}
+
+/**
+ * Evaluates whether an article workflow transition from `currentState` to `targetState`
+ * is authorized for `user` under BOTH:
+ * 1. `WorkflowEngine.getAuthorizedTransitions` for the current article state and user, AND
+ * 2. The server-equivalent required permission (`Edit`, `Approve`, or `Publish`) for `targetState`.
+ */
+export function isNewsArticleTransitionAuthorized(
+  currentState: WorkflowState,
+  targetState: WorkflowState,
+  user: AdminUser | null | undefined
+): boolean {
+  if (!user || !user.isActive) {
+    return false;
+  }
+  const serverRequiredPermission = getServerRequiredNewsTransitionPermission(targetState);
+  if (!AdminAccessService.hasPermission(user, serverRequiredPermission)) {
+    return false;
+  }
+  return WorkflowEngine.getAuthorizedTransitions(currentState, user).some(
+    (t) => t.toState === targetState
+  );
+}
+
+/**
+ * Returns the subset of `WorkflowEngine.getAuthorizedTransitions(currentState, user)`
+ * that also satisfies the server-equivalent `transitionWorkflow` permission requirement.
+ */
+export function getAuthorizedNewsArticleTransitions(
+  currentState: WorkflowState,
+  user: AdminUser | null | undefined
+): WorkflowTransitionConfig[] {
+  if (!user || !user.isActive) {
+    return [];
+  }
+  return WorkflowEngine.getAuthorizedTransitions(currentState, user).filter((config) =>
+    AdminAccessService.hasPermission(
+      user,
+      getServerRequiredNewsTransitionPermission(config.toState)
+    )
+  );
+}
+
+/**
+ * Validates whether a transition configuration can be selected or executed from `currentState` by `user`.
+ */
+export function canSelectNewsTransition(
+  currentState: WorkflowState | null | undefined,
+  config: WorkflowTransitionConfig | null | undefined,
+  user: AdminUser | null | undefined
+): boolean {
+  if (!currentState || !config || config.fromState !== currentState) {
+    return false;
+  }
+  return isNewsArticleTransitionAuthorized(currentState, config.toState, user);
+}
+
+/**
+ * Validates whether a pending comment-required transition can be confirmed from `currentState` by `user`.
+ */
+export function canConfirmNewsTransitionComment(
+  currentState: WorkflowState | null | undefined,
+  pendingTransition: WorkflowTransitionConfig | null | undefined,
+  comment: string | null | undefined,
+  user: AdminUser | null | undefined
+): boolean {
+  if (!canSelectNewsTransition(currentState, pendingTransition, user)) {
+    return false;
+  }
+  if (pendingTransition?.requiresComment && !comment?.trim()) {
+    return false;
+  }
+  return true;
+}
+
 interface AdminNewsManagementProps {
   currentUser: AdminUser;
   initialActiveItem?: NewsItem | null;
   initialIsCreating?: boolean;
+  initialActiveTab?: 'content' | 'workflow';
+  initialPendingTransition?: WorkflowTransitionConfig | null;
 }
 
 const INITIAL_IMAGE_METADATA: NewsImageMetadataFormInput = {
@@ -102,6 +196,8 @@ export function AdminNewsManagement({
   currentUser,
   initialActiveItem = null,
   initialIsCreating = false,
+  initialActiveTab = 'content',
+  initialPendingTransition = null,
 }: AdminNewsManagementProps) {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
@@ -214,10 +310,15 @@ export function AdminNewsManagement({
     return () => { isMounted = false; };
   }, [isAr]);
   
+  // Check user permission to create/edit before initializing create state
+  const canCreate = AdminAccessService.hasPermission(currentUser, AdminPermission.Create);
+  const canEdit = AdminAccessService.hasPermission(currentUser, AdminPermission.Edit) || canCreate;
+  const effectiveInitialIsCreating = Boolean(initialIsCreating && canCreate);
+
   // Modal state
   const [activeItem, setActiveItem] = useState<NewsItem | null>(() => {
     if (initialActiveItem) return initialActiveItem;
-    if (initialIsCreating) {
+    if (effectiveInitialIsCreating) {
       return {
         id: 'news-sudan-initial',
         titleAr: '',
@@ -240,9 +341,9 @@ export function AdminNewsManagement({
     }
     return null;
   });
-  const [isCreating, setIsCreating] = useState(initialIsCreating);
+  const [isCreating, setIsCreating] = useState(effectiveInitialIsCreating);
   const [isSaveSuccess, setIsSaveSuccess] = useState(false);
-  const [activeTab, setActiveTab] = useState<'content' | 'workflow'>('content');
+  const [activeTab, setActiveTab] = useState<'content' | 'workflow'>(initialActiveTab);
 
   // Notification and error states
   const [successNotification, setSuccessNotification] = useState<string | null>(null);
@@ -297,13 +398,22 @@ export function AdminNewsManagement({
   };
 
   // Comment prompt state for transitions requiring comments (e.g., Request Changes)
-  const [pendingTransition, setPendingTransition] = useState<WorkflowTransitionConfig | null>(null);
+  const [pendingTransition, setPendingTransition] = useState<WorkflowTransitionConfig | null>(() => {
+    if (
+      initialPendingTransition &&
+      initialActiveItem &&
+      canSelectNewsTransition(initialActiveItem.workflowState, initialPendingTransition, currentUser)
+    ) {
+      return initialPendingTransition;
+    }
+    return null;
+  });
   const [transitionComment, setTransitionComment] = useState('');
 
   // Form state for editor
   const [editForm, setEditForm] = useState<Partial<NewsItem> & { bodyArHasEdited?: boolean; bodyEnHasEdited?: boolean; richBodyAr?: any; richBodyEn?: any }>(() => {
     if (initialActiveItem) return { ...initialActiveItem };
-    if (initialIsCreating) {
+    if (effectiveInitialIsCreating) {
       return {
         id: 'news-sudan-initial',
         titleAr: '',
@@ -328,9 +438,7 @@ export function AdminNewsManagement({
   const [tagsInput, setTagsInput] = useState<string>('');
   const [sourcesInput, setSourcesInput] = useState<string>('');
 
-  // Check user permission to create/edit
-  const canCreate = AdminAccessService.hasPermission(currentUser, AdminPermission.Create);
-  const canEdit = AdminAccessService.hasPermission(currentUser, AdminPermission.Edit) || canCreate;
+  // Check user permission to save draft content
   const isDraft = isCreating || activeItem?.workflowState === WorkflowState.Draft;
   const canSaveContent = canEdit && isDraft;
 
@@ -357,6 +465,8 @@ export function AdminNewsManagement({
   // Open item for editing/viewing
   const handleOpenItem = (item: NewsItem) => {
     resetImageEditorSession();
+    setPendingTransition(null);
+    setTransitionComment('');
     const nextRichBodyAr = item.richBodyAr
       ? JSON.parse(JSON.stringify(item.richBodyAr))
       : convertPlainTextToRichDocument(item.bodyAr || '', 'rtl');
@@ -383,7 +493,12 @@ export function AdminNewsManagement({
 
   // Start creating new article
   const handleStartCreate = () => {
+    if (!canCreate) {
+      return;
+    }
     resetImageEditorSession();
+    setPendingTransition(null);
+    setTransitionComment('');
     const newItem: NewsItem = {
       id: `news-sudan-${Date.now()}`,
       titleAr: '',
@@ -602,7 +717,7 @@ export function AdminNewsManagement({
 
   // Save article edits (including optional binary image intake before draft persistence)
   const handleSaveForm = async () => {
-    if (imageSessionRef.current.isSaving()) {
+    if (!canSaveContent || imageSessionRef.current.isSaving()) {
       return;
     }
 
@@ -666,6 +781,16 @@ export function AdminNewsManagement({
   // Execute workflow transition on activeItem
   const handleExecuteTransition = async (config: WorkflowTransitionConfig, comment?: string) => {
     if (!activeItem) return;
+
+    if (!canSelectNewsTransition(activeItem.workflowState, config, currentUser)) {
+      setPendingTransition(null);
+      setTransitionComment('');
+      return;
+    }
+
+    if (config.requiresComment && !comment?.trim()) {
+      return;
+    }
 
     try {
       const updatedNewsItem = await NewsAdminClient.executeTransition(
@@ -1676,9 +1801,9 @@ export function AdminNewsManagement({
                       </span>
                     </div>
 
-                    {/* Check authorized transitions */}
+                    {/* Check authorized transitions (requiring BOTH WorkflowEngine and server-equivalent permission) */}
                     {(() => {
-                      const authorizedTransitions = WorkflowEngine.getAuthorizedTransitions(
+                      const authorizedTransitions = getAuthorizedNewsArticleTransitions(
                         activeItem.workflowState,
                         currentUser
                       );
@@ -1696,13 +1821,21 @@ export function AdminNewsManagement({
                       return (
                         <div className="flex flex-wrap gap-2 pt-1">
                           {validTransitions.map(config => {
-                            const isAuthorized = authorizedTransitions.some(t => t.toState === config.toState);
+                            const isAuthorized =
+                              authorizedTransitions.some(t => t.toState === config.toState) &&
+                              canSelectNewsTransition(activeItem.workflowState, config, currentUser);
 
                             return (
                               <button
                                 key={config.toState}
+                                data-testid={`news-workflow-transition-btn-${config.toState}`}
                                 disabled={!isAuthorized}
                                 onClick={() => {
+                                  if (!canSelectNewsTransition(activeItem.workflowState, config, currentUser)) {
+                                    setPendingTransition(null);
+                                    setTransitionComment('');
+                                    return;
+                                  }
                                   if (config.requiresComment) {
                                     setPendingTransition(config);
                                     setTransitionComment('');
@@ -1727,8 +1860,12 @@ export function AdminNewsManagement({
                   </div>
 
                   {/* Comment Prompt Drawer / Modal for Request Changes */}
-                  {pendingTransition && (
-                    <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 space-y-3">
+                  {pendingTransition &&
+                    canSelectNewsTransition(activeItem.workflowState, pendingTransition, currentUser) && (
+                    <div
+                      data-testid="news-workflow-comment-drawer"
+                      className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 space-y-3"
+                    >
                       <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300 font-bold text-xs">
                         <MessageSquare className="w-4 h-4" />
                         <span>{isAr ? 'يرجى تدوين ملاحظات التعديل المطلوب:' : 'Please provide change feedback notes:'}</span>
@@ -1750,8 +1887,30 @@ export function AdminNewsManagement({
                           {isAr ? 'إلغاء' : 'Cancel'}
                         </button>
                         <button
-                          disabled={!transitionComment.trim()}
-                          onClick={() => handleExecuteTransition(pendingTransition, transitionComment)}
+                          data-testid="news-workflow-confirm-comment-btn"
+                          disabled={
+                            !canConfirmNewsTransitionComment(
+                              activeItem.workflowState,
+                              pendingTransition,
+                              transitionComment,
+                              currentUser
+                            )
+                          }
+                          onClick={() => {
+                            if (
+                              !canConfirmNewsTransitionComment(
+                                activeItem.workflowState,
+                                pendingTransition,
+                                transitionComment,
+                                currentUser
+                              )
+                            ) {
+                              setPendingTransition(null);
+                              setTransitionComment('');
+                              return;
+                            }
+                            handleExecuteTransition(pendingTransition, transitionComment);
+                          }}
                           className="px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50"
                         >
                           {isAr ? 'تأكيد إرسال الملاحظات' : 'Confirm Feedback'}

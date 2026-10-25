@@ -49,7 +49,7 @@ interface AdminLayoutProps {
 
 export const CANONICAL_NAVIGATION_ITEMS: NavigationItem[] = [
   { id: 'overview', domain: AdminDomain.Overview, labelAr: 'لوحة التحكم والمؤشرات', labelEn: 'Overview Dashboard', iconName: 'LayoutDashboard', requiredPermission: AdminPermission.View },
-  { id: 'news', domain: AdminDomain.News, labelAr: 'إدارة الأخبار البيئية', labelEn: 'Environmental News', iconName: 'Newspaper', requiredPermission: AdminPermission.Create },
+  { id: 'news', domain: AdminDomain.News, labelAr: 'إدارة الأخبار البيئية', labelEn: 'Environmental News', iconName: 'Newspaper', requiredPermission: AdminPermission.View },
   { id: 'library', domain: AdminDomain.Library, labelAr: 'المكتبة البيئية والمعرفية', labelEn: 'Knowledge Library', iconName: 'BookOpen', requiredPermission: AdminPermission.Create },
   { id: 'media', domain: AdminDomain.Media, labelAr: 'إدارة الوسائط والتشغيل', labelEn: 'Media & Videos', iconName: 'Film', requiredPermission: AdminPermission.View },
   { id: 'training', domain: AdminDomain.Training, labelAr: 'البرامج والمسارات التدريبية', labelEn: 'Training & Courses', iconName: 'GraduationCap', requiredPermission: AdminPermission.Edit },

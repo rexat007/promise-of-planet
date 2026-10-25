@@ -154,6 +154,7 @@ export const ROLE_DOMAINS_MAP: Record<AdminRole, Set<AdminDomain>> = {
   ]),
   [AdminRole.RightsReviewer]: new Set([
     AdminDomain.Overview,
+    AdminDomain.News,
     AdminDomain.Media,
   ]),
   [AdminRole.TrainingManager]: new Set([
