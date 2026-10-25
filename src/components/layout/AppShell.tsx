@@ -1,16 +1,40 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ClimateClockSlot } from './ClimateClockSlot';
 import { Header, type PublicPageKey } from './Header';
 import { Footer } from './Footer';
+import { GlobalMemberAccountDialog } from '../auth/GlobalMemberAccountDialog';
 
 interface AppShellProps {
   children: React.ReactNode;
   onEnterAdmin?: () => void;
   activePage?: PublicPageKey;
   onNavigate?: (page: PublicPageKey) => void;
+  isMemberAccountOpen?: boolean;
+  onOpenMemberAccount?: () => void;
+  onCloseMemberAccount?: () => void;
 }
 
-export function AppShell({ children, onEnterAdmin, activePage, onNavigate }: AppShellProps) {
+export function AppShell({
+  children,
+  onEnterAdmin,
+  activePage,
+  onNavigate,
+  isMemberAccountOpen,
+  onOpenMemberAccount,
+  onCloseMemberAccount,
+}: AppShellProps) {
+  const { i18n } = useTranslation();
+  const isAr = i18n.language === 'ar';
+  const [internalAccountOpen, setInternalAccountOpen] = useState(false);
+
+  const isDialogOpen =
+    isMemberAccountOpen !== undefined ? isMemberAccountOpen : internalAccountOpen;
+  const handleOpenAccount =
+    onOpenMemberAccount ?? (() => setInternalAccountOpen(true));
+  const handleCloseAccount =
+    onCloseMemberAccount ?? (() => setInternalAccountOpen(false));
+
   return (
     <div 
       data-responsive-guard 
@@ -20,7 +44,20 @@ export function AppShell({ children, onEnterAdmin, activePage, onNavigate }: App
       <ClimateClockSlot />
 
       {/* 2. Header */}
-      <Header onEnterAdmin={onEnterAdmin} activePage={activePage} onNavigate={onNavigate} />
+      <Header
+        onEnterAdmin={onEnterAdmin}
+        activePage={activePage}
+        onNavigate={onNavigate}
+        onOpenMemberAccount={handleOpenAccount}
+        isMemberAccountOpen={isDialogOpen}
+      />
+
+      {/* Global Member Account Dialog */}
+      <GlobalMemberAccountDialog
+        isOpen={isDialogOpen}
+        onClose={handleCloseAccount}
+        isAr={isAr}
+      />
 
       {/* 3. Main Content with full-width structural safety */}
       <main className="flex-grow pop-page-fade w-full max-w-full min-w-0">
@@ -32,5 +69,3 @@ export function AppShell({ children, onEnterAdmin, activePage, onNavigate }: App
     </div>
   );
 }
-
-

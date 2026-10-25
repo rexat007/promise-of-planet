@@ -1,8 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Container } from './Container';
-import { Shield, ChevronDown, BookOpen, FileText, Scale, Package, Sparkles, Users, Clock, Menu, X } from 'lucide-react';
+import { Shield, User, ChevronDown, BookOpen, FileText, Scale, Package, Sparkles, Users, Clock, Menu, X } from 'lucide-react';
 import { smoothScrollToSection } from '../../utils/interaction';
+
+export const GLOBAL_MEMBER_ACCOUNT_LABELS = {
+  ar: 'حسابي / تسجيل الدخول',
+  en: 'My Account / Sign In',
+} as const;
 
 export type PublicPageKey =
   | 'home'
@@ -18,9 +23,17 @@ interface HeaderProps {
   onEnterAdmin?: () => void;
   activePage?: PublicPageKey;
   onNavigate?: (page: PublicPageKey) => void;
+  onOpenMemberAccount?: () => void;
+  isMemberAccountOpen?: boolean;
 }
 
-export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: HeaderProps) {
+export function Header({
+  onEnterAdmin,
+  activePage = 'home',
+  onNavigate,
+  onOpenMemberAccount,
+  isMemberAccountOpen = false,
+}: HeaderProps) {
   const { t, i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
   const [activePanelKey, setActivePanelKey] = useState<'library' | 'training' | null>(null);
@@ -356,7 +369,30 @@ export function Header({ onEnterAdmin, activePage = 'home', onNavigate }: Header
           </nav>
 
           {/* Dedicated Physical Control Zone */}
-          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0" dir="ltr" id="header-fixed-control-zone">
+          <div className="flex items-center gap-1 sm:gap-2.5 shrink-0 min-w-0" dir="ltr" id="header-fixed-control-zone">
+            {/* Global Member Account Entry */}
+            <button
+              type="button"
+              onClick={() => {
+                setActivePanelKey(null);
+                setIsMobileMenuOpen(false);
+                onOpenMemberAccount?.();
+              }}
+              onFocus={() => setActivePanelKey(null)}
+              className="inline-flex items-center gap-1 sm:gap-1.5 px-2 py-1.5 sm:px-3 sm:py-2 bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-800 dark:text-gray-100 border border-gray-200 dark:border-gray-700 rounded-lg text-xs font-bold pop-motion-micro pop-hover-lift cursor-pointer shadow-xs focus-visible:outline-2 focus-visible:outline-emerald-600 shrink-0 min-h-[36px] min-w-0"
+              id="header-member-account-btn"
+              data-testid="header-member-account-btn"
+              aria-haspopup="dialog"
+              aria-expanded={Boolean(isMemberAccountOpen)}
+              aria-controls="global-member-account-dialog"
+              dir={isAr ? 'rtl' : 'ltr'}
+            >
+              <User className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span className="truncate max-w-[96px] min-[390px]:max-w-[135px] sm:max-w-none">
+                {isAr ? GLOBAL_MEMBER_ACCOUNT_LABELS.ar : GLOBAL_MEMBER_ACCOUNT_LABELS.en}
+              </span>
+            </button>
+
             {/* Admin Portal Gateway */}
             {onEnterAdmin && (
               <button

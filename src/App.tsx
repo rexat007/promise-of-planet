@@ -46,6 +46,7 @@ function App() {
     }
     return false;
   });
+  const [isMemberAccountOpen, setIsMemberAccountOpen] = useState(false);
   const [activePage, setActivePage] = useState<PublicPageKey>(() => {
     if (typeof window !== 'undefined') {
       if (window.location.hash.startsWith('#news')) {
@@ -154,6 +155,7 @@ function App() {
         ) : (
           <AppShell 
             onEnterAdmin={() => {
+              setIsMemberAccountOpen(false);
               setIsAdminOpen(true);
               try {
                 sessionStorage.setItem('pop_admin_session', JSON.stringify({ open: true, tab: 'overview' }));
@@ -163,6 +165,9 @@ function App() {
             }}
             activePage={activePage}
             onNavigate={(page) => setActivePage(page)}
+            isMemberAccountOpen={isMemberAccountOpen}
+            onOpenMemberAccount={() => setIsMemberAccountOpen(true)}
+            onCloseMemberAccount={() => setIsMemberAccountOpen(false)}
           >
             <ViewTransition viewKey={activePage}>
             {activePage === 'news' ? (

@@ -29,6 +29,45 @@ interface CourseAccessModalProps {
   isAr?: boolean;
 }
 
+export async function resolveCourseAccessWithAccountRecovery(
+  courseId: string,
+  initialCourse?: TrainingCourse | null
+): Promise<DerivedAccessState> {
+  const initial = await MemberTrainingAccessService.resolveAccessState(courseId, initialCourse);
+  if (initial.status !== 'account_unavailable') {
+    return initial;
+  }
+
+  const recovery = await AccountService.recoverCurrentAccountProfile();
+  if (recovery.status === 'unauthenticated') {
+    return {
+      status: 'unauthenticated',
+      course: initial.course,
+      enrollment: null,
+      account: null,
+      error: null,
+    };
+  }
+
+  if (
+    recovery.account &&
+    (recovery.status === 'recovered' || recovery.status === 'already_provisioned')
+  ) {
+    return await MemberTrainingAccessService.resolveAccessState(courseId, initialCourse);
+  }
+
+  return {
+    ...initial,
+    status: 'account_unavailable',
+    account: null,
+    enrollment: null,
+    error: {
+      code: recovery.error?.code || 'ACCOUNT_PROVISIONING_FAILED',
+      message: 'Valid canonical Account profile record is required before enrolling in a course.',
+    },
+  };
+}
+
 export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
   course,
   isOpen,
@@ -49,6 +88,7 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
     error: null,
   });
   const [submitting, setSubmitting] = useState(false);
+  const [recoveringAccount, setRecoveringAccount] = useState(false);
   const [showAuthForm, setShowAuthForm] = useState(false);
 
   const levelLabels: Record<string, { ar: string; en: string }> = {
@@ -67,6 +107,18 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
 
   const loadAccessState = () => {
     setRetryTrigger((prev) => prev + 1);
+  };
+
+  const handleRetryAccountRecovery = async () => {
+    if (!course || recoveringAccount) return;
+    setRecoveringAccount(true);
+    setAccessState((prev) => ({ ...prev, status: 'loading', error: null }));
+    try {
+      const resolved = await resolveCourseAccessWithAccountRecovery(course.id, course);
+      setAccessState(resolved);
+    } finally {
+      setRecoveringAccount(false);
+    }
   };
 
   // Subscribe to auth state changes when open
@@ -94,7 +146,7 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
 
     const load = async () => {
       setAccessState((prev) => ({ ...prev, status: 'loading', error: null }));
-      const resolved = await MemberTrainingAccessService.resolveAccessState(course.id, course);
+      const resolved = await resolveCourseAccessWithAccountRecovery(course.id, course);
       if (active) {
         setAccessState(resolved);
       }
@@ -124,7 +176,7 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
   if (!isOpen || !course) return null;
 
   const handleEnrollClick = async () => {
-    if (!course) return;
+    if (!course || accessState.status !== 'not_enrolled' || !accessState.account) return;
     setSubmitting(true);
     const result = await MemberTrainingAccessService.requestEnrollment(course.id);
     setAccessState(result);
@@ -313,11 +365,15 @@ export const CourseAccessModal: React.FC<CourseAccessModalProps> = ({
             {accessState.status === 'account_unavailable' && (
               <ErrorBanner
                 title={isAr ? 'مستند الحساب غير متوفر' : 'Account Profile Record Unavailable'}
-                message={isAr ? 'يتعذر العثور على مستند الحساب الأساسي المرتبط بهويتك. يرجى التواصل مع الدعم.' : 'Valid canonical Account profile record is required before enrolling in a course.'}
+                message={
+                  isAr
+                    ? 'تم تسجيل الدخول، لكن إعداد ملف الحساب لم يكتمل. يلزم توفر مستند الحساب الأساسي قبل التسجيل في الدورة.'
+                    : 'You are signed in, but your account profile setup is incomplete. Valid canonical Account profile record is required before enrolling in a course.'
+                }
                 isAr={isAr}
                 action={{
-                  label: isAr ? 'إعادة المحاولة' : 'Retry',
-                  onClick: loadAccessState,
+                  label: isAr ? 'إكمال إعداد الحساب وإعادة المحاولة' : 'Complete Account & Retry',
+                  onClick: handleRetryAccountRecovery,
                 }}
               />
             )}
