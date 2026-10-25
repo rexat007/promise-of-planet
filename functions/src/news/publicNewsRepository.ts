@@ -87,11 +87,15 @@ function isValidCanonicalArticleId(
   if (typeof articleId !== 'string') {
     return false;
   }
+  const maxArticleIdLength =
+    limits.maxArticleIdLength ??
+    DEFAULT_ASSET_VALIDATION_LIMITS.maxArticleIdLength ??
+    128;
   const trimmed = articleId.trim();
   if (
     trimmed.length === 0 ||
     trimmed !== articleId ||
-    trimmed.length > limits.maxArticleIdLength ||
+    trimmed.length > maxArticleIdLength ||
     /\s/.test(trimmed) ||
     FORBIDDEN_URL_SCHEME_REGEX.test(trimmed)
   ) {
@@ -139,7 +143,7 @@ export function isEditorialImageAssetEligibleForPublicArticle(
       usageScope,
       effectiveLimits
     );
-    if (!scopeValidation.valid) {
+    if (!scopeValidation.valid || !usageScope) {
       return false;
     }
 
