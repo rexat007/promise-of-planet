@@ -1,0 +1,37 @@
+name: AUTH-03A Functions Build Verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify_functions_build:
+    name: Verify Functions TypeScript Build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Verify Main Branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::This workflow can only be run on the main branch."
+            exit 1
+          fi
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Functions Dependencies
+        working-directory: functions
+        run: npm ci
+
+      - name: Build Functions
+        working-directory: functions
+        run: npm run build
