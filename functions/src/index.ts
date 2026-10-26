@@ -19,6 +19,7 @@ export { editorialNewsImageUpload } from "./news/editorialNewsImageUploadEndpoin
 export { editorialImagePreviewEndpoint } from "./news/editorialImagePreviewEndpoint";
 export { submitCitizenReport, manageCitizenSubmissions } from "./community/communityHandlers";
 export { listAdminUsers } from "./admin/adminUserDirectoryHandlers";
+export { manageAdminInvitations } from "./admin/adminInvitationHandlers";
 
 /**
  * Public Multimedia Gateway conforming to Firebase v2 onCall callable protocol.
