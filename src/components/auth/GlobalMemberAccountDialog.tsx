@@ -2,12 +2,21 @@ import React, { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X, UserCheck } from 'lucide-react';
 import { AccountAuthWidget } from './AccountAuthWidget';
+import {
+  AdminInvitationAcceptancePanel,
+  type AdminInvitationAcceptancePanelProps,
+} from './AdminInvitationAcceptancePanel';
 
 export interface GlobalMemberAccountDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  onEnterAdmin?: () => void;
   isAr?: boolean;
   triggerId?: string;
+  invitationAcceptanceProps?: Omit<
+    AdminInvitationAcceptancePanelProps,
+    'isAr' | 'onEnterAdmin'
+  >;
 }
 
 export const GLOBAL_MEMBER_DIALOG_FOCUSABLE_SELECTOR =
@@ -86,8 +95,10 @@ export function restoreGlobalMemberDialogFocus(
 export const GlobalMemberAccountDialog: React.FC<GlobalMemberAccountDialogProps> = ({
   isOpen,
   onClose,
+  onEnterAdmin,
   isAr = false,
   triggerId = 'header-member-account-btn',
+  invitationAcceptanceProps,
 }) => {
   const dialogPanelRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -218,9 +229,14 @@ export const GlobalMemberAccountDialog: React.FC<GlobalMemberAccountDialogProps>
           </button>
         </div>
 
-        {/* Dialog Body wrapping canonical AccountAuthWidget */}
+        {/* Dialog Body wrapping canonical AccountAuthWidget and Administrative Invitation Acceptance Panel */}
         <div className="p-4 sm:p-5 text-start">
           <AccountAuthWidget isAr={isAr} />
+          <AdminInvitationAcceptancePanel
+            isAr={isAr}
+            onEnterAdmin={onEnterAdmin}
+            {...invitationAcceptanceProps}
+          />
         </div>
       </div>
     </div>

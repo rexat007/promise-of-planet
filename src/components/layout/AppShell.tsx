@@ -56,6 +56,7 @@ export function AppShell({
       <GlobalMemberAccountDialog
         isOpen={isDialogOpen}
         onClose={handleCloseAccount}
+        onEnterAdmin={onEnterAdmin}
         isAr={isAr}
       />
 

@@ -2,11 +2,8 @@ import { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AdminPermission, AdminDomain, isTabAuthorized } from '../../types/admin';
 import type { AdminUser, NavigationItem } from '../../types/admin';
-import { AdminAccessService } from '../../services/adminAccess';
-import { AdminAuditService } from '../../services/adminAuditService';
 import { AccountService } from '../../services/accountService';
-import { AuditAction, AuditTargetType } from '../../types/audit';
-import type { AuditChange } from '../../types/audit';
+import type { AdminIdentityClientDependencies } from '../../services/adminIdentityManagementClient';
 import { AdminOverview } from '../content/AdminOverview';
 import { AdminNewsManagement } from '../news/AdminNewsManagement';
 import { AdminLibraryManagement } from '../library/AdminLibraryManagement';
@@ -45,6 +42,8 @@ interface AdminLayoutProps {
   currentUser: AdminUser;
   onExitAdmin: () => void;
   onSignOut?: () => void;
+  initialTab?: string;
+  adminIdentityClientDeps?: AdminIdentityClientDependencies;
 }
 
 export const CANONICAL_NAVIGATION_ITEMS: NavigationItem[] = [
@@ -112,18 +111,20 @@ export function attemptTabNavigation(
   return { success: true, targetTabId: requestedItem.id };
 }
 
-export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayoutProps) {
+export function AdminLayout({
+  currentUser,
+  onExitAdmin,
+  onSignOut,
+  initialTab,
+  adminIdentityClientDeps,
+}: AdminLayoutProps) {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
 
-  // Demo user management state for Users Management tab simulation
-  const [managedUsers, setManagedUsers] = useState<AdminUser[]>(() => {
-    const mocks = AdminAccessService.getMockUsers();
-    const exists = mocks.some(u => u.id === currentUser.id);
-    return exists ? mocks : [currentUser, ...mocks];
-  });
-
   const [activeTab, setActiveTab] = useState<string>(() => {
+    if (initialTab && typeof initialTab === 'string') {
+      return initialTab;
+    }
     try {
       const persisted = sessionStorage.getItem('pop_admin_session');
       if (persisted) {
@@ -162,64 +163,6 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
       console.error('Failed to save admin active tab:', e);
     }
   }, [effectiveTab]);
-
-  // Handle user identity updates in Users Management demo tab
-  const handleUpdateUser = (updatedUser: AdminUser) => {
-    const prevUser = managedUsers.find(u => u.id === updatedUser.id);
-    setManagedUsers(prev => prev.map(u => u.id === updatedUser.id ? updatedUser : u));
-
-    if (prevUser) {
-      const changes: AuditChange[] = [];
-      let action: (typeof AuditAction)[keyof typeof AuditAction] = AuditAction.Updated;
-
-      if (prevUser.role !== updatedUser.role) {
-        action = AuditAction.RoleChanged;
-        changes.push({ field: 'role', previousValue: prevUser.role, newValue: updatedUser.role });
-      }
-      if (prevUser.isActive !== updatedUser.isActive) {
-        action = AuditAction.StatusChanged;
-        changes.push({ field: 'isActive', previousValue: prevUser.isActive, newValue: updatedUser.isActive });
-      }
-      if (prevUser.name !== updatedUser.name) {
-        changes.push({ field: 'name', previousValue: prevUser.name, newValue: updatedUser.name });
-      }
-      if (prevUser.email !== updatedUser.email) {
-        changes.push({ field: 'email', previousValue: prevUser.email, newValue: updatedUser.email });
-      }
-
-      if (changes.length > 0) {
-        AdminAuditService.recordEvent({
-          actorUserId: currentUser.id,
-          actorName: currentUser.name,
-          actorRole: currentUser.role,
-          action,
-          targetType: AuditTargetType.AdminUser,
-          targetId: updatedUser.id,
-          targetTitle: `${updatedUser.name} (${updatedUser.email})`,
-          changes,
-        });
-      }
-    }
-  };
-
-  // Handle user creation in Users Management demo tab
-  const handleCreateUser = (newUser: AdminUser) => {
-    setManagedUsers(prev => [newUser, ...prev]);
-
-    AdminAuditService.recordEvent({
-      actorUserId: currentUser.id,
-      actorName: currentUser.name,
-      actorRole: currentUser.role,
-      action: AuditAction.Created,
-      targetType: AuditTargetType.AdminUser,
-      targetId: newUser.id,
-      targetTitle: `${newUser.name} (${newUser.email})`,
-      changes: [
-        { field: 'role', previousValue: null, newValue: newUser.role },
-        { field: 'isActive', previousValue: null, newValue: newUser.isActive },
-      ],
-    });
-  };
 
   // Filter visible navigation items using domain responsibility + action permission
   const visibleNavItems = useMemo(() => {
@@ -453,9 +396,8 @@ export function AdminLayout({ currentUser, onExitAdmin, onSignOut }: AdminLayout
             ) : effectiveTab === 'users' ? (
               <AdminUsersManagement
                 currentUser={currentUser}
-                users={managedUsers}
-                onUpdateUser={handleUpdateUser}
-                onCreateUser={handleCreateUser}
+                activeTabId={effectiveTab}
+                clientDeps={adminIdentityClientDeps}
               />
             ) : effectiveTab === 'auditLog' ? (
               <AdminAuditLogManagement currentUser={currentUser} />
