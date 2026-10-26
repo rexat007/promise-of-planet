@@ -12,7 +12,6 @@ import { FirestoreAdminIdentityLifecycleRepository } from './firestoreAdminIdent
 import {
   systemLifecycleClock,
   type LifecycleClock,
-  type UntrustedLifecycleClientClaims,
 } from './adminIdentityLifecycleContract';
 
 export const ADMIN_LIFECYCLE_OPERATIONS = [
