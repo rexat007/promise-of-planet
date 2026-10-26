@@ -80,8 +80,21 @@ function sanitizeAndValidateDirectoryEntry(
     );
   }
 
+  if (
+    record.revision !== undefined &&
+    (typeof record.revision !== 'number' ||
+      !Number.isInteger(record.revision) ||
+      record.revision < 1)
+  ) {
+    throw new AdminDirectoryRepositoryError(
+      'INVALID_ADMIN_RECORD',
+      `Invalid or non-positive-integer revision (${String(record.revision)}) encountered for UID (${id}).`
+    );
+  }
+
   seenIds.add(id);
 
+  // Explicitly strip internal revision and any other metadata to preserve the strict 5-field DTO wire contract.
   return {
     id,
     name,

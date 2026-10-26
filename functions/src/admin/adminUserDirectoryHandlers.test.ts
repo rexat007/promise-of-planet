@@ -754,4 +754,217 @@ describe('AUTH-03A Server-Authoritative Admin Directory (listAdminUsers)', () =>
 
     expect(typeof listAdminUsers).toBe('function');
   });
+
+  it('19. Locks down FirestoreAdminRepository.saveAdmin fail-closed with UNSAFE_DIRECT_WRITE_FORBIDDEN and zero Firestore writes', async () => {
+    let setCalled = false;
+    const db: FirestoreAdminDatabase = {
+      collection() {
+        return {
+          doc(id: string) {
+            return {
+              async get() {
+                return {
+                  id,
+                  exists: false,
+                  data: () => undefined,
+                };
+              },
+              async set() {
+                setCalled = true;
+              },
+            };
+          },
+          async get() {
+            return { docs: [] };
+          },
+        };
+      },
+    };
+
+    const repo = new FirestoreAdminRepository(db);
+
+    try {
+      await repo.saveAdmin({
+        id: 'uid-owner-1',
+        name: 'Nadia Mansour',
+        email: 'nadia@planet.org',
+        role: AdminRole.Viewer,
+        isActive: false,
+      });
+      throw new Error('Expected saveAdmin to fail closed.');
+    } catch (err: unknown) {
+      expect(err).toBeInstanceOf(AdminDirectoryRepositoryError);
+      const repoErr = err as AdminDirectoryRepositoryError;
+      expect(repoErr.code).toBe('UNSAFE_DIRECT_WRITE_FORBIDDEN');
+    }
+
+    expect(setCalled).toBe(false);
+  });
+
+  it('20. Preserves valid positive integer revision internally on getAdminByUid and listAdmins while keeping legacy unversioned records readable without inventing revision: 1', async () => {
+    const db = createFakeFirestoreDatabase([
+      {
+        docId: 'uid-legacy-owner',
+        data: {
+          name: 'Legacy Unversioned Owner',
+          email: 'legacy.owner@planet.org',
+          role: AdminRole.Owner,
+          isActive: true,
+          updatedAt: '2026-01-15T10:00:00.000Z',
+        },
+      },
+      {
+        docId: 'uid-versioned-rights',
+        data: {
+          name: 'Versioned Rights Reviewer',
+          email: 'versioned.rights@planet.org',
+          role: AdminRole.RightsReviewer,
+          isActive: true,
+          revision: 1,
+          updatedAt: '2026-10-26T09:00:00.000Z',
+        },
+      },
+      {
+        docId: 'uid-versioned-curator',
+        data: {
+          name: 'Versioned Curator',
+          email: 'versioned.curator@planet.org',
+          role: AdminRole.LibraryCurator,
+          isActive: false,
+          revision: 4,
+        },
+      },
+    ]);
+
+    const repo = new FirestoreAdminRepository(db);
+
+    const legacyOwner = await repo.getAdminByUid('uid-legacy-owner');
+    expect(legacyOwner).toEqual({
+      id: 'uid-legacy-owner',
+      name: 'Legacy Unversioned Owner',
+      email: 'legacy.owner@planet.org',
+      role: AdminRole.Owner,
+      isActive: true,
+    });
+    expect(legacyOwner?.revision).toBeUndefined();
+    expect('revision' in (legacyOwner as Record<string, unknown>)).toBe(false);
+
+    const versionedRights = await repo.getAdminByUid('uid-versioned-rights');
+    expect(versionedRights).toEqual({
+      id: 'uid-versioned-rights',
+      name: 'Versioned Rights Reviewer',
+      email: 'versioned.rights@planet.org',
+      role: AdminRole.RightsReviewer,
+      isActive: true,
+      revision: 1,
+    });
+
+    const listed = await repo.listAdmins();
+    expect(listed).toEqual([
+      {
+        id: 'uid-legacy-owner',
+        name: 'Legacy Unversioned Owner',
+        email: 'legacy.owner@planet.org',
+        role: AdminRole.Owner,
+        isActive: true,
+      },
+      {
+        id: 'uid-versioned-curator',
+        name: 'Versioned Curator',
+        email: 'versioned.curator@planet.org',
+        role: AdminRole.LibraryCurator,
+        isActive: false,
+        revision: 4,
+      },
+      {
+        id: 'uid-versioned-rights',
+        name: 'Versioned Rights Reviewer',
+        email: 'versioned.rights@planet.org',
+        role: AdminRole.RightsReviewer,
+        isActive: true,
+        revision: 1,
+      },
+    ]);
+  });
+
+  it('21. Fails closed when a present revision field is invalid (0, negative, float, string, or null)', async () => {
+    const invalidRevisions: unknown[] = [0, -1, 1.5, '1', null, NaN];
+
+    for (const badRevision of invalidRevisions) {
+      const db = createFakeFirestoreDatabase([
+        ACTIVE_OWNER_DOC,
+        {
+          docId: 'uid-corrupt-revision',
+          data: {
+            name: 'Corrupt Revision Admin',
+            email: 'corrupt.rev@planet.org',
+            role: AdminRole.ContentEditor,
+            isActive: true,
+            revision: badRevision,
+          },
+        },
+      ]);
+      const repo = new FirestoreAdminRepository(db);
+
+      const singleRead = await repo.getAdminByUid('uid-corrupt-revision');
+      expect(singleRead).toBeNull();
+
+      await expect(repo.listAdmins()).rejects.toBeInstanceOf(
+        AdminDirectoryRepositoryError
+      );
+
+      await expectHttpsErrorCode(
+        executeListAdminUsers(
+          { auth: { uid: 'uid-owner-1' } },
+          { adminRepo: repo }
+        ),
+        'failed-precondition'
+      );
+    }
+  });
+
+  it('22. Explicitly strips internal revision metadata at the listAdminUsers callable response boundary to preserve the strict 5-field DTO wire contract', async () => {
+    const db = createFakeFirestoreDatabase([
+      {
+        docId: 'uid-legacy-owner',
+        data: {
+          name: 'Legacy Unversioned Owner',
+          email: 'legacy.owner@planet.org',
+          role: AdminRole.Owner,
+          isActive: true,
+        },
+      },
+      {
+        docId: 'uid-invited-admin',
+        data: {
+          name: 'Newly Invited Admin',
+          email: 'invited@planet.org',
+          role: AdminRole.RightsReviewer,
+          isActive: true,
+          revision: 1,
+          provisionedViaInvitationId: 'inv_0123456789abcdef0123456789abcdef',
+        },
+      },
+    ]);
+    const repo = new FirestoreAdminRepository(db);
+
+    const response = await executeListAdminUsers(
+      { auth: { uid: 'uid-legacy-owner' } },
+      { adminRepo: repo }
+    );
+
+    expect(response.admins).toHaveLength(2);
+    for (const entry of response.admins) {
+      const rawEntry = entry as unknown as Record<string, unknown>;
+      expect(Object.keys(rawEntry).sort()).toEqual([
+        'email',
+        'id',
+        'isActive',
+        'name',
+        'role',
+      ]);
+      expect(rawEntry.revision).toBeUndefined();
+      expect('revision' in rawEntry).toBe(false);
+    }
+  });
 });

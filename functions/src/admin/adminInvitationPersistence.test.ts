@@ -531,6 +531,10 @@ describe('AUTH-03B2 Durable Administrative Invitations & Atomic Acceptance', () 
     expect(persistedNewAdmin?.id).toBe('uid-new-curator-1');
     expect(persistedNewAdmin?.role).toBe(AdminRole.LibraryCurator);
     expect(persistedNewAdmin?.isActive).toBe(true);
+    expect(persistedNewAdmin?.revision).toBe(1);
+    expect(persistedNewAdmin?.provisionedViaInvitationId).toBe(
+      created.invitation.invitationId
+    );
 
     // 3. Existing Owner record preserved untouched
     const persistedOwner = store.collections[ADMINS_COLLECTION].get(

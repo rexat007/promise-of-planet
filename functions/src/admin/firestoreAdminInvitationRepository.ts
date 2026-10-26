@@ -551,6 +551,7 @@ export class FirestoreAdminInvitationRepository
           email: activatedAdmin.email,
           role: activatedAdmin.role,
           isActive: true,
+          revision: 1,
           createdAt: acceptedInvitation.acceptedAtIso,
           updatedAt: acceptedInvitation.acceptedAtIso,
           provisionedViaInvitationId: acceptedInvitation.invitationId,

@@ -15,8 +15,14 @@ export interface SanitizedAdminDirectoryEntry {
   readonly isActive: boolean;
 }
 
+export interface VersionedAdminRepositoryRecord extends AdminUser {
+  readonly revision?: number;
+}
+
 export type AdminDirectoryErrorCode =
   | 'INVALID_ADMIN_RECORD'
+  | 'INVALID_ADMIN_REVISION'
+  | 'UNSAFE_DIRECT_WRITE_FORBIDDEN'
   | 'DIRECTORY_SIZE_LIMIT_EXCEEDED'
   | 'DIRECTORY_READ_FAILED'
   | 'INVALID_LIST_OPTIONS';
@@ -35,23 +41,24 @@ export interface AdminRepository {
   /**
    * Resolves a canonical AdminUser identity by Firebase Auth UID from admins/{uid}.
    * Returns null if no canonical AdminUser document exists for the UID.
+   * Preserves optional positive integer revision metadata when present on the persisted document.
    */
-  getAdminByUid(uid: string): Promise<AdminUser | null>;
+  getAdminByUid(uid: string): Promise<VersionedAdminRepositoryRecord | null>;
 
   /**
-   * Saves or updates a canonical AdminUser document at admins/{uid}.
-   * Intended for backend administration and test harness setup.
+   * Legacy interface method retained only for InMemoryAdminRepository test-harness seeding.
+   * Production FirestoreAdminRepository fails closed on saveAdmin to prevent unguarded writes.
    */
   saveAdmin(admin: AdminUser): Promise<AdminUser>;
 
   /**
    * Lists canonical AdminUser identities from admins/{uid} in a bounded,
-   * read-only manner. Fails closed on malformed records or size truncation.
+   * read-only manner. Fails closed on malformed records, invalid revisions, or size truncation.
    */
-  listAdmins?(options?: ListAdminsOptions): Promise<AdminUser[]>;
+  listAdmins?(options?: ListAdminsOptions): Promise<VersionedAdminRepositoryRecord[]>;
 }
 
 export interface AdminDirectoryRepository extends AdminRepository {
-  listAdmins(options?: ListAdminsOptions): Promise<AdminUser[]>;
+  listAdmins(options?: ListAdminsOptions): Promise<VersionedAdminRepositoryRecord[]>;
 }
 
