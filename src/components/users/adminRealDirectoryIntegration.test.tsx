@@ -597,7 +597,9 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     );
 
     expect(htmlEn).toContain('data-testid="admin-directory-mutation-disabled-notice"');
-    expect(htmlEn).toContain(ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_EN);
+    expect(htmlEn).toContain(
+      ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_EN.replace(/'/g, '&#x27;')
+    );
     expect(htmlEn).not.toContain('Add New User');
   });
 

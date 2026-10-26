@@ -46,10 +46,10 @@ import {
 } from './AdminInvitationCreationPanel';
 
 export const ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_AR =
-  'إدارة الهويات الإدارية قيد الربط بالخدمة الخادمية الآمنة. لا يمكن إنشاء أو تعديل مستخدم إداري من هذه الواجهة حاليًا.';
+  'يمكنك استعراض الهويات الإدارية الحقيقية وإنشاء الدعوات الإدارية وإلغاءها. تعديل أدوار المستخدمين الحاليين وتعطيل حساباتهم أو إعادة تفعيلها غير متاح من هذه الواجهة حاليًا.';
 
 export const ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_EN =
-  'Administrative identity management is being connected to the secure server service. Creating or editing administrators is currently unavailable.';
+  "You can view real administrative identities and create or revoke administrative invitations. Changing existing administrators' roles, deactivating accounts, and reactivating accounts are not currently available in this interface.";
 
 export type AdminDirectoryViewStatus =
   | 'loading'

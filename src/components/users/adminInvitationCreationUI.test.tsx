@@ -828,7 +828,9 @@ describe('AUTH-03C3 — Owner Administrative Invitation Creation UI', () => {
         }}
       />
     );
-    expect(htmlEn).toContain(ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_EN);
+    expect(htmlEn).toContain(
+      ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_EN.replace(/'/g, '&#x27;')
+    );
     expect(typeof createAdminInvitation).toBe('function');
   });
 
