@@ -93,12 +93,21 @@ export interface AdminUsersManagementProps {
   onCreateUser?: (newUser: AdminUser) => void;
 }
 
-const CANONICAL_ADMIN_KEYS = new Set<string>([
+const CANONICAL_ADMIN_REQUIRED_KEYS = new Set<string>([
   'id',
   'name',
   'email',
   'role',
   'isActive',
+]);
+
+const CANONICAL_ADMIN_ALLOWED_KEYS = new Set<string>([
+  'id',
+  'name',
+  'email',
+  'role',
+  'isActive',
+  'revision',
 ]);
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -165,8 +174,8 @@ export function validateCanonicalDirectoryUsersList(
     const entry = item as Record<string, unknown>;
     const keys = Object.keys(entry);
     if (
-      keys.length !== CANONICAL_ADMIN_KEYS.size ||
-      keys.some((k) => !CANONICAL_ADMIN_KEYS.has(k))
+      keys.some((k) => !CANONICAL_ADMIN_ALLOWED_KEYS.has(k)) ||
+      Array.from(CANONICAL_ADMIN_REQUIRED_KEYS).some((k) => !keys.includes(k))
     ) {
       throw new AdminIdentityClientError(
         'internal',
@@ -220,6 +229,24 @@ export function validateCanonicalDirectoryUsersList(
       );
     }
 
+    let sanitizedRevision: number | undefined;
+    if ('revision' in entry) {
+      const rev = entry.revision;
+      if (
+        typeof rev !== 'number' ||
+        !Number.isInteger(rev) ||
+        !Number.isSafeInteger(rev) ||
+        rev < 1 ||
+        Number.isNaN(rev)
+      ) {
+        throw new AdminIdentityClientError(
+          'internal',
+          'MALFORMED_ADMIN_RECORD'
+        );
+      }
+      sanitizedRevision = rev;
+    }
+
     seenIds.add(id);
     validated.push(
       Object.freeze({
@@ -228,6 +255,7 @@ export function validateCanonicalDirectoryUsersList(
         email,
         role: entry.role,
         isActive: entry.isActive,
+        ...(sanitizedRevision !== undefined ? { revision: sanitizedRevision } : {}),
       })
     );
   }

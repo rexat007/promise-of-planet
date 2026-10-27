@@ -4,7 +4,6 @@ import {
   DEFAULT_MAX_ADMIN_DIRECTORY_RESULTS,
   MAX_ADMIN_DIRECTORY_LIMIT,
   type AdminRepository,
-  type SanitizedAdminDirectoryEntry,
 } from './adminRepository';
 import {
   compareAdminDirectoryEntries,
@@ -12,6 +11,15 @@ import {
 } from './firestoreAdminRepository';
 import { AdminAuthorizationService } from './adminAuthorizationService';
 import { AdminPermission, AdminRole, isValidAdminRole } from '../types/admin';
+
+export interface SanitizedAdminDirectoryEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly email: string;
+  readonly role: AdminRole;
+  readonly isActive: boolean;
+  readonly revision?: number;
+}
 
 export interface AdminDirectoryRequestContext {
   auth?: {
@@ -84,7 +92,9 @@ function sanitizeAndValidateDirectoryEntry(
     record.revision !== undefined &&
     (typeof record.revision !== 'number' ||
       !Number.isInteger(record.revision) ||
-      record.revision < 1)
+      !Number.isSafeInteger(record.revision) ||
+      record.revision < 1 ||
+      Number.isNaN(record.revision))
   ) {
     throw new AdminDirectoryRepositoryError(
       'INVALID_ADMIN_RECORD',
@@ -94,13 +104,14 @@ function sanitizeAndValidateDirectoryEntry(
 
   seenIds.add(id);
 
-  // Explicitly strip internal revision and any other metadata to preserve the strict 5-field DTO wire contract.
+  // Preserve authoritative revision when present as a valid positive safe integer; omit for legacy unversioned accounts.
   return {
     id,
     name,
     email,
     role: record.role,
     isActive: record.isActive,
+    ...(typeof record.revision === 'number' ? { revision: record.revision } : {}),
   };
 }
 

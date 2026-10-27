@@ -114,6 +114,7 @@ export interface SanitizedAdminDirectoryEntry {
   readonly email: string;
   readonly role: AdminRole;
   readonly isActive: boolean;
+  readonly revision?: number;
 }
 
 export interface ListAdminUsersClientResponse {
@@ -308,12 +309,21 @@ export interface AdminIdentityClientDependencies {
   readonly invokeCallable?: GenericAdminCallableTransport;
 }
 
-const CANONICAL_ADMIN_DIRECTORY_KEYS = new Set<string>([
+const CANONICAL_ADMIN_DIRECTORY_REQUIRED_KEYS = new Set<string>([
   'id',
   'name',
   'email',
   'role',
   'isActive',
+]);
+
+const CANONICAL_ADMIN_DIRECTORY_ALLOWED_KEYS = new Set<string>([
+  'id',
+  'name',
+  'email',
+  'role',
+  'isActive',
+  'revision',
 ]);
 
 const CANONICAL_INVITATION_DTO_KEYS = new Set<string>([
@@ -559,8 +569,11 @@ function mapCodeToDefaultReason(
 export function mapCallableBoundaryError(
   error: unknown
 ): AdminIdentityClientError {
-  if (error instanceof AdminIdentityClientError) {
-    return error;
+  if (
+    error instanceof AdminIdentityClientError ||
+    (error && typeof error === 'object' && (error as { name?: string }).name === 'AdminIdentityClientError')
+  ) {
+    return error as AdminIdentityClientError;
   }
 
   if (error && typeof error === 'object') {
@@ -691,8 +704,8 @@ function validateSanitizedAdminDirectoryEntry(
 
   const keys = Object.keys(rawEntry);
   if (
-    keys.length !== CANONICAL_ADMIN_DIRECTORY_KEYS.size ||
-    keys.some((k) => !CANONICAL_ADMIN_DIRECTORY_KEYS.has(k))
+    keys.some((k) => !CANONICAL_ADMIN_DIRECTORY_ALLOWED_KEYS.has(k)) ||
+    Array.from(CANONICAL_ADMIN_DIRECTORY_REQUIRED_KEYS).some((k) => !keys.includes(k))
   ) {
     throw new AdminIdentityClientError(
       'internal',
@@ -756,6 +769,24 @@ function validateSanitizedAdminDirectoryEntry(
     );
   }
 
+  let revision: number | undefined;
+  if ('revision' in rawEntry) {
+    const rev = rawEntry.revision;
+    if (
+      typeof rev !== 'number' ||
+      !Number.isSafeInteger(rev) ||
+      Number.isNaN(rev) ||
+      rev < 1
+    ) {
+      throw new AdminIdentityClientError(
+        'internal',
+        'MALFORMED_ADMIN_RECORD',
+        SAFE_ERROR_MESSAGES.internal
+      );
+    }
+    revision = rev;
+  }
+
   seenIds.add(id);
 
   return Object.freeze({
@@ -764,6 +795,7 @@ function validateSanitizedAdminDirectoryEntry(
     email,
     role: rawEntry.role,
     isActive: rawEntry.isActive,
+    ...(revision !== undefined ? { revision } : {}),
   });
 }
 

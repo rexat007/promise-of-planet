@@ -923,7 +923,7 @@ describe('AUTH-03A Server-Authoritative Admin Directory (listAdminUsers)', () =>
     }
   });
 
-  it('22. Explicitly strips internal revision metadata at the listAdminUsers callable response boundary to preserve the strict 5-field DTO wire contract', async () => {
+  it('22. Preserves authoritative revision on versioned entries and omits it on legacy unversioned entries while stripping non-canonical metadata', async () => {
     const db = createFakeFirestoreDatabase([
       {
         docId: 'uid-legacy-owner',
@@ -954,17 +954,71 @@ describe('AUTH-03A Server-Authoritative Admin Directory (listAdminUsers)', () =>
     );
 
     expect(response.admins).toHaveLength(2);
-    for (const entry of response.admins) {
-      const rawEntry = entry as unknown as Record<string, unknown>;
-      expect(Object.keys(rawEntry).sort()).toEqual([
-        'email',
-        'id',
-        'isActive',
-        'name',
-        'role',
-      ]);
-      expect(rawEntry.revision).toBeUndefined();
-      expect('revision' in rawEntry).toBe(false);
+
+    // Entry 1: legacy unversioned owner - strict 5 fields, no revision
+    const legacyEntry = response.admins.find((a) => a.id === 'uid-legacy-owner');
+    expect(legacyEntry).toBeDefined();
+    const legacyRaw = legacyEntry as unknown as Record<string, unknown>;
+    expect(Object.keys(legacyRaw).sort()).toEqual([
+      'email',
+      'id',
+      'isActive',
+      'name',
+      'role',
+    ]);
+    expect(legacyEntry!.revision).toBeUndefined();
+    expect('revision' in legacyRaw).toBe(false);
+
+    // Entry 2: versioned admin - exactly 6 fields, valid revision preserved, provisionedViaInvitationId stripped
+    const versionedEntry = response.admins.find((a) => a.id === 'uid-invited-admin');
+    expect(versionedEntry).toBeDefined();
+    const versionedRaw = versionedEntry as unknown as Record<string, unknown>;
+    expect(Object.keys(versionedRaw).sort()).toEqual([
+      'email',
+      'id',
+      'isActive',
+      'name',
+      'revision',
+      'role',
+    ]);
+    expect(versionedEntry!.revision).toBe(1);
+    expect('provisionedViaInvitationId' in versionedRaw).toBe(false);
+  });
+
+  it('23. Fails closed with failed-precondition if an entry in the repository contains an unsafe integer, float, NaN, or string revision', async () => {
+    const badRevisions = [0, -1, 1.5, NaN, '1', null, Number.MAX_SAFE_INTEGER + 10];
+
+    for (const badRevision of badRevisions) {
+      const mockRepo = {
+        getAdminByUid: vi.fn().mockResolvedValue({
+          id: 'uid-owner',
+          name: 'Active Owner',
+          email: 'owner@planet.org',
+          role: AdminRole.Owner,
+          isActive: true,
+        }),
+        saveAdmin: vi.fn(),
+        listAdmins: vi.fn().mockResolvedValue([
+          {
+            id: 'uid-corrupt',
+            name: 'Corrupt Revision Admin',
+            email: 'corrupt@planet.org',
+            role: AdminRole.ContentEditor,
+            isActive: true,
+            revision: badRevision,
+          },
+        ]),
+      };
+
+      await expect(
+        executeListAdminUsers(
+          { auth: { uid: 'uid-owner' } },
+          { adminRepo: mockRepo }
+        )
+      ).rejects.toMatchObject({
+        name: 'HttpsError',
+        code: 'failed-precondition',
+      });
     }
   });
 });

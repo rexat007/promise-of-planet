@@ -813,4 +813,40 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
       isAuthorizedOwnerForUsersDirectory(ACTIVE_OWNER, AdminDomain.Users)
     ).toBe(true);
   });
+
+  it('17. Directory snapshot preserves revision for versioned entries and omits revision for unversioned entries', () => {
+    const mixedRawResponse = {
+      admins: [
+        {
+          id: 'admin-ver-1',
+          name: 'Versioned User',
+          email: 'ver@promiseofplanet.org',
+          role: AdminRole.Owner,
+          isActive: true,
+          revision: 5,
+        },
+        {
+          id: 'admin-leg-2',
+          name: 'Legacy User',
+          email: 'leg@promiseofplanet.org',
+          role: AdminRole.ContentEditor,
+          isActive: true,
+        },
+      ],
+    };
+
+    const validated = validateCanonicalDirectoryUsersList(mixedRawResponse);
+    expect(validated).toHaveLength(2);
+    expect(validated[0].revision).toBe(5);
+    expect('revision' in validated[0]).toBe(true);
+    expect(validated[1].revision).toBeUndefined();
+    expect('revision' in validated[1]).toBe(false);
+    expect(Object.keys(validated[1])).toEqual([
+      'id',
+      'name',
+      'email',
+      'role',
+      'isActive',
+    ]);
+  });
 });

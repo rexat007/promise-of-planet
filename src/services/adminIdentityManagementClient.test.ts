@@ -357,6 +357,74 @@ describe('AUTH-03C1 — Typed Admin Directory & Invitation Client Bridge', () =>
         }
       }
     });
+    it('accepts versioned directory entries with positive safe integer revision and unversioned entries without revision', async () => {
+      const listCallable = vi.fn().mockResolvedValue({
+        data: {
+          admins: [
+            {
+              id: 'versioned_admin_01',
+              name: 'Versioned Admin',
+              email: 'versioned@promiseofplanet.org',
+              role: AdminRole.Owner,
+              isActive: true,
+              revision: 42,
+            },
+            {
+              id: 'legacy_admin_02',
+              name: 'Legacy Admin',
+              email: 'legacy@promiseofplanet.org',
+              role: AdminRole.RightsReviewer,
+              isActive: true,
+            },
+          ],
+        },
+      });
+
+      const response = await listAdminUsers(
+        createTestDeps({ listAdminUsersCallable: listCallable })
+      );
+
+      expect(response.admins).toHaveLength(2);
+      expect(response.admins[0].revision).toBe(42);
+      expect('revision' in response.admins[0]).toBe(true);
+      expect(response.admins[1].revision).toBeUndefined();
+      expect('revision' in response.admins[1]).toBe(false);
+      expect(Object.keys(response.admins[1])).toEqual([
+        'id',
+        'name',
+        'email',
+        'role',
+        'isActive',
+      ]);
+    });
+
+    it('fails closed with MALFORMED_ADMIN_RECORD when directory entry has an invalid revision', async () => {
+      const invalidRevisions = [0, -1, -5, 1.5, NaN, '1', null, {}, [], Number.MAX_SAFE_INTEGER + 10];
+
+      for (const invalidRev of invalidRevisions) {
+        const listCallable = vi.fn().mockResolvedValue({
+          data: {
+            admins: [
+              {
+                id: 'admin_with_bad_revision',
+                name: 'Bad Rev Admin',
+                email: 'badrev@promiseofplanet.org',
+                role: AdminRole.Owner,
+                isActive: true,
+                revision: invalidRev,
+              },
+            ],
+          },
+        });
+
+        await expect(
+          listAdminUsers(createTestDeps({ listAdminUsersCallable: listCallable }))
+        ).rejects.toMatchObject({
+          code: 'internal',
+          reason: 'MALFORMED_ADMIN_RECORD',
+        });
+      }
+    });
   });
 
   describe('2. Invitation Client (manageAdminInvitations)', () => {
