@@ -1,0 +1,125 @@
+name: Deploy Admin Lifecycle Function Live
+
+# PREREQUISITE NOTICE FOR PROJECT OWNER:
+# 1. Before triggering this workflow, ensure that the Google Cloud Artifact Registry cleanup policy
+#    for Cloud Functions Gen 2 container images has been configured in project 'promiseofplanet-bb325'
+#    to automatically delete stale container build layers and prevent storage quota exhaustion.
+# 2. SEPARATE AUTHORIZATION REQUIRED: This workflow must NOT be dispatched without separate,
+#    explicit owner authorization.
+# 3. VERIFICATION BOUNDARY: Deployment of manageAdminLifecycle alone does NOT establish successful
+#    live authorization, correct RBAC enforcement, or completed lifecycle testing. A separate,
+#    dedicated smoke test sequence must be conducted following deployment.
+# 4. ROLLBACK SAFETY: Reverting the callable export in functions/src/index.ts does NOT automatically
+#    undeploy or remove a previously deployed Cloud Function from Google Cloud / Firebase.
+#    Rollback requires a separately reviewed, explicitly authorized operational plan (e.g. manual
+#    function deletion via Firebase CLI or redeploying an empty handler stub).
+# 5. NO DATA MUTATION: This workflow contains zero automated Firestore data migrations, revisions,
+#    role changes, or administrative activations/deactivations.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-admin-lifecycle-functions-live
+  cancel-in-progress: false
+
+jobs:
+  deploy_admin_lifecycle_function:
+    name: Deploy manageAdminLifecycle
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Verify Main Branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::This workflow can only be run on the main branch."
+            exit 1
+          fi
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify Callable Export and Handler Configuration
+        run: |
+          node -e '
+            const fs = require("fs");
+            const indexSource = fs.readFileSync("functions/src/index.ts", "utf8");
+            const hasManageAdminLifecycleExport = /export\s*\{\s*manageAdminLifecycle\s*\}\s*from\s*["\x27]\.\/admin\/adminIdentityLifecycleHandlers["\x27]/.test(indexSource);
+            if (!hasManageAdminLifecycleExport) {
+              console.error("::error::Missing required callable export (manageAdminLifecycle) in functions/src/index.ts.");
+              process.exit(1);
+            }
+            console.log("Verified callable export in functions/src/index.ts: manageAdminLifecycle");
+
+            const handlerSource = fs.readFileSync("functions/src/admin/adminIdentityLifecycleHandlers.ts", "utf8");
+            const hasCallableDefinition = /export\s+const\s+manageAdminLifecycle\s*=\s*onCall\s*\(/.test(handlerSource);
+            if (!hasCallableDefinition) {
+              console.error("::error::manageAdminLifecycle callable definition not found in functions/src/admin/adminIdentityLifecycleHandlers.ts.");
+              process.exit(1);
+            }
+            console.log("Verified callable definition in functions/src/admin/adminIdentityLifecycleHandlers.ts: manageAdminLifecycle");
+
+            const hasAppCheckFalse = /enforceAppCheck:\s*false/.test(handlerSource);
+            if (!hasAppCheckFalse) {
+              console.error("::error::enforceAppCheck must be set to false in manageAdminLifecycle callable definition.");
+              process.exit(1);
+            }
+            console.log("Verified enforceAppCheck is false in manageAdminLifecycle configuration.");
+          '
+
+      - name: Verify Service Account Credential
+        env:
+          CREDENTIAL_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+        run: |
+          if [ -z "$CREDENTIAL_JSON" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 secret is empty or missing."
+            exit 1
+          fi
+          node -e '
+            const raw = process.env.CREDENTIAL_JSON;
+            let cred;
+            try {
+              cred = JSON.parse(raw);
+            } catch (err) {
+              console.error("::error::Failed to parse credential JSON.");
+              process.exit(1);
+            }
+            if (cred.type !== "service_account") {
+              console.error("::error::Credential is not a service_account (type: " + cred.type + ")");
+              process.exit(1);
+            }
+            if (cred.project_id !== "promiseofplanet-bb325") {
+              console.error("::error::Credential project_id mismatch. Expected promiseofplanet-bb325, found: " + cred.project_id);
+              process.exit(1);
+            }
+            console.log("Verified service-account credential for project: " + cred.project_id);
+          '
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+
+      - name: Install Functions Dependencies
+        working-directory: functions
+        run: npm ci
+
+      - name: Build Functions
+        working-directory: functions
+        run: npm run build
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy Admin Lifecycle Function to Firebase
+        run: |
+          firebase deploy --project promiseofplanet-bb325 --only "functions:manageAdminLifecycle" --non-interactive
