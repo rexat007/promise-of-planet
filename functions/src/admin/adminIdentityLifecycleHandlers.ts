@@ -1,7 +1,6 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { AdminRole, isValidAdminRole } from '../types/admin';
 import {
-  ADMIN_LIFECYCLE_OPERATIONS,
   AdminIdentityLifecycleApplicationService,
   AdminLifecycleApplicationError,
   isValidAdminLifecycleOperation,
