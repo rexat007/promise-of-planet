@@ -31,13 +31,16 @@ export type ManageAdminInvitationAction =
 
 export type AdminIdentityCallableName =
   | 'listAdminUsers'
-  | 'manageAdminInvitations';
+  | 'manageAdminInvitations'
+  | 'manageAdminLifecycle';
 
 export type AdminIdentityCallableErrorCode =
   | 'unauthenticated'
   | 'permission-denied'
   | 'invalid-argument'
   | 'failed-precondition'
+  | 'not-found'
+  | 'aborted'
   | 'unavailable'
   | 'internal';
 
@@ -47,15 +50,19 @@ export type AdminIdentityClientFailureReason =
   | 'PERMISSION_DENIED'
   | 'INVALID_ARGUMENT'
   | 'FAILED_PRECONDITION'
+  | 'TARGET_NOT_FOUND'
+  | 'REVISION_CONFLICT'
   | 'SERVICE_UNAVAILABLE'
   | 'INTERNAL_ERROR'
   | 'SPOOFED_AUTHORITY_REJECTED'
   | 'OWNER_ACTIVATION_FORBIDDEN'
+  | 'OWNER_PROMOTION_FORBIDDEN'
   | 'INVALID_SERVER_RESPONSE'
   | 'DUPLICATE_ADMIN_UID'
   | 'INVALID_ADMIN_ROLE'
   | 'MALFORMED_ADMIN_RECORD'
-  | 'MALFORMED_INVITATION_RECORD';
+  | 'MALFORMED_INVITATION_RECORD'
+  | 'MALFORMED_LIFECYCLE_RECORD';
 
 const SAFE_ERROR_MESSAGES: Readonly<
   Record<AdminIdentityCallableErrorCode, string>
@@ -68,6 +75,10 @@ const SAFE_ERROR_MESSAGES: Readonly<
     'Invalid administrative identity request parameters.',
   'failed-precondition':
     'Administrative identity operation precondition failed.',
+  'not-found':
+    'Target administrative identity not found.',
+  aborted:
+    'Administrative revision or transaction conflict occurred; retry with the latest revision.',
   unavailable:
     'Administrative identity service is currently unavailable.',
   internal:
@@ -187,6 +198,92 @@ export type ManageAdminInvitationsClientPayload =
       readonly expectedRevision?: number;
     };
 
+export const ADMIN_LIFECYCLE_OPERATIONS = [
+  'ChangeRole',
+  'Deactivate',
+  'Reactivate',
+  'InitializeRevision',
+] as const;
+
+export type AdminLifecycleOperation =
+  (typeof ADMIN_LIFECYCLE_OPERATIONS)[number];
+
+export function isValidAdminLifecycleOperation(
+  op: unknown
+): op is AdminLifecycleOperation {
+  return (
+    typeof op === 'string' &&
+    (ADMIN_LIFECYCLE_OPERATIONS as readonly string[]).includes(op)
+  );
+}
+
+export interface ChangeAdminRoleClientInput {
+  readonly targetUid: string;
+  readonly expectedRevision: number;
+  readonly targetRole: AdminRole;
+}
+
+export interface DeactivateAdminClientInput {
+  readonly targetUid: string;
+  readonly expectedRevision: number;
+}
+
+export interface ReactivateAdminClientInput {
+  readonly targetUid: string;
+  readonly expectedRevision: number;
+}
+
+export interface InitializeAdminRevisionClientInput {
+  readonly targetUid: string;
+}
+
+export interface SanitizedAdminIdentityLifecycleStateDto {
+  readonly id: string;
+  readonly role: AdminRole;
+  readonly isActive: boolean;
+  readonly revision: number;
+}
+
+export interface SanitizedLifecycleAuditReceiptDto {
+  readonly auditEventId: string;
+  readonly action: string;
+  readonly targetType: string;
+  readonly targetId: string;
+  readonly timestamp: string;
+}
+
+export interface AdminLifecycleClientResponse {
+  readonly operation: AdminLifecycleOperation;
+  readonly targetUid: string;
+  readonly previousRevision: number | null;
+  readonly currentRevision: number;
+  readonly committedAtIso: string;
+  readonly admin: SanitizedAdminIdentityLifecycleStateDto;
+  readonly auditReceipt: SanitizedLifecycleAuditReceiptDto;
+}
+
+export type ManageAdminLifecycleClientPayload =
+  | {
+      readonly operation: 'ChangeRole';
+      readonly targetUid: string;
+      readonly expectedRevision: number;
+      readonly targetRole: AdminRole;
+    }
+  | {
+      readonly operation: 'Deactivate';
+      readonly targetUid: string;
+      readonly expectedRevision: number;
+    }
+  | {
+      readonly operation: 'Reactivate';
+      readonly targetUid: string;
+      readonly expectedRevision: number;
+    }
+  | {
+      readonly operation: 'InitializeRevision';
+      readonly targetUid: string;
+    };
+
 export type CallableInvoker<TReq = unknown, TRes = unknown> = (
   payload: TReq
 ) => Promise<{ readonly data: TRes } | TRes>;
@@ -202,6 +299,10 @@ export interface AdminIdentityClientDependencies {
   readonly listAdminUsersCallable?: CallableInvoker<Record<string, never>, unknown>;
   readonly manageAdminInvitationsCallable?: CallableInvoker<
     ManageAdminInvitationsClientPayload,
+    unknown
+  >;
+  readonly manageAdminLifecycleCallable?: CallableInvoker<
+    ManageAdminLifecycleClientPayload,
     unknown
   >;
   readonly invokeCallable?: GenericAdminCallableTransport;
@@ -250,6 +351,57 @@ const ACCEPT_INVITATION_CLIENT_ALLOWED_KEYS = new Set<string>([
   'expectedRevision',
 ]);
 
+const LIFECYCLE_CHANGE_ROLE_ALLOWED_KEYS = new Set<string>([
+  'targetUid',
+  'expectedRevision',
+  'targetRole',
+]);
+
+const LIFECYCLE_DEACTIVATE_ALLOWED_KEYS = new Set<string>([
+  'targetUid',
+  'expectedRevision',
+]);
+
+const LIFECYCLE_REACTIVATE_ALLOWED_KEYS = new Set<string>([
+  'targetUid',
+  'expectedRevision',
+]);
+
+const LIFECYCLE_INITIALIZE_REVISION_ALLOWED_KEYS = new Set<string>([
+  'targetUid',
+]);
+
+const CANONICAL_LIFECYCLE_ADMIN_DTO_KEYS = new Set<string>([
+  'id',
+  'role',
+  'isActive',
+  'revision',
+]);
+
+const CANONICAL_LIFECYCLE_AUDIT_RECEIPT_KEYS = new Set<string>([
+  'auditEventId',
+  'action',
+  'targetType',
+  'targetId',
+  'timestamp',
+]);
+
+const CANONICAL_LIFECYCLE_RESPONSE_KEYS = new Set<string>([
+  'operation',
+  'targetUid',
+  'previousRevision',
+  'currentRevision',
+  'committedAtIso',
+  'admin',
+  'auditReceipt',
+]);
+
+const PROTOTYPE_POLLUTION_KEYS = new Set<string>([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
+
 const SPOOFED_AUTHORITY_AND_SECRET_KEYS = new Set<string>([
   'action',
   'callerUid',
@@ -280,6 +432,11 @@ const SPOOFED_AUTHORITY_AND_SECRET_KEYS = new Set<string>([
   'credential',
   'customClaims',
   'auth',
+  'actorUid',
+  'actorRole',
+  'activeOwnerCount',
+  'trustedOwnerState',
+  'explicitOwnerPromotionPolicy',
 ]);
 
 const FORBIDDEN_SECRET_KEY_PATTERNS: readonly RegExp[] = [
@@ -358,12 +515,15 @@ function normalizeFirebaseCallableErrorCode(
       return 'invalid-argument';
     case 'failed-precondition':
       return 'failed-precondition';
+    case 'not-found':
+      return 'not-found';
+    case 'aborted':
+      return 'aborted';
     case 'unavailable':
     case 'deadline-exceeded':
       return 'unavailable';
     case 'internal':
     case 'resource-exhausted':
-    case 'aborted':
     case 'unknown':
     case 'data-loss':
       return 'internal';
@@ -384,6 +544,10 @@ function mapCodeToDefaultReason(
       return 'INVALID_ARGUMENT';
     case 'failed-precondition':
       return 'FAILED_PRECONDITION';
+    case 'not-found':
+      return 'TARGET_NOT_FOUND';
+    case 'aborted':
+      return 'REVISION_CONFLICT';
     case 'unavailable':
       return 'SERVICE_UNAVAILABLE';
     case 'internal':
@@ -994,6 +1158,37 @@ async function invokeManageAdminInvitationsCallable(
   return res.data;
 }
 
+async function invokeManageAdminLifecycleCallable(
+  payload: ManageAdminLifecycleClientPayload,
+  deps: AdminIdentityClientDependencies
+): Promise<unknown> {
+  if (deps.manageAdminLifecycleCallable) {
+    const raw = await deps.manageAdminLifecycleCallable(payload);
+    return unwrapCallableEnvelope(raw);
+  }
+
+  if (deps.invokeCallable) {
+    const raw = await deps.invokeCallable('manageAdminLifecycle', payload);
+    return unwrapCallableEnvelope(raw);
+  }
+
+  if (!isFirebaseConfigured || !app) {
+    throw new AdminIdentityClientError(
+      'unavailable',
+      'BACKEND_UNAVAILABLE',
+      SAFE_ERROR_MESSAGES.unavailable
+    );
+  }
+
+  const fns = getFunctions(app);
+  const callable = httpsCallable<ManageAdminLifecycleClientPayload, unknown>(
+    fns,
+    'manageAdminLifecycle'
+  );
+  const res = await callable(payload);
+  return res.data;
+}
+
 export async function listAdminUsers(
   deps?: AdminIdentityClientDependencies
 ): Promise<ListAdminUsersClientResponse> {
@@ -1472,6 +1667,541 @@ export async function acceptAdminInvitation(
   }
 }
 
+function assertNoLifecycleAuthorityOrPollution(
+  input: Record<string, unknown>,
+  allowedKeys: ReadonlySet<string>
+): void {
+  for (const key of Object.keys(input)) {
+    if (PROTOTYPE_POLLUTION_KEYS.has(key)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        SAFE_ERROR_MESSAGES['invalid-argument']
+      );
+    }
+    if (
+      SPOOFED_AUTHORITY_AND_SECRET_KEYS.has(key) ||
+      FORBIDDEN_SECRET_KEY_PATTERNS.some((pattern) => pattern.test(key))
+    ) {
+      throw new AdminIdentityClientError(
+        'permission-denied',
+        'SPOOFED_AUTHORITY_REJECTED',
+        SAFE_ERROR_MESSAGES['permission-denied']
+      );
+    }
+    if (!allowedKeys.has(key)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        SAFE_ERROR_MESSAGES['invalid-argument']
+      );
+    }
+  }
+}
+
+function validateRequiredExpectedRevision(rawRevision: unknown): number {
+  if (
+    typeof rawRevision !== 'number' ||
+    !Number.isInteger(rawRevision) ||
+    !Number.isSafeInteger(rawRevision) ||
+    rawRevision < 1
+  ) {
+    throw new AdminIdentityClientError(
+      'invalid-argument',
+      'INVALID_ARGUMENT',
+      'expectedRevision must be a positive integer >= 1.'
+    );
+  }
+  return rawRevision;
+}
+
+function validateSanitizedAdminLifecycleResponse(
+  rawResult: unknown,
+  expectedOperation: AdminLifecycleOperation,
+  expectedTargetUid: string,
+  expectedRevision?: number,
+  expectedTargetRole?: AdminRole
+): AdminLifecycleClientResponse {
+  if (!isPlainObject(rawResult)) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  assertNoForbiddenSecretKeys(rawResult);
+
+  const topKeys = Object.keys(rawResult);
+  if (
+    topKeys.length !== CANONICAL_LIFECYCLE_RESPONSE_KEYS.size ||
+    topKeys.some((k) => !CANONICAL_LIFECYCLE_RESPONSE_KEYS.has(k))
+  ) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  if (rawResult.operation !== expectedOperation) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  const targetUid = validateCanonicalUid(rawResult.targetUid);
+  if (!targetUid || targetUid !== expectedTargetUid) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  const prevRev = rawResult.previousRevision;
+  if (expectedOperation === 'InitializeRevision') {
+    if (
+      prevRev !== null &&
+      (typeof prevRev !== 'number' || !Number.isInteger(prevRev) || prevRev < 1)
+    ) {
+      throw new AdminIdentityClientError(
+        'internal',
+        'MALFORMED_LIFECYCLE_RECORD',
+        SAFE_ERROR_MESSAGES.internal
+      );
+    }
+  } else {
+    if (
+      typeof prevRev !== 'number' ||
+      !Number.isInteger(prevRev) ||
+      !Number.isSafeInteger(prevRev) ||
+      prevRev < 1 ||
+      (expectedRevision !== undefined && prevRev !== expectedRevision)
+    ) {
+      throw new AdminIdentityClientError(
+        'internal',
+        'MALFORMED_LIFECYCLE_RECORD',
+        SAFE_ERROR_MESSAGES.internal
+      );
+    }
+  }
+
+  const currRev = rawResult.currentRevision;
+  if (
+    typeof currRev !== 'number' ||
+    !Number.isInteger(currRev) ||
+    !Number.isSafeInteger(currRev) ||
+    currRev < 1 ||
+    (prevRev !== null && currRev !== prevRev + 1)
+  ) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  const committedAt = parseStrictUtcIsoTimestamp(rawResult.committedAtIso);
+  if (!committedAt) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  // Admin DTO check
+  const rawAdmin = rawResult.admin;
+  if (!isPlainObject(rawAdmin)) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+  assertNoForbiddenSecretKeys(rawAdmin);
+
+  const adminKeys = Object.keys(rawAdmin);
+  if (
+    adminKeys.length !== CANONICAL_LIFECYCLE_ADMIN_DTO_KEYS.size ||
+    adminKeys.some((k) => !CANONICAL_LIFECYCLE_ADMIN_DTO_KEYS.has(k))
+  ) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  const adminId = validateCanonicalUid(rawAdmin.id);
+  if (!adminId || adminId !== expectedTargetUid) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  if (!isValidAdminRole(rawAdmin.role)) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'INVALID_ADMIN_ROLE',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  if (expectedTargetRole !== undefined && rawAdmin.role !== expectedTargetRole) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  if (typeof rawAdmin.isActive !== 'boolean') {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  if (expectedOperation === 'Deactivate' && rawAdmin.isActive !== false) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  if (expectedOperation === 'Reactivate' && rawAdmin.isActive !== true) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  if (rawAdmin.revision !== currRev) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  // Audit receipt check
+  const rawReceipt = rawResult.auditReceipt;
+  if (!isPlainObject(rawReceipt)) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+  assertNoForbiddenSecretKeys(rawReceipt);
+
+  const receiptKeys = Object.keys(rawReceipt);
+  if (
+    receiptKeys.length !== CANONICAL_LIFECYCLE_AUDIT_RECEIPT_KEYS.size ||
+    receiptKeys.some((k) => !CANONICAL_LIFECYCLE_AUDIT_RECEIPT_KEYS.has(k))
+  ) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  const auditEventId = validateAuditEventId(rawReceipt.auditEventId);
+  if (
+    typeof rawReceipt.action !== 'string' ||
+    !rawReceipt.action ||
+    typeof rawReceipt.targetType !== 'string' ||
+    !rawReceipt.targetType ||
+    rawReceipt.targetId !== expectedTargetUid ||
+    !parseStrictUtcIsoTimestamp(rawReceipt.timestamp)
+  ) {
+    throw new AdminIdentityClientError(
+      'internal',
+      'MALFORMED_LIFECYCLE_RECORD',
+      SAFE_ERROR_MESSAGES.internal
+    );
+  }
+
+  return Object.freeze({
+    operation: expectedOperation,
+    targetUid: expectedTargetUid,
+    previousRevision: prevRev,
+    currentRevision: currRev,
+    committedAtIso: committedAt.iso,
+    admin: Object.freeze({
+      id: adminId,
+      role: rawAdmin.role as AdminRole,
+      isActive: rawAdmin.isActive as boolean,
+      revision: currRev,
+    }),
+    auditReceipt: Object.freeze({
+      auditEventId,
+      action: rawReceipt.action as string,
+      targetType: rawReceipt.targetType as string,
+      targetId: expectedTargetUid,
+      timestamp: rawReceipt.timestamp as string,
+    }),
+  });
+}
+
+export async function changeAdminRole(
+  input: ChangeAdminRoleClientInput,
+  deps?: AdminIdentityClientDependencies
+): Promise<AdminLifecycleClientResponse> {
+  const effectiveDeps = resolveEffectiveDependencies(deps);
+
+  try {
+    requireAuthenticatedFirebaseSession(effectiveDeps);
+
+    if (!isPlainObject(input)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        SAFE_ERROR_MESSAGES['invalid-argument']
+      );
+    }
+
+    assertNoLifecycleAuthorityOrPollution(
+      input as Record<string, unknown>,
+      LIFECYCLE_CHANGE_ROLE_ALLOWED_KEYS
+    );
+
+    const rawTargetUid = input.targetUid;
+    const targetUid = validateCanonicalUid(rawTargetUid);
+    if (!targetUid || (typeof rawTargetUid === 'string' && rawTargetUid !== targetUid)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        'targetUid must be a non-empty trimmed string.'
+      );
+    }
+
+    const expectedRevision = validateRequiredExpectedRevision(input.expectedRevision);
+
+    if (!isValidAdminRole(input.targetRole)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ADMIN_ROLE',
+        'Invalid or non-canonical targetRole.'
+      );
+    }
+
+    if (input.targetRole === AdminRole.Owner) {
+      throw new AdminIdentityClientError(
+        'permission-denied',
+        'OWNER_PROMOTION_FORBIDDEN',
+        'Promotion to Owner is forbidden; no Owner promotion policy is established.'
+      );
+    }
+
+    const payload: ManageAdminLifecycleClientPayload = {
+      operation: 'ChangeRole',
+      targetUid,
+      expectedRevision,
+      targetRole: input.targetRole,
+    };
+
+    const rawResponse = await invokeManageAdminLifecycleCallable(payload, effectiveDeps);
+    return validateSanitizedAdminLifecycleResponse(
+      rawResponse,
+      'ChangeRole',
+      targetUid,
+      expectedRevision,
+      input.targetRole
+    );
+  } catch (error: unknown) {
+    throw mapCallableBoundaryError(error);
+  }
+}
+
+export async function deactivateAdmin(
+  input: DeactivateAdminClientInput,
+  deps?: AdminIdentityClientDependencies
+): Promise<AdminLifecycleClientResponse> {
+  const effectiveDeps = resolveEffectiveDependencies(deps);
+
+  try {
+    requireAuthenticatedFirebaseSession(effectiveDeps);
+
+    if (!isPlainObject(input)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        SAFE_ERROR_MESSAGES['invalid-argument']
+      );
+    }
+
+    assertNoLifecycleAuthorityOrPollution(
+      input as Record<string, unknown>,
+      LIFECYCLE_DEACTIVATE_ALLOWED_KEYS
+    );
+
+    const rawTargetUid = input.targetUid;
+    const targetUid = validateCanonicalUid(rawTargetUid);
+    if (!targetUid || (typeof rawTargetUid === 'string' && rawTargetUid !== targetUid)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        'targetUid must be a non-empty trimmed string.'
+      );
+    }
+
+    const expectedRevision = validateRequiredExpectedRevision(input.expectedRevision);
+
+    const payload: ManageAdminLifecycleClientPayload = {
+      operation: 'Deactivate',
+      targetUid,
+      expectedRevision,
+    };
+
+    const rawResponse = await invokeManageAdminLifecycleCallable(payload, effectiveDeps);
+    return validateSanitizedAdminLifecycleResponse(rawResponse, 'Deactivate', targetUid, expectedRevision);
+  } catch (error: unknown) {
+    throw mapCallableBoundaryError(error);
+  }
+}
+
+export async function reactivateAdmin(
+  input: ReactivateAdminClientInput,
+  deps?: AdminIdentityClientDependencies
+): Promise<AdminLifecycleClientResponse> {
+  const effectiveDeps = resolveEffectiveDependencies(deps);
+
+  try {
+    requireAuthenticatedFirebaseSession(effectiveDeps);
+
+    if (!isPlainObject(input)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        SAFE_ERROR_MESSAGES['invalid-argument']
+      );
+    }
+
+    assertNoLifecycleAuthorityOrPollution(
+      input as Record<string, unknown>,
+      LIFECYCLE_REACTIVATE_ALLOWED_KEYS
+    );
+
+    const rawTargetUid = input.targetUid;
+    const targetUid = validateCanonicalUid(rawTargetUid);
+    if (!targetUid || (typeof rawTargetUid === 'string' && rawTargetUid !== targetUid)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        'targetUid must be a non-empty trimmed string.'
+      );
+    }
+
+    const expectedRevision = validateRequiredExpectedRevision(input.expectedRevision);
+
+    const payload: ManageAdminLifecycleClientPayload = {
+      operation: 'Reactivate',
+      targetUid,
+      expectedRevision,
+    };
+
+    const rawResponse = await invokeManageAdminLifecycleCallable(payload, effectiveDeps);
+    return validateSanitizedAdminLifecycleResponse(rawResponse, 'Reactivate', targetUid, expectedRevision);
+  } catch (error: unknown) {
+    throw mapCallableBoundaryError(error);
+  }
+}
+
+export async function initializeAdminRevision(
+  input: InitializeAdminRevisionClientInput,
+  deps?: AdminIdentityClientDependencies
+): Promise<AdminLifecycleClientResponse> {
+  const effectiveDeps = resolveEffectiveDependencies(deps);
+
+  try {
+    requireAuthenticatedFirebaseSession(effectiveDeps);
+
+    if (!isPlainObject(input)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        SAFE_ERROR_MESSAGES['invalid-argument']
+      );
+    }
+
+    assertNoLifecycleAuthorityOrPollution(
+      input as Record<string, unknown>,
+      LIFECYCLE_INITIALIZE_REVISION_ALLOWED_KEYS
+    );
+
+    const rawTargetUid = input.targetUid;
+    const targetUid = validateCanonicalUid(rawTargetUid);
+    if (!targetUid || (typeof rawTargetUid === 'string' && rawTargetUid !== targetUid)) {
+      throw new AdminIdentityClientError(
+        'invalid-argument',
+        'INVALID_ARGUMENT',
+        'targetUid must be a non-empty trimmed string.'
+      );
+    }
+
+    const payload: ManageAdminLifecycleClientPayload = {
+      operation: 'InitializeRevision',
+      targetUid,
+    };
+
+    const rawResponse = await invokeManageAdminLifecycleCallable(payload, effectiveDeps);
+    return validateSanitizedAdminLifecycleResponse(rawResponse, 'InitializeRevision', targetUid);
+  } catch (error: unknown) {
+    throw mapCallableBoundaryError(error);
+  }
+}
+
+export async function manageAdminLifecycle(
+  payload: ManageAdminLifecycleClientPayload,
+  deps?: AdminIdentityClientDependencies
+): Promise<AdminLifecycleClientResponse> {
+  switch (payload.operation) {
+    case 'ChangeRole':
+      return changeAdminRole(
+        {
+          targetUid: payload.targetUid,
+          expectedRevision: payload.expectedRevision,
+          targetRole: payload.targetRole,
+        },
+        deps
+      );
+    case 'Deactivate':
+      return deactivateAdmin(
+        {
+          targetUid: payload.targetUid,
+          expectedRevision: payload.expectedRevision,
+        },
+        deps
+      );
+    case 'Reactivate':
+      return reactivateAdmin(
+        {
+          targetUid: payload.targetUid,
+          expectedRevision: payload.expectedRevision,
+        },
+        deps
+      );
+    case 'InitializeRevision':
+      return initializeAdminRevision(
+        {
+          targetUid: payload.targetUid,
+        },
+        deps
+      );
+  }
+}
+
 export class AdminIdentityManagementClient {
   private readonly deps: AdminIdentityClientDependencies;
 
@@ -1528,6 +2258,41 @@ export class AdminIdentityManagementClient {
     return acceptAdminInvitation(input, deps);
   }
 
+  public static async changeRole(
+    input: ChangeAdminRoleClientInput,
+    deps?: AdminIdentityClientDependencies
+  ): Promise<AdminLifecycleClientResponse> {
+    return changeAdminRole(input, deps);
+  }
+
+  public static async deactivate(
+    input: DeactivateAdminClientInput,
+    deps?: AdminIdentityClientDependencies
+  ): Promise<AdminLifecycleClientResponse> {
+    return deactivateAdmin(input, deps);
+  }
+
+  public static async reactivate(
+    input: ReactivateAdminClientInput,
+    deps?: AdminIdentityClientDependencies
+  ): Promise<AdminLifecycleClientResponse> {
+    return reactivateAdmin(input, deps);
+  }
+
+  public static async initializeRevision(
+    input: InitializeAdminRevisionClientInput,
+    deps?: AdminIdentityClientDependencies
+  ): Promise<AdminLifecycleClientResponse> {
+    return initializeAdminRevision(input, deps);
+  }
+
+  public static async manageLifecycle(
+    payload: ManageAdminLifecycleClientPayload,
+    deps?: AdminIdentityClientDependencies
+  ): Promise<AdminLifecycleClientResponse> {
+    return manageAdminLifecycle(payload, deps);
+  }
+
   public async listAdminUsers(): Promise<ListAdminUsersClientResponse> {
     return listAdminUsers(this.deps);
   }
@@ -1548,6 +2313,36 @@ export class AdminIdentityManagementClient {
     input: AcceptAdminInvitationClientInput
   ): Promise<AcceptAdminInvitationClientResponse> {
     return acceptAdminInvitation(input, this.deps);
+  }
+
+  public async changeRole(
+    input: ChangeAdminRoleClientInput
+  ): Promise<AdminLifecycleClientResponse> {
+    return changeAdminRole(input, this.deps);
+  }
+
+  public async deactivate(
+    input: DeactivateAdminClientInput
+  ): Promise<AdminLifecycleClientResponse> {
+    return deactivateAdmin(input, this.deps);
+  }
+
+  public async reactivate(
+    input: ReactivateAdminClientInput
+  ): Promise<AdminLifecycleClientResponse> {
+    return reactivateAdmin(input, this.deps);
+  }
+
+  public async initializeRevision(
+    input: InitializeAdminRevisionClientInput
+  ): Promise<AdminLifecycleClientResponse> {
+    return initializeAdminRevision(input, this.deps);
+  }
+
+  public async manageLifecycle(
+    payload: ManageAdminLifecycleClientPayload
+  ): Promise<AdminLifecycleClientResponse> {
+    return manageAdminLifecycle(payload, this.deps);
   }
 }
 
