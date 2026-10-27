@@ -1,0 +1,217 @@
+name: Emergency Teardown — Admin Lifecycle Function
+
+# PREREQUISITE & OPERATIONAL SAFETY NOTICE:
+# 1. NON-AUTHORIZATION NOTICE: The creation or presence of this workflow does NOT authorize
+#    deployment or teardown of manageAdminLifecycle. Deployment and teardown each require
+#    separate, explicit, written Owner authorization.
+# 2. DESTRUCTIVE ACTION: Running this workflow permanently deletes the manageAdminLifecycle
+#    Gen 2 Cloud Function from Google Cloud project 'promiseofplanet-bb325'.
+# 3. SINGLE FUNCTION TARGET: This workflow targets exclusively 'manageAdminLifecycle'.
+#    Sibling functions (listAdminUsers, manageAdminInvitations) and other Firebase resources
+#    remain untouched.
+# 4. IN-FLIGHT REQUESTS: Deleting a Cloud Function de-provisions the underlying Cloud Run service.
+#    Any request already executing inside a container prior to de-provisioning may complete
+#    its transactional commit or abort. Teardown does NOT cancel in-flight transactions.
+# 5. SOURCE REVERT LIMITATION: Reverting the callable export in functions/src/index.ts does NOT
+#    automatically delete or undeploy a Cloud Function from Google Cloud / Firebase.
+# 6. DATA RESTORATION LIMITATION: Absence of new audit logs does not alone prove zero mutations
+#    occurred prior to teardown. Restoring administrative accounts requires an independently
+#    reviewed, authorized transactional recovery procedure. Automated rollback is prohibited.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_project:
+        description: 'Target Firebase/GCP Project ID (must be promiseofplanet-bb325)'
+        required: true
+        type: string
+      target_region:
+        description: 'Exact Cloud Region where manageAdminLifecycle is deployed (e.g. us-central1)'
+        required: true
+        type: string
+      confirmation:
+        description: 'Type exact phrase "TEARDOWN_MANAGE_ADMIN_LIFECYCLE" to authorize deletion'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-admin-lifecycle-functions-live
+  cancel-in-progress: false
+
+jobs:
+  teardown_admin_lifecycle_function:
+    name: Emergency Teardown manageAdminLifecycle
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Verify Main Branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::Emergency teardown can only be run on the main branch."
+            exit 1
+          fi
+
+      - name: Validate Inputs Strictly
+        env:
+          INPUT_PROJECT: ${{ github.event.inputs.target_project }}
+          INPUT_REGION: ${{ github.event.inputs.target_region }}
+          INPUT_CONFIRMATION: ${{ github.event.inputs.confirmation }}
+        run: |
+          if [ "$INPUT_PROJECT" != "promiseofplanet-bb325" ]; then
+            echo "::error::target_project must be exactly 'promiseofplanet-bb325'."
+            exit 1
+          fi
+          if [ -z "$INPUT_REGION" ] || [[ ! "$INPUT_REGION" =~ ^[a-z0-9-]+$ ]]; then
+            echo "::error::target_region is required and must be a valid GCP region string (e.g. us-central1)."
+            exit 1
+          fi
+          if [ "$INPUT_CONFIRMATION" != "TEARDOWN_MANAGE_ADMIN_LIFECYCLE" ]; then
+            echo "::error::Invalid confirmation phrase. Teardown aborted."
+            exit 1
+          fi
+          echo "Verified teardown inputs: project=$INPUT_PROJECT, region=$INPUT_REGION"
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify Service Account Credential
+        env:
+          CREDENTIAL_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+        run: |
+          if [ -z "$CREDENTIAL_JSON" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 secret is empty or missing."
+            exit 1
+          fi
+          node -e '
+            const raw = process.env.CREDENTIAL_JSON;
+            let cred;
+            try {
+              cred = JSON.parse(raw);
+            } catch (err) {
+              console.error("::error::Failed to parse credential JSON.");
+              process.exit(1);
+            }
+            if (cred.type !== "service_account") {
+              console.error("::error::Credential is not a service_account (type: " + cred.type + ")");
+              process.exit(1);
+            }
+            if (cred.project_id !== "promiseofplanet-bb325") {
+              console.error("::error::Credential project_id mismatch. Expected promiseofplanet-bb325, found: " + cred.project_id);
+              process.exit(1);
+            }
+            console.log("Verified service-account credential for project: " + cred.project_id);
+          '
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Preflight Cloud Function Identity Verification
+        env:
+          TARGET_PROJECT: ${{ github.event.inputs.target_project }}
+          TARGET_REGION: ${{ github.event.inputs.target_region }}
+        run: |
+          echo "Verifying exact Cloud Function identity in project: $TARGET_PROJECT, region: $TARGET_REGION"
+          DESCRIBE_OUTPUT=$(gcloud functions describe manageAdminLifecycle \
+            --gen2 \
+            --region="$TARGET_REGION" \
+            --project="$TARGET_PROJECT" \
+            --format=json 2>&1) || {
+              echo "::error::Failed to describe manageAdminLifecycle in region $TARGET_REGION. Resource may not exist or service account lacks permissions."
+              echo "Cloud response: $DESCRIBE_OUTPUT"
+              exit 1
+            }
+
+          DESCRIBE_OUTPUT="$DESCRIBE_OUTPUT" node -e '
+            const rawOutput = process.env.DESCRIBE_OUTPUT;
+            if (!rawOutput || !rawOutput.trim()) {
+              console.error("::error::DESCRIBE_OUTPUT is empty or missing.");
+              process.exit(1);
+            }
+
+            let data;
+            try {
+              data = JSON.parse(rawOutput);
+            } catch (err) {
+              console.error("::error::Failed to parse gcloud describe JSON output.");
+              process.exit(1);
+            }
+
+            if (!data || typeof data !== "object" || Array.isArray(data)) {
+              console.error("::error::Invalid gcloud describe response shape.");
+              process.exit(1);
+            }
+
+            const targetProject = process.env.TARGET_PROJECT;
+            const targetRegion = process.env.TARGET_REGION;
+
+            if (!targetProject || !targetRegion) {
+              console.error("::error::TARGET_PROJECT or TARGET_REGION environment variable missing.");
+              process.exit(1);
+            }
+
+            const expectedCanonicalName = "projects/" + targetProject + "/locations/" + targetRegion + "/functions/manageAdminLifecycle";
+
+            if (typeof data.name !== "string" || data.name !== expectedCanonicalName) {
+              console.error("::error::Function resource name mismatch. Expected exact: " + expectedCanonicalName + ", found: " + data.name);
+              process.exit(1);
+            }
+
+            if (data.environment !== "GEN_2") {
+              console.error("::error::Function generation mismatch. Expected GEN_2, found: " + data.environment);
+              process.exit(1);
+            }
+
+            console.log("Preflight verified exact Gen 2 function resource: " + data.name);
+          '
+
+      - name: Execute Targeted Single-Function Deletion
+        env:
+          TARGET_PROJECT: ${{ github.event.inputs.target_project }}
+          TARGET_REGION: ${{ github.event.inputs.target_region }}
+        run: |
+          echo "Executing targeted deletion of manageAdminLifecycle in $TARGET_REGION..."
+          gcloud functions delete manageAdminLifecycle \
+            --gen2 \
+            --region="$TARGET_REGION" \
+            --project="$TARGET_PROJECT" \
+            --quiet
+
+      - name: Post-Deletion Verification
+        env:
+          TARGET_PROJECT: ${{ github.event.inputs.target_project }}
+          TARGET_REGION: ${{ github.event.inputs.target_region }}
+        run: |
+          echo "Verifying resource absence after deletion..."
+          VERIFY_OUTPUT=$(gcloud functions describe manageAdminLifecycle \
+            --gen2 \
+            --region="$TARGET_REGION" \
+            --project="$TARGET_PROJECT" \
+            --format=json 2>&1) && {
+              echo "::error::manageAdminLifecycle still exists after deletion command!"
+              exit 1
+            }
+
+          # Check if the error is a confirmed NOT_FOUND
+          if echo "$VERIFY_OUTPUT" | grep -iq "NOT_FOUND\|not found"; then
+            echo "Confirmed resource absence: manageAdminLifecycle does not exist in $TARGET_REGION of $TARGET_PROJECT."
+          else
+            echo "::error::Post-deletion query failed with unexpected error (not confirmed absent)."
+            echo "Query output: $VERIFY_OUTPUT"
+            exit 1
+          fi
+
+          echo "Teardown operation completed and verified successfully for commit ${{ github.sha }}."
