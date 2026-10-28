@@ -43,6 +43,11 @@ import {
 import {
   ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_AR,
   ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_EN,
+  ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_AR,
+  ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_EN,
+  ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR,
+  ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN,
+  NON_OWNER_LIFECYCLE_ROLES,
   AdminDirectoryLoadController,
   AdminUsersManagement,
   classifyDirectoryLoadFailure,
@@ -848,5 +853,381 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
       'role',
       'isActive',
     ]);
+  });
+
+  it('18. Owner-only control visibility: Active Owner sees lifecycle triggers for eligible versioned identities', () => {
+    const versionedDirectory: ReadonlyArray<AdminUser> = [
+      {
+        id: 'owner-session-900',
+        name: 'Nadia Al-Mansoor',
+        email: 'nadia.owner@promiseofplanet.org',
+        role: AdminRole.Owner,
+        isActive: true,
+        revision: 1,
+      },
+      {
+        id: 'editor-versioned-01',
+        name: 'Zaid Editor',
+        email: 'zaid@promiseofplanet.org',
+        role: AdminRole.ContentEditor,
+        isActive: true,
+        revision: 3,
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: versionedDirectory,
+        }}
+      />
+    );
+
+    expect(html).toContain('data-testid="admin-lifecycle-trigger-editor-versioned-01"');
+    expect(html).toContain('data-testid="admin-lifecycle-trigger-card-editor-versioned-01"');
+  });
+
+  it('19. Non-Owner denial: Non-Owner users see zero lifecycle triggers', () => {
+    const versionedDirectory: ReadonlyArray<AdminUser> = [
+      {
+        id: 'editor-versioned-01',
+        name: 'Zaid Editor',
+        email: 'zaid@promiseofplanet.org',
+        role: AdminRole.ContentEditor,
+        isActive: true,
+        revision: 3,
+      },
+    ];
+
+    for (const nonOwner of NON_OWNER_USERS) {
+      const html = renderToStaticMarkup(
+        <AdminUsersManagement
+          currentUser={nonOwner}
+          activeTabId="users"
+          initialDirectoryState={{
+            status: 'loaded',
+            users: versionedDirectory,
+          }}
+        />
+      );
+
+      expect(html).not.toContain('data-testid="admin-lifecycle-trigger-editor-versioned-01"');
+      expect(html).not.toContain('data-testid="admin-lifecycle-trigger-card-editor-versioned-01"');
+    }
+  });
+
+  it('20. Self and Owner protection: Current Owner session and other Owners never show lifecycle triggers', () => {
+    const directoryWithMultipleOwners: ReadonlyArray<AdminUser> = [
+      {
+        id: 'owner-session-900',
+        name: 'Nadia Al-Mansoor (Current Session)',
+        email: 'nadia.owner@promiseofplanet.org',
+        role: AdminRole.Owner,
+        isActive: true,
+        revision: 1,
+      },
+      {
+        id: 'other-owner-002',
+        name: 'Dr. Layla Al-Harbi (Other Owner)',
+        email: 'layla.owner@promiseofplanet.org',
+        role: AdminRole.Owner,
+        isActive: true,
+        revision: 2,
+      },
+      {
+        id: 'editor-versioned-01',
+        name: 'Zaid Editor',
+        email: 'zaid@promiseofplanet.org',
+        role: AdminRole.ContentEditor,
+        isActive: true,
+        revision: 4,
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: directoryWithMultipleOwners,
+        }}
+      />
+    );
+
+    // Self session: protected badge, NO lifecycle trigger
+    expect(html).toContain('data-testid="user-protected-badge-owner-session-900"');
+    expect(html).not.toContain('data-testid="admin-lifecycle-trigger-owner-session-900"');
+    expect(html).not.toContain('data-testid="admin-lifecycle-trigger-card-owner-session-900"');
+
+    // Other Owner: protected badge, NO lifecycle trigger
+    expect(html).toContain('data-testid="user-protected-badge-other-owner-002"');
+    expect(html).not.toContain('data-testid="admin-lifecycle-trigger-other-owner-002"');
+    expect(html).not.toContain('data-testid="admin-lifecycle-trigger-card-other-owner-002"');
+
+    // Eligible non-Owner: HAS lifecycle trigger
+    expect(html).toContain('data-testid="admin-lifecycle-trigger-editor-versioned-01"');
+  });
+
+  it('21. Missing revision blocking: Legacy accounts without revision display concise read-only explanation and no triggers', () => {
+    const mixedDirectory: ReadonlyArray<AdminUser> = [
+      {
+        id: 'legacy-curator-01',
+        name: 'Legacy Curator',
+        email: 'legacy.curator@promiseofplanet.org',
+        role: AdminRole.LibraryCurator,
+        isActive: true,
+      },
+      {
+        id: 'versioned-curator-02',
+        name: 'Versioned Curator',
+        email: 'ver.curator@promiseofplanet.org',
+        role: AdminRole.LibraryCurator,
+        isActive: true,
+        revision: 5,
+      },
+    ];
+
+    const htmlAr = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: mixedDirectory,
+        }}
+      />
+    );
+
+    expect(htmlAr).toContain('data-testid="user-legacy-revision-notice-legacy-curator-01"');
+    expect(htmlAr).toContain('data-testid="user-legacy-revision-notice-card-legacy-curator-01"');
+    expect(htmlAr).toContain(ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR);
+    expect(htmlAr).not.toContain('data-testid="admin-lifecycle-trigger-legacy-curator-01"');
+    expect(htmlAr).not.toContain('data-testid="admin-lifecycle-trigger-card-legacy-curator-01"');
+
+    expect(htmlAr).toContain('data-testid="admin-lifecycle-trigger-versioned-curator-02"');
+  });
+
+  it('22. Valid revision display: Authoritative revision number is displayed on badges and in cards', () => {
+    const versionedUser: AdminUser = {
+      id: 'versioned-reviewer-01',
+      name: 'Salma Reviewer',
+      email: 'salma@promiseofplanet.org',
+      role: AdminRole.RightsReviewer,
+      isActive: true,
+      revision: 42,
+    };
+
+    const html = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [versionedUser],
+        }}
+      />
+    );
+
+    expect(html).toContain('data-testid="user-revision-badge-versioned-reviewer-01"');
+    expect(html).toContain('v42');
+    expect(html).toContain('data-testid="user-revision-badge-card-versioned-reviewer-01"');
+  });
+
+  it('23. Confirmation content: Explicitly identifies target account, current role, revision, and proposed action in Arabic and English', async () => {
+    const targetUser: AdminUser = {
+      id: 'target-admin-777',
+      name: 'Karim Training',
+      email: 'karim@promiseofplanet.org',
+      role: AdminRole.Trainer,
+      isActive: true,
+      revision: 8,
+    };
+
+    await i18n.changeLanguage('ar');
+    const htmlAr = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [targetUser],
+        }}
+        initialLifecycleTarget={targetUser}
+        initialLifecycleOperation="ChangeRole"
+        initialLifecycleTargetRole={AdminRole.TrainingManager}
+      />
+    );
+
+    expect(htmlAr).toContain('data-testid="admin-lifecycle-modal"');
+    expect(htmlAr).toContain('data-testid="admin-lifecycle-modal-title"');
+    expect(htmlAr).toContain('data-testid="lifecycle-target-name"');
+    expect(htmlAr).toContain('Karim Training');
+    expect(htmlAr).toContain('data-testid="lifecycle-target-email"');
+    expect(htmlAr).toContain('karim@promiseofplanet.org');
+    expect(htmlAr).toContain('data-testid="lifecycle-target-uid"');
+    expect(htmlAr).toContain('target-admin-777');
+    expect(htmlAr).toContain('data-testid="lifecycle-target-revision"');
+    expect(htmlAr).toContain('v8');
+    expect(htmlAr).toContain('data-testid="lifecycle-operation-select"');
+    expect(htmlAr).toContain('data-testid="lifecycle-proposed-summary"');
+    expect(htmlAr).toContain('data-testid="lifecycle-mutation-disabled-banner"');
+    expect(htmlAr).toContain(ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_AR);
+    expect(NON_OWNER_LIFECYCLE_ROLES).not.toContain(AdminRole.Owner);
+    expect(ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN).toContain('read-only');
+
+    await i18n.changeLanguage('en');
+    const htmlEn = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [targetUser],
+        }}
+        initialLifecycleTarget={targetUser}
+        initialLifecycleOperation="Deactivate"
+      />
+    );
+
+    expect(htmlEn).toContain('data-testid="admin-lifecycle-modal"');
+    expect(htmlEn).toContain('data-testid="lifecycle-target-name"');
+    expect(htmlEn).toContain('Karim Training');
+    expect(htmlEn).toContain('data-testid="lifecycle-mutation-disabled-banner"');
+    expect(htmlEn).toContain(ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_EN);
+    expect(htmlEn).toContain('Deactivate account');
+
+    await i18n.changeLanguage('ar');
+  });
+
+  it('24. No callable invocation & confirmation submission unconditionally disabled', () => {
+    const targetUser: AdminUser = {
+      id: 'target-admin-888',
+      name: 'Farah Moderator',
+      email: 'farah@promiseofplanet.org',
+      role: AdminRole.CitizenModerator,
+      isActive: true,
+      revision: 3,
+    };
+
+    const callableSpy = vi.fn();
+    const clientDeps = createClientDepsWithDirectory(callableSpy, ACTIVE_OWNER.id);
+
+    const html = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        clientDeps={clientDeps}
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [targetUser],
+        }}
+        initialLifecycleTarget={targetUser}
+        initialLifecycleOperation="ChangeRole"
+        initialLifecycleTargetRole={AdminRole.RightsReviewer}
+      />
+    );
+
+    expect(html).toContain('data-testid="lifecycle-confirm-btn"');
+    const confirmBtnMatch = html.match(/<button[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/) ||
+      html.match(/<button[^>]*disabled=""[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/);
+    expect(confirmBtnMatch).not.toBeNull();
+    expect(confirmBtnMatch![0]).toContain('disabled=""');
+    expect(confirmBtnMatch![0]).toContain('aria-disabled="true"');
+
+    expect(callableSpy).not.toHaveBeenCalled();
+  });
+
+  it('25. Desktop and mobile consistency: Entry points and indicators are present across both view modes', () => {
+    const mixedUsers: ReadonlyArray<AdminUser> = [
+      {
+        id: 'owner-session-900',
+        name: 'Nadia Al-Mansoor',
+        email: 'nadia@promiseofplanet.org',
+        role: AdminRole.Owner,
+        isActive: true,
+        revision: 1,
+      },
+      {
+        id: 'versioned-user-01',
+        name: 'Versioned Assistant',
+        email: 'assistant@promiseofplanet.org',
+        role: AdminRole.AIAssistant,
+        isActive: true,
+        revision: 2,
+      },
+      {
+        id: 'legacy-user-02',
+        name: 'Legacy Viewer',
+        email: 'viewer@promiseofplanet.org',
+        role: AdminRole.Viewer,
+        isActive: true,
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: mixedUsers,
+        }}
+      />
+    );
+
+    expect(html).toContain('data-testid="user-protected-badge-owner-session-900"');
+    expect(html).toContain('data-testid="admin-lifecycle-trigger-versioned-user-01"');
+    expect(html).toContain('data-testid="user-legacy-revision-notice-legacy-user-02"');
+
+    expect(html).toContain('data-testid="admin-lifecycle-trigger-card-versioned-user-01"');
+    expect(html).toContain('data-testid="user-legacy-revision-notice-card-legacy-user-02"');
+  });
+
+  it('26. No regressions in directory reading, search filtering, and invitations integration', () => {
+    const multiUsers: ReadonlyArray<AdminUser> = [
+      {
+        id: 'admin-1',
+        name: 'Alice Curator',
+        email: 'alice@planet.org',
+        role: AdminRole.LibraryCurator,
+        isActive: true,
+        revision: 1,
+      },
+      {
+        id: 'admin-2',
+        name: 'Bob Editor',
+        email: 'bob@planet.org',
+        role: AdminRole.ContentEditor,
+        isActive: false,
+        revision: 2,
+      },
+    ];
+
+    const filtered = filterAdminDirectoryEntries(multiUsers, {
+      searchQuery: 'Alice',
+      selectedRoleFilter: 'ALL',
+      selectedStatusFilter: 'ALL',
+      isAr: true,
+    });
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].name).toBe('Alice Curator');
+
+    const htmlWithInvites = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: multiUsers,
+        }}
+        initialInvitationPanelOpen={true}
+      />
+    );
+
+    expect(htmlWithInvites).toContain('data-testid="admin-invitation-creation-panel"');
   });
 });

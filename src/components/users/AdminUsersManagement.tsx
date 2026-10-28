@@ -12,6 +12,7 @@ import {
   Loader2,
   Lock,
   MailPlus,
+  X,
 } from 'lucide-react';
 import {
   AdminRole,
@@ -51,6 +52,29 @@ export const ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_AR =
 export const ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_EN =
   "You can view real administrative identities and create or revoke administrative invitations. Changing existing administrators' roles, deactivating accounts, and reactivating accounts are not currently available in this interface.";
 
+export const ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_AR =
+  'وضع المعاينة والتحقق الآمن: زر تأكيد الإجراء معطل بالكامل في هذه المرحلة. لا يتم إرسال أي تعديلات حية إلى الخادم.';
+
+export const ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_EN =
+  'Safe Preview Mode: Confirmation submission is unconditionally disabled in this unit. No live mutations are sent to the server.';
+
+export const ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR =
+  'حساب قديم بدون مراجعة معتمدة (للقراءة فقط)';
+
+export const ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN =
+  'Legacy unversioned account (read-only)';
+
+export const NON_OWNER_LIFECYCLE_ROLES: ReadonlyArray<AdminRole> = Object.freeze([
+  AdminRole.ContentEditor,
+  AdminRole.LibraryCurator,
+  AdminRole.RightsReviewer,
+  AdminRole.TrainingManager,
+  AdminRole.Trainer,
+  AdminRole.CitizenModerator,
+  AdminRole.AIAssistant,
+  AdminRole.Viewer,
+]);
+
 export type AdminDirectoryViewStatus =
   | 'loading'
   | 'loaded'
@@ -85,6 +109,9 @@ export interface AdminUsersManagementProps {
   };
   initialInvitationPanelOpen?: boolean;
   initialInvitationSubmissionState?: Partial<AdminInvitationSubmissionSnapshot>;
+  initialLifecycleTarget?: AdminUser | null;
+  initialLifecycleOperation?: 'ChangeRole' | 'Deactivate' | 'Reactivate';
+  initialLifecycleTargetRole?: AdminRole;
   invokeCreateInvitation?: (
     input: CreateAdminInvitationClientInput
   ) => Promise<CreateAdminInvitationClientResponse>;
@@ -111,6 +138,15 @@ const CANONICAL_ADMIN_ALLOWED_KEYS = new Set<string>([
 ]);
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function getAdminUserRevision(user: AdminUser | null | undefined): number | undefined {
+  if (!user) return undefined;
+  const rev = (user as { revision?: unknown }).revision;
+  if (typeof rev === 'number' && Number.isSafeInteger(rev) && rev >= 1 && !Number.isNaN(rev)) {
+    return rev;
+  }
+  return undefined;
+}
 
 export function isAuthorizedOwnerForUsersDirectory(
   user: AdminUser | null | undefined,
@@ -485,6 +521,9 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
   initialDirectoryState,
   initialInvitationPanelOpen = false,
   initialInvitationSubmissionState,
+  initialLifecycleTarget = null,
+  initialLifecycleOperation = 'ChangeRole',
+  initialLifecycleTargetRole = AdminRole.ContentEditor,
   invokeCreateInvitation,
 }) => {
   const { i18n } = useTranslation();
@@ -541,6 +580,31 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
   const [isInvitationPanelOpen, setIsInvitationPanelOpen] = useState<boolean>(
     () => Boolean(initialInvitationPanelOpen && canCreateInvitation)
   );
+
+  // Guarded Admin Lifecycle Modal State (Read-only / Safe Preview)
+  const [activeLifecycleTarget, setActiveLifecycleTarget] = useState<AdminUser | null>(
+    () => initialLifecycleTarget
+  );
+  const [selectedOperation, setSelectedOperation] = useState<'ChangeRole' | 'Deactivate' | 'Reactivate'>(
+    () => initialLifecycleOperation
+  );
+  const [selectedTargetRole, setSelectedTargetRole] = useState<AdminRole>(
+    () => initialLifecycleTargetRole
+  );
+
+  const handleOpenLifecycleModal = useCallback((targetUser: AdminUser) => {
+    setActiveLifecycleTarget(targetUser);
+    if (!targetUser.isActive) {
+      setSelectedOperation('Reactivate');
+    } else {
+      setSelectedOperation('ChangeRole');
+    }
+    const defaultRole =
+      targetUser.role === AdminRole.ContentEditor
+        ? AdminRole.RightsReviewer
+        : AdminRole.ContentEditor;
+    setSelectedTargetRole(defaultRole);
+  }, []);
 
   // Search & Filter State
   const [searchQuery, setSearchQuery] = useState('');
@@ -1130,19 +1194,76 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                         </span>
                       </div>
 
-                      {/* Read-Only Authority Indicator */}
-                      <div className="pt-2 border-t border-gray-100 dark:border-gray-800 flex items-center justify-between text-[11px] text-gray-400 dark:text-gray-500">
-                        <span className="font-mono truncate">{user.id}</span>
-                        <span
-                          className="inline-flex items-center gap-1 font-semibold shrink-0"
-                          data-testid={`user-readonly-indicator-${user.id}`}
-                        >
-                          <Lock className="w-3 h-3" />
-                          <span>
-                            {isAr ? 'للقراءة فقط' : 'Read-Only'}
-                          </span>
-                        </span>
-                      </div>
+                      {/* Identity & Lifecycle Action Bar */}
+                      {(() => {
+                        const isOwnerAccount = user.role === AdminRole.Owner;
+                        const isProtectedAccount = isOwnerAccount || isCurrentSession;
+                        const userRev = getAdminUserRevision(user);
+                        const isSafeRevision = userRev !== undefined;
+
+                        return (
+                          <div className="pt-2 border-t border-gray-100 dark:border-gray-800 flex items-center justify-between gap-2 flex-wrap text-[11px]">
+                            <div className="flex items-center gap-1.5 font-mono text-gray-500 dark:text-gray-400 truncate">
+                              <span>{user.id}</span>
+                              {isSafeRevision && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold font-mono"
+                                  data-testid={`user-revision-indicator-card-${user.id}`}
+                                >
+                                  v{userRev}
+                                </span>
+                              )}
+                            </div>
+
+                            {!isAuthorizedOwner ? (
+                              <span
+                                className="inline-flex items-center gap-1 font-semibold text-gray-400 dark:text-gray-500 shrink-0"
+                                data-testid={`user-readonly-indicator-${user.id}`}
+                              >
+                                <Lock className="w-3 h-3" />
+                                <span>{isAr ? 'للقراءة فقط' : 'Read-Only'}</span>
+                              </span>
+                            ) : isProtectedAccount ? (
+                              <span
+                                className="inline-flex items-center gap-1 font-semibold text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded-md border border-gray-200 dark:border-gray-700 shrink-0"
+                                data-testid={`user-protected-badge-${user.id}`}
+                              >
+                                <Lock className="w-3 h-3" />
+                                <span>
+                                  {isCurrentSession
+                                    ? isAr ? 'الجلسة الحالية' : 'Current Session'
+                                    : isAr ? 'حساب مالك محمي' : 'Protected Owner'}
+                                </span>
+                              </span>
+                            ) : isSafeRevision ? (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenLifecycleModal(user)}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800 transition-colors cursor-pointer shrink-0"
+                                data-testid={`admin-lifecycle-trigger-card-${user.id}`}
+                                aria-label={isAr ? `إدارة حساب: ${user.name}` : `Manage account: ${user.name}`}
+                              >
+                                <Shield className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                <span>{isAr ? 'إدارة الحساب' : 'Manage Account'}</span>
+                                <span
+                                  className="text-[10px] px-1 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 font-mono font-bold"
+                                  data-testid={`user-revision-badge-card-${user.id}`}
+                                >
+                                  v{userRev}
+                                </span>
+                              </button>
+                            ) : (
+                              <span
+                                className="inline-flex items-center gap-1 font-medium text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 px-2 py-1 rounded-md border border-amber-200 dark:border-amber-900/50 shrink-0"
+                                data-testid={`user-legacy-revision-notice-card-${user.id}`}
+                              >
+                                <AlertTriangle className="w-3 h-3 text-amber-600 dark:text-amber-400 shrink-0" />
+                                <span>{isAr ? ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR : ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN}</span>
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })}
@@ -1172,7 +1293,7 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                         {isAr ? 'الصلاحيات الفعالة' : 'Effective Permissions'}
                       </th>
                       <th className="py-3.5 px-4 text-end">
-                        {isAr ? 'حالة التعديل' : 'Access Mode'}
+                        {isAr ? 'التحكم والإجراءات' : 'Actions & Access'}
                       </th>
                     </tr>
                   </thead>
@@ -1279,14 +1400,73 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                             )}
                           </td>
 
-                          {/* Read-Only Mode */}
+                          {/* Access Mode & Lifecycle Action */}
                           <td className="py-3 px-4 text-end">
-                            <span className="text-[11px] font-semibold text-gray-400 dark:text-gray-500 inline-flex items-center gap-1">
-                              <Lock className="w-3 h-3" />
-                              <span>
-                                {isAr ? 'للقراءة فقط' : 'Read-Only'}
-                              </span>
-                            </span>
+                            {(() => {
+                              const isOwnerAccount = user.role === AdminRole.Owner;
+                              const isProtectedAccount = isOwnerAccount || isCurrentSession;
+                              const userRev = getAdminUserRevision(user);
+                              const isSafeRevision = userRev !== undefined;
+
+                              if (!isAuthorizedOwner) {
+                                return (
+                                  <span
+                                    className="text-[11px] font-semibold text-gray-400 dark:text-gray-500 inline-flex items-center gap-1"
+                                    data-testid={`user-readonly-indicator-${user.id}`}
+                                  >
+                                    <Lock className="w-3 h-3" />
+                                    <span>{isAr ? 'للقراءة فقط' : 'Read-Only'}</span>
+                                  </span>
+                                );
+                              }
+
+                              if (isProtectedAccount) {
+                                return (
+                                  <span
+                                    className="text-[11px] font-semibold text-gray-500 dark:text-gray-400 inline-flex items-center gap-1 bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded-md border border-gray-200 dark:border-gray-700"
+                                    data-testid={`user-protected-badge-${user.id}`}
+                                  >
+                                    <Lock className="w-3 h-3" />
+                                    <span>
+                                      {isCurrentSession
+                                        ? isAr ? 'الجلسة الحالية' : 'Current Session'
+                                        : isAr ? 'حساب مالك محمي' : 'Protected Owner'}
+                                    </span>
+                                  </span>
+                                );
+                              }
+
+                              if (isSafeRevision) {
+                                return (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenLifecycleModal(user)}
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800 transition-colors cursor-pointer"
+                                    data-testid={`admin-lifecycle-trigger-${user.id}`}
+                                    aria-label={isAr ? `إدارة حساب: ${user.name}` : `Manage account: ${user.name}`}
+                                  >
+                                    <Shield className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                    <span>{isAr ? 'إدارة الحساب' : 'Manage Account'}</span>
+                                    <span
+                                      className="text-[10px] px-1 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 font-mono font-bold"
+                                      data-testid={`user-revision-badge-${user.id}`}
+                                    >
+                                      v{userRev}
+                                    </span>
+                                  </button>
+                                );
+                              }
+
+                              return (
+                                <span
+                                  className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 px-2 py-1 rounded-md border border-amber-200 dark:border-amber-900/50"
+                                  data-testid={`user-legacy-revision-notice-${user.id}`}
+                                >
+                                  <AlertTriangle className="w-3 h-3 text-amber-600 dark:text-amber-400 shrink-0" />
+                                  <span>{isAr ? ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR : ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN}</span>
+                                </span>
+                              );
+                            })()}
                           </td>
                         </tr>
                       );
@@ -1296,6 +1476,211 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* 4. Guarded Admin Lifecycle Confirmation Modal (Mutations Unconditionally Disabled) */}
+      {activeLifecycleTarget && isAuthorizedOwner && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto"
+          data-testid="admin-lifecycle-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="lifecycle-modal-title"
+        >
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5 text-start my-8">
+            {/* Header */}
+            <div className="flex items-start justify-between gap-3 border-b border-gray-100 dark:border-gray-800 pb-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <div className="h-8 w-8 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+                    <Shield className="w-4 h-4" />
+                  </div>
+                  <h3
+                    id="lifecycle-modal-title"
+                    className="text-base font-bold text-gray-900 dark:text-gray-100"
+                    data-testid="admin-lifecycle-modal-title"
+                  >
+                    {isAr ? 'إدارة دورة حياة الحساب الإداري' : 'Administrative Lifecycle Management'}
+                  </h3>
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {isAr
+                    ? 'مراجعة وتأكيد الإجراءات الإدارية للحساب المحدد'
+                    : 'Review and confirm administrative action for the selected account'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveLifecycleTarget(null)}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer"
+                data-testid="lifecycle-modal-close-btn"
+                aria-label={isAr ? 'إغلاق' : 'Close'}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Target Account Summary Card */}
+            <div
+              className="bg-gray-50 dark:bg-gray-850 rounded-xl p-4 border border-gray-200/80 dark:border-gray-800/80 space-y-2.5"
+              data-testid="lifecycle-target-identity-card"
+            >
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-xs font-bold text-gray-900 dark:text-gray-100" data-testid="lifecycle-target-name">
+                  {activeLifecycleTarget.name}
+                </span>
+                <span
+                  className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                    activeLifecycleTarget.isActive
+                      ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400'
+                      : 'bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
+                  }`}
+                  data-testid="lifecycle-current-status"
+                >
+                  {getStatusLabel(activeLifecycleTarget.isActive, isAr)}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <div>
+                  <span className="text-gray-400 text-[11px] block">{isAr ? 'البريد الإلكتروني' : 'Email'}:</span>
+                  <span className="font-mono text-gray-700 dark:text-gray-300 truncate block" data-testid="lifecycle-target-email">
+                    {activeLifecycleTarget.email}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-400 text-[11px] block">{isAr ? 'المعرّف الفريد' : 'UID'}:</span>
+                  <span className="font-mono text-gray-700 dark:text-gray-300 truncate block" data-testid="lifecycle-target-uid">
+                    {activeLifecycleTarget.id}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-400 text-[11px] block">{isAr ? 'الدور الحالي' : 'Current Role'}:</span>
+                  <span className="font-bold text-gray-800 dark:text-gray-200" data-testid="lifecycle-current-role">
+                    {getRoleLabel(activeLifecycleTarget.role, isAr)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-400 text-[11px] block">{isAr ? 'المراجعة المعتمدة' : 'Authoritative Revision'}:</span>
+                  <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400" data-testid="lifecycle-target-revision">
+                    {getAdminUserRevision(activeLifecycleTarget) !== undefined ? `v${getAdminUserRevision(activeLifecycleTarget)}` : (isAr ? 'غير مرقّم' : 'Unversioned')}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Operation Selection */}
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-700 dark:text-gray-300 block">
+                {isAr ? 'الإجراء الإداري المطلوب:' : 'Select Lifecycle Action:'}
+              </label>
+              <select
+                value={selectedOperation}
+                onChange={(e) => setSelectedOperation(e.target.value as 'ChangeRole' | 'Deactivate' | 'Reactivate')}
+                className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer"
+                data-testid="lifecycle-operation-select"
+              >
+                <option value="ChangeRole">
+                  {isAr ? 'تغيير الدور الإداري (Change Role)' : 'Change Admin Role'}
+                </option>
+                {activeLifecycleTarget.isActive ? (
+                  <option value="Deactivate">
+                    {isAr ? 'تعطيل الحساب الإداري (Deactivate)' : 'Deactivate Account'}
+                  </option>
+                ) : (
+                  <option value="Reactivate">
+                    {isAr ? 'إعادة تفعيل الحساب الإداري (Reactivate)' : 'Reactivate Account'}
+                  </option>
+                )}
+              </select>
+            </div>
+
+            {/* Role selection if ChangeRole */}
+            {selectedOperation === 'ChangeRole' && (
+              <div className="space-y-2 bg-gray-50/50 dark:bg-gray-850/50 p-3.5 rounded-xl border border-gray-200/60 dark:border-gray-800/60">
+                <label className="text-xs font-bold text-gray-700 dark:text-gray-300 block">
+                  {isAr ? 'الدور الإداري الجديد المقترح:' : 'Proposed Target Role:'}
+                </label>
+                <select
+                  value={selectedTargetRole}
+                  onChange={(e) => setSelectedTargetRole(e.target.value as AdminRole)}
+                  className="w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer"
+                  data-testid="lifecycle-target-role-select"
+                >
+                  {NON_OWNER_LIFECYCLE_ROLES.map((r) => (
+                    <option key={r} value={r} disabled={r === activeLifecycleTarget.role}>
+                      {getRoleLabel(r, isAr)} {r === activeLifecycleTarget.role ? (isAr ? '(الدور الحالي)' : '(Current)') : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* Proposed Summary Box */}
+            <div className="p-3 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200/60 dark:border-blue-900/40 rounded-xl text-xs space-y-1">
+              <span className="font-bold text-blue-900 dark:text-blue-200 block">
+                {isAr ? 'ملخص الإجراء المقترح:' : 'Proposed Action Summary:'}
+              </span>
+              <p className="text-blue-800 dark:text-blue-300" data-testid="lifecycle-proposed-summary">
+                {(() => {
+                  const targetRev = getAdminUserRevision(activeLifecycleTarget) ?? 1;
+                  if (selectedOperation === 'ChangeRole') {
+                    return isAr
+                      ? `تغيير الدور من [${getRoleLabel(activeLifecycleTarget.role, isAr)}] إلى [${getRoleLabel(selectedTargetRole, isAr)}] (المراجعة المتوقعة: ${targetRev})`
+                      : `Change role from [${getRoleLabel(activeLifecycleTarget.role, isAr)}] to [${getRoleLabel(selectedTargetRole, isAr)}] (Expected revision: ${targetRev})`;
+                  }
+                  if (selectedOperation === 'Deactivate') {
+                    return isAr
+                      ? `تعطيل حساب [${activeLifecycleTarget.name}] وإيقاف صلاحياته الفعالة (المراجعة المتوقعة: ${targetRev})`
+                      : `Deactivate account [${activeLifecycleTarget.name}] and revoke active permissions (Expected revision: ${targetRev})`;
+                  }
+                  return isAr
+                    ? `إعادة تفعيل حساب [${activeLifecycleTarget.name}] واستعادة صلاحيات دور [${getRoleLabel(activeLifecycleTarget.role, isAr)}] (المراجعة المتوقعة: ${targetRev})`
+                    : `Reactivate account [${activeLifecycleTarget.name}] and restore permissions for role [${getRoleLabel(activeLifecycleTarget.role, isAr)}] (Expected revision: ${targetRev})`;
+                })()}
+              </p>
+            </div>
+
+            {/* Safe Preview Notice - Unconditional Mutation Guard */}
+            <div
+              className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 rounded-xl p-3.5 flex items-start gap-2.5"
+              data-testid="lifecycle-mutation-disabled-banner"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+              <div className="space-y-0.5 text-xs">
+                <span className="font-bold text-amber-900 dark:text-amber-200 block">
+                  {isAr ? 'وضع المعاينة والتحقق الآمن' : 'Safe Preview Mode'}
+                </span>
+                <p className="text-amber-800 dark:text-amber-300 text-[11px] leading-relaxed">
+                  {isAr ? ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_AR : ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_EN}
+                </p>
+              </div>
+            </div>
+
+            {/* Actions Footer */}
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-gray-100 dark:border-gray-800">
+              <button
+                type="button"
+                onClick={() => setActiveLifecycleTarget(null)}
+                className="px-4 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                data-testid="lifecycle-cancel-btn"
+              >
+                {isAr ? 'إلغاء' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                disabled={true}
+                aria-disabled="true"
+                title={isAr ? 'التعديلات المباشرة معطلة في هذه المرحلة' : 'Live mutations are disabled in this unit'}
+                className="px-4 py-2 bg-gray-300 dark:bg-gray-800 text-gray-500 dark:text-gray-500 text-xs font-bold rounded-xl cursor-not-allowed opacity-75 inline-flex items-center gap-1.5"
+                data-testid="lifecycle-confirm-btn"
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span>{isAr ? 'تأكيد الإجراء (معطل حالياً)' : 'Confirm Action (Disabled)'}</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
