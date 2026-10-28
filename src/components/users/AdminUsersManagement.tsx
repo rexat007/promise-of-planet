@@ -26,15 +26,21 @@ import { AdminAccessService } from '../../services/adminAccess';
 import { AdminUserManager } from '../../services/adminUserManager';
 import {
   AdminIdentityClientError,
+  changeAdminRole,
+  deactivateAdmin,
   initializeAdminRevision,
   listAdminUsers,
+  reactivateAdmin,
   type AdminIdentityClientDependencies,
   type AdminLifecycleClientResponse,
   type AdminLifecycleOperation,
+  type ChangeAdminRoleClientInput,
   type CreateAdminInvitationClientInput,
   type CreateAdminInvitationClientResponse,
+  type DeactivateAdminClientInput,
   type InitializeAdminRevisionClientInput,
   type ListAdminUsersClientResponse,
+  type ReactivateAdminClientInput,
 } from '../../services/adminIdentityManagementClient';
 import {
   ROLE_METADATA,
@@ -51,10 +57,10 @@ import {
 } from './AdminInvitationCreationPanel';
 
 export const ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_AR =
-  'يمكنك استعراض الهويات الإدارية الحقيقية وإنشاء الدعوات الإدارية وإلغاءها. تعديل أدوار المستخدمين الحاليين وتعطيل حساباتهم أو إعادة تفعيلها غير متاح من هذه الواجهة حاليًا.';
+  'يمكنك استعراض الهويات الإدارية الفعلية، وإدارة الدعوات الإدارية المعلقة، وتنفيذ إجراءات دورة حياة الحسابات غير المالكة المؤهلة (تهيئة الحساب القديم، تغيير الدور الإداري، تعطيل الحساب الإداري، وإعادة تفعيل الحساب الإداري) بعد التأكيد الصريح والتحقق الخادمي.';
 
 export const ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_EN =
-  "You can view real administrative identities and create or revoke administrative invitations. Changing existing administrators' roles, deactivating accounts, and reactivating accounts are not currently available in this interface.";
+  'You can inspect canonical administrative identities, manage pending administrative invitations, and execute guarded lifecycle operations on eligible non-Owner accounts (initialize legacy account, change administrative role, deactivate administrative account, and reactivate administrative account) with explicit Owner confirmation and server verification.';
 
 export const ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_AR =
   'وضع المعاينة والتحقق الآمن: زر تأكيد الإجراء معطل بالكامل في هذه المرحلة. لا يتم إرسال أي تعديلات حية إلى الخادم.';
@@ -73,6 +79,54 @@ export const ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR =
 
 export const ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN =
   'Initialize legacy account';
+
+export const ADMIN_LIFECYCLE_CHANGE_ROLE_LABEL_AR =
+  'تغيير الدور الإداري';
+
+export const ADMIN_LIFECYCLE_CHANGE_ROLE_LABEL_EN =
+  'Change administrative role';
+
+export const ADMIN_LIFECYCLE_DEACTIVATE_LABEL_AR =
+  'تعطيل الحساب الإداري';
+
+export const ADMIN_LIFECYCLE_DEACTIVATE_LABEL_EN =
+  'Deactivate administrative account';
+
+export const ADMIN_LIFECYCLE_REACTIVATE_LABEL_AR =
+  'إعادة تفعيل الحساب الإداري';
+
+export const ADMIN_LIFECYCLE_REACTIVATE_LABEL_EN =
+  'Reactivate administrative account';
+
+export const ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_AR =
+  'تأكيد العملية';
+
+export const ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_EN =
+  'Confirm operation';
+
+export const ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_AR =
+  'تم تنفيذ العملية بنجاح';
+
+export const ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_EN =
+  'Operation completed';
+
+export const ADMIN_LIFECYCLE_REVISION_CONFLICT_LABEL_AR =
+  'تعارض في رقم المراجعة';
+
+export const ADMIN_LIFECYCLE_REVISION_CONFLICT_LABEL_EN =
+  'Revision conflict';
+
+export const ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_AR =
+  'يلزم تحديث الدليل';
+
+export const ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_EN =
+  'Refresh required';
+
+export const ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_AR =
+  'تم رفض الصلاحية';
+
+export const ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_EN =
+  'Permission denied';
 
 export const ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_AR =
   'يقوم هذا الإجراء بتهيئة رقم المراجعة الأولي للحساب القديم فقط دون تغيير الدور الإداري أو حالة التفعيل الحالية للحساب.';
@@ -120,6 +174,24 @@ export const ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_AR =
 export const ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_EN =
   'I explicitly confirm initializing the authoritative revision for this legacy administrative account without changing its role or status.';
 
+export const ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_AR =
+  'أؤكد بصفتي مالكاً مفوضاً تغيير الدور الإداري لهذا الحساب وفق المراجعة المعتمدة المعروضة أعلاه.';
+
+export const ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_EN =
+  'I explicitly confirm changing the administrative role for this account at the displayed authoritative revision.';
+
+export const ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_AR =
+  'أؤكد بصفتي مالكاً مفوضاً تعطيل هذا الحساب الإداري وإيقاف صلاحياته الفعالة وفق المراجعة المعتمدة.';
+
+export const ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_EN =
+  'I explicitly confirm deactivating this administrative account and revoking its active permissions at the displayed revision.';
+
+export const ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_AR =
+  'أؤكد بصفتي مالكاً مفوضاً إعادة تفعيل هذا الحساب الإداري واستعادة صلاحيات دوره المعتمد وفق المراجعة المعروضة.';
+
+export const ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_EN =
+  'I explicitly confirm reactivating this administrative account and restoring its role permissions at the displayed revision.';
+
 export type AdminRevisionInitSubmissionStatus =
   | 'idle'
   | 'submitting'
@@ -129,11 +201,15 @@ export type AdminRevisionInitSubmissionStatus =
 export type AdminRevisionInitErrorCategory =
   | 'unauthorized'
   | 'target-ineligible'
+  | 'owner-promotion'
+  | 'noop-operation'
   | 'unconfirmed'
   | 'stale-directory'
   | 'conflict'
   | 'unavailable'
   | 'malformed-response';
+
+export type AdminLifecycleErrorCategory = AdminRevisionInitErrorCategory;
 
 export interface AdminRevisionInitSubmissionSnapshot {
   readonly status: AdminRevisionInitSubmissionStatus;
@@ -144,40 +220,59 @@ export interface AdminRevisionInitSubmissionSnapshot {
   readonly errorMessageEn: string | null;
   readonly boundCallerUid: string | null;
   readonly boundTargetUid: string | null;
+  readonly boundTargetEmail?: string | null;
+  readonly boundTargetRole?: AdminRole | null;
+  readonly boundTargetIsActive?: boolean | null;
+  readonly boundTargetRevision?: number | null;
+  readonly boundOperation?: AdminLifecycleOperation | null;
+  readonly boundProposedRole?: AdminRole | null;
   readonly boundDirectoryGeneration: number;
+  readonly lastCompletedOperation?: AdminLifecycleOperation | null;
+  readonly lastCompletedTargetUid?: string | null;
+  readonly lastAuditEventId?: string | null;
 }
+
+export type AdminLifecycleSubmissionSnapshot = AdminRevisionInitSubmissionSnapshot;
 
 export const INIT_REVISION_ERROR_MESSAGES: Record<
   AdminRevisionInitErrorCategory,
   { readonly ar: string; readonly en: string }
 > = Object.freeze({
   unauthorized: {
-    ar: 'تم رفض العملية: يجب أن تكون مالكاً نشطاً مفوضاً بإدارة المستخدمين لتنفيذ تهيئة المراجعة.',
-    en: 'Operation denied: An authenticated active Owner with ManageUsers permission is required.',
+    ar: `${ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_AR}: يجب أن تكون مالكاً نشطاً مفوضاً بإدارة المستخدمين لتنفيذ هذه العملية.`,
+    en: `${ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_EN}: An authenticated active Owner with ManageUsers permission is required.`,
   },
   'target-ineligible': {
-    ar: 'الحساب المحدد غير مؤهل لتهيئة المراجعة (حساب مالك، أو الجلسة الحالية، أو يمتلك مراجعة مسبقة).',
-    en: 'The selected account is ineligible for revision initialization (Owner account, current session, or already versioned).',
+    ar: 'الحساب المحدد غير مؤهل لهذه العملية (حساب مالك محمي، أو الجلسة الحالية، أو حالة المراجعة غير متوافقة مع العملية).',
+    en: 'The selected account is ineligible for this operation (protected Owner account, current session, or incompatible revision state).',
+  },
+  'owner-promotion': {
+    ar: `${ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_AR}: يُمنع ترقية أي حساب إلى دور المالك (Owner)؛ لا توجد سياسة ترقية لمالك.`,
+    en: `${ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_EN}: Promoting any account to Owner is forbidden.`,
+  },
+  'noop-operation': {
+    ar: 'العملية المطلوبة لا تُحدث أي تغيير على الدور الحالي أو حالة الحساب الفعالة.',
+    en: 'The requested operation is a no-op because the account already has the selected role or active status.',
   },
   unconfirmed: {
-    ar: 'يرجى تحديد مربع التأكيد الصريح لهوية الحساب المستهدف قبل الإرسال.',
-    en: 'Please check the explicit target account confirmation box before submitting.',
+    ar: 'يرجى تحديد مربع التأكيد الصريح لهوية الحساب المستهدف والعملية المحددة قبل الإرسال.',
+    en: 'Please check the explicit confirmation acknowledgment box for the target account and selected operation before submitting.',
   },
   'stale-directory': {
-    ar: 'تغيرت بيانات الحساب أو سياق الدليل. يرجى تحديث الدليل والتحقق من أحدث حالة قبل المتابعة.',
-    en: 'Account state or directory context changed. Please refresh the directory and verify the latest state before proceeding.',
+    ar: `${ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_AR}: تغيرت بيانات الحساب أو سياق الدليل. يرجى تحديث الدليل والتحقق من أحدث حالة قبل المتابعة.`,
+    en: `${ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_EN}: Account state or directory context changed. Please refresh the directory and verify the latest state before proceeding.`,
   },
   conflict: {
-    ar: 'حدث تعارض في حالة الحساب على الخادم (ربما تمت تهيئته أو تعديله). يرجى تحديث الدليل قبل أي محاولة أخرى.',
-    en: 'A server state conflict occurred (the account may already be initialized or modified). Please refresh the directory before trying again.',
+    ar: `${ADMIN_LIFECYCLE_REVISION_CONFLICT_LABEL_AR}: حدث تعارض في حالة الحساب أو رقم المراجعة على الخادم. ${ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_AR} قبل أي محاولة أخرى.`,
+    en: `${ADMIN_LIFECYCLE_REVISION_CONFLICT_LABEL_EN}: A server revision or state conflict occurred. ${ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_EN} before trying again.`,
   },
   unavailable: {
-    ar: 'تعذر إتمام الاتصال بالخادم. لم يتم تعديل الحالة محلياً؛ يرجى تحديث الدليل للتحقق من حالة الحساب.',
-    en: 'Could not complete the server request. Local state was not modified; please refresh the directory to verify account state.',
+    ar: `تعذر إتمام الاتصال بالخادم. لم يتم تعديل الحالة محلياً؛ ${ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_AR} للتحقق من حالة الحساب.`,
+    en: `Could not complete the server request. Local state was not modified; ${ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_EN} to verify account state.`,
   },
   'malformed-response': {
-    ar: 'رفض استجابة الخادم غير المتوافقة (إغلاق آمن). يرجى تحديث الدليل للتحقق من حالة الحساب.',
-    en: 'Rejected malformed server response (fail-closed). Please refresh the directory to verify account state.',
+    ar: `رفض استجابة الخادم غير المتوافقة (إغلاق آمن). ${ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_AR} للتحقق من حالة الحساب.`,
+    en: `Rejected malformed server response (fail-closed). ${ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_EN} to verify account state.`,
   },
 });
 
@@ -199,6 +294,15 @@ export interface AdminUsersManagementProps {
   initialLifecycleSubmissionState?: Partial<AdminRevisionInitSubmissionSnapshot>;
   invokeInitializeRevision?: (
     input: InitializeAdminRevisionClientInput
+  ) => Promise<AdminLifecycleClientResponse>;
+  invokeChangeRole?: (
+    input: ChangeAdminRoleClientInput
+  ) => Promise<AdminLifecycleClientResponse>;
+  invokeDeactivate?: (
+    input: DeactivateAdminClientInput
+  ) => Promise<AdminLifecycleClientResponse>;
+  invokeReactivate?: (
+    input: ReactivateAdminClientInput
   ) => Promise<AdminLifecycleClientResponse>;
   invokeCreateInvitation?: (
     input: CreateAdminInvitationClientInput
@@ -597,21 +701,25 @@ export class AdminDirectoryLoadController {
   }
 }
 
-export function isTargetEligibleForRevisionInitialization(
+export function validateLifecycleOperationEligibility(
   caller: AdminUser | null | undefined,
   activeTabId: string,
   target: AdminUser | null | undefined,
-  directorySnapshot?: AdminDirectoryStateSnapshot
+  directorySnapshot: AdminDirectoryStateSnapshot | undefined,
+  operation: AdminLifecycleOperation,
+  proposedRole?: AdminRole
 ): {
   readonly eligible: boolean;
   readonly reason: AdminRevisionInitErrorCategory | null;
   readonly canonicalTarget: AdminUser | null;
+  readonly expectedRevision: number | null;
 } {
   if (!isAuthorizedOwnerForUsersDirectory(caller, activeTabId) || !caller) {
     return {
       eligible: false,
       reason: 'unauthorized',
       canonicalTarget: null,
+      expectedRevision: null,
     };
   }
 
@@ -619,27 +727,31 @@ export function isTargetEligibleForRevisionInitialization(
     !target ||
     typeof target !== 'object' ||
     typeof target.id !== 'string' ||
-    !target.id.trim()
+    !target.id.trim() ||
+    typeof target.isActive !== 'boolean'
   ) {
     return {
       eligible: false,
       reason: 'target-ineligible',
       canonicalTarget: null,
+      expectedRevision: null,
     };
   }
 
   if (
     target.id === caller.id ||
     target.role === AdminRole.Owner ||
-    !isValidAdminRole(target.role) ||
-    getAdminUserRevision(target) !== undefined
+    !isValidAdminRole(target.role)
   ) {
     return {
       eligible: false,
       reason: 'target-ineligible',
       canonicalTarget: null,
+      expectedRevision: null,
     };
   }
+
+  let canonicalTarget: AdminUser = target;
 
   if (directorySnapshot) {
     if (
@@ -651,6 +763,7 @@ export function isTargetEligibleForRevisionInitialization(
         eligible: false,
         reason: 'stale-directory',
         canonicalTarget: null,
+        expectedRevision: null,
       };
     }
 
@@ -660,18 +773,20 @@ export function isTargetEligibleForRevisionInitialization(
         eligible: false,
         reason: 'stale-directory',
         canonicalTarget: null,
+        expectedRevision: null,
       };
     }
 
     if (
       latest.id === caller.id ||
       latest.role === AdminRole.Owner ||
-      getAdminUserRevision(latest) !== undefined
+      !isValidAdminRole(latest.role)
     ) {
       return {
         eligible: false,
         reason: 'target-ineligible',
         canonicalTarget: null,
+        expectedRevision: null,
       };
     }
 
@@ -679,26 +794,139 @@ export function isTargetEligibleForRevisionInitialization(
       latest.id !== target.id ||
       latest.email !== target.email ||
       latest.role !== target.role ||
-      latest.isActive !== target.isActive
+      latest.isActive !== target.isActive ||
+      getAdminUserRevision(latest) !== getAdminUserRevision(target)
     ) {
       return {
         eligible: false,
         reason: 'stale-directory',
         canonicalTarget: null,
+        expectedRevision: null,
       };
+    }
+
+    canonicalTarget = latest;
+  }
+
+  const targetRev = getAdminUserRevision(canonicalTarget);
+
+  if (operation === 'InitializeRevision') {
+    if (targetRev !== undefined) {
+      return {
+        eligible: false,
+        reason: 'target-ineligible',
+        canonicalTarget: null,
+        expectedRevision: null,
+      };
+    }
+    return {
+      eligible: true,
+      reason: null,
+      canonicalTarget,
+      expectedRevision: null,
+    };
+  }
+
+  if (
+    operation === 'ChangeRole' ||
+    operation === 'Deactivate' ||
+    operation === 'Reactivate'
+  ) {
+    if (targetRev === undefined) {
+      return {
+        eligible: false,
+        reason: 'target-ineligible',
+        canonicalTarget: null,
+        expectedRevision: null,
+      };
+    }
+
+    if (operation === 'ChangeRole') {
+      if (proposedRole === AdminRole.Owner) {
+        return {
+          eligible: false,
+          reason: 'owner-promotion',
+          canonicalTarget: null,
+          expectedRevision: null,
+        };
+      }
+      if (
+        !proposedRole ||
+        !isValidAdminRole(proposedRole) ||
+        !NON_OWNER_LIFECYCLE_ROLES.includes(proposedRole)
+      ) {
+        return {
+          eligible: false,
+          reason: 'target-ineligible',
+          canonicalTarget: null,
+          expectedRevision: null,
+        };
+      }
+      if (proposedRole === canonicalTarget.role) {
+        return {
+          eligible: false,
+          reason: 'noop-operation',
+          canonicalTarget: null,
+          expectedRevision: null,
+        };
+      }
+    } else if (operation === 'Deactivate') {
+      if (canonicalTarget.isActive !== true) {
+        return {
+          eligible: false,
+          reason: 'noop-operation',
+          canonicalTarget: null,
+          expectedRevision: null,
+        };
+      }
+    } else if (operation === 'Reactivate') {
+      if (canonicalTarget.isActive !== false) {
+        return {
+          eligible: false,
+          reason: 'noop-operation',
+          canonicalTarget: null,
+          expectedRevision: null,
+        };
+      }
     }
 
     return {
       eligible: true,
       reason: null,
-      canonicalTarget: latest,
+      canonicalTarget,
+      expectedRevision: targetRev,
     };
   }
 
   return {
-    eligible: true,
-    reason: null,
-    canonicalTarget: target,
+    eligible: false,
+    reason: 'target-ineligible',
+    canonicalTarget: null,
+    expectedRevision: null,
+  };
+}
+
+export function isTargetEligibleForRevisionInitialization(
+  caller: AdminUser | null | undefined,
+  activeTabId: string,
+  target: AdminUser | null | undefined,
+  directorySnapshot?: AdminDirectoryStateSnapshot
+): {
+  readonly eligible: boolean;
+  readonly reason: AdminRevisionInitErrorCategory | null;
+  readonly canonicalTarget: AdminUser | null;
+} {
+  const result = validateLifecycleOperationEligibility(
+    caller,
+    activeTabId,
+    target,
+    directorySnapshot,
+    'InitializeRevision'
+  );
+  return {
+    eligible: result.eligible,
+    reason: result.reason,
+    canonicalTarget: result.canonicalTarget,
   };
 }
 
@@ -724,10 +952,15 @@ export function classifyInitRevisionError(
     ) {
       return 'unauthorized';
     }
+    if (rawReason === 'OWNER_PROMOTION_FORBIDDEN') {
+      return 'owner-promotion';
+    }
+    if (rawReason === 'NOOP_LIFECYCLE_MUTATION') {
+      return 'noop-operation';
+    }
     if (
       rawReason === 'SELF_MUTATION_FORBIDDEN' ||
       rawReason === 'OWNER_ACCOUNT_PROTECTED' ||
-      rawReason === 'OWNER_PROMOTION_FORBIDDEN' ||
       rawReason === 'TARGET_NOT_FOUND' ||
       rawReason === 'INVALID_ARGUMENT' ||
       rawCode === 'invalid-argument' ||
@@ -760,9 +993,13 @@ export function classifyInitRevisionError(
   return 'unavailable';
 }
 
-export function validateInitializeRevisionSuccessResponse(
+export const classifyLifecycleError = classifyInitRevisionError;
+
+export function validateLifecycleSuccessResponse(
   response: unknown,
-  expectedTarget: AdminUser
+  expectedOperation: AdminLifecycleOperation,
+  expectedTarget: AdminUser,
+  expectedTargetRole?: AdminRole
 ): AdminLifecycleClientResponse {
   if (!response || typeof response !== 'object') {
     throw new AdminIdentityClientError(
@@ -772,8 +1009,10 @@ export function validateInitializeRevisionSuccessResponse(
   }
 
   const candidate = response as AdminLifecycleClientResponse;
+  const expectedPrevRev = getAdminUserRevision(expectedTarget);
+
   if (
-    candidate.operation !== 'InitializeRevision' ||
+    candidate.operation !== expectedOperation ||
     candidate.targetUid !== expectedTarget.id ||
     typeof candidate.currentRevision !== 'number' ||
     !Number.isInteger(candidate.currentRevision) ||
@@ -786,8 +1025,8 @@ export function validateInitializeRevisionSuccessResponse(
     typeof candidate.admin !== 'object' ||
     candidate.admin.id !== expectedTarget.id ||
     candidate.admin.revision !== candidate.currentRevision ||
-    candidate.admin.role !== expectedTarget.role ||
-    candidate.admin.isActive !== expectedTarget.isActive ||
+    candidate.admin.role === AdminRole.Owner ||
+    !isValidAdminRole(candidate.admin.role) ||
     !candidate.auditReceipt ||
     typeof candidate.auditReceipt !== 'object' ||
     candidate.auditReceipt.targetId !== expectedTarget.id ||
@@ -806,7 +1045,77 @@ export function validateInitializeRevisionSuccessResponse(
     );
   }
 
+  if (expectedOperation === 'InitializeRevision') {
+    if (
+      candidate.previousRevision !== null ||
+      candidate.admin.role !== expectedTarget.role ||
+      candidate.admin.isActive !== expectedTarget.isActive
+    ) {
+      throw new AdminIdentityClientError(
+        'internal',
+        'MALFORMED_LIFECYCLE_RECORD'
+      );
+    }
+  } else {
+    if (
+      expectedPrevRev === undefined ||
+      candidate.previousRevision !== expectedPrevRev ||
+      candidate.currentRevision <= expectedPrevRev ||
+      candidate.currentRevision !== expectedPrevRev + 1
+    ) {
+      throw new AdminIdentityClientError(
+        'internal',
+        'MALFORMED_LIFECYCLE_RECORD'
+      );
+    }
+
+    if (expectedOperation === 'ChangeRole') {
+      if (
+        !expectedTargetRole ||
+        expectedTargetRole === AdminRole.Owner ||
+        candidate.admin.role !== expectedTargetRole ||
+        candidate.admin.isActive !== expectedTarget.isActive
+      ) {
+        throw new AdminIdentityClientError(
+          'internal',
+          'MALFORMED_LIFECYCLE_RECORD'
+        );
+      }
+    } else if (expectedOperation === 'Deactivate') {
+      if (
+        candidate.admin.role !== expectedTarget.role ||
+        candidate.admin.isActive !== false
+      ) {
+        throw new AdminIdentityClientError(
+          'internal',
+          'MALFORMED_LIFECYCLE_RECORD'
+        );
+      }
+    } else if (expectedOperation === 'Reactivate') {
+      if (
+        candidate.admin.role !== expectedTarget.role ||
+        candidate.admin.isActive !== true
+      ) {
+        throw new AdminIdentityClientError(
+          'internal',
+          'MALFORMED_LIFECYCLE_RECORD'
+        );
+      }
+    }
+  }
+
   return candidate;
+}
+
+export function validateInitializeRevisionSuccessResponse(
+  response: unknown,
+  expectedTarget: AdminUser
+): AdminLifecycleClientResponse {
+  return validateLifecycleSuccessResponse(
+    response,
+    'InitializeRevision',
+    expectedTarget
+  );
 }
 
 export class AdminRevisionInitializationController {
@@ -829,6 +1138,18 @@ export class AdminRevisionInitializationController {
       boundCallerUid: initial?.boundCallerUid ?? null,
       boundTargetUid: initial?.boundTargetUid ?? null,
       boundDirectoryGeneration: initial?.boundDirectoryGeneration ?? 0,
+      boundTargetEmail: initial?.boundTargetEmail ?? null,
+      boundTargetRole: initial?.boundTargetRole ?? null,
+      boundTargetIsActive: initial?.boundTargetIsActive ?? null,
+      boundTargetRevision:
+        initial?.boundTargetRevision !== undefined
+          ? initial.boundTargetRevision
+          : null,
+      boundOperation: initial?.boundOperation ?? null,
+      boundProposedRole: initial?.boundProposedRole ?? null,
+      lastCompletedOperation: initial?.lastCompletedOperation ?? null,
+      lastCompletedTargetUid: initial?.lastCompletedTargetUid ?? null,
+      lastAuditEventId: initial?.lastAuditEventId ?? null,
     });
     if (this.snapshot.status === 'submitting') {
       this.inFlight = true;
@@ -872,10 +1193,13 @@ export class AdminRevisionInitializationController {
     caller: AdminUser | null | undefined,
     target: AdminUser | null | undefined,
     directoryGeneration: number,
-    initialConfirmed = false
+    initialConfirmed = false,
+    operation?: AdminLifecycleOperation | null,
+    proposedRole?: AdminRole | null
   ): AdminRevisionInitSubmissionSnapshot {
     this.inFlight = false;
     this.submissionGeneration += 1;
+    const targetRev = getAdminUserRevision(target);
     this.emit({
       status: 'idle',
       isConfirmed: Boolean(initialConfirmed),
@@ -886,6 +1210,45 @@ export class AdminRevisionInitializationController {
       boundCallerUid: caller?.id ?? null,
       boundTargetUid: target?.id ?? null,
       boundDirectoryGeneration: directoryGeneration,
+      boundTargetEmail: target?.email ?? null,
+      boundTargetRole: target?.role ?? null,
+      boundTargetIsActive:
+        typeof target?.isActive === 'boolean' ? target.isActive : null,
+      boundTargetRevision: targetRev !== undefined ? targetRev : null,
+      boundOperation: operation ?? null,
+      boundProposedRole: proposedRole ?? null,
+      lastCompletedOperation: this.snapshot.lastCompletedOperation ?? null,
+      lastCompletedTargetUid: this.snapshot.lastCompletedTargetUid ?? null,
+      lastAuditEventId: this.snapshot.lastAuditEventId ?? null,
+    });
+    return this.snapshot;
+  }
+
+  public resetConfirmationForOperationChange(
+    operation: AdminLifecycleOperation,
+    proposedRole?: AdminRole | null
+  ): AdminRevisionInitSubmissionSnapshot {
+    if (this.inFlight || this.snapshot.status === 'submitting') {
+      return this.snapshot;
+    }
+    this.emit({
+      ...this.snapshot,
+      status: this.snapshot.requiresRefreshBeforeRetry
+        ? this.snapshot.status
+        : 'idle',
+      isConfirmed: false,
+      errorCategory: this.snapshot.requiresRefreshBeforeRetry
+        ? this.snapshot.errorCategory
+        : null,
+      errorMessageAr: this.snapshot.requiresRefreshBeforeRetry
+        ? this.snapshot.errorMessageAr
+        : null,
+      errorMessageEn: this.snapshot.requiresRefreshBeforeRetry
+        ? this.snapshot.errorMessageEn
+        : null,
+      boundOperation: operation,
+      boundProposedRole:
+        operation === 'ChangeRole' ? (proposedRole ?? null) : null,
     });
     return this.snapshot;
   }
@@ -907,6 +1270,7 @@ export class AdminRevisionInitializationController {
     ) {
       this.inFlight = false;
       this.submissionGeneration += 1;
+      const targetRev = getAdminUserRevision(target);
       this.emit({
         status: isAuthorized ? 'idle' : 'error',
         isConfirmed: false,
@@ -921,6 +1285,16 @@ export class AdminRevisionInitializationController {
         boundCallerUid: nextCallerUid,
         boundTargetUid: nextTargetUid,
         boundDirectoryGeneration: directorySnapshot.requestGeneration,
+        boundTargetEmail: target?.email ?? null,
+        boundTargetRole: target?.role ?? null,
+        boundTargetIsActive:
+          typeof target?.isActive === 'boolean' ? target.isActive : null,
+        boundTargetRevision: targetRev !== undefined ? targetRev : null,
+        boundOperation: null,
+        boundProposedRole: null,
+        lastCompletedOperation: this.snapshot.lastCompletedOperation ?? null,
+        lastCompletedTargetUid: this.snapshot.lastCompletedTargetUid ?? null,
+        lastAuditEventId: this.snapshot.lastAuditEventId ?? null,
       });
       return this.snapshot;
     }
@@ -932,8 +1306,9 @@ export class AdminRevisionInitializationController {
     ) {
       this.inFlight = false;
       this.submissionGeneration += 1;
+      const targetRev = getAdminUserRevision(target);
       this.emit({
-        status: 'idle',
+        status: this.snapshot.status === 'succeeded' ? 'succeeded' : 'idle',
         isConfirmed: false,
         requiresRefreshBeforeRetry: false,
         errorCategory: null,
@@ -942,6 +1317,16 @@ export class AdminRevisionInitializationController {
         boundCallerUid: nextCallerUid,
         boundTargetUid: nextTargetUid,
         boundDirectoryGeneration: directorySnapshot.requestGeneration,
+        boundTargetEmail: target?.email ?? null,
+        boundTargetRole: target?.role ?? null,
+        boundTargetIsActive:
+          typeof target?.isActive === 'boolean' ? target.isActive : null,
+        boundTargetRevision: targetRev !== undefined ? targetRev : null,
+        boundOperation: this.snapshot.boundOperation ?? null,
+        boundProposedRole: this.snapshot.boundProposedRole ?? null,
+        lastCompletedOperation: this.snapshot.lastCompletedOperation ?? null,
+        lastCompletedTargetUid: this.snapshot.lastCompletedTargetUid ?? null,
+        lastAuditEventId: this.snapshot.lastAuditEventId ?? null,
       });
     }
 
@@ -953,7 +1338,9 @@ export class AdminRevisionInitializationController {
     caller: AdminUser | null | undefined,
     activeTabId: string,
     target: AdminUser | null | undefined,
-    directorySnapshot: AdminDirectoryStateSnapshot
+    directorySnapshot: AdminDirectoryStateSnapshot,
+    operation: AdminLifecycleOperation = 'InitializeRevision',
+    proposedRole?: AdminRole
   ): AdminRevisionInitSubmissionSnapshot {
     if (this.inFlight || this.snapshot.status === 'submitting') {
       return this.snapshot;
@@ -962,25 +1349,33 @@ export class AdminRevisionInitializationController {
       return this.snapshot;
     }
 
-    const check = isTargetEligibleForRevisionInitialization(
+    const check = validateLifecycleOperationEligibility(
       caller,
       activeTabId,
       target,
-      directorySnapshot
+      directorySnapshot,
+      operation,
+      proposedRole
     );
-    if (!check.eligible || !caller || !target) {
+    if (!check.eligible || !caller || !check.canonicalTarget) {
       const cat = check.reason ?? 'target-ineligible';
+      const needsRefresh =
+        cat !== 'unconfirmed' &&
+        cat !== 'noop-operation' &&
+        cat !== 'owner-promotion';
       this.emit({
         ...this.snapshot,
         status: 'error',
         isConfirmed: false,
-        requiresRefreshBeforeRetry: cat !== 'unconfirmed',
+        requiresRefreshBeforeRetry: needsRefresh,
         errorCategory: cat,
         errorMessageAr: INIT_REVISION_ERROR_MESSAGES[cat].ar,
         errorMessageEn: INIT_REVISION_ERROR_MESSAGES[cat].en,
       });
       return this.snapshot;
     }
+
+    const canonicalTarget = check.canonicalTarget;
 
     this.emit({
       ...this.snapshot,
@@ -990,20 +1385,37 @@ export class AdminRevisionInitializationController {
       errorMessageAr: null,
       errorMessageEn: null,
       boundCallerUid: caller.id,
-      boundTargetUid: target.id,
+      boundTargetUid: canonicalTarget.id,
       boundDirectoryGeneration: directorySnapshot.requestGeneration,
+      boundTargetEmail: canonicalTarget.email,
+      boundTargetRole: canonicalTarget.role,
+      boundTargetIsActive: canonicalTarget.isActive,
+      boundTargetRevision: check.expectedRevision,
+      boundOperation: operation,
+      boundProposedRole:
+        operation === 'ChangeRole' ? (proposedRole ?? null) : null,
     });
     return this.snapshot;
   }
 
-  public async submitInitializeRevision(params: {
+  public async submitLifecycleOperation(params: {
     readonly caller: AdminUser | null | undefined;
     readonly activeTabId: string;
     readonly target: AdminUser | null | undefined;
     readonly operation: AdminLifecycleOperation;
+    readonly proposedRole?: AdminRole;
     readonly directorySnapshot: AdminDirectoryStateSnapshot;
-    readonly invokeInit: (
+    readonly invokeInit?: (
       input: InitializeAdminRevisionClientInput
+    ) => Promise<AdminLifecycleClientResponse>;
+    readonly invokeChangeRole?: (
+      input: ChangeAdminRoleClientInput
+    ) => Promise<AdminLifecycleClientResponse>;
+    readonly invokeDeactivate?: (
+      input: DeactivateAdminClientInput
+    ) => Promise<AdminLifecycleClientResponse>;
+    readonly invokeReactivate?: (
+      input: ReactivateAdminClientInput
     ) => Promise<AdminLifecycleClientResponse>;
     readonly refreshDirectory: () => Promise<unknown>;
     readonly onModalClose?: () => void;
@@ -1016,7 +1428,10 @@ export class AdminRevisionInitializationController {
       return this.snapshot;
     }
 
-    if (!isAuthorizedOwnerForUsersDirectory(params.caller, params.activeTabId) || !params.caller) {
+    if (
+      !isAuthorizedOwnerForUsersDirectory(params.caller, params.activeTabId) ||
+      !params.caller
+    ) {
       this.emit({
         ...this.snapshot,
         status: 'error',
@@ -1029,32 +1444,25 @@ export class AdminRevisionInitializationController {
       return this.snapshot;
     }
 
-    if (params.operation !== 'InitializeRevision') {
-      this.emit({
-        ...this.snapshot,
-        status: 'error',
-        isConfirmed: false,
-        requiresRefreshBeforeRetry: false,
-        errorCategory: 'target-ineligible',
-        errorMessageAr: INIT_REVISION_ERROR_MESSAGES['target-ineligible'].ar,
-        errorMessageEn: INIT_REVISION_ERROR_MESSAGES['target-ineligible'].en,
-      });
-      return this.snapshot;
-    }
-
-    const check = isTargetEligibleForRevisionInitialization(
+    const check = validateLifecycleOperationEligibility(
       params.caller,
       params.activeTabId,
       params.target,
-      params.directorySnapshot
+      params.directorySnapshot,
+      params.operation,
+      params.proposedRole
     );
     if (!check.eligible || !check.canonicalTarget) {
       const cat = check.reason ?? 'target-ineligible';
+      const needsRefresh =
+        cat !== 'unconfirmed' &&
+        cat !== 'noop-operation' &&
+        cat !== 'owner-promotion';
       this.emit({
         ...this.snapshot,
         status: 'error',
         isConfirmed: false,
-        requiresRefreshBeforeRetry: true,
+        requiresRefreshBeforeRetry: needsRefresh,
         errorCategory: cat,
         errorMessageAr: INIT_REVISION_ERROR_MESSAGES[cat].ar,
         errorMessageEn: INIT_REVISION_ERROR_MESSAGES[cat].en,
@@ -1062,10 +1470,34 @@ export class AdminRevisionInitializationController {
       return this.snapshot;
     }
 
+    const targetSnapshot = check.canonicalTarget;
+
+    const hasMismatchedBoundFields =
+      (this.snapshot.boundTargetEmail !== undefined &&
+        this.snapshot.boundTargetEmail !== null &&
+        this.snapshot.boundTargetEmail !== targetSnapshot.email) ||
+      (this.snapshot.boundTargetRole !== undefined &&
+        this.snapshot.boundTargetRole !== null &&
+        this.snapshot.boundTargetRole !== targetSnapshot.role) ||
+      (this.snapshot.boundTargetIsActive !== undefined &&
+        this.snapshot.boundTargetIsActive !== null &&
+        this.snapshot.boundTargetIsActive !== targetSnapshot.isActive) ||
+      (this.snapshot.boundTargetRevision !== undefined &&
+        this.snapshot.boundTargetRevision !== null &&
+        this.snapshot.boundTargetRevision !== check.expectedRevision) ||
+      (this.snapshot.boundOperation !== undefined &&
+        this.snapshot.boundOperation !== null &&
+        this.snapshot.boundOperation !== params.operation) ||
+      (params.operation === 'ChangeRole' &&
+        this.snapshot.boundProposedRole !== undefined &&
+        this.snapshot.boundProposedRole !== null &&
+        this.snapshot.boundProposedRole !== params.proposedRole);
+
     if (
       !this.snapshot.isConfirmed ||
       this.snapshot.boundCallerUid !== params.caller.id ||
-      this.snapshot.boundTargetUid !== check.canonicalTarget.id
+      this.snapshot.boundTargetUid !== targetSnapshot.id ||
+      hasMismatchedBoundFields
     ) {
       this.emit({
         ...this.snapshot,
@@ -1082,7 +1514,6 @@ export class AdminRevisionInitializationController {
     this.inFlight = true;
     const generation = ++this.submissionGeneration;
     const callerUid = params.caller.id;
-    const targetSnapshot = check.canonicalTarget;
 
     this.emit({
       ...this.snapshot,
@@ -1093,11 +1524,61 @@ export class AdminRevisionInitializationController {
     });
 
     try {
-      const exactPayload: InitializeAdminRevisionClientInput = Object.freeze({
-        targetUid: targetSnapshot.id,
-      });
+      let response: AdminLifecycleClientResponse;
 
-      const response = await params.invokeInit(exactPayload);
+      if (params.operation === 'InitializeRevision') {
+        if (!params.invokeInit) {
+          throw new AdminIdentityClientError(
+            'unavailable',
+            'SERVICE_UNAVAILABLE'
+          );
+        }
+        const exactPayload: InitializeAdminRevisionClientInput = Object.freeze({
+          targetUid: targetSnapshot.id,
+        });
+        response = await params.invokeInit(exactPayload);
+      } else if (params.operation === 'ChangeRole') {
+        if (
+          !params.invokeChangeRole ||
+          check.expectedRevision === null ||
+          !params.proposedRole
+        ) {
+          throw new AdminIdentityClientError(
+            'unavailable',
+            'SERVICE_UNAVAILABLE'
+          );
+        }
+        const exactPayload: ChangeAdminRoleClientInput = Object.freeze({
+          targetUid: targetSnapshot.id,
+          expectedRevision: check.expectedRevision,
+          targetRole: params.proposedRole,
+        });
+        response = await params.invokeChangeRole(exactPayload);
+      } else if (params.operation === 'Deactivate') {
+        if (!params.invokeDeactivate || check.expectedRevision === null) {
+          throw new AdminIdentityClientError(
+            'unavailable',
+            'SERVICE_UNAVAILABLE'
+          );
+        }
+        const exactPayload: DeactivateAdminClientInput = Object.freeze({
+          targetUid: targetSnapshot.id,
+          expectedRevision: check.expectedRevision,
+        });
+        response = await params.invokeDeactivate(exactPayload);
+      } else {
+        if (!params.invokeReactivate || check.expectedRevision === null) {
+          throw new AdminIdentityClientError(
+            'unavailable',
+            'SERVICE_UNAVAILABLE'
+          );
+        }
+        const exactPayload: ReactivateAdminClientInput = Object.freeze({
+          targetUid: targetSnapshot.id,
+          expectedRevision: check.expectedRevision,
+        });
+        response = await params.invokeReactivate(exactPayload);
+      }
 
       if (
         !this.isMounted ||
@@ -1110,7 +1591,12 @@ export class AdminRevisionInitializationController {
         return this.snapshot;
       }
 
-      validateInitializeRevisionSuccessResponse(response, targetSnapshot);
+      const validatedResponse = validateLifecycleSuccessResponse(
+        response,
+        params.operation,
+        targetSnapshot,
+        params.proposedRole
+      );
 
       this.inFlight = false;
       this.emit({
@@ -1123,6 +1609,18 @@ export class AdminRevisionInitializationController {
         boundCallerUid: callerUid,
         boundTargetUid: targetSnapshot.id,
         boundDirectoryGeneration: params.directorySnapshot.requestGeneration,
+        boundTargetEmail: targetSnapshot.email,
+        boundTargetRole: validatedResponse.admin.role,
+        boundTargetIsActive: validatedResponse.admin.isActive,
+        boundTargetRevision: validatedResponse.currentRevision,
+        boundOperation: params.operation,
+        boundProposedRole:
+          params.operation === 'ChangeRole'
+            ? (params.proposedRole ?? null)
+            : null,
+        lastCompletedOperation: params.operation,
+        lastCompletedTargetUid: targetSnapshot.id,
+        lastAuditEventId: validatedResponse.auditReceipt.auditEventId,
       });
 
       params.onModalClose?.();
@@ -1148,7 +1646,46 @@ export class AdminRevisionInitializationController {
       return this.snapshot;
     }
   }
+
+  public async submitInitializeRevision(params: {
+    readonly caller: AdminUser | null | undefined;
+    readonly activeTabId: string;
+    readonly target: AdminUser | null | undefined;
+    readonly operation: AdminLifecycleOperation;
+    readonly directorySnapshot: AdminDirectoryStateSnapshot;
+    readonly invokeInit: (
+      input: InitializeAdminRevisionClientInput
+    ) => Promise<AdminLifecycleClientResponse>;
+    readonly refreshDirectory: () => Promise<unknown>;
+    readonly onModalClose?: () => void;
+  }): Promise<AdminRevisionInitSubmissionSnapshot> {
+    if (params.operation !== 'InitializeRevision') {
+      this.emit({
+        ...this.snapshot,
+        status: 'error',
+        isConfirmed: false,
+        requiresRefreshBeforeRetry: false,
+        errorCategory: 'target-ineligible',
+        errorMessageAr: INIT_REVISION_ERROR_MESSAGES['target-ineligible'].ar,
+        errorMessageEn: INIT_REVISION_ERROR_MESSAGES['target-ineligible'].en,
+      });
+      return this.snapshot;
+    }
+    return this.submitLifecycleOperation({
+      caller: params.caller,
+      activeTabId: params.activeTabId,
+      target: params.target,
+      operation: 'InitializeRevision',
+      directorySnapshot: params.directorySnapshot,
+      invokeInit: params.invokeInit,
+      refreshDirectory: params.refreshDirectory,
+      onModalClose: params.onModalClose,
+    });
+  }
 }
+
+export const AdminLifecycleSubmissionController =
+  AdminRevisionInitializationController;
 
 const NOOP_USER_MUTATION = (_user: AdminUser): void => {
   // Local administrative user creation and mutation are disabled in AUTH-03C2.
@@ -1168,6 +1705,9 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
   initialLifecycleConfirmed = false,
   initialLifecycleSubmissionState,
   invokeInitializeRevision,
+  invokeChangeRole,
+  invokeDeactivate,
+  invokeReactivate,
   invokeCreateInvitation,
 }) => {
   const { i18n } = useTranslation();
@@ -1238,6 +1778,17 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
 
   const initControllerRef = useRef<AdminRevisionInitializationController | null>(null);
   if (!initControllerRef.current) {
+    const initialTargetRev = getAdminUserRevision(initialLifecycleTarget);
+    const initialEffectiveOp: AdminLifecycleOperation = initialLifecycleTarget
+      ? initialTargetRev === undefined
+        ? 'InitializeRevision'
+        : initialLifecycleOperation === 'InitializeRevision'
+        ? initialLifecycleTarget.isActive
+          ? 'ChangeRole'
+          : 'Reactivate'
+        : initialLifecycleOperation
+      : initialLifecycleOperation;
+
     initControllerRef.current = new AdminRevisionInitializationController({
       status: initialLifecycleSubmissionState?.status ?? 'idle',
       isConfirmed:
@@ -1257,6 +1808,33 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
       boundDirectoryGeneration:
         initialLifecycleSubmissionState?.boundDirectoryGeneration ??
         controllerRef.current.getSnapshot().requestGeneration,
+      boundTargetEmail:
+        initialLifecycleSubmissionState?.boundTargetEmail ??
+        (initialLifecycleTarget?.email ?? null),
+      boundTargetRole:
+        initialLifecycleSubmissionState?.boundTargetRole ??
+        (initialLifecycleTarget?.role ?? null),
+      boundTargetIsActive:
+        initialLifecycleSubmissionState?.boundTargetIsActive ??
+        (typeof initialLifecycleTarget?.isActive === 'boolean'
+          ? initialLifecycleTarget.isActive
+          : null),
+      boundTargetRevision:
+        initialLifecycleSubmissionState?.boundTargetRevision !== undefined
+          ? initialLifecycleSubmissionState.boundTargetRevision
+          : (initialTargetRev !== undefined ? initialTargetRev : null),
+      boundOperation:
+        initialLifecycleSubmissionState?.boundOperation ??
+        (initialLifecycleTarget ? initialEffectiveOp : null),
+      boundProposedRole:
+        initialLifecycleSubmissionState?.boundProposedRole ??
+        (initialEffectiveOp === 'ChangeRole' ? initialLifecycleTargetRole : null),
+      lastCompletedOperation:
+        initialLifecycleSubmissionState?.lastCompletedOperation ?? null,
+      lastCompletedTargetUid:
+        initialLifecycleSubmissionState?.lastCompletedTargetUid ?? null,
+      lastAuditEventId:
+        initialLifecycleSubmissionState?.lastAuditEventId ?? null,
     });
   }
 
@@ -1269,13 +1847,15 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
     (targetUser: AdminUser) => {
       setActiveLifecycleTarget(targetUser);
       const rev = getAdminUserRevision(targetUser);
+      let nextOp: AdminLifecycleOperation = 'ChangeRole';
       if (rev === undefined) {
-        setSelectedOperation('InitializeRevision');
+        nextOp = 'InitializeRevision';
       } else if (!targetUser.isActive) {
-        setSelectedOperation('Reactivate');
+        nextOp = 'Reactivate';
       } else {
-        setSelectedOperation('ChangeRole');
+        nextOp = 'ChangeRole';
       }
+      setSelectedOperation(nextOp);
       const defaultRole =
         targetUser.role === AdminRole.ContentEditor
           ? AdminRole.RightsReviewer
@@ -1285,7 +1865,9 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
         currentUser,
         targetUser,
         directorySnapshot.requestGeneration,
-        false
+        false,
+        nextOp,
+        nextOp === 'ChangeRole' ? defaultRole : null
       );
     },
     [currentUser, directorySnapshot.requestGeneration]
@@ -1300,7 +1882,9 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
       currentUser,
       null,
       directorySnapshot.requestGeneration,
-      false
+      false,
+      null,
+      null
     );
   }, [currentUser, directorySnapshot.requestGeneration]);
 
@@ -1318,52 +1902,102 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
     await controller.loadDirectory(currentUser, activeTabId, loader);
   }, [currentUser, activeTabId, clientDeps, loadDirectory]);
 
-  const handleToggleInitConfirmation = useCallback(
-    (checked: boolean) => {
+  const handleSelectLifecycleOperation = useCallback(
+    (nextOp: AdminLifecycleOperation) => {
+      setSelectedOperation(nextOp);
+      initControllerRef.current?.resetConfirmationForOperationChange(
+        nextOp,
+        nextOp === 'ChangeRole' ? selectedTargetRole : null
+      );
+    },
+    [selectedTargetRole]
+  );
+
+  const handleSelectTargetRole = useCallback(
+    (nextRole: AdminRole) => {
+      setSelectedTargetRole(nextRole);
+      initControllerRef.current?.resetConfirmationForOperationChange(
+        selectedOperation,
+        nextRole
+      );
+    },
+    [selectedOperation]
+  );
+
+  const handleToggleLifecycleConfirmation = useCallback(
+    (
+      checked: boolean,
+      effectiveOperation: AdminLifecycleOperation,
+      proposedRole?: AdminRole
+    ) => {
       initControllerRef.current?.setConfirmed(
         checked,
         currentUser,
         activeTabId,
         activeLifecycleTarget,
-        directorySnapshot
+        directorySnapshot,
+        effectiveOperation,
+        proposedRole
       );
     },
     [currentUser, activeTabId, activeLifecycleTarget, directorySnapshot]
   );
 
-  const handleExecuteInitializeRevision = useCallback(async () => {
-    const initController = initControllerRef.current;
-    if (!initController || !activeLifecycleTarget) return;
-    const targetRevision = getAdminUserRevision(activeLifecycleTarget);
-    const effectiveOp: AdminLifecycleOperation =
-      targetRevision === undefined ? 'InitializeRevision' : selectedOperation;
-    const invoker =
-      invokeInitializeRevision ??
-      ((input: InitializeAdminRevisionClientInput) =>
-        initializeAdminRevision(input, clientDeps));
+  const handleExecuteLifecycleOperation = useCallback(
+    async (
+      effectiveOp: AdminLifecycleOperation,
+      proposedRole?: AdminRole
+    ) => {
+      const initController = initControllerRef.current;
+      if (!initController || !activeLifecycleTarget) return;
 
-    await initController.submitInitializeRevision({
-      caller: currentUser,
+      const initInvoker =
+        invokeInitializeRevision ??
+        ((input: InitializeAdminRevisionClientInput) =>
+          initializeAdminRevision(input, clientDeps));
+      const changeRoleInvoker =
+        invokeChangeRole ??
+        ((input: ChangeAdminRoleClientInput) =>
+          changeAdminRole(input, clientDeps));
+      const deactivateInvoker =
+        invokeDeactivate ??
+        ((input: DeactivateAdminClientInput) =>
+          deactivateAdmin(input, clientDeps));
+      const reactivateInvoker =
+        invokeReactivate ??
+        ((input: ReactivateAdminClientInput) =>
+          reactivateAdmin(input, clientDeps));
+
+      await initController.submitLifecycleOperation({
+        caller: currentUser,
+        activeTabId,
+        target: activeLifecycleTarget,
+        operation: effectiveOp,
+        proposedRole,
+        directorySnapshot,
+        invokeInit: initInvoker,
+        invokeChangeRole: changeRoleInvoker,
+        invokeDeactivate: deactivateInvoker,
+        invokeReactivate: reactivateInvoker,
+        refreshDirectory: executeDirectoryLoad,
+        onModalClose: () => {
+          setActiveLifecycleTarget(null);
+        },
+      });
+    },
+    [
+      activeLifecycleTarget,
+      invokeInitializeRevision,
+      invokeChangeRole,
+      invokeDeactivate,
+      invokeReactivate,
+      clientDeps,
+      currentUser,
       activeTabId,
-      target: activeLifecycleTarget,
-      operation: effectiveOp,
       directorySnapshot,
-      invokeInit: invoker,
-      refreshDirectory: executeDirectoryLoad,
-      onModalClose: () => {
-        setActiveLifecycleTarget(null);
-      },
-    });
-  }, [
-    activeLifecycleTarget,
-    selectedOperation,
-    invokeInitializeRevision,
-    clientDeps,
-    currentUser,
-    activeTabId,
-    directorySnapshot,
-    executeDirectoryLoad,
-  ]);
+      executeDirectoryLoad,
+    ]
+  );
 
   const handleRefreshAfterInitFailure = useCallback(async () => {
     await executeDirectoryLoad();
@@ -1372,14 +2006,24 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
       const updatedTarget =
         latestSnap.users.find((u) => u.id === activeLifecycleTarget.id) ?? null;
       setActiveLifecycleTarget(updatedTarget);
+      const updatedRev = getAdminUserRevision(updatedTarget);
+      const nextOp: AdminLifecycleOperation =
+        updatedRev === undefined
+          ? 'InitializeRevision'
+          : updatedTarget && !updatedTarget.isActive
+          ? 'Reactivate'
+          : 'ChangeRole';
+      setSelectedOperation(nextOp);
       initControllerRef.current?.resetForTarget(
         currentUser,
         updatedTarget,
         latestSnap.requestGeneration,
-        false
+        false,
+        nextOp,
+        nextOp === 'ChangeRole' ? selectedTargetRole : null
       );
     }
-  }, [executeDirectoryLoad, activeLifecycleTarget, currentUser]);
+  }, [executeDirectoryLoad, activeLifecycleTarget, currentUser, selectedTargetRole]);
 
   useEffect(() => {
     const controller = controllerRef.current!;
@@ -1573,7 +2217,7 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
           </div>
         </div>
 
-        {/* Bilingual Read-Only Notice (Mutating Actions Disabled in AUTH-03C2) */}
+        {/* Bilingual Governance & Guarded Lifecycle Notice */}
         <div
           className="mt-4 p-3.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-800/60 flex items-start gap-2.5 text-xs text-amber-900 dark:text-amber-200"
           role="status"
@@ -1588,6 +2232,32 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
             </p>
           </div>
         </div>
+
+        {/* Completed Lifecycle Operation Banner */}
+        {initSubmissionSnapshot.status === 'succeeded' && (
+          <div
+            className="mt-3 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/70 flex items-center justify-between gap-2.5 text-xs text-emerald-900 dark:text-emerald-200"
+            role="status"
+            data-testid="admin-lifecycle-completed-banner"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <Shield className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span className="font-bold">
+                {isAr
+                  ? ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_AR
+                  : ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_EN}
+              </span>
+              {initSubmissionSnapshot.lastAuditEventId && (
+                <span
+                  className="font-mono text-[11px] text-emerald-700 dark:text-emerald-300 truncate"
+                  data-testid="admin-lifecycle-audit-receipt-id"
+                >
+                  ({initSubmissionSnapshot.lastAuditEventId})
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Metrics Grid (only shown when server response is loaded or genuinely empty) */}
         {(effectiveStatus === 'loaded' || effectiveStatus === 'empty') && (
@@ -2383,31 +3053,41 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                   : 'Reactivate'
                 : selectedOperation;
 
-              const eligibilityCheck = isTargetEligibleForRevisionInitialization(
+              const eligibilityCheck = validateLifecycleOperationEligibility(
                 currentUser,
                 activeTabId,
                 activeLifecycleTarget,
-                directorySnapshot
+                directorySnapshot,
+                effectiveOperation,
+                effectiveOperation === 'ChangeRole' ? selectedTargetRole : undefined
               );
 
-              const isSubmittingInit =
-                isLegacyTarget && initSubmissionSnapshot.status === 'submitting';
+              const isSubmittingLifecycle =
+                initSubmissionSnapshot.status === 'submitting';
 
-              const canSubmitInitializeRevision =
-                isAuthorizedOwner &&
-                isLegacyTarget &&
-                effectiveOperation === 'InitializeRevision' &&
-                eligibilityCheck.eligible &&
+              const isBoundContextMatching =
                 initSubmissionSnapshot.isConfirmed &&
                 initSubmissionSnapshot.boundCallerUid === currentUser.id &&
                 initSubmissionSnapshot.boundTargetUid === activeLifecycleTarget.id &&
-                !isSubmittingInit &&
+                (initSubmissionSnapshot.boundOperation === null ||
+                  initSubmissionSnapshot.boundOperation === undefined ||
+                  initSubmissionSnapshot.boundOperation === effectiveOperation) &&
+                (effectiveOperation !== 'ChangeRole' ||
+                  initSubmissionSnapshot.boundProposedRole === null ||
+                  initSubmissionSnapshot.boundProposedRole === undefined ||
+                  initSubmissionSnapshot.boundProposedRole === selectedTargetRole);
+
+              const canSubmitLifecycle =
+                isAuthorizedOwner &&
+                eligibilityCheck.eligible &&
+                isBoundContextMatching &&
+                !isSubmittingLifecycle &&
                 !initSubmissionSnapshot.requiresRefreshBeforeRetry;
 
               const activeErrorCategory: AdminRevisionInitErrorCategory | null =
                 initSubmissionSnapshot.status === 'error'
                   ? initSubmissionSnapshot.errorCategory ?? 'unavailable'
-                  : isLegacyTarget && !eligibilityCheck.eligible
+                  : !eligibilityCheck.eligible
                   ? eligibilityCheck.reason ?? 'target-ineligible'
                   : null;
 
@@ -2420,10 +3100,26 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                 : null;
 
               const showRefreshPrompt =
-                isLegacyTarget &&
-                (initSubmissionSnapshot.requiresRefreshBeforeRetry ||
-                  (!eligibilityCheck.eligible &&
-                    activeErrorCategory === 'stale-directory'));
+                initSubmissionSnapshot.requiresRefreshBeforeRetry ||
+                (!eligibilityCheck.eligible &&
+                  activeErrorCategory === 'stale-directory');
+
+              const confirmationCheckboxLabel =
+                effectiveOperation === 'InitializeRevision'
+                  ? isAr
+                    ? ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_AR
+                    : ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_EN
+                  : effectiveOperation === 'ChangeRole'
+                  ? isAr
+                    ? ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_AR
+                    : ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_EN
+                  : effectiveOperation === 'Deactivate'
+                  ? isAr
+                    ? ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_AR
+                    : ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_EN
+                  : isAr
+                  ? ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_AR
+                  : ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_EN;
 
               return (
                 <>
@@ -2441,27 +3137,38 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                       >
                         <option value="InitializeRevision">
                           {isAr
-                            ? 'تهيئة المراجعة الأولية للحساب القديم'
-                            : 'Initialize legacy account (InitializeRevision)'}
+                            ? ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR
+                            : ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN}
                         </option>
                       </select>
                     ) : (
                       <select
                         value={effectiveOperation}
-                        onChange={(e) => setSelectedOperation(e.target.value as AdminLifecycleOperation)}
-                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer"
+                        onChange={(e) =>
+                          handleSelectLifecycleOperation(
+                            e.target.value as AdminLifecycleOperation
+                          )
+                        }
+                        disabled={isSubmittingLifecycle}
+                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer disabled:opacity-60"
                         data-testid="lifecycle-operation-select"
                       >
                         <option value="ChangeRole">
-                          {isAr ? 'تغيير الدور الإداري' : 'Change Admin Role'}
+                          {isAr
+                            ? ADMIN_LIFECYCLE_CHANGE_ROLE_LABEL_AR
+                            : ADMIN_LIFECYCLE_CHANGE_ROLE_LABEL_EN}
                         </option>
                         {activeLifecycleTarget.isActive ? (
                           <option value="Deactivate">
-                            {isAr ? 'تعطيل الحساب الإداري' : 'Deactivate Account'}
+                            {isAr
+                              ? ADMIN_LIFECYCLE_DEACTIVATE_LABEL_AR
+                              : ADMIN_LIFECYCLE_DEACTIVATE_LABEL_EN}
                           </option>
                         ) : (
                           <option value="Reactivate">
-                            {isAr ? 'إعادة تفعيل الحساب الإداري' : 'Reactivate Account'}
+                            {isAr
+                              ? ADMIN_LIFECYCLE_REACTIVATE_LABEL_AR
+                              : ADMIN_LIFECYCLE_REACTIVATE_LABEL_EN}
                           </option>
                         )}
                       </select>
@@ -2476,8 +3183,11 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                       </label>
                       <select
                         value={selectedTargetRole}
-                        onChange={(e) => setSelectedTargetRole(e.target.value as AdminRole)}
-                        className="w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer"
+                        onChange={(e) =>
+                          handleSelectTargetRole(e.target.value as AdminRole)
+                        }
+                        disabled={isSubmittingLifecycle}
+                        className="w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer disabled:opacity-60"
                         data-testid="lifecycle-target-role-select"
                       >
                         {NON_OWNER_LIFECYCLE_ROLES.map((r) => (
@@ -2500,7 +3210,7 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                           <p className="font-semibold" data-testid="lifecycle-proposed-operation">
                             {isAr
                               ? `الإجراء المقترح: تهيئة المراجعة الأولية للحساب [${activeLifecycleTarget.name}]`
-                              : `Proposed Operation: InitializeRevision for account [${activeLifecycleTarget.name}]`}
+                              : `Proposed Operation: ${ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN} for account [${activeLifecycleTarget.name}]`}
                           </p>
                           <p>
                             {isAr
@@ -2530,174 +3240,143 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                     </div>
                   </div>
 
-                  {/* S5 Explicit Legacy Revision Initialization Controls vs Guarded Mutation Preview */}
-                  {isLegacyTarget && effectiveOperation === 'InitializeRevision' ? (
-                    <div className="space-y-3">
-                      {/* Dedicated Explicit Confirmation Checkbox */}
-                      <label
-                        className={`flex items-start gap-2.5 p-3.5 rounded-xl border text-xs transition-colors ${
-                          !eligibilityCheck.eligible ||
-                          isSubmittingInit ||
-                          initSubmissionSnapshot.requiresRefreshBeforeRetry
-                            ? 'bg-gray-50 dark:bg-gray-850 border-gray-200 dark:border-gray-800 opacity-75 cursor-not-allowed'
-                            : 'bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-200/80 dark:border-emerald-800/60 cursor-pointer'
-                        }`}
-                        data-testid="lifecycle-init-confirmation-box"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={Boolean(
-                            initSubmissionSnapshot.isConfirmed &&
-                              initSubmissionSnapshot.boundCallerUid === currentUser.id &&
-                              initSubmissionSnapshot.boundTargetUid === activeLifecycleTarget.id
-                          )}
-                          disabled={
-                            !eligibilityCheck.eligible ||
-                            isSubmittingInit ||
-                            initSubmissionSnapshot.requiresRefreshBeforeRetry
-                          }
-                          onChange={(e) => handleToggleInitConfirmation(e.target.checked)}
-                          className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 shrink-0"
-                          data-testid="lifecycle-init-confirm-checkbox"
-                        />
-                        <span
-                          className="text-gray-800 dark:text-gray-200 font-medium leading-relaxed"
-                          data-testid="lifecycle-init-confirm-label"
-                        >
-                          {isAr
-                            ? ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_AR
-                            : ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_EN}
-                        </span>
-                      </label>
-
-                      {/* Compact Progress Indicator while Submitting */}
-                      {isSubmittingInit && (
-                        <div
-                          className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 flex items-center gap-2.5 text-xs text-emerald-800 dark:text-emerald-200"
-                          role="status"
-                          data-testid="lifecycle-submitting-indicator"
-                        >
-                          <Loader2 className="w-4 h-4 animate-spin text-emerald-600 dark:text-emerald-400 shrink-0" />
-                          <span className="font-semibold">
-                            {isAr
-                              ? 'جاري تهيئة المراجعة الأولية للحساب على الخادم...'
-                              : 'Initializing authoritative account revision on server...'}
-                          </span>
-                        </div>
-                      )}
-
-                      {/* Sanitized Failure / Ineligibility Notice */}
-                      {activeErrorMessage && !isSubmittingInit && (
-                        <div
-                          className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/80 space-y-2.5 text-xs text-rose-900 dark:text-rose-200"
-                          role="alert"
-                          data-testid="lifecycle-submission-error"
-                        >
-                          <div className="flex items-start gap-2">
-                            <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
-                            <p
-                              className="font-semibold leading-relaxed"
-                              data-testid="lifecycle-submission-error-message"
-                            >
-                              {activeErrorMessage}
-                            </p>
-                          </div>
-                          {showRefreshPrompt && (
-                            <div className="flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() => void handleRefreshAfterInitFailure()}
-                                className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg inline-flex items-center gap-1.5 cursor-pointer transition-colors"
-                                data-testid="lifecycle-refresh-directory-btn"
-                              >
-                                <RefreshCw className="w-3.5 h-3.5" />
-                                <span>
-                                  {isAr ? 'تحديث الدليل الآن' : 'Refresh Directory Now'}
-                                </span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    /* Safe Preview Notice - Unconditional Mutation Guard for ChangeRole / Deactivate / Reactivate */
-                    <div
-                      className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 rounded-xl p-3.5 flex items-start gap-2.5"
-                      data-testid="lifecycle-mutation-disabled-banner"
+                  {/* Unified Guarded Lifecycle Confirmation & Submission Controls */}
+                  <div className="space-y-3">
+                    {/* Dedicated Explicit Confirmation Checkbox */}
+                    <label
+                      className={`flex items-start gap-2.5 p-3.5 rounded-xl border text-xs transition-colors ${
+                        !eligibilityCheck.eligible ||
+                        isSubmittingLifecycle ||
+                        initSubmissionSnapshot.requiresRefreshBeforeRetry
+                          ? 'bg-gray-50 dark:bg-gray-850 border-gray-200 dark:border-gray-800 opacity-75 cursor-not-allowed'
+                          : 'bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-200/80 dark:border-emerald-800/60 cursor-pointer'
+                      }`}
+                      data-testid="lifecycle-init-confirmation-box"
                     >
-                      <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-                      <div className="space-y-0.5 text-xs">
-                        <span className="font-bold text-amber-900 dark:text-amber-200 block">
-                          {isAr ? 'وضع المعاينة والتحقق الآمن' : 'Safe Preview Mode'}
-                        </span>
-                        <p className="text-amber-800 dark:text-amber-300 text-[11px] leading-relaxed">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(isBoundContextMatching)}
+                        disabled={
+                          !eligibilityCheck.eligible ||
+                          isSubmittingLifecycle ||
+                          initSubmissionSnapshot.requiresRefreshBeforeRetry
+                        }
+                        onChange={(e) =>
+                          handleToggleLifecycleConfirmation(
+                            e.target.checked,
+                            effectiveOperation,
+                            effectiveOperation === 'ChangeRole'
+                              ? selectedTargetRole
+                              : undefined
+                          )
+                        }
+                        className="mt-0.5 h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 shrink-0"
+                        data-testid="lifecycle-init-confirm-checkbox"
+                      />
+                      <span
+                        className="text-gray-800 dark:text-gray-200 font-medium leading-relaxed"
+                        data-testid="lifecycle-init-confirm-label"
+                      >
+                        {confirmationCheckboxLabel}
+                      </span>
+                    </label>
+
+                    {/* Compact Progress Indicator while Submitting */}
+                    {isSubmittingLifecycle && (
+                      <div
+                        className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 flex items-center gap-2.5 text-xs text-emerald-800 dark:text-emerald-200"
+                        role="status"
+                        data-testid="lifecycle-submitting-indicator"
+                      >
+                        <Loader2 className="w-4 h-4 animate-spin text-emerald-600 dark:text-emerald-400 shrink-0" />
+                        <span className="font-semibold">
                           {isAr
-                            ? ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_AR
-                            : ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_EN}
-                        </p>
+                            ? 'جاري تنفيذ الإجراء الإداري على الخادم...'
+                            : 'Executing administrative lifecycle operation on server...'}
+                        </span>
                       </div>
-                    </div>
-                  )}
+                    )}
+
+                    {/* Sanitized Failure / Ineligibility Notice */}
+                    {activeErrorMessage && !isSubmittingLifecycle && (
+                      <div
+                        className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/80 space-y-2.5 text-xs text-rose-900 dark:text-rose-200"
+                        role="alert"
+                        data-testid="lifecycle-submission-error"
+                      >
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                          <p
+                            className="font-semibold leading-relaxed"
+                            data-testid="lifecycle-submission-error-message"
+                          >
+                            {activeErrorMessage}
+                          </p>
+                        </div>
+                        {showRefreshPrompt && (
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => void handleRefreshAfterInitFailure()}
+                              className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                              data-testid="lifecycle-refresh-directory-btn"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                              <span>
+                                {isAr ? 'تحديث الدليل الآن' : 'Refresh Directory Now'}
+                              </span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   {/* Actions Footer */}
                   <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-gray-100 dark:border-gray-800">
                     <button
                       type="button"
                       onClick={handleCloseLifecycleModal}
-                      disabled={isSubmittingInit}
+                      disabled={isSubmittingLifecycle}
                       className="px-4 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs font-bold rounded-xl transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       data-testid="lifecycle-cancel-btn"
                     >
                       {isAr ? 'إلغاء' : 'Cancel'}
                     </button>
-                    {isLegacyTarget && effectiveOperation === 'InitializeRevision' ? (
-                      <button
-                        type="button"
-                        onClick={() => void handleExecuteInitializeRevision()}
-                        disabled={!canSubmitInitializeRevision}
-                        aria-disabled={canSubmitInitializeRevision ? 'false' : 'true'}
-                        className={`px-4 py-2 text-xs font-bold rounded-xl inline-flex items-center gap-1.5 transition-colors ${
-                          canSubmitInitializeRevision
-                            ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
-                            : 'bg-gray-300 dark:bg-gray-800 text-gray-500 dark:text-gray-500 cursor-not-allowed opacity-75'
-                        }`}
-                        data-testid="lifecycle-confirm-btn"
-                      >
-                        {isSubmittingInit ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Shield className="w-3.5 h-3.5" />
-                        )}
-                        <span>
-                          {isSubmittingInit
-                            ? isAr
-                              ? 'جاري التهيئة...'
-                              : 'Initializing...'
-                            : isAr
-                            ? 'تأكيد تهيئة الحساب القديم'
-                            : 'Confirm Initialize Legacy Account'}
-                        </span>
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={true}
-                        aria-disabled="true"
-                        title={
-                          isAr
-                            ? 'التعديلات المباشرة معطلة في هذه المرحلة'
-                            : 'Live mutations are disabled in this unit'
-                        }
-                        className="px-4 py-2 bg-gray-300 dark:bg-gray-800 text-gray-500 dark:text-gray-500 text-xs font-bold rounded-xl cursor-not-allowed opacity-75 inline-flex items-center gap-1.5"
-                        data-testid="lifecycle-confirm-btn"
-                      >
-                        <Lock className="w-3.5 h-3.5" />
-                        <span>
-                          {isAr ? 'تأكيد الإجراء (معطل حالياً)' : 'Confirm Action (Disabled)'}
-                        </span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void handleExecuteLifecycleOperation(
+                          effectiveOperation,
+                          effectiveOperation === 'ChangeRole'
+                            ? selectedTargetRole
+                            : undefined
+                        )
+                      }
+                      disabled={!canSubmitLifecycle}
+                      aria-disabled={canSubmitLifecycle ? 'false' : 'true'}
+                      className={`px-4 py-2 text-xs font-bold rounded-xl inline-flex items-center gap-1.5 transition-colors ${
+                        canSubmitLifecycle
+                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+                          : 'bg-gray-300 dark:bg-gray-800 text-gray-500 dark:text-gray-500 cursor-not-allowed opacity-75'
+                      }`}
+                      data-testid="lifecycle-confirm-btn"
+                    >
+                      {isSubmittingLifecycle ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Shield className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {isSubmittingLifecycle
+                          ? isAr
+                            ? 'جاري التنفيذ...'
+                            : 'Processing...'
+                          : isAr
+                          ? ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_AR
+                          : ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_EN}
+                      </span>
+                    </button>
                   </div>
                 </>
               );

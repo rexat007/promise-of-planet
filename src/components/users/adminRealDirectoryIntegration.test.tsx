@@ -30,8 +30,11 @@ import { AdminRole, AdminPermission, AdminDomain, type AdminUser } from '../../t
 import { AdminAccessService } from '../../services/adminAccess';
 import {
   AdminIdentityClientError,
+  changeAdminRole,
+  deactivateAdmin,
   initializeAdminRevision,
   listAdminUsers,
+  reactivateAdmin,
   type AdminIdentityClientDependencies,
   type AdminLifecycleClientResponse,
   type ListAdminUsersClientResponse,
@@ -45,16 +48,36 @@ import {
 import {
   ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_AR,
   ADMIN_DIRECTORY_MUTATION_DISABLED_NOTICE_EN,
-  ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_AR,
-  ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_EN,
   ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR,
   ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN,
   ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR,
   ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN,
+  ADMIN_LIFECYCLE_CHANGE_ROLE_LABEL_AR,
+  ADMIN_LIFECYCLE_CHANGE_ROLE_LABEL_EN,
+  ADMIN_LIFECYCLE_DEACTIVATE_LABEL_AR,
+  ADMIN_LIFECYCLE_DEACTIVATE_LABEL_EN,
+  ADMIN_LIFECYCLE_REACTIVATE_LABEL_AR,
+  ADMIN_LIFECYCLE_REACTIVATE_LABEL_EN,
+  ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_AR,
+  ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_EN,
+  ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_AR,
+  ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_EN,
+  ADMIN_LIFECYCLE_REVISION_CONFLICT_LABEL_AR,
+  ADMIN_LIFECYCLE_REVISION_CONFLICT_LABEL_EN,
+  ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_AR,
+  ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_EN,
+  ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_AR,
+  ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_EN,
   ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_AR,
   ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_EN,
   ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_AR,
   ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_EN,
+  ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_AR,
+  ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_EN,
+  ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_AR,
+  ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_EN,
+  ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_AR,
+  ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_EN,
   INIT_REVISION_ERROR_MESSAGES,
   NON_OWNER_LIFECYCLE_ROLES,
   AdminDirectoryLoadController,
@@ -65,6 +88,8 @@ import {
   isAuthorizedOwnerForUsersDirectory,
   isTargetEligibleForRevisionInitialization,
   validateCanonicalDirectoryUsersList,
+  validateLifecycleOperationEligibility,
+  validateLifecycleSuccessResponse,
 } from './AdminUsersManagement';
 
 const ACTIVE_OWNER: AdminUser = Object.freeze({
@@ -1050,7 +1075,7 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     expect(html).toContain('data-testid="user-revision-badge-card-versioned-reviewer-01"');
   });
 
-  it('23. Confirmation content: Explicitly identifies target account, current role, revision, and proposed action in Arabic and English', async () => {
+  it('23. Confirmation content: Explicitly identifies target account, current role, revision, proposed action, and explicit confirmation checkbox in Arabic and English', async () => {
     const targetUser: AdminUser = {
       id: 'target-admin-777',
       name: 'Karim Training',
@@ -1087,8 +1112,8 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     expect(htmlAr).toContain('v8');
     expect(htmlAr).toContain('data-testid="lifecycle-operation-select"');
     expect(htmlAr).toContain('data-testid="lifecycle-proposed-summary"');
-    expect(htmlAr).toContain('data-testid="lifecycle-mutation-disabled-banner"');
-    expect(htmlAr).toContain(ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_AR);
+    expect(htmlAr).toContain('data-testid="lifecycle-init-confirm-checkbox"');
+    expect(htmlAr).toContain(ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_AR);
     expect(NON_OWNER_LIFECYCLE_ROLES).not.toContain(AdminRole.Owner);
     expect(ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN).toContain('read-only');
 
@@ -1109,8 +1134,8 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     expect(htmlEn).toContain('data-testid="admin-lifecycle-modal"');
     expect(htmlEn).toContain('data-testid="lifecycle-target-name"');
     expect(htmlEn).toContain('Karim Training');
-    expect(htmlEn).toContain('data-testid="lifecycle-mutation-disabled-banner"');
-    expect(htmlEn).toContain(ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_EN);
+    expect(htmlEn).toContain('data-testid="lifecycle-init-confirm-checkbox"');
+    expect(htmlEn).toContain(ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_EN);
     expect(htmlEn).toContain('Deactivate account');
 
     await i18n.changeLanguage('ar');
@@ -2308,7 +2333,7 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     expect(directorySnapshot.users[0].revision).toBeUndefined();
   });
 
-  it('41. S5 ChangeRole, Deactivate, and Reactivate submission buttons remain unconditionally disabled', () => {
+  it('41. FINAL Unified Confirmation Gating: ChangeRole, Deactivate, Reactivate, and InitializeRevision remain disabled until explicitly confirmed and become enabled when eligible and confirmed', () => {
     const activeVersionedUser: AdminUser = {
       id: 'ver-active-710',
       name: 'Active Versioned Editor',
@@ -2325,39 +2350,909 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
       isActive: false,
       revision: 4,
     };
+    const legacyUser: AdminUser = {
+      id: 'legacy-unver-712',
+      name: 'Legacy Unversioned User',
+      email: 'legacy.unver@promiseofplanet.org',
+      role: AdminRole.Viewer,
+      isActive: true,
+    };
 
     const operationsToVerify = [
-      { target: activeVersionedUser, op: 'ChangeRole' as const },
-      { target: activeVersionedUser, op: 'Deactivate' as const },
-      { target: inactiveVersionedUser, op: 'Reactivate' as const },
+      {
+        target: activeVersionedUser,
+        op: 'ChangeRole' as const,
+        targetRole: AdminRole.RightsReviewer,
+      },
+      {
+        target: activeVersionedUser,
+        op: 'Deactivate' as const,
+        targetRole: AdminRole.RightsReviewer,
+      },
+      {
+        target: inactiveVersionedUser,
+        op: 'Reactivate' as const,
+        targetRole: AdminRole.ContentEditor,
+      },
+      {
+        target: legacyUser,
+        op: 'InitializeRevision' as const,
+        targetRole: AdminRole.ContentEditor,
+      },
     ];
 
-    for (const { target, op } of operationsToVerify) {
-      const html = renderToStaticMarkup(
+    for (const { target, op, targetRole } of operationsToVerify) {
+      // 1. Unconfirmed by default -> confirm button disabled
+      const unconfirmedHtml = renderToStaticMarkup(
         <AdminUsersManagement
           currentUser={ACTIVE_OWNER}
           activeTabId="users"
           initialDirectoryState={{
             status: 'loaded',
-            users: [activeVersionedUser, inactiveVersionedUser],
+            users: [activeVersionedUser, inactiveVersionedUser, legacyUser],
           }}
           initialLifecycleTarget={target}
           initialLifecycleOperation={op}
+          initialLifecycleTargetRole={targetRole}
+          initialLifecycleConfirmed={false}
+        />
+      );
+
+      expect(unconfirmedHtml).toContain('data-testid="lifecycle-init-confirm-checkbox"');
+      const disabledBtnMatch =
+        unconfirmedHtml.match(/<button[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/) ||
+        unconfirmedHtml.match(
+          /<button[^>]*disabled=""[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/
+        );
+      expect(disabledBtnMatch).not.toBeNull();
+      expect(disabledBtnMatch![0]).toContain('disabled=""');
+      expect(disabledBtnMatch![0]).toContain('aria-disabled="true"');
+
+      // 2. Explicitly confirmed -> confirm button enabled
+      const confirmedHtml = renderToStaticMarkup(
+        <AdminUsersManagement
+          currentUser={ACTIVE_OWNER}
+          activeTabId="users"
+          initialDirectoryState={{
+            status: 'loaded',
+            users: [activeVersionedUser, inactiveVersionedUser, legacyUser],
+          }}
+          initialLifecycleTarget={target}
+          initialLifecycleOperation={op}
+          initialLifecycleTargetRole={targetRole}
           initialLifecycleConfirmed={true}
         />
       );
 
-      expect(html).toContain('data-testid="lifecycle-mutation-disabled-banner"');
-      expect(html).not.toContain('data-testid="lifecycle-init-confirm-checkbox"');
-
-      const confirmBtnMatch =
-        html.match(/<button[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/) ||
-        html.match(
-          /<button[^>]*disabled=""[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/
-        );
-      expect(confirmBtnMatch).not.toBeNull();
-      expect(confirmBtnMatch![0]).toContain('disabled=""');
-      expect(confirmBtnMatch![0]).toContain('aria-disabled="true"');
+      const enabledBtnMatch = confirmedHtml.match(
+        /<button[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/
+      );
+      expect(enabledBtnMatch).not.toBeNull();
+      expect(enabledBtnMatch![0]).not.toContain('disabled=""');
+      expect(enabledBtnMatch![0]).toContain('aria-disabled="false"');
     }
   });
+
+  it('42. FINAL ChangeRole execution: Dispatches exact { targetUid, expectedRevision, targetRole } via changeAdminRole, validates response & auditReceipt, closes modal, and refreshes directory', async () => {
+    const targetAdmin: AdminUser = {
+      id: 'ver-editor-801',
+      name: 'Yara Content Editor',
+      email: 'yara.editor@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+      revision: 3,
+    };
+
+    let serverUsers: ReadonlyArray<AdminUser> = [targetAdmin];
+
+    const invokeCallableSpy = vi.fn(async (functionName: string, payload: unknown) => {
+      expect(functionName).toBe('manageAdminLifecycle');
+      expect(payload).toEqual({
+        operation: 'ChangeRole',
+        targetUid: 'ver-editor-801',
+        expectedRevision: 3,
+        targetRole: AdminRole.LibraryCurator,
+      });
+      expect(Object.keys(payload as Record<string, unknown>).sort()).toEqual([
+        'expectedRevision',
+        'operation',
+        'targetRole',
+        'targetUid',
+      ]);
+
+      serverUsers = [
+        {
+          ...targetAdmin,
+          role: AdminRole.LibraryCurator,
+          revision: 4,
+        },
+      ];
+
+      return {
+        data: {
+          operation: 'ChangeRole',
+          targetUid: 'ver-editor-801',
+          previousRevision: 3,
+          currentRevision: 4,
+          committedAtIso: '2026-03-01T14:00:00.000Z',
+          admin: {
+            id: 'ver-editor-801',
+            role: AdminRole.LibraryCurator,
+            isActive: true,
+            revision: 4,
+          },
+          auditReceipt: {
+            auditEventId: 'audit-changerole-801-004',
+            action: 'ADMIN_ROLE_CHANGED',
+            targetType: 'admin_identity',
+            targetId: 'ver-editor-801',
+            timestamp: '2026-03-01T14:00:00.000Z',
+          },
+        },
+      };
+    });
+
+    const listCallableSpy = vi.fn(async () => ({
+      data: {
+        admins: serverUsers,
+      },
+    }));
+
+    const clientDeps: AdminIdentityClientDependencies = {
+      isBackendConfigured: () => true,
+      getAuthenticatedUid: () => ACTIVE_OWNER.id,
+      listAdminUsersCallable: listCallableSpy,
+      invokeCallable: invokeCallableSpy,
+    };
+
+    const dirController = new AdminDirectoryLoadController();
+    const initialDirSnap = await dirController.loadDirectory(
+      ACTIVE_OWNER,
+      'users',
+      () => listAdminUsers(clientDeps)
+    );
+    expect(initialDirSnap.users[0].role).toBe(AdminRole.ContentEditor);
+    expect(initialDirSnap.users[0].revision).toBe(3);
+
+    const lifecycleController = new AdminRevisionInitializationController();
+    lifecycleController.resetForTarget(
+      ACTIVE_OWNER,
+      targetAdmin,
+      initialDirSnap.requestGeneration,
+      false,
+      'ChangeRole',
+      AdminRole.LibraryCurator
+    );
+    lifecycleController.setConfirmed(
+      true,
+      ACTIVE_OWNER,
+      'users',
+      targetAdmin,
+      initialDirSnap,
+      'ChangeRole',
+      AdminRole.LibraryCurator
+    );
+
+    let modalClosed = false;
+    const finalSnap = await lifecycleController.submitLifecycleOperation({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: targetAdmin,
+      operation: 'ChangeRole',
+      proposedRole: AdminRole.LibraryCurator,
+      directorySnapshot: initialDirSnap,
+      invokeChangeRole: (input) => {
+        expect(Object.keys(input).sort()).toEqual([
+          'expectedRevision',
+          'targetRole',
+          'targetUid',
+        ]);
+        expect(input).toEqual({
+          targetUid: 'ver-editor-801',
+          expectedRevision: 3,
+          targetRole: AdminRole.LibraryCurator,
+        });
+        return changeAdminRole(input, clientDeps);
+      },
+      refreshDirectory: () =>
+        dirController.loadDirectory(ACTIVE_OWNER, 'users', () =>
+          listAdminUsers(clientDeps)
+        ),
+      onModalClose: () => {
+        modalClosed = true;
+      },
+    });
+
+    expect(finalSnap.status).toBe('succeeded');
+    expect(finalSnap.isConfirmed).toBe(false);
+    expect(finalSnap.lastCompletedOperation).toBe('ChangeRole');
+    expect(finalSnap.lastCompletedTargetUid).toBe('ver-editor-801');
+    expect(finalSnap.lastAuditEventId).toBe('audit-changerole-801-004');
+    expect(modalClosed).toBe(true);
+    expect(invokeCallableSpy).toHaveBeenCalledTimes(1);
+    expect(listCallableSpy).toHaveBeenCalledTimes(2);
+
+    const refreshedDirSnap = dirController.getSnapshot();
+    expect(refreshedDirSnap.users[0].role).toBe(AdminRole.LibraryCurator);
+    expect(refreshedDirSnap.users[0].revision).toBe(4);
+  });
+
+  it('43. FINAL Deactivate execution: Dispatches exact { targetUid, expectedRevision } via deactivateAdmin, validates response & auditReceipt, closes modal, and refreshes directory', async () => {
+    const activeTarget: AdminUser = {
+      id: 'ver-trainer-802',
+      name: 'Mazen Trainer',
+      email: 'mazen.trainer@promiseofplanet.org',
+      role: AdminRole.Trainer,
+      isActive: true,
+      revision: 5,
+    };
+
+    let serverUsers: ReadonlyArray<AdminUser> = [activeTarget];
+
+    const invokeCallableSpy = vi.fn(async (functionName: string, payload: unknown) => {
+      expect(functionName).toBe('manageAdminLifecycle');
+      expect(payload).toEqual({
+        operation: 'Deactivate',
+        targetUid: 'ver-trainer-802',
+        expectedRevision: 5,
+      });
+      expect(Object.keys(payload as Record<string, unknown>).sort()).toEqual([
+        'expectedRevision',
+        'operation',
+        'targetUid',
+      ]);
+
+      serverUsers = [
+        {
+          ...activeTarget,
+          isActive: false,
+          revision: 6,
+        },
+      ];
+
+      return {
+        data: {
+          operation: 'Deactivate',
+          targetUid: 'ver-trainer-802',
+          previousRevision: 5,
+          currentRevision: 6,
+          committedAtIso: '2026-03-01T15:00:00.000Z',
+          admin: {
+            id: 'ver-trainer-802',
+            role: AdminRole.Trainer,
+            isActive: false,
+            revision: 6,
+          },
+          auditReceipt: {
+            auditEventId: 'audit-deactivate-802-006',
+            action: 'ADMIN_DEACTIVATED',
+            targetType: 'admin_identity',
+            targetId: 'ver-trainer-802',
+            timestamp: '2026-03-01T15:00:00.000Z',
+          },
+        },
+      };
+    });
+
+    const listCallableSpy = vi.fn(async () => ({
+      data: {
+        admins: serverUsers,
+      },
+    }));
+
+    const clientDeps: AdminIdentityClientDependencies = {
+      isBackendConfigured: () => true,
+      getAuthenticatedUid: () => ACTIVE_OWNER.id,
+      listAdminUsersCallable: listCallableSpy,
+      invokeCallable: invokeCallableSpy,
+    };
+
+    const dirController = new AdminDirectoryLoadController();
+    const initialDirSnap = await dirController.loadDirectory(
+      ACTIVE_OWNER,
+      'users',
+      () => listAdminUsers(clientDeps)
+    );
+    expect(initialDirSnap.users[0].isActive).toBe(true);
+
+    const lifecycleController = new AdminRevisionInitializationController();
+    lifecycleController.resetForTarget(
+      ACTIVE_OWNER,
+      activeTarget,
+      initialDirSnap.requestGeneration,
+      false,
+      'Deactivate'
+    );
+    lifecycleController.setConfirmed(
+      true,
+      ACTIVE_OWNER,
+      'users',
+      activeTarget,
+      initialDirSnap,
+      'Deactivate'
+    );
+
+    let modalClosed = false;
+    const finalSnap = await lifecycleController.submitLifecycleOperation({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: activeTarget,
+      operation: 'Deactivate',
+      directorySnapshot: initialDirSnap,
+      invokeDeactivate: (input) => {
+        expect(Object.keys(input).sort()).toEqual([
+          'expectedRevision',
+          'targetUid',
+        ]);
+        expect(input).toEqual({
+          targetUid: 'ver-trainer-802',
+          expectedRevision: 5,
+        });
+        return deactivateAdmin(input, clientDeps);
+      },
+      refreshDirectory: () =>
+        dirController.loadDirectory(ACTIVE_OWNER, 'users', () =>
+          listAdminUsers(clientDeps)
+        ),
+      onModalClose: () => {
+        modalClosed = true;
+      },
+    });
+
+    expect(finalSnap.status).toBe('succeeded');
+    expect(finalSnap.lastCompletedOperation).toBe('Deactivate');
+    expect(finalSnap.lastAuditEventId).toBe('audit-deactivate-802-006');
+    expect(modalClosed).toBe(true);
+    expect(invokeCallableSpy).toHaveBeenCalledTimes(1);
+
+    const refreshedDirSnap = dirController.getSnapshot();
+    expect(refreshedDirSnap.users[0].isActive).toBe(false);
+    expect(refreshedDirSnap.users[0].revision).toBe(6);
+  });
+
+  it('44. FINAL Reactivate execution: Dispatches exact { targetUid, expectedRevision } via reactivateAdmin, validates response & auditReceipt, closes modal, and refreshes directory', async () => {
+    const inactiveTarget: AdminUser = {
+      id: 'ver-reviewer-803',
+      name: 'Dina Reviewer',
+      email: 'dina.reviewer@promiseofplanet.org',
+      role: AdminRole.RightsReviewer,
+      isActive: false,
+      revision: 9,
+    };
+
+    let serverUsers: ReadonlyArray<AdminUser> = [inactiveTarget];
+
+    const invokeCallableSpy = vi.fn(async (functionName: string, payload: unknown) => {
+      expect(functionName).toBe('manageAdminLifecycle');
+      expect(payload).toEqual({
+        operation: 'Reactivate',
+        targetUid: 'ver-reviewer-803',
+        expectedRevision: 9,
+      });
+      expect(Object.keys(payload as Record<string, unknown>).sort()).toEqual([
+        'expectedRevision',
+        'operation',
+        'targetUid',
+      ]);
+
+      serverUsers = [
+        {
+          ...inactiveTarget,
+          isActive: true,
+          revision: 10,
+        },
+      ];
+
+      return {
+        data: {
+          operation: 'Reactivate',
+          targetUid: 'ver-reviewer-803',
+          previousRevision: 9,
+          currentRevision: 10,
+          committedAtIso: '2026-03-01T16:00:00.000Z',
+          admin: {
+            id: 'ver-reviewer-803',
+            role: AdminRole.RightsReviewer,
+            isActive: true,
+            revision: 10,
+          },
+          auditReceipt: {
+            auditEventId: 'audit-reactivate-803-010',
+            action: 'ADMIN_REACTIVATED',
+            targetType: 'admin_identity',
+            targetId: 'ver-reviewer-803',
+            timestamp: '2026-03-01T16:00:00.000Z',
+          },
+        },
+      };
+    });
+
+    const listCallableSpy = vi.fn(async () => ({
+      data: {
+        admins: serverUsers,
+      },
+    }));
+
+    const clientDeps: AdminIdentityClientDependencies = {
+      isBackendConfigured: () => true,
+      getAuthenticatedUid: () => ACTIVE_OWNER.id,
+      listAdminUsersCallable: listCallableSpy,
+      invokeCallable: invokeCallableSpy,
+    };
+
+    const dirController = new AdminDirectoryLoadController();
+    const initialDirSnap = await dirController.loadDirectory(
+      ACTIVE_OWNER,
+      'users',
+      () => listAdminUsers(clientDeps)
+    );
+    expect(initialDirSnap.users[0].isActive).toBe(false);
+
+    const lifecycleController = new AdminRevisionInitializationController();
+    lifecycleController.resetForTarget(
+      ACTIVE_OWNER,
+      inactiveTarget,
+      initialDirSnap.requestGeneration,
+      false,
+      'Reactivate'
+    );
+    lifecycleController.setConfirmed(
+      true,
+      ACTIVE_OWNER,
+      'users',
+      inactiveTarget,
+      initialDirSnap,
+      'Reactivate'
+    );
+
+    let modalClosed = false;
+    const finalSnap = await lifecycleController.submitLifecycleOperation({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: inactiveTarget,
+      operation: 'Reactivate',
+      directorySnapshot: initialDirSnap,
+      invokeReactivate: (input) => {
+        expect(Object.keys(input).sort()).toEqual([
+          'expectedRevision',
+          'targetUid',
+        ]);
+        expect(input).toEqual({
+          targetUid: 'ver-reviewer-803',
+          expectedRevision: 9,
+        });
+        return reactivateAdmin(input, clientDeps);
+      },
+      refreshDirectory: () =>
+        dirController.loadDirectory(ACTIVE_OWNER, 'users', () =>
+          listAdminUsers(clientDeps)
+        ),
+      onModalClose: () => {
+        modalClosed = true;
+      },
+    });
+
+    expect(finalSnap.status).toBe('succeeded');
+    expect(finalSnap.lastCompletedOperation).toBe('Reactivate');
+    expect(finalSnap.lastAuditEventId).toBe('audit-reactivate-803-010');
+    expect(modalClosed).toBe(true);
+    expect(invokeCallableSpy).toHaveBeenCalledTimes(1);
+
+    const refreshedDirSnap = dirController.getSnapshot();
+    expect(refreshedDirSnap.users[0].isActive).toBe(true);
+    expect(refreshedDirSnap.users[0].revision).toBe(10);
+  });
+
+  it('45. FINAL Owner promotion rejection, no-op operation rejection, and missing/invalid revision rejection across ChangeRole, Deactivate, and Reactivate', async () => {
+    const activeEditor: AdminUser = {
+      id: 'ver-editor-804',
+      name: 'Sami Editor',
+      email: 'sami@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+      revision: 2,
+    };
+    const inactiveEditor: AdminUser = {
+      id: 'ver-inactive-805',
+      name: 'Hana Inactive',
+      email: 'hana@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: false,
+      revision: 3,
+    };
+    const unversionedEditor: AdminUser = {
+      id: 'unver-editor-806',
+      name: 'Unversioned Editor',
+      email: 'unver806@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+    };
+
+    const directorySnapshot = {
+      status: 'loaded' as const,
+      users: [activeEditor, inactiveEditor, unversionedEditor],
+      requestGeneration: 1,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    const invokeChangeRoleSpy = vi.fn();
+    const invokeDeactivateSpy = vi.fn();
+    const invokeReactivateSpy = vi.fn();
+
+    // 1. Owner promotion is forbidden
+    const ownerPromoCheck = validateLifecycleOperationEligibility(
+      ACTIVE_OWNER,
+      'users',
+      activeEditor,
+      directorySnapshot,
+      'ChangeRole',
+      AdminRole.Owner
+    );
+    expect(ownerPromoCheck.eligible).toBe(false);
+    expect(ownerPromoCheck.reason).toBe('owner-promotion');
+
+    const promoController = new AdminRevisionInitializationController({
+      isConfirmed: true,
+      boundCallerUid: ACTIVE_OWNER.id,
+      boundTargetUid: activeEditor.id,
+      boundDirectoryGeneration: 1,
+    });
+    const promoRes = await promoController.submitLifecycleOperation({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: activeEditor,
+      operation: 'ChangeRole',
+      proposedRole: AdminRole.Owner,
+      directorySnapshot,
+      invokeChangeRole: invokeChangeRoleSpy,
+      refreshDirectory: vi.fn(),
+    });
+    expect(promoRes.status).toBe('error');
+    expect(promoRes.errorCategory).toBe('owner-promotion');
+
+    // 2. No-op ChangeRole (same role) is rejected
+    const sameRoleCheck = validateLifecycleOperationEligibility(
+      ACTIVE_OWNER,
+      'users',
+      activeEditor,
+      directorySnapshot,
+      'ChangeRole',
+      AdminRole.ContentEditor
+    );
+    expect(sameRoleCheck.eligible).toBe(false);
+    expect(sameRoleCheck.reason).toBe('noop-operation');
+
+    // 3. No-op Deactivate on already inactive account is rejected
+    const noopDeactivateCheck = validateLifecycleOperationEligibility(
+      ACTIVE_OWNER,
+      'users',
+      inactiveEditor,
+      directorySnapshot,
+      'Deactivate'
+    );
+    expect(noopDeactivateCheck.eligible).toBe(false);
+    expect(noopDeactivateCheck.reason).toBe('noop-operation');
+
+    // 4. No-op Reactivate on already active account is rejected
+    const noopReactivateCheck = validateLifecycleOperationEligibility(
+      ACTIVE_OWNER,
+      'users',
+      activeEditor,
+      directorySnapshot,
+      'Reactivate'
+    );
+    expect(noopReactivateCheck.eligible).toBe(false);
+    expect(noopReactivateCheck.reason).toBe('noop-operation');
+
+    // 5. Missing revision on ChangeRole / Deactivate / Reactivate is rejected
+    for (const op of ['ChangeRole', 'Deactivate', 'Reactivate'] as const) {
+      const missingRevCheck = validateLifecycleOperationEligibility(
+        ACTIVE_OWNER,
+        'users',
+        unversionedEditor,
+        directorySnapshot,
+        op,
+        AdminRole.Trainer
+      );
+      expect(missingRevCheck.eligible).toBe(false);
+      expect(missingRevCheck.reason).toBe('target-ineligible');
+    }
+
+    expect(invokeChangeRoleSpy).not.toHaveBeenCalled();
+    expect(invokeDeactivateSpy).not.toHaveBeenCalled();
+    expect(invokeReactivateSpy).not.toHaveBeenCalled();
+  });
+
+  it('46. FINAL Operation switching, target switching, and stale revision protection: Changing operation or proposed role resets confirmation and blocks stale submissions', async () => {
+    const versionedTarget: AdminUser = {
+      id: 'ver-target-807',
+      name: 'Adel Moderator',
+      email: 'adel@promiseofplanet.org',
+      role: AdminRole.CitizenModerator,
+      isActive: true,
+      revision: 4,
+    };
+
+    const directorySnapshot = {
+      status: 'loaded' as const,
+      users: [versionedTarget],
+      requestGeneration: 1,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    const controller = new AdminRevisionInitializationController();
+    controller.resetForTarget(
+      ACTIVE_OWNER,
+      versionedTarget,
+      1,
+      false,
+      'ChangeRole',
+      AdminRole.Trainer
+    );
+    controller.setConfirmed(
+      true,
+      ACTIVE_OWNER,
+      'users',
+      versionedTarget,
+      directorySnapshot,
+      'ChangeRole',
+      AdminRole.Trainer
+    );
+    expect(controller.getSnapshot().isConfirmed).toBe(true);
+
+    // Switching proposed role or operation clears confirmation
+    controller.resetConfirmationForOperationChange('Deactivate');
+    expect(controller.getSnapshot().isConfirmed).toBe(false);
+    expect(controller.getSnapshot().boundOperation).toBe('Deactivate');
+
+    // Attempting to submit Deactivate when confirmation was bound to ChangeRole or cleared is rejected
+    const invokeDeactivateSpy = vi.fn();
+    const unconfirmedDeactivate = await controller.submitLifecycleOperation({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: versionedTarget,
+      operation: 'Deactivate',
+      directorySnapshot,
+      invokeDeactivate: invokeDeactivateSpy,
+      refreshDirectory: vi.fn(),
+    });
+    expect(unconfirmedDeactivate.status).toBe('error');
+    expect(unconfirmedDeactivate.errorCategory).toBe('unconfirmed');
+    expect(invokeDeactivateSpy).not.toHaveBeenCalled();
+
+    // If directory revision changes on server before submit (stale expectedRevision), submission is blocked
+    controller.setConfirmed(
+      true,
+      ACTIVE_OWNER,
+      'users',
+      versionedTarget,
+      directorySnapshot,
+      'Deactivate'
+    );
+    const newerDirectorySnapshot = {
+      ...directorySnapshot,
+      users: [{ ...versionedTarget, revision: 5 }],
+    };
+    const staleRevisionRes = await controller.submitLifecycleOperation({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: versionedTarget,
+      operation: 'Deactivate',
+      directorySnapshot: newerDirectorySnapshot,
+      invokeDeactivate: invokeDeactivateSpy,
+      refreshDirectory: vi.fn(),
+    });
+    expect(staleRevisionRes.status).toBe('error');
+    expect(staleRevisionRes.errorCategory).toBe('stale-directory');
+    expect(staleRevisionRes.requiresRefreshBeforeRetry).toBe(true);
+    expect(invokeDeactivateSpy).not.toHaveBeenCalled();
+  });
+
+  it('47. FINAL No optimistic updates & response/auditReceipt validation across ChangeRole, Deactivate, and Reactivate', async () => {
+    const versionedTarget: AdminUser = {
+      id: 'ver-target-808',
+      name: 'Kareem Curator',
+      email: 'kareem@promiseofplanet.org',
+      role: AdminRole.LibraryCurator,
+      isActive: true,
+      revision: 7,
+    };
+
+    const directorySnapshot = {
+      status: 'loaded' as const,
+      users: [versionedTarget],
+      requestGeneration: 1,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    // 1. Rejects response where currentRevision does not increment previousRevision + 1
+    expect(() =>
+      validateLifecycleSuccessResponse(
+        {
+          operation: 'ChangeRole',
+          targetUid: versionedTarget.id,
+          previousRevision: 7,
+          currentRevision: 7, // invalid non-incremented revision
+          committedAtIso: '2026-03-01T17:00:00.000Z',
+          admin: {
+            id: versionedTarget.id,
+            role: AdminRole.Trainer,
+            isActive: true,
+            revision: 7,
+          },
+          auditReceipt: {
+            auditEventId: 'audit-808-bad',
+            action: 'ADMIN_ROLE_CHANGED',
+            targetType: 'admin_identity',
+            targetId: versionedTarget.id,
+            timestamp: '2026-03-01T17:00:00.000Z',
+          },
+        },
+        'ChangeRole',
+        versionedTarget,
+        AdminRole.Trainer
+      )
+    ).toThrow(AdminIdentityClientError);
+
+    // 2. Rejects response missing auditReceipt.auditEventId
+    expect(() =>
+      validateLifecycleSuccessResponse(
+        {
+          operation: 'Deactivate',
+          targetUid: versionedTarget.id,
+          previousRevision: 7,
+          currentRevision: 8,
+          committedAtIso: '2026-03-01T17:00:00.000Z',
+          admin: {
+            id: versionedTarget.id,
+            role: AdminRole.LibraryCurator,
+            isActive: false,
+            revision: 8,
+          },
+          auditReceipt: {
+            auditEventId: '   ',
+            action: 'ADMIN_DEACTIVATED',
+            targetType: 'admin_identity',
+            targetId: versionedTarget.id,
+            timestamp: '2026-03-01T17:00:00.000Z',
+          },
+        },
+        'Deactivate',
+        versionedTarget
+      )
+    ).toThrow(AdminIdentityClientError);
+
+    // 3. When callable fails with REVISION_CONFLICT on ChangeRole, local directory snapshot is NOT optimistically mutated
+    const controller = new AdminRevisionInitializationController();
+    controller.resetForTarget(
+      ACTIVE_OWNER,
+      versionedTarget,
+      1,
+      false,
+      'ChangeRole',
+      AdminRole.Trainer
+    );
+    controller.setConfirmed(
+      true,
+      ACTIVE_OWNER,
+      'users',
+      versionedTarget,
+      directorySnapshot,
+      'ChangeRole',
+      AdminRole.Trainer
+    );
+
+    const conflictSnap = await controller.submitLifecycleOperation({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: versionedTarget,
+      operation: 'ChangeRole',
+      proposedRole: AdminRole.Trainer,
+      directorySnapshot,
+      invokeChangeRole: async () => {
+        throw new AdminIdentityClientError('aborted', 'REVISION_CONFLICT');
+      },
+      refreshDirectory: vi.fn(),
+    });
+
+    expect(conflictSnap.status).toBe('error');
+    expect(conflictSnap.errorCategory).toBe('conflict');
+    expect(conflictSnap.requiresRefreshBeforeRetry).toBe(true);
+    expect(directorySnapshot.users[0].role).toBe(AdminRole.LibraryCurator);
+    expect(directorySnapshot.users[0].revision).toBe(7);
+  });
+
+  it('48. FINAL Bilingual Arabic & English human-readable labels for all 4 operations and completion status', async () => {
+    expect(ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR).toBe('تهيئة الحساب القديم');
+    expect(ADMIN_LIFECYCLE_CHANGE_ROLE_LABEL_AR).toBe('تغيير الدور الإداري');
+    expect(ADMIN_LIFECYCLE_DEACTIVATE_LABEL_AR).toBe('تعطيل الحساب الإداري');
+    expect(ADMIN_LIFECYCLE_REACTIVATE_LABEL_AR).toBe('إعادة تفعيل الحساب الإداري');
+    expect(ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_AR).toBe('تأكيد العملية');
+    expect(ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_AR).toBe('تم تنفيذ العملية بنجاح');
+    expect(ADMIN_LIFECYCLE_REVISION_CONFLICT_LABEL_AR).toBe('تعارض في رقم المراجعة');
+    expect(ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_AR).toBe('يلزم تحديث الدليل');
+    expect(ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_AR).toBe('تم رفض الصلاحية');
+
+    expect(ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN).toBe('Initialize legacy account');
+    expect(ADMIN_LIFECYCLE_CHANGE_ROLE_LABEL_EN).toBe('Change administrative role');
+    expect(ADMIN_LIFECYCLE_DEACTIVATE_LABEL_EN).toBe('Deactivate administrative account');
+    expect(ADMIN_LIFECYCLE_REACTIVATE_LABEL_EN).toBe('Reactivate administrative account');
+    expect(ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_EN).toBe('Confirm operation');
+    expect(ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_EN).toBe('Operation completed');
+    expect(ADMIN_LIFECYCLE_REVISION_CONFLICT_LABEL_EN).toBe('Revision conflict');
+    expect(ADMIN_LIFECYCLE_REFRESH_REQUIRED_LABEL_EN).toBe('Refresh required');
+    expect(ADMIN_LIFECYCLE_PERMISSION_DENIED_LABEL_EN).toBe('Permission denied');
+
+    expect(ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_AR.length).toBeGreaterThan(10);
+    expect(ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_EN.length).toBeGreaterThan(10);
+    expect(ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_AR.length).toBeGreaterThan(10);
+    expect(ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_EN.length).toBeGreaterThan(10);
+    expect(ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_AR.length).toBeGreaterThan(10);
+    expect(ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_EN.length).toBeGreaterThan(10);
+
+    const versionedTarget: AdminUser = {
+      id: 'ver-target-809',
+      name: 'Bilingual Test Target',
+      email: 'bilingual@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+      revision: 2,
+    };
+
+    await i18n.changeLanguage('ar');
+    const completedHtmlAr = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [versionedTarget],
+        }}
+        initialLifecycleSubmissionState={{
+          status: 'succeeded',
+          isConfirmed: false,
+          boundCallerUid: ACTIVE_OWNER.id,
+          boundTargetUid: versionedTarget.id,
+          boundDirectoryGeneration: 1,
+          lastCompletedOperation: 'ChangeRole',
+          lastCompletedTargetUid: versionedTarget.id,
+          lastAuditEventId: 'audit-bilingual-001',
+        }}
+      />
+    );
+    expect(completedHtmlAr).toContain('data-testid="admin-lifecycle-completed-banner"');
+    expect(completedHtmlAr).toContain(ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_AR);
+    expect(completedHtmlAr).toContain('audit-bilingual-001');
+
+    await i18n.changeLanguage('en');
+    const completedHtmlEn = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [versionedTarget],
+        }}
+        initialLifecycleSubmissionState={{
+          status: 'succeeded',
+          isConfirmed: false,
+          boundCallerUid: ACTIVE_OWNER.id,
+          boundTargetUid: versionedTarget.id,
+          boundDirectoryGeneration: 1,
+          lastCompletedOperation: 'ChangeRole',
+          lastCompletedTargetUid: versionedTarget.id,
+          lastAuditEventId: 'audit-bilingual-001',
+        }}
+      />
+    );
+    expect(completedHtmlEn).toContain('data-testid="admin-lifecycle-completed-banner"');
+    expect(completedHtmlEn).toContain(ADMIN_LIFECYCLE_OPERATION_COMPLETED_LABEL_EN);
+    expect(completedHtmlEn).toContain('audit-bilingual-001');
+
+    await i18n.changeLanguage('ar');
+  });
 });
+
