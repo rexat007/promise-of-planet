@@ -30,8 +30,10 @@ import { AdminRole, AdminPermission, AdminDomain, type AdminUser } from '../../t
 import { AdminAccessService } from '../../services/adminAccess';
 import {
   AdminIdentityClientError,
+  initializeAdminRevision,
   listAdminUsers,
   type AdminIdentityClientDependencies,
+  type AdminLifecycleClientResponse,
   type ListAdminUsersClientResponse,
 } from '../../services/adminIdentityManagementClient';
 import {
@@ -51,12 +53,17 @@ import {
   ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN,
   ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_AR,
   ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_EN,
+  ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_AR,
+  ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_EN,
+  INIT_REVISION_ERROR_MESSAGES,
   NON_OWNER_LIFECYCLE_ROLES,
   AdminDirectoryLoadController,
+  AdminRevisionInitializationController,
   AdminUsersManagement,
   classifyDirectoryLoadFailure,
   filterAdminDirectoryEntries,
   isAuthorizedOwnerForUsersDirectory,
+  isTargetEligibleForRevisionInitialization,
   validateCanonicalDirectoryUsersList,
 } from './AdminUsersManagement';
 
@@ -1348,7 +1355,7 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     expect(html).not.toContain('data-testid="admin-lifecycle-trigger-eligible-legacy-trainer-904"');
   });
 
-  it('29. S4 InitializeRevision confirmation preview: Shows target identity, Not initialized revision, InitializeRevision operation, and role/status preservation explanation in Arabic and English', async () => {
+  it('29. S4/S5 InitializeRevision confirmation preview: Shows target identity, Not initialized revision, human-readable Arabic operation labels (no technical InitializeRevision in Arabic text), and role/status preservation explanation in Arabic and English', async () => {
     const legacyTarget: AdminUser = {
       id: 'legacy-tm-505',
       name: 'Huda Training Manager',
@@ -1383,11 +1390,19 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     expect(htmlAr).toContain('data-testid="lifecycle-current-status"');
     expect(htmlAr).toContain('معطل');
     expect(htmlAr).toContain('data-testid="lifecycle-target-revision"');
-    expect(htmlAr).toContain('غير مهيأ (Not initialized)');
+    expect(htmlAr).toContain('غير مهيأ');
     expect(htmlAr).toContain('data-testid="lifecycle-proposed-operation"');
-    expect(htmlAr).toContain('InitializeRevision');
+    expect(htmlAr).toContain('الإجراء المقترح: تهيئة المراجعة الأولية للحساب [Huda Training Manager]');
+    // Requirement 14: Do not expose technical operation name InitializeRevision in visible Arabic UI text
+    const proposedOpArMatch = htmlAr.match(
+      /<p[^>]*data-testid="lifecycle-proposed-operation"[^>]*>([^<]+)<\/p>/
+    );
+    expect(proposedOpArMatch).not.toBeNull();
+    expect(proposedOpArMatch![1]).not.toContain('InitializeRevision');
     expect(htmlAr).toContain('data-testid="lifecycle-initialize-explanation"');
     expect(htmlAr).toContain(ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_AR);
+    expect(htmlAr).toContain('data-testid="lifecycle-init-confirm-checkbox"');
+    expect(htmlAr).toContain(ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_AR);
     expect(htmlAr).not.toContain('data-testid="lifecycle-target-role-select"');
 
     await i18n.changeLanguage('en');
@@ -1412,11 +1427,12 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     expect(htmlEn).toContain('InitializeRevision');
     expect(htmlEn).toContain(ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_EN);
     expect(htmlEn).toContain(ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN);
+    expect(htmlEn).toContain(ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_EN);
 
     await i18n.changeLanguage('ar');
   });
 
-  it('30. S4 Disabled confirmation submission & zero callable invocation for InitializeRevision', () => {
+  it('30. S4/S5 Unconfirmed InitializeRevision submission remains disabled & zero callable invocation before confirmation', () => {
     const legacyTarget: AdminUser = {
       id: 'legacy-mod-606',
       name: 'Omar Moderator',
@@ -1447,6 +1463,13 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
         initialLifecycleOperation="InitializeRevision"
       />
     );
+
+    // Checkbox is not preselected
+    const checkboxMatch = html.match(
+      /<input[^>]*data-testid="lifecycle-init-confirm-checkbox"[^>]*>/
+    );
+    expect(checkboxMatch).not.toBeNull();
+    expect(checkboxMatch![0]).not.toContain('checked=""');
 
     const confirmBtnMatch =
       html.match(/<button[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/) ||
@@ -1577,5 +1600,764 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     expect(htmlEn).toContain('Reactivate account [Inactive Versioned User]');
 
     await i18n.changeLanguage('ar');
+  });
+
+  it('33. S5 Explicit confirmation required & no initialization before confirmation: Submitting without confirmation is rejected and never invokes callable', async () => {
+    const legacyTarget: AdminUser = {
+      id: 'legacy-curator-701',
+      name: 'Nour Curator',
+      email: 'nour.curator@promiseofplanet.org',
+      role: AdminRole.LibraryCurator,
+      isActive: true,
+    };
+
+    const directorySnapshot = {
+      status: 'loaded' as const,
+      users: [legacyTarget],
+      requestGeneration: 1,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    const invokeInitSpy = vi.fn();
+    const refreshSpy = vi.fn();
+    const closeSpy = vi.fn();
+
+    const initController = new AdminRevisionInitializationController({
+      boundCallerUid: ACTIVE_OWNER.id,
+      boundTargetUid: legacyTarget.id,
+      boundDirectoryGeneration: 1,
+    });
+
+    // Attempt submit before setting confirmation
+    const unconfirmedResult = await initController.submitInitializeRevision({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: legacyTarget,
+      operation: 'InitializeRevision',
+      directorySnapshot,
+      invokeInit: invokeInitSpy,
+      refreshDirectory: refreshSpy,
+      onModalClose: closeSpy,
+    });
+
+    expect(unconfirmedResult.status).toBe('error');
+    expect(unconfirmedResult.errorCategory).toBe('unconfirmed');
+    expect(unconfirmedResult.isConfirmed).toBe(false);
+    expect(invokeInitSpy).not.toHaveBeenCalled();
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(closeSpy).not.toHaveBeenCalled();
+
+    // When explicitly confirmed in UI, confirm button becomes enabled for eligible legacy non-Owner
+    const confirmedHtml = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyTarget],
+        }}
+        initialLifecycleTarget={legacyTarget}
+        initialLifecycleOperation="InitializeRevision"
+        initialLifecycleConfirmed={true}
+      />
+    );
+
+    const confirmBtnMatch = confirmedHtml.match(
+      /<button[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/
+    );
+    expect(confirmBtnMatch).not.toBeNull();
+    expect(confirmBtnMatch![0]).not.toContain('disabled=""');
+    expect(confirmBtnMatch![0]).toContain('aria-disabled="false"');
+  });
+
+  it('34. S5 Eligible legacy non-Owner submission sends exact { targetUid } payload, validates response, closes modal, and refreshes directory to versioned state', async () => {
+    const legacyTarget: AdminUser = {
+      id: 'legacy-editor-702',
+      name: 'Rami Legacy Editor',
+      email: 'rami.editor@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+    };
+
+    let serverUsers: ReadonlyArray<AdminUser> = [legacyTarget];
+
+    const invokeCallableSpy = vi.fn(async (functionName: string, payload: unknown) => {
+      expect(functionName).toBe('manageAdminLifecycle');
+      expect(payload).toEqual({
+        operation: 'InitializeRevision',
+        targetUid: 'legacy-editor-702',
+      });
+      // Verify no extra authority claims or expectedRevision are ever sent
+      expect(Object.keys(payload as Record<string, unknown>).sort()).toEqual([
+        'operation',
+        'targetUid',
+      ]);
+
+      serverUsers = [
+        {
+          ...legacyTarget,
+          revision: 1,
+        },
+      ];
+
+      return {
+        data: {
+          operation: 'InitializeRevision',
+          targetUid: 'legacy-editor-702',
+          previousRevision: null,
+          currentRevision: 1,
+          committedAtIso: '2026-03-01T12:00:00.000Z',
+          admin: {
+            id: 'legacy-editor-702',
+            role: AdminRole.ContentEditor,
+            isActive: true,
+            revision: 1,
+          },
+          auditReceipt: {
+            auditEventId: 'audit-init-702-001',
+            action: 'ADMIN_REVISION_INITIALIZED',
+            targetType: 'admin_identity',
+            targetId: 'legacy-editor-702',
+            timestamp: '2026-03-01T12:00:00.000Z',
+          },
+        },
+      };
+    });
+
+    const listCallableSpy = vi.fn(async () => ({
+      data: {
+        admins: serverUsers,
+      },
+    }));
+
+    const clientDeps: AdminIdentityClientDependencies = {
+      isBackendConfigured: () => true,
+      getAuthenticatedUid: () => ACTIVE_OWNER.id,
+      listAdminUsersCallable: listCallableSpy,
+      invokeCallable: invokeCallableSpy,
+    };
+
+    const dirController = new AdminDirectoryLoadController();
+    const initialDirSnap = await dirController.loadDirectory(
+      ACTIVE_OWNER,
+      'users',
+      () => listAdminUsers(clientDeps)
+    );
+    expect(initialDirSnap.users[0].revision).toBeUndefined();
+
+    const initController = new AdminRevisionInitializationController();
+    initController.resetForTarget(
+      ACTIVE_OWNER,
+      legacyTarget,
+      initialDirSnap.requestGeneration,
+      false
+    );
+    initController.setConfirmed(
+      true,
+      ACTIVE_OWNER,
+      'users',
+      legacyTarget,
+      initialDirSnap
+    );
+
+    let modalClosed = false;
+    const finalInitSnap = await initController.submitInitializeRevision({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: legacyTarget,
+      operation: 'InitializeRevision',
+      directorySnapshot: initialDirSnap,
+      invokeInit: (input) => {
+        expect(Object.keys(input)).toEqual(['targetUid']);
+        expect(input.targetUid).toBe('legacy-editor-702');
+        return initializeAdminRevision(input, clientDeps);
+      },
+      refreshDirectory: () =>
+        dirController.loadDirectory(ACTIVE_OWNER, 'users', () =>
+          listAdminUsers(clientDeps)
+        ),
+      onModalClose: () => {
+        modalClosed = true;
+      },
+    });
+
+    expect(finalInitSnap.status).toBe('succeeded');
+    expect(finalInitSnap.isConfirmed).toBe(false);
+    expect(modalClosed).toBe(true);
+    expect(invokeCallableSpy).toHaveBeenCalledTimes(1);
+    expect(listCallableSpy).toHaveBeenCalledTimes(2);
+
+    const refreshedDirSnap = dirController.getSnapshot();
+    expect(refreshedDirSnap.status).toBe('loaded');
+    expect(refreshedDirSnap.users[0].revision).toBe(1);
+
+    // After directory refresh, the account renders normal versioned lifecycle controls instead of legacy init trigger
+    const refreshedHtml = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: refreshedDirSnap.users,
+        }}
+      />
+    );
+    expect(refreshedHtml).toContain('data-testid="admin-lifecycle-trigger-legacy-editor-702"');
+    expect(refreshedHtml).toContain('v1');
+    expect(refreshedHtml).not.toContain(
+      'data-testid="admin-lifecycle-init-trigger-legacy-editor-702"'
+    );
+  });
+
+  it('35. S5 Owner, self, and versioned account rejection: Refuses initialization for any Owner account, current session, or account that already has a revision', async () => {
+    const coOwnerLegacy: AdminUser = {
+      id: 'co-owner-703',
+      name: 'Co-Owner Legacy',
+      email: 'coowner@promiseofplanet.org',
+      role: AdminRole.Owner,
+      isActive: true,
+    };
+    const versionedTrainer: AdminUser = {
+      id: 'versioned-trainer-704',
+      name: 'Versioned Trainer',
+      email: 'ver.trainer@promiseofplanet.org',
+      role: AdminRole.Trainer,
+      isActive: true,
+      revision: 2,
+    };
+
+    const directorySnapshot = {
+      status: 'loaded' as const,
+      users: [ACTIVE_OWNER, coOwnerLegacy, versionedTrainer],
+      requestGeneration: 1,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    const invokeInitSpy = vi.fn();
+    const refreshSpy = vi.fn();
+
+    for (const ineligibleTarget of [ACTIVE_OWNER, coOwnerLegacy, versionedTrainer]) {
+      const check = isTargetEligibleForRevisionInitialization(
+        ACTIVE_OWNER,
+        'users',
+        ineligibleTarget,
+        directorySnapshot
+      );
+      expect(check.eligible).toBe(false);
+      expect(check.reason).toBe('target-ineligible');
+
+      const controller = new AdminRevisionInitializationController({
+        isConfirmed: true,
+        boundCallerUid: ACTIVE_OWNER.id,
+        boundTargetUid: ineligibleTarget.id,
+        boundDirectoryGeneration: 1,
+      });
+
+      const res = await controller.submitInitializeRevision({
+        caller: ACTIVE_OWNER,
+        activeTabId: 'users',
+        target: ineligibleTarget,
+        operation: 'InitializeRevision',
+        directorySnapshot,
+        invokeInit: invokeInitSpy,
+        refreshDirectory: refreshSpy,
+      });
+
+      expect(res.status).toBe('error');
+      expect(res.errorCategory).toBe('target-ineligible');
+    }
+
+    expect(invokeInitSpy).not.toHaveBeenCalled();
+    expect(refreshSpy).not.toHaveBeenCalled();
+  });
+
+  it('36. S5 Stale directory state or target change before submit: Revalidates against authoritative directory snapshot and refuses submission when target role, active status, email, or revision changed', async () => {
+    const selectedTargetAtModalOpen: AdminUser = {
+      id: 'legacy-target-705',
+      name: 'Salma Reviewer',
+      email: 'salma@promiseofplanet.org',
+      role: AdminRole.RightsReviewer,
+      isActive: true,
+    };
+
+    // Scenario A: Target in directory snapshot was already initialized to revision 1 before submit
+    const snapshotNowVersioned = {
+      status: 'loaded' as const,
+      users: [{ ...selectedTargetAtModalOpen, revision: 1 }],
+      requestGeneration: 2,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    // Scenario B: Target in directory snapshot changed role or active status before submit
+    const snapshotRoleChanged = {
+      status: 'loaded' as const,
+      users: [{ ...selectedTargetAtModalOpen, role: AdminRole.Viewer }],
+      requestGeneration: 2,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    // Scenario C: Target disappeared from directory snapshot
+    const snapshotMissingTarget = {
+      status: 'loaded' as const,
+      users: [],
+      requestGeneration: 2,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    const invokeInitSpy = vi.fn();
+    const refreshSpy = vi.fn();
+
+    for (const staleSnap of [
+      snapshotNowVersioned,
+      snapshotRoleChanged,
+      snapshotMissingTarget,
+    ]) {
+      const controller = new AdminRevisionInitializationController({
+        isConfirmed: true,
+        boundCallerUid: ACTIVE_OWNER.id,
+        boundTargetUid: selectedTargetAtModalOpen.id,
+        boundDirectoryGeneration: staleSnap.requestGeneration,
+      });
+
+      const res = await controller.submitInitializeRevision({
+        caller: ACTIVE_OWNER,
+        activeTabId: 'users',
+        target: selectedTargetAtModalOpen,
+        operation: 'InitializeRevision',
+        directorySnapshot: staleSnap,
+        invokeInit: invokeInitSpy,
+        refreshDirectory: refreshSpy,
+      });
+
+      expect(res.status).toBe('error');
+      expect(res.requiresRefreshBeforeRetry).toBe(true);
+      expect(['target-ineligible', 'stale-directory']).toContain(res.errorCategory);
+    }
+
+    expect(invokeInitSpy).not.toHaveBeenCalled();
+  });
+
+  it('37. S5 Caller permission loss or account switching: Invalidates confirmation state and prevents submission', async () => {
+    const legacyTarget: AdminUser = {
+      id: 'legacy-target-706',
+      name: 'Tariq Trainer',
+      email: 'tariq@promiseofplanet.org',
+      role: AdminRole.Trainer,
+      isActive: true,
+    };
+
+    const secondOwner: AdminUser = {
+      id: 'owner-session-999',
+      name: 'Second Active Owner',
+      email: 'second.owner@promiseofplanet.org',
+      role: AdminRole.Owner,
+      isActive: true,
+    };
+
+    const directorySnapshot = {
+      status: 'loaded' as const,
+      users: [legacyTarget],
+      requestGeneration: 1,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    const controller = new AdminRevisionInitializationController();
+    controller.resetForTarget(ACTIVE_OWNER, legacyTarget, 1, false);
+    controller.setConfirmed(true, ACTIVE_OWNER, 'users', legacyTarget, directorySnapshot);
+    expect(controller.getSnapshot().isConfirmed).toBe(true);
+
+    // 1. Account switches to a different Owner -> confirmation is cleared
+    const switchedOwnerSnap = controller.syncContext(
+      secondOwner,
+      'users',
+      legacyTarget,
+      { ...directorySnapshot, boundUserUid: secondOwner.id }
+    );
+    expect(switchedOwnerSnap.isConfirmed).toBe(false);
+    expect(switchedOwnerSnap.boundCallerUid).toBe(secondOwner.id);
+
+    // 2. Caller loses Owner/ManageUsers authority -> invalidated with unauthorized error
+    const unauthorizedSnap = controller.syncContext(
+      NON_OWNER_USERS[0],
+      'users',
+      legacyTarget,
+      directorySnapshot
+    );
+    expect(unauthorizedSnap.status).toBe('error');
+    expect(unauthorizedSnap.errorCategory).toBe('unauthorized');
+    expect(unauthorizedSnap.isConfirmed).toBe(false);
+
+    const invokeInitSpy = vi.fn();
+    const rejectedSubmit = await controller.submitInitializeRevision({
+      caller: NON_OWNER_USERS[0],
+      activeTabId: 'users',
+      target: legacyTarget,
+      operation: 'InitializeRevision',
+      directorySnapshot,
+      invokeInit: invokeInitSpy,
+      refreshDirectory: vi.fn(),
+    });
+    expect(rejectedSubmit.status).toBe('error');
+    expect(rejectedSubmit.errorCategory).toBe('unauthorized');
+    expect(invokeInitSpy).not.toHaveBeenCalled();
+  });
+
+  it('38. S5 Double-click / in-flight duplicate submission protection and compact progress indicator', async () => {
+    const legacyTarget: AdminUser = {
+      id: 'legacy-target-707',
+      name: 'Layla Moderator',
+      email: 'layla@promiseofplanet.org',
+      role: AdminRole.CitizenModerator,
+      isActive: true,
+    };
+
+    const directorySnapshot = {
+      status: 'loaded' as const,
+      users: [legacyTarget],
+      requestGeneration: 1,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    let resolvePendingCall!: (value: AdminLifecycleClientResponse) => void;
+    const invokeInitSpy = vi.fn(
+      () =>
+        new Promise<AdminLifecycleClientResponse>((resolve) => {
+          resolvePendingCall = resolve;
+        })
+    );
+
+    const controller = new AdminRevisionInitializationController();
+    controller.resetForTarget(ACTIVE_OWNER, legacyTarget, 1, false);
+    controller.setConfirmed(true, ACTIVE_OWNER, 'users', legacyTarget, directorySnapshot);
+
+    const firstSubmissionPromise = controller.submitInitializeRevision({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: legacyTarget,
+      operation: 'InitializeRevision',
+      directorySnapshot,
+      invokeInit: invokeInitSpy,
+      refreshDirectory: vi.fn(async () => {}),
+    });
+
+    expect(controller.getSnapshot().status).toBe('submitting');
+
+    // Second rapid click while in-flight is ignored
+    const secondSubmissionPromise = controller.submitInitializeRevision({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: legacyTarget,
+      operation: 'InitializeRevision',
+      directorySnapshot,
+      invokeInit: invokeInitSpy,
+      refreshDirectory: vi.fn(async () => {}),
+    });
+
+    expect(invokeInitSpy).toHaveBeenCalledTimes(1);
+
+    // UI while submitting renders compact progress indicator and disables confirm/cancel buttons
+    const submittingHtml = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyTarget],
+        }}
+        initialLifecycleTarget={legacyTarget}
+        initialLifecycleOperation="InitializeRevision"
+        initialLifecycleSubmissionState={{
+          status: 'submitting',
+          isConfirmed: true,
+          boundCallerUid: ACTIVE_OWNER.id,
+          boundTargetUid: legacyTarget.id,
+          boundDirectoryGeneration: 1,
+        }}
+      />
+    );
+    expect(submittingHtml).toContain('data-testid="lifecycle-submitting-indicator"');
+    const confirmBtnMatch = submittingHtml.match(
+      /<button[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/
+    );
+    expect(confirmBtnMatch).not.toBeNull();
+    expect(confirmBtnMatch![0]).toContain('disabled=""');
+
+    resolvePendingCall({
+      operation: 'InitializeRevision',
+      targetUid: legacyTarget.id,
+      previousRevision: null,
+      currentRevision: 1,
+      committedAtIso: '2026-03-01T12:00:01.000Z',
+      admin: {
+        id: legacyTarget.id,
+        role: legacyTarget.role,
+        isActive: legacyTarget.isActive,
+        revision: 1,
+      },
+      auditReceipt: {
+        auditEventId: 'audit-init-707-001',
+        action: 'ADMIN_REVISION_INITIALIZED',
+        targetType: 'admin_identity',
+        targetId: legacyTarget.id,
+        timestamp: '2026-03-01T12:00:01.000Z',
+      },
+    });
+
+    await firstSubmissionPromise;
+    await secondSubmissionPromise;
+    expect(invokeInitSpy).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().status).toBe('succeeded');
+  });
+
+  it('39. S5 Conflict rejection without automatic retry: Displays bilingual conflict notice and requires explicit directory refresh before retrying', async () => {
+    const legacyTarget: AdminUser = {
+      id: 'legacy-target-708',
+      name: 'Ziad Assistant',
+      email: 'ziad@promiseofplanet.org',
+      role: AdminRole.AIAssistant,
+      isActive: true,
+    };
+
+    const directorySnapshot = {
+      status: 'loaded' as const,
+      users: [legacyTarget],
+      requestGeneration: 1,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    const invokeInitSpy = vi.fn(async () => {
+      throw new AdminIdentityClientError(
+        'failed-precondition',
+        'REVISION_ALREADY_INITIALIZED'
+      );
+    });
+    const refreshSpy = vi.fn();
+
+    const controller = new AdminRevisionInitializationController();
+    controller.resetForTarget(ACTIVE_OWNER, legacyTarget, 1, false);
+    controller.setConfirmed(true, ACTIVE_OWNER, 'users', legacyTarget, directorySnapshot);
+
+    const conflictSnap = await controller.submitInitializeRevision({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: legacyTarget,
+      operation: 'InitializeRevision',
+      directorySnapshot,
+      invokeInit: invokeInitSpy,
+      refreshDirectory: refreshSpy,
+    });
+
+    // No automatic retry or automatic directory refresh on conflict
+    expect(invokeInitSpy).toHaveBeenCalledTimes(1);
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(conflictSnap.status).toBe('error');
+    expect(conflictSnap.errorCategory).toBe('conflict');
+    expect(conflictSnap.requiresRefreshBeforeRetry).toBe(true);
+    expect(conflictSnap.isConfirmed).toBe(false);
+
+    // Attempting to re-confirm or resubmit before refreshing is blocked
+    controller.setConfirmed(true, ACTIVE_OWNER, 'users', legacyTarget, directorySnapshot);
+    expect(controller.getSnapshot().isConfirmed).toBe(false);
+
+    await controller.submitInitializeRevision({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: legacyTarget,
+      operation: 'InitializeRevision',
+      directorySnapshot,
+      invokeInit: invokeInitSpy,
+      refreshDirectory: refreshSpy,
+    });
+    expect(invokeInitSpy).toHaveBeenCalledTimes(1);
+
+    // UI renders conflict error message and explicit refresh button in Arabic & English
+    await i18n.changeLanguage('ar');
+    const errorHtmlAr = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyTarget],
+        }}
+        initialLifecycleTarget={legacyTarget}
+        initialLifecycleOperation="InitializeRevision"
+        initialLifecycleSubmissionState={conflictSnap}
+      />
+    );
+    expect(errorHtmlAr).toContain('data-testid="lifecycle-submission-error"');
+    expect(errorHtmlAr).toContain(INIT_REVISION_ERROR_MESSAGES.conflict.ar);
+    expect(errorHtmlAr).toContain('data-testid="lifecycle-refresh-directory-btn"');
+
+    await i18n.changeLanguage('en');
+    const errorHtmlEn = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyTarget],
+        }}
+        initialLifecycleTarget={legacyTarget}
+        initialLifecycleOperation="InitializeRevision"
+        initialLifecycleSubmissionState={conflictSnap}
+      />
+    );
+    expect(errorHtmlEn).toContain('data-testid="lifecycle-submission-error"');
+    expect(errorHtmlEn).toContain(INIT_REVISION_ERROR_MESSAGES.conflict.en);
+    expect(errorHtmlEn).toContain('data-testid="lifecycle-refresh-directory-btn"');
+
+    await i18n.changeLanguage('ar');
+  });
+
+  it('40. S5 Network error and malformed response handling: Fails closed without mutating local state', async () => {
+    const legacyTarget: AdminUser = {
+      id: 'legacy-target-709',
+      name: 'Mona Viewer',
+      email: 'mona@promiseofplanet.org',
+      role: AdminRole.Viewer,
+      isActive: false,
+    };
+
+    const directorySnapshot = {
+      status: 'loaded' as const,
+      users: [legacyTarget],
+      requestGeneration: 1,
+      boundUserUid: ACTIVE_OWNER.id,
+      boundTabId: 'users',
+    };
+
+    // 1. Network / callable unavailability
+    const netController = new AdminRevisionInitializationController();
+    netController.resetForTarget(ACTIVE_OWNER, legacyTarget, 1, false);
+    netController.setConfirmed(true, ACTIVE_OWNER, 'users', legacyTarget, directorySnapshot);
+
+    const netSnap = await netController.submitInitializeRevision({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: legacyTarget,
+      operation: 'InitializeRevision',
+      directorySnapshot,
+      invokeInit: async () => {
+        throw new AdminIdentityClientError('unavailable', 'Callable offline');
+      },
+      refreshDirectory: vi.fn(),
+    });
+    expect(netSnap.status).toBe('error');
+    expect(netSnap.errorCategory).toBe('unavailable');
+    expect(netSnap.errorMessageAr).toBe(INIT_REVISION_ERROR_MESSAGES.unavailable.ar);
+    expect(netSnap.errorMessageEn).toBe(INIT_REVISION_ERROR_MESSAGES.unavailable.en);
+
+    // 2. Malformed response (e.g., mismatched targetUid, wrong operation, or unexpected role mutation in response)
+    const malformedController = new AdminRevisionInitializationController();
+    malformedController.resetForTarget(ACTIVE_OWNER, legacyTarget, 1, false);
+    malformedController.setConfirmed(
+      true,
+      ACTIVE_OWNER,
+      'users',
+      legacyTarget,
+      directorySnapshot
+    );
+
+    const malformedSnap = await malformedController.submitInitializeRevision({
+      caller: ACTIVE_OWNER,
+      activeTabId: 'users',
+      target: legacyTarget,
+      operation: 'InitializeRevision',
+      directorySnapshot,
+      invokeInit: async () =>
+        ({
+          operation: 'InitializeRevision',
+          targetUid: 'wrong-uid-999',
+          previousRevision: null,
+          currentRevision: 1,
+          changed: true,
+          admin: {
+            ...legacyTarget,
+            id: 'wrong-uid-999',
+            revision: 1,
+          },
+          auditReceipt: {
+            auditEventId: 'audit-wrong',
+            action: 'ADMIN_REVISION_INITIALIZED',
+            actorUid: ACTIVE_OWNER.id,
+            targetId: 'wrong-uid-999',
+            executedAtMillis: 1710000002000,
+          },
+        }) as AdminLifecycleClientResponse,
+      refreshDirectory: vi.fn(),
+    });
+
+    expect(malformedSnap.status).toBe('error');
+    expect(malformedSnap.errorCategory).toBe('malformed-response');
+    expect(malformedSnap.errorMessageAr).toBe(
+      INIT_REVISION_ERROR_MESSAGES['malformed-response'].ar
+    );
+    expect(malformedSnap.errorMessageEn).toBe(
+      INIT_REVISION_ERROR_MESSAGES['malformed-response'].en
+    );
+    // Original local directory record remains untouched (no revision added locally)
+    expect(directorySnapshot.users[0].revision).toBeUndefined();
+  });
+
+  it('41. S5 ChangeRole, Deactivate, and Reactivate submission buttons remain unconditionally disabled', () => {
+    const activeVersionedUser: AdminUser = {
+      id: 'ver-active-710',
+      name: 'Active Versioned Editor',
+      email: 'ver.active@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+      revision: 3,
+    };
+    const inactiveVersionedUser: AdminUser = {
+      id: 'ver-inactive-711',
+      name: 'Inactive Versioned Reviewer',
+      email: 'ver.inactive@promiseofplanet.org',
+      role: AdminRole.RightsReviewer,
+      isActive: false,
+      revision: 4,
+    };
+
+    const operationsToVerify = [
+      { target: activeVersionedUser, op: 'ChangeRole' as const },
+      { target: activeVersionedUser, op: 'Deactivate' as const },
+      { target: inactiveVersionedUser, op: 'Reactivate' as const },
+    ];
+
+    for (const { target, op } of operationsToVerify) {
+      const html = renderToStaticMarkup(
+        <AdminUsersManagement
+          currentUser={ACTIVE_OWNER}
+          activeTabId="users"
+          initialDirectoryState={{
+            status: 'loaded',
+            users: [activeVersionedUser, inactiveVersionedUser],
+          }}
+          initialLifecycleTarget={target}
+          initialLifecycleOperation={op}
+          initialLifecycleConfirmed={true}
+        />
+      );
+
+      expect(html).toContain('data-testid="lifecycle-mutation-disabled-banner"');
+      expect(html).not.toContain('data-testid="lifecycle-init-confirm-checkbox"');
+
+      const confirmBtnMatch =
+        html.match(/<button[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/) ||
+        html.match(
+          /<button[^>]*disabled=""[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/
+        );
+      expect(confirmBtnMatch).not.toBeNull();
+      expect(confirmBtnMatch![0]).toContain('disabled=""');
+      expect(confirmBtnMatch![0]).toContain('aria-disabled="true"');
+    }
   });
 });
