@@ -31,6 +31,7 @@ import {
   type CreateAdminInvitationClientInput,
   type CreateAdminInvitationClientResponse,
   type ListAdminUsersClientResponse,
+  type AdminLifecycleOperation,
 } from '../../services/adminIdentityManagementClient';
 import {
   ROLE_METADATA,
@@ -63,6 +64,18 @@ export const ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR =
 
 export const ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN =
   'Legacy unversioned account (read-only)';
+
+export const ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR =
+  'تهيئة الحساب القديم';
+
+export const ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN =
+  'Initialize legacy account';
+
+export const ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_AR =
+  'يقوم هذا الإجراء بتهيئة رقم المراجعة الأولي للحساب القديم فقط دون تغيير الدور الإداري أو حالة التفعيل الحالية للحساب.';
+
+export const ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_EN =
+  'This operation initializes the authoritative revision for the legacy account without changing its current administrative role or active status.';
 
 export const NON_OWNER_LIFECYCLE_ROLES: ReadonlyArray<AdminRole> = Object.freeze([
   AdminRole.ContentEditor,
@@ -110,7 +123,7 @@ export interface AdminUsersManagementProps {
   initialInvitationPanelOpen?: boolean;
   initialInvitationSubmissionState?: Partial<AdminInvitationSubmissionSnapshot>;
   initialLifecycleTarget?: AdminUser | null;
-  initialLifecycleOperation?: 'ChangeRole' | 'Deactivate' | 'Reactivate';
+  initialLifecycleOperation?: AdminLifecycleOperation;
   initialLifecycleTargetRole?: AdminRole;
   invokeCreateInvitation?: (
     input: CreateAdminInvitationClientInput
@@ -585,7 +598,7 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
   const [activeLifecycleTarget, setActiveLifecycleTarget] = useState<AdminUser | null>(
     () => initialLifecycleTarget
   );
-  const [selectedOperation, setSelectedOperation] = useState<'ChangeRole' | 'Deactivate' | 'Reactivate'>(
+  const [selectedOperation, setSelectedOperation] = useState<AdminLifecycleOperation>(
     () => initialLifecycleOperation
   );
   const [selectedTargetRole, setSelectedTargetRole] = useState<AdminRole>(
@@ -594,7 +607,10 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
 
   const handleOpenLifecycleModal = useCallback((targetUser: AdminUser) => {
     setActiveLifecycleTarget(targetUser);
-    if (!targetUser.isActive) {
+    const rev = getAdminUserRevision(targetUser);
+    if (rev === undefined) {
+      setSelectedOperation('InitializeRevision');
+    } else if (!targetUser.isActive) {
       setSelectedOperation('Reactivate');
     } else {
       setSelectedOperation('ChangeRole');
@@ -1253,13 +1269,16 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                                 </span>
                               </button>
                             ) : (
-                              <span
-                                className="inline-flex items-center gap-1 font-medium text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 px-2 py-1 rounded-md border border-amber-200 dark:border-amber-900/50 shrink-0"
-                                data-testid={`user-legacy-revision-notice-card-${user.id}`}
+                              <button
+                                type="button"
+                                onClick={() => handleOpenLifecycleModal(user)}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 border border-amber-200 dark:border-amber-800 transition-colors cursor-pointer shrink-0"
+                                data-testid={`admin-lifecycle-init-trigger-card-${user.id}`}
+                                aria-label={isAr ? `${ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR}: ${user.name}` : `${ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN}: ${user.name}`}
                               >
-                                <AlertTriangle className="w-3 h-3 text-amber-600 dark:text-amber-400 shrink-0" />
-                                <span>{isAr ? ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR : ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN}</span>
-                              </span>
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                                <span>{isAr ? ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR : ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN}</span>
+                              </button>
                             )}
                           </div>
                         );
@@ -1458,13 +1477,16 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                               }
 
                               return (
-                                <span
-                                  className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 px-2 py-1 rounded-md border border-amber-200 dark:border-amber-900/50"
-                                  data-testid={`user-legacy-revision-notice-${user.id}`}
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenLifecycleModal(user)}
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 border border-amber-200 dark:border-amber-800 transition-colors cursor-pointer"
+                                  data-testid={`admin-lifecycle-init-trigger-${user.id}`}
+                                  aria-label={isAr ? `${ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR}: ${user.name}` : `${ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN}: ${user.name}`}
                                 >
-                                  <AlertTriangle className="w-3 h-3 text-amber-600 dark:text-amber-400 shrink-0" />
-                                  <span>{isAr ? ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR : ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN}</span>
-                                </span>
+                                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                                  <span>{isAr ? ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR : ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN}</span>
+                                </button>
                               );
                             })()}
                           </td>
@@ -1564,83 +1586,134 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                 <div>
                   <span className="text-gray-400 text-[11px] block">{isAr ? 'المراجعة المعتمدة' : 'Authoritative Revision'}:</span>
                   <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400" data-testid="lifecycle-target-revision">
-                    {getAdminUserRevision(activeLifecycleTarget) !== undefined ? `v${getAdminUserRevision(activeLifecycleTarget)}` : (isAr ? 'غير مرقّم' : 'Unversioned')}
+                    {getAdminUserRevision(activeLifecycleTarget) !== undefined
+                      ? `v${getAdminUserRevision(activeLifecycleTarget)}`
+                      : isAr
+                      ? 'غير مهيأ (Not initialized)'
+                      : 'Not initialized'}
                   </span>
                 </div>
               </div>
             </div>
 
-            {/* Operation Selection */}
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-gray-700 dark:text-gray-300 block">
-                {isAr ? 'الإجراء الإداري المطلوب:' : 'Select Lifecycle Action:'}
-              </label>
-              <select
-                value={selectedOperation}
-                onChange={(e) => setSelectedOperation(e.target.value as 'ChangeRole' | 'Deactivate' | 'Reactivate')}
-                className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer"
-                data-testid="lifecycle-operation-select"
-              >
-                <option value="ChangeRole">
-                  {isAr ? 'تغيير الدور الإداري (Change Role)' : 'Change Admin Role'}
-                </option>
-                {activeLifecycleTarget.isActive ? (
-                  <option value="Deactivate">
-                    {isAr ? 'تعطيل الحساب الإداري (Deactivate)' : 'Deactivate Account'}
-                  </option>
-                ) : (
-                  <option value="Reactivate">
-                    {isAr ? 'إعادة تفعيل الحساب الإداري (Reactivate)' : 'Reactivate Account'}
-                  </option>
-                )}
-              </select>
-            </div>
+            {(() => {
+              const targetRevision = getAdminUserRevision(activeLifecycleTarget);
+              const isLegacyTarget = targetRevision === undefined;
+              const effectiveOperation: AdminLifecycleOperation = isLegacyTarget
+                ? 'InitializeRevision'
+                : selectedOperation === 'InitializeRevision'
+                ? activeLifecycleTarget.isActive
+                  ? 'ChangeRole'
+                  : 'Reactivate'
+                : selectedOperation;
 
-            {/* Role selection if ChangeRole */}
-            {selectedOperation === 'ChangeRole' && (
-              <div className="space-y-2 bg-gray-50/50 dark:bg-gray-850/50 p-3.5 rounded-xl border border-gray-200/60 dark:border-gray-800/60">
-                <label className="text-xs font-bold text-gray-700 dark:text-gray-300 block">
-                  {isAr ? 'الدور الإداري الجديد المقترح:' : 'Proposed Target Role:'}
-                </label>
-                <select
-                  value={selectedTargetRole}
-                  onChange={(e) => setSelectedTargetRole(e.target.value as AdminRole)}
-                  className="w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer"
-                  data-testid="lifecycle-target-role-select"
-                >
-                  {NON_OWNER_LIFECYCLE_ROLES.map((r) => (
-                    <option key={r} value={r} disabled={r === activeLifecycleTarget.role}>
-                      {getRoleLabel(r, isAr)} {r === activeLifecycleTarget.role ? (isAr ? '(الدور الحالي)' : '(Current)') : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
+              return (
+                <>
+                  {/* Operation Selection */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-gray-700 dark:text-gray-300 block">
+                      {isAr ? 'الإجراء الإداري المطلوب:' : 'Select Lifecycle Action:'}
+                    </label>
+                    {isLegacyTarget ? (
+                      <select
+                        value="InitializeRevision"
+                        disabled={true}
+                        className="w-full px-3 py-2 bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl text-xs font-semibold text-amber-900 dark:text-amber-200"
+                        data-testid="lifecycle-operation-select"
+                      >
+                        <option value="InitializeRevision">
+                          {isAr
+                            ? 'تهيئة الحساب القديم (InitializeRevision)'
+                            : 'Initialize legacy account (InitializeRevision)'}
+                        </option>
+                      </select>
+                    ) : (
+                      <select
+                        value={effectiveOperation}
+                        onChange={(e) => setSelectedOperation(e.target.value as AdminLifecycleOperation)}
+                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer"
+                        data-testid="lifecycle-operation-select"
+                      >
+                        <option value="ChangeRole">
+                          {isAr ? 'تغيير الدور الإداري (Change Role)' : 'Change Admin Role'}
+                        </option>
+                        {activeLifecycleTarget.isActive ? (
+                          <option value="Deactivate">
+                            {isAr ? 'تعطيل الحساب الإداري (Deactivate)' : 'Deactivate Account'}
+                          </option>
+                        ) : (
+                          <option value="Reactivate">
+                            {isAr ? 'إعادة تفعيل الحساب الإداري (Reactivate)' : 'Reactivate Account'}
+                          </option>
+                        )}
+                      </select>
+                    )}
+                  </div>
 
-            {/* Proposed Summary Box */}
-            <div className="p-3 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200/60 dark:border-blue-900/40 rounded-xl text-xs space-y-1">
-              <span className="font-bold text-blue-900 dark:text-blue-200 block">
-                {isAr ? 'ملخص الإجراء المقترح:' : 'Proposed Action Summary:'}
-              </span>
-              <p className="text-blue-800 dark:text-blue-300" data-testid="lifecycle-proposed-summary">
-                {(() => {
-                  const targetRev = getAdminUserRevision(activeLifecycleTarget) ?? 1;
-                  if (selectedOperation === 'ChangeRole') {
-                    return isAr
-                      ? `تغيير الدور من [${getRoleLabel(activeLifecycleTarget.role, isAr)}] إلى [${getRoleLabel(selectedTargetRole, isAr)}] (المراجعة المتوقعة: ${targetRev})`
-                      : `Change role from [${getRoleLabel(activeLifecycleTarget.role, isAr)}] to [${getRoleLabel(selectedTargetRole, isAr)}] (Expected revision: ${targetRev})`;
-                  }
-                  if (selectedOperation === 'Deactivate') {
-                    return isAr
-                      ? `تعطيل حساب [${activeLifecycleTarget.name}] وإيقاف صلاحياته الفعالة (المراجعة المتوقعة: ${targetRev})`
-                      : `Deactivate account [${activeLifecycleTarget.name}] and revoke active permissions (Expected revision: ${targetRev})`;
-                  }
-                  return isAr
-                    ? `إعادة تفعيل حساب [${activeLifecycleTarget.name}] واستعادة صلاحيات دور [${getRoleLabel(activeLifecycleTarget.role, isAr)}] (المراجعة المتوقعة: ${targetRev})`
-                    : `Reactivate account [${activeLifecycleTarget.name}] and restore permissions for role [${getRoleLabel(activeLifecycleTarget.role, isAr)}] (Expected revision: ${targetRev})`;
-                })()}
-              </p>
-            </div>
+                  {/* Role selection if ChangeRole on versioned account */}
+                  {!isLegacyTarget && effectiveOperation === 'ChangeRole' && (
+                    <div className="space-y-2 bg-gray-50/50 dark:bg-gray-850/50 p-3.5 rounded-xl border border-gray-200/60 dark:border-gray-800/60">
+                      <label className="text-xs font-bold text-gray-700 dark:text-gray-300 block">
+                        {isAr ? 'الدور الإداري الجديد المقترح:' : 'Proposed Target Role:'}
+                      </label>
+                      <select
+                        value={selectedTargetRole}
+                        onChange={(e) => setSelectedTargetRole(e.target.value as AdminRole)}
+                        className="w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer"
+                        data-testid="lifecycle-target-role-select"
+                      >
+                        {NON_OWNER_LIFECYCLE_ROLES.map((r) => (
+                          <option key={r} value={r} disabled={r === activeLifecycleTarget.role}>
+                            {getRoleLabel(r, isAr)} {r === activeLifecycleTarget.role ? (isAr ? '(الدور الحالي)' : '(Current)') : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Proposed Summary Box */}
+                  <div className="p-3 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200/60 dark:border-blue-900/40 rounded-xl text-xs space-y-1.5">
+                    <span className="font-bold text-blue-900 dark:text-blue-200 block">
+                      {isAr ? 'ملخص الإجراء المقترح:' : 'Proposed Action Summary:'}
+                    </span>
+                    <div className="text-blue-800 dark:text-blue-300 space-y-1" data-testid="lifecycle-proposed-summary">
+                      {effectiveOperation === 'InitializeRevision' ? (
+                        <div className="space-y-1" data-testid="lifecycle-initialize-explanation">
+                          <p className="font-semibold" data-testid="lifecycle-proposed-operation">
+                            {isAr
+                              ? `العملية المقترحة: InitializeRevision — تهيئة المراجعة الأولية للحساب [${activeLifecycleTarget.name}]`
+                              : `Proposed Operation: InitializeRevision for account [${activeLifecycleTarget.name}]`}
+                          </p>
+                          <p>
+                            {isAr
+                              ? ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_AR
+                              : ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_EN}
+                          </p>
+                        </div>
+                      ) : effectiveOperation === 'ChangeRole' ? (
+                        <p>
+                          {isAr
+                            ? `تغيير الدور من [${getRoleLabel(activeLifecycleTarget.role, isAr)}] إلى [${getRoleLabel(selectedTargetRole, isAr)}] (المراجعة المتوقعة: ${targetRevision ?? 1})`
+                            : `Change role from [${getRoleLabel(activeLifecycleTarget.role, isAr)}] to [${getRoleLabel(selectedTargetRole, isAr)}] (Expected revision: ${targetRevision ?? 1})`}
+                        </p>
+                      ) : effectiveOperation === 'Deactivate' ? (
+                        <p>
+                          {isAr
+                            ? `تعطيل حساب [${activeLifecycleTarget.name}] وإيقاف صلاحياته الفعالة (المراجعة المتوقعة: ${targetRevision ?? 1})`
+                            : `Deactivate account [${activeLifecycleTarget.name}] and revoke active permissions (Expected revision: ${targetRevision ?? 1})`}
+                        </p>
+                      ) : (
+                        <p>
+                          {isAr
+                            ? `إعادة تفعيل حساب [${activeLifecycleTarget.name}] واستعادة صلاحيات دور [${getRoleLabel(activeLifecycleTarget.role, isAr)}] (المراجعة المتوقعة: ${targetRevision ?? 1})`
+                            : `Reactivate account [${activeLifecycleTarget.name}] and restore permissions for role [${getRoleLabel(activeLifecycleTarget.role, isAr)}] (Expected revision: ${targetRevision ?? 1})`}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
 
             {/* Safe Preview Notice - Unconditional Mutation Guard */}
             <div

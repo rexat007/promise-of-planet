@@ -47,6 +47,10 @@ import {
   ADMIN_LIFECYCLE_MUTATION_DISABLED_NOTICE_EN,
   ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR,
   ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_EN,
+  ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR,
+  ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN,
+  ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_AR,
+  ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_EN,
   NON_OWNER_LIFECYCLE_ROLES,
   AdminDirectoryLoadController,
   AdminUsersManagement,
@@ -972,7 +976,7 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     expect(html).toContain('data-testid="admin-lifecycle-trigger-editor-versioned-01"');
   });
 
-  it('21. Missing revision blocking: Legacy accounts without revision display concise read-only explanation and no triggers', () => {
+  it('21. Missing revision blocking & initialization entry point: Eligible legacy accounts show Initialize legacy account entry point and never show standard mutation triggers', () => {
     const mixedDirectory: ReadonlyArray<AdminUser> = [
       {
         id: 'legacy-curator-01',
@@ -1002,13 +1006,15 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
       />
     );
 
-    expect(htmlAr).toContain('data-testid="user-legacy-revision-notice-legacy-curator-01"');
-    expect(htmlAr).toContain('data-testid="user-legacy-revision-notice-card-legacy-curator-01"');
-    expect(htmlAr).toContain(ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR);
+    expect(htmlAr).toContain('data-testid="admin-lifecycle-init-trigger-legacy-curator-01"');
+    expect(htmlAr).toContain('data-testid="admin-lifecycle-init-trigger-card-legacy-curator-01"');
+    expect(htmlAr).toContain(ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR);
+    expect(ADMIN_LIFECYCLE_LEGACY_UNVERSIONED_NOTICE_AR).toContain('للقراءة فقط');
     expect(htmlAr).not.toContain('data-testid="admin-lifecycle-trigger-legacy-curator-01"');
     expect(htmlAr).not.toContain('data-testid="admin-lifecycle-trigger-card-legacy-curator-01"');
 
     expect(htmlAr).toContain('data-testid="admin-lifecycle-trigger-versioned-curator-02"');
+    expect(htmlAr).not.toContain('data-testid="admin-lifecycle-init-trigger-versioned-curator-02"');
   });
 
   it('22. Valid revision display: Authoritative revision number is displayed on badges and in cards', () => {
@@ -1181,10 +1187,10 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
 
     expect(html).toContain('data-testid="user-protected-badge-owner-session-900"');
     expect(html).toContain('data-testid="admin-lifecycle-trigger-versioned-user-01"');
-    expect(html).toContain('data-testid="user-legacy-revision-notice-legacy-user-02"');
+    expect(html).toContain('data-testid="admin-lifecycle-init-trigger-legacy-user-02"');
 
     expect(html).toContain('data-testid="admin-lifecycle-trigger-card-versioned-user-01"');
-    expect(html).toContain('data-testid="user-legacy-revision-notice-card-legacy-user-02"');
+    expect(html).toContain('data-testid="admin-lifecycle-init-trigger-card-legacy-user-02"');
   });
 
   it('26. No regressions in directory reading, search filtering, and invitations integration', () => {
@@ -1229,5 +1235,347 @@ describe('AUTH-03C2 — Real Administrative Directory Read-Only UI Integration',
     );
 
     expect(htmlWithInvites).toContain('data-testid="admin-invitation-creation-panel"');
+  });
+
+  it('27. S4 Owner-only visibility: Only active Owners with ManageUsers see legacy initialization controls; non-Owners and inactive Owners never see them', () => {
+    const legacyAccount: AdminUser = {
+      id: 'legacy-editor-401',
+      name: 'Legacy Editor',
+      email: 'legacy.editor@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+    };
+
+    const ownerHtml = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyAccount],
+        }}
+      />
+    );
+    expect(ownerHtml).toContain('data-testid="admin-lifecycle-init-trigger-legacy-editor-401"');
+    expect(ownerHtml).toContain('data-testid="admin-lifecycle-init-trigger-card-legacy-editor-401"');
+
+    const inactiveOwnerHtml = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={INACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyAccount],
+        }}
+      />
+    );
+    expect(inactiveOwnerHtml).not.toContain('data-testid="admin-lifecycle-init-trigger-legacy-editor-401"');
+    expect(inactiveOwnerHtml).not.toContain('data-testid="admin-lifecycle-init-trigger-card-legacy-editor-401"');
+
+    for (const nonOwner of NON_OWNER_USERS) {
+      const nonOwnerHtml = renderToStaticMarkup(
+        <AdminUsersManagement
+          currentUser={nonOwner}
+          activeTabId="users"
+          initialDirectoryState={{
+            status: 'loaded',
+            users: [legacyAccount],
+          }}
+        />
+      );
+      expect(nonOwnerHtml).not.toContain('data-testid="admin-lifecycle-init-trigger-legacy-editor-401"');
+      expect(nonOwnerHtml).not.toContain('data-testid="admin-lifecycle-init-trigger-card-legacy-editor-401"');
+    }
+  });
+
+  it('28. S4 Protected Owner exclusion & Versioned account exclusion: Initialization controls never appear for Owners, current session, or versioned accounts', () => {
+    const directoryEntries: ReadonlyArray<AdminUser> = [
+      {
+        id: 'owner-session-900',
+        name: 'Nadia Al-Mansoor (Unversioned Session Owner)',
+        email: 'nadia.owner@promiseofplanet.org',
+        role: AdminRole.Owner,
+        isActive: true,
+      },
+      {
+        id: 'legacy-other-owner-902',
+        name: 'Legacy Co-Owner',
+        email: 'co.owner@promiseofplanet.org',
+        role: AdminRole.Owner,
+        isActive: true,
+      },
+      {
+        id: 'versioned-reviewer-903',
+        name: 'Versioned Reviewer',
+        email: 'ver.reviewer@promiseofplanet.org',
+        role: AdminRole.RightsReviewer,
+        isActive: true,
+        revision: 1,
+      },
+      {
+        id: 'eligible-legacy-trainer-904',
+        name: 'Eligible Legacy Trainer',
+        email: 'legacy.trainer@promiseofplanet.org',
+        role: AdminRole.Trainer,
+        isActive: false,
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: directoryEntries,
+        }}
+      />
+    );
+
+    // Current session Owner & other Owner: protected badge only, NO init trigger
+    expect(html).toContain('data-testid="user-protected-badge-owner-session-900"');
+    expect(html).not.toContain('data-testid="admin-lifecycle-init-trigger-owner-session-900"');
+    expect(html).toContain('data-testid="user-protected-badge-legacy-other-owner-902"');
+    expect(html).not.toContain('data-testid="admin-lifecycle-init-trigger-legacy-other-owner-902"');
+
+    // Versioned non-Owner: standard lifecycle trigger only, NO init trigger
+    expect(html).toContain('data-testid="admin-lifecycle-trigger-versioned-reviewer-903"');
+    expect(html).not.toContain('data-testid="admin-lifecycle-init-trigger-versioned-reviewer-903"');
+
+    // Eligible unversioned non-Owner: init trigger only, NO standard lifecycle trigger
+    expect(html).toContain('data-testid="admin-lifecycle-init-trigger-eligible-legacy-trainer-904"');
+    expect(html).toContain('data-testid="admin-lifecycle-init-trigger-card-eligible-legacy-trainer-904"');
+    expect(html).not.toContain('data-testid="admin-lifecycle-trigger-eligible-legacy-trainer-904"');
+  });
+
+  it('29. S4 InitializeRevision confirmation preview: Shows target identity, Not initialized revision, InitializeRevision operation, and role/status preservation explanation in Arabic and English', async () => {
+    const legacyTarget: AdminUser = {
+      id: 'legacy-tm-505',
+      name: 'Huda Training Manager',
+      email: 'huda.tm@promiseofplanet.org',
+      role: AdminRole.TrainingManager,
+      isActive: false,
+    };
+
+    await i18n.changeLanguage('ar');
+    const htmlAr = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyTarget],
+        }}
+        initialLifecycleTarget={legacyTarget}
+        initialLifecycleOperation="InitializeRevision"
+      />
+    );
+
+    expect(htmlAr).toContain('data-testid="admin-lifecycle-modal"');
+    expect(htmlAr).toContain('data-testid="lifecycle-target-name"');
+    expect(htmlAr).toContain('Huda Training Manager');
+    expect(htmlAr).toContain('data-testid="lifecycle-target-email"');
+    expect(htmlAr).toContain('huda.tm@promiseofplanet.org');
+    expect(htmlAr).toContain('data-testid="lifecycle-target-uid"');
+    expect(htmlAr).toContain('legacy-tm-505');
+    expect(htmlAr).toContain('data-testid="lifecycle-current-role"');
+    expect(htmlAr).toContain('مدير البرامج والتدريب');
+    expect(htmlAr).toContain('data-testid="lifecycle-current-status"');
+    expect(htmlAr).toContain('معطل');
+    expect(htmlAr).toContain('data-testid="lifecycle-target-revision"');
+    expect(htmlAr).toContain('غير مهيأ (Not initialized)');
+    expect(htmlAr).toContain('data-testid="lifecycle-proposed-operation"');
+    expect(htmlAr).toContain('InitializeRevision');
+    expect(htmlAr).toContain('data-testid="lifecycle-initialize-explanation"');
+    expect(htmlAr).toContain(ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_AR);
+    expect(htmlAr).not.toContain('data-testid="lifecycle-target-role-select"');
+
+    await i18n.changeLanguage('en');
+    const htmlEn = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyTarget],
+        }}
+        initialLifecycleTarget={legacyTarget}
+        initialLifecycleOperation="InitializeRevision"
+      />
+    );
+
+    expect(htmlEn).toContain('data-testid="admin-lifecycle-modal"');
+    expect(htmlEn).toContain('Huda Training Manager');
+    expect(htmlEn).toContain('huda.tm@promiseofplanet.org');
+    expect(htmlEn).toContain('legacy-tm-505');
+    expect(htmlEn).toContain('Not initialized');
+    expect(htmlEn).toContain('InitializeRevision');
+    expect(htmlEn).toContain(ADMIN_LIFECYCLE_INITIALIZE_EXPLANATION_EN);
+    expect(htmlEn).toContain(ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN);
+
+    await i18n.changeLanguage('ar');
+  });
+
+  it('30. S4 Disabled confirmation submission & zero callable invocation for InitializeRevision', () => {
+    const legacyTarget: AdminUser = {
+      id: 'legacy-mod-606',
+      name: 'Omar Moderator',
+      email: 'omar.mod@promiseofplanet.org',
+      role: AdminRole.CitizenModerator,
+      isActive: true,
+    };
+
+    const listCallableSpy = vi.fn();
+    const invokeCallableSpy = vi.fn();
+    const clientDeps: AdminIdentityClientDependencies = {
+      isBackendConfigured: () => true,
+      getAuthenticatedUid: () => ACTIVE_OWNER.id,
+      listAdminUsersCallable: listCallableSpy,
+      invokeCallable: invokeCallableSpy,
+    };
+
+    const html = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        clientDeps={clientDeps}
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyTarget],
+        }}
+        initialLifecycleTarget={legacyTarget}
+        initialLifecycleOperation="InitializeRevision"
+      />
+    );
+
+    const confirmBtnMatch =
+      html.match(/<button[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/) ||
+      html.match(/<button[^>]*disabled=""[^>]*data-testid="lifecycle-confirm-btn"[^>]*>/);
+    expect(confirmBtnMatch).not.toBeNull();
+    expect(confirmBtnMatch![0]).toContain('disabled=""');
+    expect(confirmBtnMatch![0]).toContain('aria-disabled="true"');
+
+    expect(listCallableSpy).not.toHaveBeenCalled();
+    expect(invokeCallableSpy).not.toHaveBeenCalled();
+  });
+
+  it('31. S4 No automatic initialization on page load, directory refresh, modal open, or error states', async () => {
+    const legacyUsers: ReadonlyArray<AdminUser> = [
+      {
+        id: 'legacy-auto-check-01',
+        name: 'Unversioned Editor',
+        email: 'unver@promiseofplanet.org',
+        role: AdminRole.ContentEditor,
+        isActive: true,
+      },
+    ];
+
+    const invokeCallableSpy = vi.fn();
+    const listCallableSpy = vi.fn(async () => ({
+      data: {
+        admins: legacyUsers,
+      },
+    }));
+
+    const clientDeps: AdminIdentityClientDependencies = {
+      isBackendConfigured: () => true,
+      getAuthenticatedUid: () => ACTIVE_OWNER.id,
+      listAdminUsersCallable: listCallableSpy,
+      invokeCallable: invokeCallableSpy,
+    };
+
+    const controller = new AdminDirectoryLoadController();
+    const snap = await controller.loadDirectory(ACTIVE_OWNER, 'users', () =>
+      listAdminUsers(clientDeps)
+    );
+
+    expect(snap.status).toBe('loaded');
+    expect(snap.users[0].revision).toBeUndefined();
+    expect(invokeCallableSpy).not.toHaveBeenCalled();
+
+    // Render loaded state, modal open state, and error state: never invokes lifecycle callable
+    renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        clientDeps={clientDeps}
+        initialDirectoryState={{
+          status: 'loaded',
+          users: snap.users,
+        }}
+        initialLifecycleTarget={snap.users[0]}
+      />
+    );
+
+    renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        clientDeps={clientDeps}
+        initialDirectoryState={{
+          status: 'unavailable',
+        }}
+      />
+    );
+
+    expect(invokeCallableSpy).not.toHaveBeenCalled();
+  });
+
+  it('32. S4 Desktop and mobile parity for Initialize legacy account in Arabic and English and preservation of existing ChangeRole/Deactivate/Reactivate previews', async () => {
+    const legacyUser: AdminUser = {
+      id: 'legacy-parity-01',
+      name: 'Legacy Parity User',
+      email: 'parity@promiseofplanet.org',
+      role: AdminRole.LibraryCurator,
+      isActive: true,
+    };
+    const inactiveVersionedUser: AdminUser = {
+      id: 'inactive-ver-02',
+      name: 'Inactive Versioned User',
+      email: 'inactive.ver@promiseofplanet.org',
+      role: AdminRole.RightsReviewer,
+      isActive: false,
+      revision: 6,
+    };
+
+    await i18n.changeLanguage('ar');
+    const htmlAr = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyUser, inactiveVersionedUser],
+        }}
+        initialLifecycleTarget={inactiveVersionedUser}
+        initialLifecycleOperation="Reactivate"
+      />
+    );
+
+    expect(htmlAr).toContain('data-testid="admin-lifecycle-init-trigger-legacy-parity-01"');
+    expect(htmlAr).toContain('data-testid="admin-lifecycle-init-trigger-card-legacy-parity-01"');
+    expect(htmlAr).toContain(ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_AR);
+    expect(htmlAr).toContain('إعادة تفعيل حساب [Inactive Versioned User]');
+
+    await i18n.changeLanguage('en');
+    const htmlEn = renderToStaticMarkup(
+      <AdminUsersManagement
+        currentUser={ACTIVE_OWNER}
+        activeTabId="users"
+        initialDirectoryState={{
+          status: 'loaded',
+          users: [legacyUser, inactiveVersionedUser],
+        }}
+        initialLifecycleTarget={inactiveVersionedUser}
+        initialLifecycleOperation="Reactivate"
+      />
+    );
+
+    expect(htmlEn).toContain('data-testid="admin-lifecycle-init-trigger-legacy-parity-01"');
+    expect(htmlEn).toContain('data-testid="admin-lifecycle-init-trigger-card-legacy-parity-01"');
+    expect(htmlEn).toContain(ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN);
+    expect(htmlEn).toContain('Reactivate account [Inactive Versioned User]');
+
+    await i18n.changeLanguage('ar');
   });
 });
