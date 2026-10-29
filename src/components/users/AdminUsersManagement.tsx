@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Users,
@@ -1843,8 +1844,21 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
       initControllerRef.current!.getSnapshot()
     );
 
+  const lifecycleModalDialogRef = useRef<HTMLDivElement | null>(null);
+  const lifecycleModalCloseBtnRef = useRef<HTMLButtonElement | null>(null);
+  const lifecycleModalPreviousFocusRef = useRef<HTMLElement | null>(null);
+  const isLifecycleModalOpen = Boolean(
+    activeLifecycleTarget && isAuthorizedOwner
+  );
+
   const handleOpenLifecycleModal = useCallback(
     (targetUser: AdminUser) => {
+      if (
+        typeof document !== 'undefined' &&
+        document.activeElement instanceof HTMLElement
+      ) {
+        lifecycleModalPreviousFocusRef.current = document.activeElement;
+      }
       setActiveLifecycleTarget(targetUser);
       const rev = getAdminUserRevision(targetUser);
       let nextOp: AdminLifecycleOperation = 'ChangeRole';
@@ -1887,6 +1901,108 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
       null
     );
   }, [currentUser, directorySnapshot.requestGeneration]);
+
+  // Lock background document scrolling while the lifecycle modal is open
+  useEffect(() => {
+    if (
+      !isLifecycleModalOpen ||
+      typeof document === 'undefined' ||
+      !document.body
+    ) {
+      return;
+    }
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+    };
+  }, [isLifecycleModalOpen]);
+
+  // Focus management and restoration for the lifecycle modal
+  useEffect(() => {
+    if (!isLifecycleModalOpen || typeof document === 'undefined') {
+      return;
+    }
+    if (
+      !lifecycleModalPreviousFocusRef.current &&
+      document.activeElement instanceof HTMLElement
+    ) {
+      lifecycleModalPreviousFocusRef.current = document.activeElement;
+    }
+    const focusTimer = setTimeout(() => {
+      if (
+        lifecycleModalCloseBtnRef.current &&
+        !lifecycleModalCloseBtnRef.current.disabled
+      ) {
+        lifecycleModalCloseBtnRef.current.focus();
+      } else {
+        lifecycleModalDialogRef.current?.focus();
+      }
+    }, 0);
+    return () => {
+      clearTimeout(focusTimer);
+      const prevEl = lifecycleModalPreviousFocusRef.current;
+      if (
+        prevEl &&
+        typeof prevEl.focus === 'function' &&
+        (typeof document.contains !== 'function' || document.contains(prevEl))
+      ) {
+        prevEl.focus();
+      }
+      lifecycleModalPreviousFocusRef.current = null;
+    };
+  }, [isLifecycleModalOpen]);
+
+  // Keyboard accessibility: Escape-to-close (respecting submission lock) and Tab focus trap
+  useEffect(() => {
+    if (!isLifecycleModalOpen || typeof window === 'undefined') {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (initControllerRef.current?.getSnapshot().status === 'submitting') {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        handleCloseLifecycleModal();
+        return;
+      }
+
+      if (event.key === 'Tab') {
+        const dialogEl = lifecycleModalDialogRef.current;
+        if (!dialogEl || typeof document === 'undefined') return;
+        const focusables = Array.from(
+          dialogEl.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]):not([disabled])'
+          )
+        );
+        if (focusables.length === 0) {
+          event.preventDefault();
+          dialogEl.focus();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (event.shiftKey) {
+          if (!active || active === first || !focusables.includes(active)) {
+            event.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (!active || active === last || !focusables.includes(active)) {
+            event.preventDefault();
+            first.focus();
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [isLifecycleModalOpen, handleCloseLifecycleModal]);
 
   // Search & Filter State
   const [searchQuery, setSearchQuery] = useState('');
@@ -2946,193 +3062,241 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
         </div>
       )}
 
-      {/* 4. Guarded Admin Lifecycle Confirmation Modal */}
-      {activeLifecycleTarget && isAuthorizedOwner && (
-        <div
-          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto"
-          data-testid="admin-lifecycle-modal"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="lifecycle-modal-title"
-        >
-          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5 text-start my-8">
-            {/* Header */}
-            <div className="flex items-start justify-between gap-3 border-b border-gray-100 dark:border-gray-800 pb-4">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <div className="h-8 w-8 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
-                    <Shield className="w-4 h-4" />
-                  </div>
-                  <h3
-                    id="lifecycle-modal-title"
-                    className="text-base font-bold text-gray-900 dark:text-gray-100"
-                    data-testid="admin-lifecycle-modal-title"
-                  >
-                    {isAr ? 'إدارة دورة حياة الحساب الإداري' : 'Administrative Lifecycle Management'}
-                  </h3>
-                </div>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  {isAr
-                    ? 'مراجعة وتأكيد الإجراءات الإدارية للحساب المحدد'
-                    : 'Review and confirm administrative action for the selected account'}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={handleCloseLifecycleModal}
-                disabled={initSubmissionSnapshot.status === 'submitting'}
-                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                data-testid="lifecycle-modal-close-btn"
-                aria-label={isAr ? 'إغلاق' : 'Close'}
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+      {/* 4. Guarded Admin Lifecycle Confirmation Modal (Portaled to document.body outside ViewTransition) */}
+      {activeLifecycleTarget &&
+        isAuthorizedOwner &&
+        (() => {
+          const targetRevision = getAdminUserRevision(activeLifecycleTarget);
+          const isLegacyTarget = targetRevision === undefined;
+          const effectiveOperation: AdminLifecycleOperation = isLegacyTarget
+            ? 'InitializeRevision'
+            : selectedOperation === 'InitializeRevision'
+            ? activeLifecycleTarget.isActive
+              ? 'ChangeRole'
+              : 'Reactivate'
+            : selectedOperation;
 
-            {/* Target Account Summary Card */}
+          const eligibilityCheck = validateLifecycleOperationEligibility(
+            currentUser,
+            activeTabId,
+            activeLifecycleTarget,
+            directorySnapshot,
+            effectiveOperation,
+            effectiveOperation === 'ChangeRole' ? selectedTargetRole : undefined
+          );
+
+          const isSubmittingLifecycle =
+            initSubmissionSnapshot.status === 'submitting';
+
+          const isBoundContextMatching =
+            initSubmissionSnapshot.isConfirmed &&
+            initSubmissionSnapshot.boundCallerUid === currentUser.id &&
+            initSubmissionSnapshot.boundTargetUid === activeLifecycleTarget.id &&
+            (initSubmissionSnapshot.boundOperation === null ||
+              initSubmissionSnapshot.boundOperation === undefined ||
+              initSubmissionSnapshot.boundOperation === effectiveOperation) &&
+            (effectiveOperation !== 'ChangeRole' ||
+              initSubmissionSnapshot.boundProposedRole === null ||
+              initSubmissionSnapshot.boundProposedRole === undefined ||
+              initSubmissionSnapshot.boundProposedRole === selectedTargetRole);
+
+          const canSubmitLifecycle =
+            isAuthorizedOwner &&
+            eligibilityCheck.eligible &&
+            isBoundContextMatching &&
+            !isSubmittingLifecycle &&
+            !initSubmissionSnapshot.requiresRefreshBeforeRetry;
+
+          const activeErrorCategory: AdminRevisionInitErrorCategory | null =
+            initSubmissionSnapshot.status === 'error'
+              ? initSubmissionSnapshot.errorCategory ?? 'unavailable'
+              : !eligibilityCheck.eligible
+              ? eligibilityCheck.reason ?? 'target-ineligible'
+              : null;
+
+          const activeErrorMessage = activeErrorCategory
+            ? isAr
+              ? initSubmissionSnapshot.errorMessageAr ??
+                INIT_REVISION_ERROR_MESSAGES[activeErrorCategory].ar
+              : initSubmissionSnapshot.errorMessageEn ??
+                INIT_REVISION_ERROR_MESSAGES[activeErrorCategory].en
+            : null;
+
+          const showRefreshPrompt =
+            initSubmissionSnapshot.requiresRefreshBeforeRetry ||
+            (!eligibilityCheck.eligible &&
+              activeErrorCategory === 'stale-directory');
+
+          const confirmationCheckboxLabel =
+            effectiveOperation === 'InitializeRevision'
+              ? isAr
+                ? ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_AR
+                : ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_EN
+              : effectiveOperation === 'ChangeRole'
+              ? isAr
+                ? ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_AR
+                : ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_EN
+              : effectiveOperation === 'Deactivate'
+              ? isAr
+                ? ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_AR
+                : ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_EN
+              : isAr
+              ? ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_AR
+              : ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_EN;
+
+          const lifecycleModalNode = (
             <div
-              className="bg-gray-50 dark:bg-gray-850 rounded-xl p-4 border border-gray-200/80 dark:border-gray-800/80 space-y-2.5"
-              data-testid="lifecycle-target-identity-card"
+              dir={isAr ? 'rtl' : 'ltr'}
+              className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-2.5 sm:p-4 md:p-6 overflow-x-hidden"
+              data-testid="admin-lifecycle-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="lifecycle-modal-title"
+              onClick={(e) => {
+                if (e.target === e.currentTarget && !isSubmittingLifecycle) {
+                  handleCloseLifecycleModal();
+                }
+              }}
             >
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-xs font-bold text-gray-900 dark:text-gray-100" data-testid="lifecycle-target-name">
-                  {activeLifecycleTarget.name}
-                </span>
-                <span
-                  className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
-                    activeLifecycleTarget.isActive
-                      ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400'
-                      : 'bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
-                  }`}
-                  data-testid="lifecycle-current-status"
+              <div
+                ref={lifecycleModalDialogRef}
+                tabIndex={-1}
+                className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl max-w-lg w-full max-h-[90vh] max-h-[90dvh] shadow-2xl flex flex-col overflow-hidden text-start min-w-0 my-auto focus:outline-hidden"
+                data-testid="admin-lifecycle-modal-dialog"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* Pinned Header */}
+                <div
+                  className="flex items-start justify-between gap-3 border-b border-gray-100 dark:border-gray-800 px-4 py-3.5 sm:px-6 sm:py-4 shrink-0 bg-white dark:bg-gray-900 min-w-0"
+                  data-testid="admin-lifecycle-modal-header"
                 >
-                  {getStatusLabel(activeLifecycleTarget.isActive, isAr)}
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                <div>
-                  <span className="text-gray-400 text-[11px] block">{isAr ? 'البريد الإلكتروني' : 'Email'}:</span>
-                  <span className="font-mono text-gray-700 dark:text-gray-300 truncate block" data-testid="lifecycle-target-email">
-                    {activeLifecycleTarget.email}
-                  </span>
+                  <div className="space-y-1 min-w-0 flex-1">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="h-8 w-8 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                        <Shield className="w-4 h-4" />
+                      </div>
+                      <h3
+                        id="lifecycle-modal-title"
+                        className="text-sm sm:text-base font-bold text-gray-900 dark:text-gray-100 break-words min-w-0"
+                        data-testid="admin-lifecycle-modal-title"
+                      >
+                        {isAr
+                          ? 'إدارة دورة حياة الحساب الإداري'
+                          : 'Administrative Lifecycle Management'}
+                      </h3>
+                    </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 break-words">
+                      {isAr
+                        ? 'مراجعة وتأكيد الإجراءات الإدارية للحساب المحدد'
+                        : 'Review and confirm administrative action for the selected account'}
+                    </p>
+                  </div>
+                  <button
+                    ref={lifecycleModalCloseBtnRef}
+                    type="button"
+                    onClick={handleCloseLifecycleModal}
+                    disabled={isSubmittingLifecycle}
+                    className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                    data-testid="lifecycle-modal-close-btn"
+                    aria-label={isAr ? 'إغلاق' : 'Close'}
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
-                <div>
-                  <span className="text-gray-400 text-[11px] block">{isAr ? 'المعرّف الفريد' : 'UID'}:</span>
-                  <span className="font-mono text-gray-700 dark:text-gray-300 truncate block" data-testid="lifecycle-target-uid">
-                    {activeLifecycleTarget.id}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-400 text-[11px] block">{isAr ? 'الدور الحالي' : 'Current Role'}:</span>
-                  <span className="font-bold text-gray-800 dark:text-gray-200" data-testid="lifecycle-current-role">
-                    {getRoleLabel(activeLifecycleTarget.role, isAr)}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-400 text-[11px] block">{isAr ? 'المراجعة المعتمدة' : 'Authoritative Revision'}:</span>
-                  <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400" data-testid="lifecycle-target-revision">
-                    {getAdminUserRevision(activeLifecycleTarget) !== undefined
-                      ? `v${getAdminUserRevision(activeLifecycleTarget)}`
-                      : isAr
-                      ? 'غير مهيأ'
-                      : 'Not initialized'}
-                  </span>
-                </div>
-              </div>
-            </div>
 
-            {(() => {
-              const targetRevision = getAdminUserRevision(activeLifecycleTarget);
-              const isLegacyTarget = targetRevision === undefined;
-              const effectiveOperation: AdminLifecycleOperation = isLegacyTarget
-                ? 'InitializeRevision'
-                : selectedOperation === 'InitializeRevision'
-                ? activeLifecycleTarget.isActive
-                  ? 'ChangeRole'
-                  : 'Reactivate'
-                : selectedOperation;
+                {/* Single Scrollable Dialog Body */}
+                <div
+                  className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 sm:px-6 sm:py-5 space-y-4 min-w-0"
+                  data-testid="admin-lifecycle-modal-body"
+                >
+                  {/* Target Account Summary Card */}
+                  <div
+                    className="bg-gray-50 dark:bg-gray-850 rounded-xl p-3.5 sm:p-4 border border-gray-200/80 dark:border-gray-800/80 space-y-2.5 min-w-0"
+                    data-testid="lifecycle-target-identity-card"
+                  >
+                    <div className="flex items-center justify-between gap-2 flex-wrap min-w-0">
+                      <span
+                        className="text-xs font-bold text-gray-900 dark:text-gray-100 break-words min-w-0"
+                        data-testid="lifecycle-target-name"
+                      >
+                        {activeLifecycleTarget.name}
+                      </span>
+                      <span
+                        className={`text-[11px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                          activeLifecycleTarget.isActive
+                            ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400'
+                            : 'bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
+                        }`}
+                        data-testid="lifecycle-current-status"
+                      >
+                        {getStatusLabel(activeLifecycleTarget.isActive, isAr)}
+                      </span>
+                    </div>
 
-              const eligibilityCheck = validateLifecycleOperationEligibility(
-                currentUser,
-                activeTabId,
-                activeLifecycleTarget,
-                directorySnapshot,
-                effectiveOperation,
-                effectiveOperation === 'ChangeRole' ? selectedTargetRole : undefined
-              );
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs min-w-0">
+                      <div className="min-w-0">
+                        <span className="text-gray-400 text-[11px] block">
+                          {isAr ? 'البريد الإلكتروني' : 'Email'}:
+                        </span>
+                        <span
+                          className="font-mono text-gray-700 dark:text-gray-300 truncate block"
+                          data-testid="lifecycle-target-email"
+                        >
+                          {activeLifecycleTarget.email}
+                        </span>
+                      </div>
+                      <div className="min-w-0">
+                        <span className="text-gray-400 text-[11px] block">
+                          {isAr ? 'المعرّف الفريد' : 'UID'}:
+                        </span>
+                        <span
+                          className="font-mono text-gray-700 dark:text-gray-300 truncate block"
+                          data-testid="lifecycle-target-uid"
+                        >
+                          {activeLifecycleTarget.id}
+                        </span>
+                      </div>
+                      <div className="min-w-0">
+                        <span className="text-gray-400 text-[11px] block">
+                          {isAr ? 'الدور الحالي' : 'Current Role'}:
+                        </span>
+                        <span
+                          className="font-bold text-gray-800 dark:text-gray-200 break-words block"
+                          data-testid="lifecycle-current-role"
+                        >
+                          {getRoleLabel(activeLifecycleTarget.role, isAr)}
+                        </span>
+                      </div>
+                      <div className="min-w-0">
+                        <span className="text-gray-400 text-[11px] block">
+                          {isAr ? 'المراجعة المعتمدة' : 'Authoritative Revision'}:
+                        </span>
+                        <span
+                          className="font-mono font-bold text-emerald-700 dark:text-emerald-400"
+                          data-testid="lifecycle-target-revision"
+                        >
+                          {targetRevision !== undefined
+                            ? `v${targetRevision}`
+                            : isAr
+                            ? 'غير مهيأ'
+                            : 'Not initialized'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
 
-              const isSubmittingLifecycle =
-                initSubmissionSnapshot.status === 'submitting';
-
-              const isBoundContextMatching =
-                initSubmissionSnapshot.isConfirmed &&
-                initSubmissionSnapshot.boundCallerUid === currentUser.id &&
-                initSubmissionSnapshot.boundTargetUid === activeLifecycleTarget.id &&
-                (initSubmissionSnapshot.boundOperation === null ||
-                  initSubmissionSnapshot.boundOperation === undefined ||
-                  initSubmissionSnapshot.boundOperation === effectiveOperation) &&
-                (effectiveOperation !== 'ChangeRole' ||
-                  initSubmissionSnapshot.boundProposedRole === null ||
-                  initSubmissionSnapshot.boundProposedRole === undefined ||
-                  initSubmissionSnapshot.boundProposedRole === selectedTargetRole);
-
-              const canSubmitLifecycle =
-                isAuthorizedOwner &&
-                eligibilityCheck.eligible &&
-                isBoundContextMatching &&
-                !isSubmittingLifecycle &&
-                !initSubmissionSnapshot.requiresRefreshBeforeRetry;
-
-              const activeErrorCategory: AdminRevisionInitErrorCategory | null =
-                initSubmissionSnapshot.status === 'error'
-                  ? initSubmissionSnapshot.errorCategory ?? 'unavailable'
-                  : !eligibilityCheck.eligible
-                  ? eligibilityCheck.reason ?? 'target-ineligible'
-                  : null;
-
-              const activeErrorMessage = activeErrorCategory
-                ? isAr
-                  ? initSubmissionSnapshot.errorMessageAr ??
-                    INIT_REVISION_ERROR_MESSAGES[activeErrorCategory].ar
-                  : initSubmissionSnapshot.errorMessageEn ??
-                    INIT_REVISION_ERROR_MESSAGES[activeErrorCategory].en
-                : null;
-
-              const showRefreshPrompt =
-                initSubmissionSnapshot.requiresRefreshBeforeRetry ||
-                (!eligibilityCheck.eligible &&
-                  activeErrorCategory === 'stale-directory');
-
-              const confirmationCheckboxLabel =
-                effectiveOperation === 'InitializeRevision'
-                  ? isAr
-                    ? ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_AR
-                    : ADMIN_LIFECYCLE_INITIALIZE_CONFIRM_CHECKBOX_EN
-                  : effectiveOperation === 'ChangeRole'
-                  ? isAr
-                    ? ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_AR
-                    : ADMIN_LIFECYCLE_CHANGE_ROLE_CONFIRM_CHECKBOX_EN
-                  : effectiveOperation === 'Deactivate'
-                  ? isAr
-                    ? ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_AR
-                    : ADMIN_LIFECYCLE_DEACTIVATE_CONFIRM_CHECKBOX_EN
-                  : isAr
-                  ? ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_AR
-                  : ADMIN_LIFECYCLE_REACTIVATE_CONFIRM_CHECKBOX_EN;
-
-              return (
-                <>
                   {/* Operation Selection */}
-                  <div className="space-y-2">
+                  <div className="space-y-2 min-w-0">
                     <label className="text-xs font-bold text-gray-700 dark:text-gray-300 block">
-                      {isAr ? 'الإجراء الإداري المطلوب:' : 'Select Lifecycle Action:'}
+                      {isAr
+                        ? 'الإجراء الإداري المطلوب:'
+                        : 'Select Lifecycle Action:'}
                     </label>
                     {isLegacyTarget ? (
                       <select
                         value="InitializeRevision"
                         disabled={true}
-                        className="w-full px-3 py-2 bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl text-xs font-semibold text-amber-900 dark:text-amber-200"
+                        className="w-full min-w-0 px-3 py-2 bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl text-xs font-semibold text-amber-900 dark:text-amber-200"
                         data-testid="lifecycle-operation-select"
                       >
                         <option value="InitializeRevision">
@@ -3150,7 +3314,7 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                           )
                         }
                         disabled={isSubmittingLifecycle}
-                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer disabled:opacity-60"
+                        className="w-full min-w-0 px-3 py-2 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer disabled:opacity-60"
                         data-testid="lifecycle-operation-select"
                       >
                         <option value="ChangeRole">
@@ -3177,9 +3341,11 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
 
                   {/* Role selection if ChangeRole on versioned account */}
                   {!isLegacyTarget && effectiveOperation === 'ChangeRole' && (
-                    <div className="space-y-2 bg-gray-50/50 dark:bg-gray-850/50 p-3.5 rounded-xl border border-gray-200/60 dark:border-gray-800/60">
+                    <div className="space-y-2 bg-gray-50/50 dark:bg-gray-850/50 p-3.5 rounded-xl border border-gray-200/60 dark:border-gray-800/60 min-w-0">
                       <label className="text-xs font-bold text-gray-700 dark:text-gray-300 block">
-                        {isAr ? 'الدور الإداري الجديد المقترح:' : 'Proposed Target Role:'}
+                        {isAr
+                          ? 'الدور الإداري الجديد المقترح:'
+                          : 'Proposed Target Role:'}
                       </label>
                       <select
                         value={selectedTargetRole}
@@ -3187,12 +3353,21 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                           handleSelectTargetRole(e.target.value as AdminRole)
                         }
                         disabled={isSubmittingLifecycle}
-                        className="w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer disabled:opacity-60"
+                        className="w-full min-w-0 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold text-gray-900 dark:text-gray-100 focus:outline-hidden focus:border-emerald-500 cursor-pointer disabled:opacity-60"
                         data-testid="lifecycle-target-role-select"
                       >
                         {NON_OWNER_LIFECYCLE_ROLES.map((r) => (
-                          <option key={r} value={r} disabled={r === activeLifecycleTarget.role}>
-                            {getRoleLabel(r, isAr)} {r === activeLifecycleTarget.role ? (isAr ? '(الدور الحالي)' : '(Current)') : ''}
+                          <option
+                            key={r}
+                            value={r}
+                            disabled={r === activeLifecycleTarget.role}
+                          >
+                            {getRoleLabel(r, isAr)}{' '}
+                            {r === activeLifecycleTarget.role
+                              ? isAr
+                                ? '(الدور الحالي)'
+                                : '(Current)'
+                              : ''}
                           </option>
                         ))}
                       </select>
@@ -3200,14 +3375,25 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                   )}
 
                   {/* Proposed Summary Box */}
-                  <div className="p-3 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200/60 dark:border-blue-900/40 rounded-xl text-xs space-y-1.5">
+                  <div className="p-3 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200/60 dark:border-blue-900/40 rounded-xl text-xs space-y-1.5 min-w-0">
                     <span className="font-bold text-blue-900 dark:text-blue-200 block">
-                      {isAr ? 'ملخص الإجراء المقترح:' : 'Proposed Action Summary:'}
+                      {isAr
+                        ? 'ملخص الإجراء المقترح:'
+                        : 'Proposed Action Summary:'}
                     </span>
-                    <div className="text-blue-800 dark:text-blue-300 space-y-1" data-testid="lifecycle-proposed-summary">
+                    <div
+                      className="text-blue-800 dark:text-blue-300 space-y-1 break-words"
+                      data-testid="lifecycle-proposed-summary"
+                    >
                       {effectiveOperation === 'InitializeRevision' ? (
-                        <div className="space-y-1" data-testid="lifecycle-initialize-explanation">
-                          <p className="font-semibold" data-testid="lifecycle-proposed-operation">
+                        <div
+                          className="space-y-1"
+                          data-testid="lifecycle-initialize-explanation"
+                        >
+                          <p
+                            className="font-semibold"
+                            data-testid="lifecycle-proposed-operation"
+                          >
                             {isAr
                               ? `الإجراء المقترح: تهيئة المراجعة الأولية للحساب [${activeLifecycleTarget.name}]`
                               : `Proposed Operation: ${ADMIN_LIFECYCLE_INITIALIZE_ACTION_LABEL_EN} for account [${activeLifecycleTarget.name}]`}
@@ -3241,10 +3427,10 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                   </div>
 
                   {/* Unified Guarded Lifecycle Confirmation & Submission Controls */}
-                  <div className="space-y-3">
+                  <div className="space-y-3 min-w-0">
                     {/* Dedicated Explicit Confirmation Checkbox */}
                     <label
-                      className={`flex items-start gap-2.5 p-3.5 rounded-xl border text-xs transition-colors ${
+                      className={`flex items-start gap-2.5 p-3.5 rounded-xl border text-xs transition-colors min-w-0 ${
                         !eligibilityCheck.eligible ||
                         isSubmittingLifecycle ||
                         initSubmissionSnapshot.requiresRefreshBeforeRetry
@@ -3274,7 +3460,7 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                         data-testid="lifecycle-init-confirm-checkbox"
                       />
                       <span
-                        className="text-gray-800 dark:text-gray-200 font-medium leading-relaxed"
+                        className="text-gray-800 dark:text-gray-200 font-medium leading-relaxed break-words min-w-0"
                         data-testid="lifecycle-init-confirm-label"
                       >
                         {confirmationCheckboxLabel}
@@ -3284,12 +3470,12 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                     {/* Compact Progress Indicator while Submitting */}
                     {isSubmittingLifecycle && (
                       <div
-                        className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 flex items-center gap-2.5 text-xs text-emerald-800 dark:text-emerald-200"
+                        className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 flex items-center gap-2.5 text-xs text-emerald-800 dark:text-emerald-200 min-w-0"
                         role="status"
                         data-testid="lifecycle-submitting-indicator"
                       >
                         <Loader2 className="w-4 h-4 animate-spin text-emerald-600 dark:text-emerald-400 shrink-0" />
-                        <span className="font-semibold">
+                        <span className="font-semibold break-words min-w-0">
                           {isAr
                             ? 'جاري تنفيذ الإجراء الإداري على الخادم...'
                             : 'Executing administrative lifecycle operation on server...'}
@@ -3300,14 +3486,14 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                     {/* Sanitized Failure / Ineligibility Notice */}
                     {activeErrorMessage && !isSubmittingLifecycle && (
                       <div
-                        className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/80 space-y-2.5 text-xs text-rose-900 dark:text-rose-200"
+                        className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/80 space-y-2.5 text-xs text-rose-900 dark:text-rose-200 min-w-0"
                         role="alert"
                         data-testid="lifecycle-submission-error"
                       >
-                        <div className="flex items-start gap-2">
+                        <div className="flex items-start gap-2 min-w-0">
                           <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
                           <p
-                            className="font-semibold leading-relaxed"
+                            className="font-semibold leading-relaxed break-words min-w-0"
                             data-testid="lifecycle-submission-error-message"
                           >
                             {activeErrorMessage}
@@ -3317,13 +3503,17 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                           <div className="flex justify-end">
                             <button
                               type="button"
-                              onClick={() => void handleRefreshAfterInitFailure()}
+                              onClick={() =>
+                                void handleRefreshAfterInitFailure()
+                              }
                               className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg inline-flex items-center gap-1.5 cursor-pointer transition-colors"
                               data-testid="lifecycle-refresh-directory-btn"
                             >
                               <RefreshCw className="w-3.5 h-3.5" />
                               <span>
-                                {isAr ? 'تحديث الدليل الآن' : 'Refresh Directory Now'}
+                                {isAr
+                                  ? 'تحديث الدليل الآن'
+                                  : 'Refresh Directory Now'}
                               </span>
                             </button>
                           </div>
@@ -3331,59 +3521,67 @@ export const AdminUsersManagement: React.FC<AdminUsersManagementProps> = ({
                       </div>
                     )}
                   </div>
+                </div>
 
-                  {/* Actions Footer */}
-                  <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-gray-100 dark:border-gray-800">
-                    <button
-                      type="button"
-                      onClick={handleCloseLifecycleModal}
-                      disabled={isSubmittingLifecycle}
-                      className="px-4 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs font-bold rounded-xl transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                      data-testid="lifecycle-cancel-btn"
-                    >
-                      {isAr ? 'إلغاء' : 'Cancel'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void handleExecuteLifecycleOperation(
-                          effectiveOperation,
-                          effectiveOperation === 'ChangeRole'
-                            ? selectedTargetRole
-                            : undefined
-                        )
-                      }
-                      disabled={!canSubmitLifecycle}
-                      aria-disabled={canSubmitLifecycle ? 'false' : 'true'}
-                      className={`px-4 py-2 text-xs font-bold rounded-xl inline-flex items-center gap-1.5 transition-colors ${
-                        canSubmitLifecycle
-                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
-                          : 'bg-gray-300 dark:bg-gray-800 text-gray-500 dark:text-gray-500 cursor-not-allowed opacity-75'
-                      }`}
-                      data-testid="lifecycle-confirm-btn"
-                    >
-                      {isSubmittingLifecycle ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Shield className="w-3.5 h-3.5" />
-                      )}
-                      <span>
-                        {isSubmittingLifecycle
-                          ? isAr
-                            ? 'جاري التنفيذ...'
-                            : 'Processing...'
-                          : isAr
-                          ? ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_AR
-                          : ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_EN}
-                      </span>
-                    </button>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      )}
+                {/* Pinned Actions Footer */}
+                <div
+                  className="flex items-center justify-end gap-2.5 px-4 py-3.5 sm:px-6 sm:py-4 border-t border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-850/50 shrink-0 flex-wrap"
+                  data-testid="admin-lifecycle-modal-footer"
+                >
+                  <button
+                    type="button"
+                    onClick={handleCloseLifecycleModal}
+                    disabled={isSubmittingLifecycle}
+                    className="px-4 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs font-bold rounded-xl transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    data-testid="lifecycle-cancel-btn"
+                  >
+                    {isAr ? 'إلغاء' : 'Cancel'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleExecuteLifecycleOperation(
+                        effectiveOperation,
+                        effectiveOperation === 'ChangeRole'
+                          ? selectedTargetRole
+                          : undefined
+                      )
+                    }
+                    disabled={!canSubmitLifecycle}
+                    aria-disabled={canSubmitLifecycle ? 'false' : 'true'}
+                    className={`px-4 py-2 text-xs font-bold rounded-xl inline-flex items-center gap-1.5 transition-colors ${
+                      canSubmitLifecycle
+                        ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+                        : 'bg-gray-300 dark:bg-gray-800 text-gray-500 dark:text-gray-500 cursor-not-allowed opacity-75'
+                    }`}
+                    data-testid="lifecycle-confirm-btn"
+                  >
+                    {isSubmittingLifecycle ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Shield className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {isSubmittingLifecycle
+                        ? isAr
+                          ? 'جاري التنفيذ...'
+                          : 'Processing...'
+                        : isAr
+                        ? ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_AR
+                        : ADMIN_LIFECYCLE_CONFIRM_OPERATION_LABEL_EN}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+
+          if (typeof document !== 'undefined' && document.body) {
+            return createPortal(lifecycleModalNode, document.body);
+          }
+
+          return lifecycleModalNode;
+        })()}
 
       {/* Existing Modals Retained Closed (Mutating Flows Disabled in AUTH-03C2) */}
       <UserEditorModal
