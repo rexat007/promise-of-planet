@@ -1,13 +1,195 @@
 import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { User as FirebaseUser } from 'firebase/auth';
 import { Container } from './Container';
 import { Shield, User, ChevronDown, BookOpen, FileText, Scale, Package, Sparkles, Users, Clock, Menu, X } from 'lucide-react';
 import { smoothScrollToSection } from '../../utils/interaction';
+import { AccountService } from '../../services/accountService';
 
 export const GLOBAL_MEMBER_ACCOUNT_LABELS = {
-  ar: 'حسابي / تسجيل الدخول',
-  en: 'My Account / Sign In',
+  signedOut: {
+    ar: 'تسجيل الدخول',
+    en: 'Sign In',
+  },
+  signedIn: {
+    ar: 'حسابي',
+    en: 'My Account',
+  },
 } as const;
+
+export function isAuthenticatedFirebaseSessionUser(
+  firebaseUser: FirebaseUser | null | undefined
+): firebaseUser is FirebaseUser {
+  return Boolean(
+    firebaseUser &&
+      typeof firebaseUser.uid === 'string' &&
+      firebaseUser.uid.trim().length > 0
+  );
+}
+
+export function getGlobalMemberAccountLabel(
+  isAr: boolean,
+  firebaseUser: FirebaseUser | null | undefined,
+  isAuthLoading: boolean
+): string {
+  const hasAuthenticatedSession =
+    !isAuthLoading && isAuthenticatedFirebaseSessionUser(firebaseUser);
+
+  if (hasAuthenticatedSession) {
+    return isAr
+      ? GLOBAL_MEMBER_ACCOUNT_LABELS.signedIn.ar
+      : GLOBAL_MEMBER_ACCOUNT_LABELS.signedIn.en;
+  }
+
+  return isAr
+    ? GLOBAL_MEMBER_ACCOUNT_LABELS.signedOut.ar
+    : GLOBAL_MEMBER_ACCOUNT_LABELS.signedOut.en;
+}
+
+export interface HeaderAuthSessionSnapshot {
+  readonly firebaseUser: FirebaseUser | null;
+  readonly isAuthLoading: boolean;
+  readonly isSignedIn: boolean;
+  readonly subscriptionCount: number;
+}
+
+export type ObserveHeaderAuthStateFn = (
+  callback: (user: FirebaseUser | null) => void
+) => () => void;
+
+export interface HeaderAuthSessionControllerOptions {
+  readonly observeAuthState?: ObserveHeaderAuthStateFn;
+  readonly initialUser?: FirebaseUser | null;
+  readonly initialIsAuthLoading?: boolean;
+}
+
+export class HeaderAuthSessionController {
+  private static sharedController: HeaderAuthSessionController | null = null;
+
+  public static setSharedController(
+    controller: HeaderAuthSessionController | null
+  ): void {
+    HeaderAuthSessionController.sharedController = controller;
+  }
+
+  public static getSharedController(): HeaderAuthSessionController | null {
+    return HeaderAuthSessionController.sharedController;
+  }
+
+  private snapshot: HeaderAuthSessionSnapshot;
+  private isMounted = false;
+  private activeUnsubscribe: (() => void) | null = null;
+  private readonly observeAuthStateFn: ObserveHeaderAuthStateFn;
+  private readonly listeners = new Set<
+    (snapshot: HeaderAuthSessionSnapshot) => void
+  >();
+
+  constructor(options?: HeaderAuthSessionControllerOptions) {
+    this.observeAuthStateFn =
+      options?.observeAuthState ??
+      ((callback) => AccountService.observeAuthState(callback));
+
+    const hasExplicitLoading =
+      options !== undefined && options.initialIsAuthLoading !== undefined;
+    const hasExplicitUser =
+      options !== undefined && options.initialUser !== undefined;
+
+    const initialIsAuthLoading = hasExplicitLoading
+      ? Boolean(options.initialIsAuthLoading)
+      : !hasExplicitUser;
+
+    const candidateUser = hasExplicitUser ? (options.initialUser ?? null) : null;
+    const validatedUser =
+      !initialIsAuthLoading && isAuthenticatedFirebaseSessionUser(candidateUser)
+        ? candidateUser
+        : null;
+
+    this.snapshot = Object.freeze({
+      firebaseUser: validatedUser,
+      isAuthLoading: initialIsAuthLoading,
+      isSignedIn: Boolean(validatedUser),
+      subscriptionCount: 0,
+    });
+  }
+
+  public getSnapshot(): HeaderAuthSessionSnapshot {
+    return this.snapshot;
+  }
+
+  public subscribe(
+    listener: (snapshot: HeaderAuthSessionSnapshot) => void
+  ): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private emit(next: HeaderAuthSessionSnapshot): void {
+    this.snapshot = Object.freeze(next);
+    if (!this.isMounted) {
+      return;
+    }
+    this.listeners.forEach((listener) => listener(this.snapshot));
+  }
+
+  public mount(): () => void {
+    if (this.isMounted && this.activeUnsubscribe !== null) {
+      return () => {
+        this.unmount();
+      };
+    }
+
+    this.isMounted = true;
+    const nextSubscriptionCount = this.snapshot.subscriptionCount + 1;
+    this.snapshot = Object.freeze({
+      ...this.snapshot,
+      subscriptionCount: nextSubscriptionCount,
+    });
+
+    const unsubscribe = this.observeAuthStateFn((user) => {
+      if (!this.isMounted) {
+        return;
+      }
+      const validUser = isAuthenticatedFirebaseSessionUser(user) ? user : null;
+      this.emit({
+        firebaseUser: validUser,
+        isAuthLoading: false,
+        isSignedIn: Boolean(validUser),
+        subscriptionCount: this.snapshot.subscriptionCount,
+      });
+    });
+
+    this.activeUnsubscribe =
+      typeof unsubscribe === 'function' ? unsubscribe : () => {};
+
+    return () => {
+      this.unmount();
+    };
+  }
+
+  public unmount(): void {
+    this.isMounted = false;
+    if (this.activeUnsubscribe) {
+      const unsub = this.activeUnsubscribe;
+      this.activeUnsubscribe = null;
+      unsub();
+    }
+  }
+}
+
+export function bindHeaderAuthSessionEffect(
+  controller: HeaderAuthSessionController,
+  onSnapshotChange: (snapshot: HeaderAuthSessionSnapshot) => void
+): () => void {
+  controller.mount();
+  onSnapshotChange(controller.getSnapshot());
+  const unsubscribeState = controller.subscribe(onSnapshotChange);
+  return () => {
+    unsubscribeState();
+    controller.unmount();
+  };
+}
 
 export type PublicPageKey =
   | 'home'
@@ -25,6 +207,7 @@ interface HeaderProps {
   onNavigate?: (page: PublicPageKey) => void;
   onOpenMemberAccount?: () => void;
   isMemberAccountOpen?: boolean;
+  authSessionController?: HeaderAuthSessionController;
 }
 
 export function Header({
@@ -33,9 +216,43 @@ export function Header({
   onNavigate,
   onOpenMemberAccount,
   isMemberAccountOpen = false,
+  authSessionController,
 }: HeaderProps) {
   const { t, i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
+
+  const controllerRef = useRef<HeaderAuthSessionController | null>(null);
+  if (!controllerRef.current) {
+    controllerRef.current =
+      authSessionController ??
+      HeaderAuthSessionController.getSharedController() ??
+      new HeaderAuthSessionController();
+  }
+  const activeController =
+    authSessionController ??
+    HeaderAuthSessionController.getSharedController() ??
+    controllerRef.current;
+
+  const [authSnapshot, setAuthSnapshot] = useState<HeaderAuthSessionSnapshot>(
+    () => activeController.getSnapshot()
+  );
+
+  // Observe the shared Firebase authentication session once on mount and clean up on unmount
+  useEffect(() => {
+    return bindHeaderAuthSessionEffect(activeController, setAuthSnapshot);
+  }, [activeController]);
+
+  const currentSnapshot =
+    authSessionController || HeaderAuthSessionController.getSharedController()
+      ? activeController.getSnapshot()
+      : authSnapshot;
+
+  const memberAccountLabel = getGlobalMemberAccountLabel(
+    isAr,
+    currentSnapshot.firebaseUser,
+    currentSnapshot.isAuthLoading
+  );
+
   const [activePanelKey, setActivePanelKey] = useState<'library' | 'training' | null>(null);
   const [isScrolled, setIsScrolled] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -385,11 +602,19 @@ export function Header({
               aria-haspopup="dialog"
               aria-expanded={Boolean(isMemberAccountOpen)}
               aria-controls="global-member-account-dialog"
+              aria-busy={currentSnapshot.isAuthLoading}
+              data-auth-state={
+                currentSnapshot.isAuthLoading
+                  ? 'loading'
+                  : currentSnapshot.isSignedIn
+                    ? 'authenticated'
+                    : 'unauthenticated'
+              }
               dir={isAr ? 'rtl' : 'ltr'}
             >
               <User className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
               <span className="truncate max-w-[96px] min-[390px]:max-w-[135px] sm:max-w-none">
-                {isAr ? GLOBAL_MEMBER_ACCOUNT_LABELS.ar : GLOBAL_MEMBER_ACCOUNT_LABELS.en}
+                {memberAccountLabel}
               </span>
             </button>
 
