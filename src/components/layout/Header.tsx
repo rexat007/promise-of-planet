@@ -2,11 +2,15 @@ import { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { User as FirebaseUser } from 'firebase/auth';
 import { Container } from './Container';
-import { Shield, User, ChevronDown, BookOpen, FileText, Scale, Package, Sparkles, Users, Clock, Menu, X } from 'lucide-react';
+import { User, ChevronDown, BookOpen, FileText, Scale, Package, Sparkles, Users, Clock, Menu, X } from 'lucide-react';
 import { smoothScrollToSection } from '../../utils/interaction';
 import { AccountService } from '../../services/accountService';
 
 export const GLOBAL_MEMBER_ACCOUNT_LABELS = {
+  loading: {
+    ar: 'الحساب',
+    en: 'Account',
+  },
   signedOut: {
     ar: 'تسجيل الدخول',
     en: 'Sign In',
@@ -32,8 +36,13 @@ export function getGlobalMemberAccountLabel(
   firebaseUser: FirebaseUser | null | undefined,
   isAuthLoading: boolean
 ): string {
-  const hasAuthenticatedSession =
-    !isAuthLoading && isAuthenticatedFirebaseSessionUser(firebaseUser);
+  if (isAuthLoading) {
+    return isAr
+      ? GLOBAL_MEMBER_ACCOUNT_LABELS.loading.ar
+      : GLOBAL_MEMBER_ACCOUNT_LABELS.loading.en;
+  }
+
+  const hasAuthenticatedSession = isAuthenticatedFirebaseSessionUser(firebaseUser);
 
   if (hasAuthenticatedSession) {
     return isAr
@@ -211,7 +220,6 @@ interface HeaderProps {
 }
 
 export function Header({
-  onEnterAdmin,
   activePage = 'home',
   onNavigate,
   onOpenMemberAccount,
@@ -228,6 +236,7 @@ export function Header({
       HeaderAuthSessionController.getSharedController() ??
       new HeaderAuthSessionController();
   }
+
   const activeController =
     authSessionController ??
     HeaderAuthSessionController.getSharedController() ??
@@ -617,21 +626,6 @@ export function Header({
                 {memberAccountLabel}
               </span>
             </button>
-
-            {/* Admin Portal Gateway */}
-            {onEnterAdmin && (
-              <button
-                onClick={onEnterAdmin}
-                onFocus={() => setActivePanelKey(null)}
-                className="inline-flex items-center gap-1 sm:gap-1.5 px-2 py-1.5 sm:px-3 sm:py-2 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:hover:bg-emerald-900/40 text-emerald-800 dark:text-emerald-300 border border-emerald-100 dark:border-emerald-900/40 rounded-lg text-xs font-bold pop-motion-micro pop-hover-lift cursor-pointer shadow-xs focus-visible:outline-2 shrink-0 min-h-[36px]"
-                id="header-enter-admin-btn"
-                dir={isAr ? 'rtl' : 'ltr'}
-              >
-                <Shield className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden min-[360px]:inline">{isAr ? 'بوابة الإدارة' : 'Admin Portal'}</span>
-                <span className="min-[360px]:hidden">{isAr ? 'إدارة' : 'Admin'}</span>
-              </button>
-            )}
 
             {/* Language Switcher */}
             <button

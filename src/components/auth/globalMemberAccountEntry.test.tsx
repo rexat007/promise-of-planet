@@ -17,15 +17,29 @@ import {
   isAuthenticatedFirebaseSessionUser,
 } from '../layout/Header';
 import { AppShell } from '../layout/AppShell';
+import {
+  AdminAccessGate,
+  ADMIN_SIGNOUT_ERROR_MESSAGES,
+  clearAdminPresentationSession,
+  executeAdminSignOut,
+} from '../layout/AdminAccessGate';
 import { AdminRole, type AdminUser } from '../../types/admin';
 import {
   AdminGateResolutionController,
   AdminIdentityServiceClass,
+  AdminReadError,
   InMemoryAdminIdentityRepository,
 } from '../../services/adminIdentityService';
 import {
   GlobalMemberAccountDialog,
+  GLOBAL_MEMBER_ADMIN_DASHBOARD_ACTION_LABELS,
+  GLOBAL_MEMBER_ADMIN_READ_ERROR_MESSAGES,
+  GLOBAL_MEMBER_ADMIN_RETRY_LABELS,
+  DialogAdminClassificationController,
+  bindDialogAdminClassificationEffect,
+  getGlobalMemberDialogTitle,
   handleGlobalMemberDialogKeyDown,
+  invokeAuthorizedDialogAdminNavigation,
   restoreGlobalMemberDialogFocus,
 } from './GlobalMemberAccountDialog';
 import {
@@ -33,6 +47,15 @@ import {
   FORGOT_PASSWORD_ACTION_LABELS,
   INCOMPLETE_ACCOUNT_SETUP_MESSAGES,
 } from './AccountAuthWidget';
+import {
+  AdminInvitationAcceptanceController,
+  OPEN_ADMIN_PORTAL_ACTION_AR,
+  OPEN_ADMIN_PORTAL_ACTION_EN,
+} from './AdminInvitationAcceptancePanel';
+import {
+  AdminInvitationStatus,
+  type AcceptAdminInvitationClientResponse,
+} from '../../services/adminIdentityManagementClient';
 import {
   AccountService,
   AccountServiceClass,
@@ -130,7 +153,7 @@ const SAMPLE_COURSE: TrainingCourse = {
   language: 'ar',
 };
 
-describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Account Session & Dynamic Header Label', () => {
+describe('AUTH-02B2, AUTH-05-R1 & AUTH-05-UAE1: Unified Account Entry & Server-Backed Admin Classification', () => {
   let accountRepo: InMemoryAccountRepository;
   let testService: TestableGlobalAccountService;
 
@@ -138,14 +161,20 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     accountRepo = new InMemoryAccountRepository();
     testService = new TestableGlobalAccountService(accountRepo);
     HeaderAuthSessionController.setSharedController(null);
+    DialogAdminClassificationController.setSharedController(null);
     vi.restoreAllMocks();
     await i18n.changeLanguage('ar');
   });
 
-  it('1. renders exactly one Header member account entry in the fixed control zone on desktop without duplicating forms', async () => {
+  it('1. renders exactly one Header member account entry in the fixed control zone on desktop without duplicating forms or rendering redundant Header Admin Portal button', async () => {
     await i18n.changeLanguage('en');
+    const signedOutController = new HeaderAuthSessionController({
+      initialUser: null,
+      initialIsAuthLoading: false,
+    });
     const html = renderToStaticMarkup(
       createElement(Header, {
+        authSessionController: signedOutController,
         onEnterAdmin: () => {},
         activePage: 'home',
         onOpenMemberAccount: () => {},
@@ -159,18 +188,25 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     expect(html).toContain(GLOBAL_MEMBER_ACCOUNT_LABELS.signedOut.en);
     expect(html).toContain('aria-haspopup="dialog"');
     expect(html).toContain('aria-expanded="false"');
+    // Redundant public Header Admin Portal button must be removed
+    expect(html).not.toContain('id="header-enter-admin-btn"');
     // Header itself must not embed AccountAuthWidget's password/email inputs directly
     expect(html).not.toContain('type="password"');
   });
 
-  it('2. exposes a single reachable account entry across mobile and desktop viewports with no duplicate account controls', async () => {
+  it('2. exposes a single reachable account entry across mobile, tablet, and desktop viewports (320px, 390px, 768px, 1280px) with no duplicate account controls', async () => {
     await i18n.changeLanguage('ar');
     const headerSource = readFileSync(
       resolve(__dirname, '../layout/Header.tsx'),
       'utf8'
     );
+    const signedOutController = new HeaderAuthSessionController({
+      initialUser: null,
+      initialIsAuthLoading: false,
+    });
     const html = renderToStaticMarkup(
       createElement(Header, {
+        authSessionController: signedOutController,
         onEnterAdmin: () => {},
         activePage: 'home',
         onOpenMemberAccount: () => {},
@@ -178,17 +214,19 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       })
     );
 
-    // Control is located inside #header-fixed-control-zone which is visible across mobile, tablet, and desktop
     const buttonOccurrencesInSource = (
       headerSource.match(/\sid="header-member-account-btn"/g) || []
     ).length;
     expect(buttonOccurrencesInSource).toBe(1);
+    expect(headerSource).not.toContain('header-enter-admin-btn');
 
     const renderedOccurrences = (
       html.match(/data-testid="header-member-account-btn"/g) || []
     ).length;
     expect(renderedOccurrences).toBe(1);
     expect(html).toContain(GLOBAL_MEMBER_ACCOUNT_LABELS.signedOut.ar);
+    // Responsive truncation and min-w-0 guards across 320px, 390px, 768px, and 1280px
+    expect(html).toContain('max-w-[96px] min-[390px]:max-w-[135px] sm:max-w-none');
   });
 
   it('3. opens GlobalMemberAccountDialog wrapping the existing AccountAuthWidget through App -> AppShell -> Header', async () => {
@@ -205,6 +243,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       )
     );
     expect(closedShellHtml).toContain('id="header-member-account-btn"');
+    expect(closedShellHtml).not.toContain('id="header-enter-admin-btn"');
     expect(closedShellHtml).not.toContain('id="global-member-account-dialog"');
 
     const openShellHtml = renderToStaticMarkup(
@@ -231,32 +270,41 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     expect(dialogSource).toContain('<AccountAuthWidget isAr={isAr} />');
   });
 
-  it('4. keeps sign-in and registration reachable inside GlobalMemberAccountDialog', async () => {
+  it('4. keeps sign-in and registration reachable inside GlobalMemberAccountDialog with dynamic state-consistent headings', async () => {
+    const signedOutDialogController = new DialogAdminClassificationController({
+      initialUser: null,
+      initialIsAuthLoading: false,
+    });
+
     const dialogEnHtml = renderToStaticMarkup(
       createElement(GlobalMemberAccountDialog, {
         isOpen: true,
         onClose: () => {},
         isAr: false,
+        adminClassificationController: signedOutDialogController,
       })
     );
     const widgetEnHtml = renderToStaticMarkup(
       createElement(AccountAuthWidget, { isAr: false })
     );
     expect(dialogEnHtml).toContain(widgetEnHtml);
-    expect(dialogEnHtml).toContain('My Account / Sign In');
+    expect(dialogEnHtml).toContain('>Sign In</h2>');
+    expect(dialogEnHtml).not.toContain('My Account / Sign In');
 
     const dialogArHtml = renderToStaticMarkup(
       createElement(GlobalMemberAccountDialog, {
         isOpen: true,
         onClose: () => {},
         isAr: true,
+        adminClassificationController: signedOutDialogController,
       })
     );
     const widgetArHtml = renderToStaticMarkup(
       createElement(AccountAuthWidget, { isAr: true })
     );
     expect(dialogArHtml).toContain(widgetArHtml);
-    expect(dialogArHtml).toContain('حسابي / تسجيل الدخول');
+    expect(dialogArHtml).toContain('>تسجيل الدخول</h2>');
+    expect(dialogArHtml).not.toContain('حسابي / تسجيل الدخول');
 
     // Verify AccountAuthWidget sign-in and registration flows work end-to-end
     const widgetSource = readFileSync(
@@ -301,7 +349,6 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
   });
 
   it('6. keeps AUTH-02A incomplete-account recovery reachable from the global dialog without signing out or creating a second user', async () => {
-    // Simulate a signed-in Firebase user whose accounts/{uid} document is missing
     const orphanUser = {
       uid: 'uid-orphan-member',
       email: 'orphan@example.com',
@@ -311,7 +358,6 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
 
     expect(await testService.getCurrentAccount()).toBeNull();
 
-    // Recover profile via canonical AUTH-02A recovery operation
     const recovery = await testService.recoverCurrentAccountProfile({
       displayName: 'Recovered Global Member',
     });
@@ -320,7 +366,6 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     expect(recovery.account?.displayName).toBe('Recovered Global Member');
     expect(testService.signOutCallCount).toBe(0);
 
-    // Confirm AccountAuthWidget exposes the incomplete setup banner and recovery button
     const widgetSource = readFileSync(
       resolve(__dirname, './AccountAuthWidget.tsx'),
       'utf8'
@@ -339,7 +384,6 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       dialogOpen = false;
     };
 
-    // Closing via Escape key handler or close callback never invokes signOut
     handleGlobalMemberDialogKeyDown({
       key: 'Escape',
       focusableElements: [],
@@ -351,7 +395,6 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     expect(testService.signOutCallCount).toBe(0);
     expect((await testService.getCurrentAccount())?.id).toBe('uid-persistent');
 
-    // Verify App.tsx preserves session across public page switches
     const appSource = readFileSync(resolve(__dirname, '../../App.tsx'), 'utf8');
     expect(appSource).toContain('isMemberAccountOpen={isMemberAccountOpen}');
     expect(appSource).not.toContain('AccountService.signOut');
@@ -370,7 +413,6 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       TrainingCourseService.setRepository(courseRepo);
       EnrollmentService.setRepository(enrollmentRepo);
 
-      // Register via global account authority
       const { user, account } = await testService.register(
         'sharedmember@example.com',
         'SharedPass123!',
@@ -378,12 +420,10 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       );
       expect(account?.id).toBe(user.uid);
 
-      // Inject authenticated user into singleton AccountService, EnrollmentService, and MemberTrainingAccessService
       AccountService.setAuthUserProvider(() => user);
       EnrollmentService.setAuthProvider(() => user.uid);
       MemberTrainingAccessService.setAuthProvider(() => user.uid);
 
-      // 1) Training Center course access immediately recognizes the signed-in member
       const trainingAccess = await resolveCourseAccessWithAccountRecovery(
         SAMPLE_COURSE.id,
         SAMPLE_COURSE
@@ -396,7 +436,6 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       expect(enrolledState.status).toBe('enrolled');
       expect(enrolledState.enrollment?.accountId).toBe(user.uid);
 
-      // 2) Citizen Journalism submission service recognizes the exact same account session
       const citizenService = new CitizenSubmissionServiceClass();
       citizenService.setRepository(new InMemoryCitizenSubmissionRepository());
       citizenService.setStorageAdapter(new InMemoryCitizenEvidenceStorageAdapter());
@@ -420,7 +459,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     }
   });
 
-  it('9. keeps Admin Portal gateway separate from public member account authentication', () => {
+  it('9. removes the redundant Header Admin Portal button while preserving App.tsx AdminAccessGate wiring via GlobalMemberAccountDialog', () => {
     let adminEntered = false;
     let memberOpened = false;
 
@@ -437,7 +476,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     );
 
     expect(headerHtml).toContain('id="header-member-account-btn"');
-    expect(headerHtml).toContain('id="header-enter-admin-btn"');
+    expect(headerHtml).not.toContain('id="header-enter-admin-btn"');
     expect(adminEntered).toBe(false);
     expect(memberOpened).toBe(false);
 
@@ -447,7 +486,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     expect(appSource).toContain('setIsAdminOpen(true)');
   });
 
-  it('10. never uses FirebaseAuthProvider, mock admin identities, localStorage, or cookies as Header auth authority or grants administrative roles through public registration', async () => {
+  it('10. never uses FirebaseAuthProvider, mock admin identities, localStorage, sessionStorage, or cookies as Header/Dialog auth authority or grants administrative roles through public registration', async () => {
     const filesToInspect = [
       resolve(__dirname, '../layout/Header.tsx'),
       resolve(__dirname, './GlobalMemberAccountDialog.tsx'),
@@ -470,7 +509,20 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     expect(headerSource).not.toContain('canonicalAdminUser');
     expect(headerSource).not.toContain('simulateSignIn');
     expect(headerSource).not.toContain('localStorage');
+    expect(headerSource).not.toContain('sessionStorage');
     expect(headerSource).not.toContain('document.cookie');
+
+    const dialogSource = readFileSync(
+      resolve(__dirname, './GlobalMemberAccountDialog.tsx'),
+      'utf8'
+    );
+    expect(dialogSource).toContain('AccountService.observeAuthState');
+    expect(dialogSource).toContain(
+      'AdminIdentityService.resolveAdminForAuthenticatedUid'
+    );
+    expect(dialogSource).not.toContain('localStorage');
+    expect(dialogSource).not.toContain('sessionStorage');
+    expect(dialogSource).not.toContain('document.cookie');
 
     const { account } = await testService.register(
       'publicreader@example.com',
@@ -490,11 +542,20 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     expect('permissions' in (account as Record<string, unknown>)).toBe(false);
   });
 
-  it('11. renders correct Arabic RTL and English LTR labels and direction attributes in Header and GlobalMemberAccountDialog', async () => {
+  it('11. renders correct Arabic RTL and English LTR labels and direction attributes in Header and GlobalMemberAccountDialog across loading, signed-out, and signed-in states', async () => {
+    const signedOutHeaderCtrl = new HeaderAuthSessionController({
+      initialUser: null,
+      initialIsAuthLoading: false,
+    });
+    const signedOutDialogCtrl = new DialogAdminClassificationController({
+      initialUser: null,
+      initialIsAuthLoading: false,
+    });
+
     await i18n.changeLanguage('ar');
     const headerAr = renderToStaticMarkup(
       createElement(Header, {
-        onEnterAdmin: () => {},
+        authSessionController: signedOutHeaderCtrl,
         onOpenMemberAccount: () => {},
         isMemberAccountOpen: true,
       })
@@ -507,16 +568,17 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
         isOpen: true,
         onClose: () => {},
         isAr: true,
+        adminClassificationController: signedOutDialogCtrl,
       })
     );
     expect(dialogAr).toContain('dir="rtl"');
-    expect(dialogAr).toContain('حسابي / تسجيل الدخول');
+    expect(dialogAr).toContain('>تسجيل الدخول</h2>');
     expect(dialogAr).toContain('aria-label="إغلاق نافذة الحساب"');
 
     await i18n.changeLanguage('en');
     const headerEn = renderToStaticMarkup(
       createElement(Header, {
-        onEnterAdmin: () => {},
+        authSessionController: signedOutHeaderCtrl,
         onOpenMemberAccount: () => {},
         isMemberAccountOpen: true,
       })
@@ -529,10 +591,11 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
         isOpen: true,
         onClose: () => {},
         isAr: false,
+        adminClassificationController: signedOutDialogCtrl,
       })
     );
     expect(dialogEn).toContain('dir="ltr"');
-    expect(dialogEn).toContain('My Account / Sign In');
+    expect(dialogEn).toContain('>Sign In</h2>');
     expect(dialogEn).toContain('aria-label="Close account dialog"');
   });
 
@@ -609,11 +672,20 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     expect(widgetHtml).not.toContain('overflow-y-scroll');
   });
 
-  it('13. AUTH-05-R1: renders exact signed-out ("تسجيل الدخول" / "Sign In") and signed-in ("حسابي" / "My Account") labels in Arabic and English via AccountService.observeAuthState', async () => {
+  it('13. AUTH-05-UAE1: renders exact loading ("الحساب" / "Account"), signed-out ("تسجيل الدخول" / "Sign In"), and signed-in ("حسابي" / "My Account") labels in Header and Dialog via AccountService.observeAuthState', async () => {
+    expect(GLOBAL_MEMBER_ACCOUNT_LABELS.loading.ar).toBe('الحساب');
+    expect(GLOBAL_MEMBER_ACCOUNT_LABELS.loading.en).toBe('Account');
     expect(GLOBAL_MEMBER_ACCOUNT_LABELS.signedOut.ar).toBe('تسجيل الدخول');
     expect(GLOBAL_MEMBER_ACCOUNT_LABELS.signedOut.en).toBe('Sign In');
     expect(GLOBAL_MEMBER_ACCOUNT_LABELS.signedIn.ar).toBe('حسابي');
     expect(GLOBAL_MEMBER_ACCOUNT_LABELS.signedIn.en).toBe('My Account');
+
+    expect(getGlobalMemberDialogTitle(true, 'loading')).toBe('الحساب');
+    expect(getGlobalMemberDialogTitle(false, 'loading')).toBe('Account');
+    expect(getGlobalMemberDialogTitle(true, 'unauthenticated')).toBe('تسجيل الدخول');
+    expect(getGlobalMemberDialogTitle(false, 'unauthenticated')).toBe('Sign In');
+    expect(getGlobalMemberDialogTitle(true, 'authenticated')).toBe('حسابي');
+    expect(getGlobalMemberDialogTitle(false, 'authenticated')).toBe('My Account');
 
     let observedCallback: ((user: User | null) => void) | null = null;
     const observeSpy = vi
@@ -697,7 +769,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     }
   });
 
-  it('14. AUTH-05-R1: displays "حسابي" / "My Account" for Owner, Admin, Editor, RightsReviewer, and ordinary members when authenticated in Firebase Auth, and never infers auth from mock admins', async () => {
+  it('14. AUTH-05-UAE1: displays "حسابي" / "My Account" for Owner, Admin, Editor, RightsReviewer, and ordinary members when authenticated in Firebase Auth, and never infers auth from mock admins', async () => {
     let observedCallback: ((user: User | null) => void) | null = null;
     vi.spyOn(AccountService, 'observeAuthState').mockImplementation((cb) => {
       observedCallback = cb;
@@ -811,7 +883,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     }
   });
 
-  it('15. AUTH-05-R1: maintains an accessible, stable initial loading state until AccountService.observeAuthState resolves the session', async () => {
+  it('15. AUTH-05-UAE1: maintains an accessible, neutral initial loading state ("الحساب" / "Account") in both Header and Dialog until AccountService.observeAuthState resolves the session', async () => {
     let observedCallback: ((user: User | null) => void) | null = null;
     vi.spyOn(AccountService, 'observeAuthState').mockImplementation((cb) => {
       observedCallback = cb;
@@ -821,11 +893,16 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
 
     const controller = new HeaderAuthSessionController();
     const cleanup = bindHeaderAuthSessionEffect(controller, () => {});
+    const dialogController = new DialogAdminClassificationController({
+      observeAuthState: () => () => {},
+    });
+    const cleanupDialog = bindDialogAdminClassificationEffect(dialogController, () => {});
 
     try {
       expect(controller.getSnapshot().isAuthLoading).toBe(true);
       expect(controller.getSnapshot().isSignedIn).toBe(false);
       expect(controller.getSnapshot().firebaseUser).toBeNull();
+      expect(dialogController.getSnapshot().authState).toBe('loading');
 
       await i18n.changeLanguage('ar');
       const loadingArHtml = renderToStaticMarkup(
@@ -833,8 +910,20 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       );
       expect(loadingArHtml).toContain('aria-busy="true"');
       expect(loadingArHtml).toContain('data-auth-state="loading"');
-      expect(loadingArHtml).toContain('>تسجيل الدخول<');
+      expect(loadingArHtml).toContain('>الحساب<');
+      expect(loadingArHtml).not.toContain('>تسجيل الدخول<');
       expect(loadingArHtml).not.toContain('>حسابي<');
+
+      const loadingDialogArHtml = renderToStaticMarkup(
+        createElement(GlobalMemberAccountDialog, {
+          isOpen: true,
+          onClose: () => {},
+          isAr: true,
+          adminClassificationController: dialogController,
+        })
+      );
+      expect(loadingDialogArHtml).toContain('data-auth-state="loading"');
+      expect(loadingDialogArHtml).toContain('>الحساب</h2>');
 
       await i18n.changeLanguage('en');
       const loadingEnHtml = renderToStaticMarkup(
@@ -842,16 +931,28 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       );
       expect(loadingEnHtml).toContain('aria-busy="true"');
       expect(loadingEnHtml).toContain('data-auth-state="loading"');
-      expect(loadingEnHtml).toContain('>Sign In<');
+      expect(loadingEnHtml).toContain('>Account<');
+      expect(loadingEnHtml).not.toContain('>Sign In<');
       expect(loadingEnHtml).not.toContain('>My Account<');
 
-      // Even if a user object is passed to getGlobalMemberAccountLabel while isAuthLoading is true, it must stay stable
+      const loadingDialogEnHtml = renderToStaticMarkup(
+        createElement(GlobalMemberAccountDialog, {
+          isOpen: true,
+          onClose: () => {},
+          isAr: false,
+          adminClassificationController: dialogController,
+        })
+      );
+      expect(loadingDialogEnHtml).toContain('data-auth-state="loading"');
+      expect(loadingDialogEnHtml).toContain('>Account</h2>');
+
+      // Even if a user object is passed to getGlobalMemberAccountLabel while isAuthLoading is true, it must stay neutral
       const pendingUser = {
         uid: 'pending-uid-100',
         email: 'pending@promiseofplanet.org',
       } as unknown as User;
-      expect(getGlobalMemberAccountLabel(true, pendingUser, true)).toBe('تسجيل الدخول');
-      expect(getGlobalMemberAccountLabel(false, pendingUser, true)).toBe('Sign In');
+      expect(getGlobalMemberAccountLabel(true, pendingUser, true)).toBe('الحساب');
+      expect(getGlobalMemberAccountLabel(false, pendingUser, true)).toBe('Account');
 
       // Once AccountService.observeAuthState resolves with the user, loading completes and label updates
       observedCallback!(pendingUser);
@@ -874,12 +975,13 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       expect(resolvedEnHtml).toContain('data-auth-state="authenticated"');
       expect(resolvedEnHtml).toContain('>My Account<');
     } finally {
+      cleanupDialog();
       cleanup();
       await i18n.changeLanguage('ar');
     }
   });
 
-  it('16. AUTH-05-R1: reactively transitions label on sign-in and sign-out via AccountService.observeAuthState without page refresh', async () => {
+  it('16. AUTH-05-UAE1: reactively transitions label on sign-in and sign-out via AccountService.observeAuthState without page refresh', async () => {
     let observedCallback: ((user: User | null) => void) | null = null;
     vi.spyOn(AccountService, 'observeAuthState').mockImplementation((cb) => {
       observedCallback = cb;
@@ -946,7 +1048,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     }
   });
 
-  it('17. AUTH-05-R1: opens GlobalMemberAccountDialog in both signed-out and signed-in states and keeps signed-in account profile and sign-out action accessible', async () => {
+  it('17. AUTH-05-UAE1: opens GlobalMemberAccountDialog in both signed-out and signed-in states with synchronized dynamic headings and keeps signed-in account profile and sign-out action accessible', async () => {
     let observedCallback: ((user: User | null) => void) | null = null;
     vi.spyOn(AccountService, 'observeAuthState').mockImplementation((cb) => {
       observedCallback = cb;
@@ -966,7 +1068,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     } as unknown as User;
 
     try {
-      // 1) Signed-out AppShell opens GlobalMemberAccountDialog
+      // 1) Signed-out AppShell opens GlobalMemberAccountDialog with "تسجيل الدخول"
       await i18n.changeLanguage('ar');
       const signedOutOpenShell = renderToStaticMarkup(
         createElement(
@@ -982,6 +1084,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       expect(signedOutOpenShell).toContain('id="header-member-account-btn"');
       expect(signedOutOpenShell).toContain('data-testid="header-member-account-btn"');
       expect(signedOutOpenShell).toContain('>تسجيل الدخول<');
+      expect(signedOutOpenShell).toContain('>تسجيل الدخول</h2>');
       expect(signedOutOpenShell).toContain('id="global-member-account-dialog"');
       expect(signedOutOpenShell).toContain('aria-expanded="true"');
       expect((signedOutOpenShell.match(/\sid="header-member-account-btn"/g) || []).length).toBe(1);
@@ -1002,6 +1105,7 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
       expect(signedInOpenShell).toContain('id="header-member-account-btn"');
       expect(signedInOpenShell).toContain('data-testid="header-member-account-btn"');
       expect(signedInOpenShell).toContain('>حسابي<');
+      expect(signedInOpenShell).toContain('>حسابي</h2>');
       expect(signedInOpenShell).toContain('id="global-member-account-dialog"');
       expect(signedInOpenShell).toContain('aria-expanded="true"');
       expect((signedInOpenShell.match(/\sid="header-member-account-btn"/g) || []).length).toBe(1);
@@ -1023,94 +1127,181 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     }
   });
 
-  it('18. AUTH-05-R1: keeps Admin Portal button and AdminAccessGate authorization strictly separate from Header Firebase authentication', async () => {
+  it('18. AUTH-05-UAE1: exposes Admin Dashboard action inside GlobalMemberAccountDialog for active Owner, Admin, Editor, and RightsReviewer while omitting it for ordinary members, without auto-redirecting on login', async () => {
     const adminRepo = new InMemoryAdminIdentityRepository();
     const adminIdentityService = new AdminIdentityServiceClass(adminRepo);
     const gateController = new AdminGateResolutionController();
 
-    const activeOwnerRecord: AdminUser = {
-      id: 'uid-owner-900',
-      name: 'Nadia Owner',
-      email: 'owner@promiseofplanet.org',
-      role: AdminRole.Owner,
-      isActive: true,
-    };
-    adminRepo.seed(activeOwnerRecord);
+    const activeAdmins: Array<{ user: User; adminRecord: AdminUser }> = [
+      {
+        user: {
+          uid: 'uid-owner-900',
+          email: 'owner@promiseofplanet.org',
+          displayName: 'Nadia Owner',
+          emailVerified: true,
+        } as unknown as User,
+        adminRecord: {
+          id: 'uid-owner-900',
+          name: 'Nadia Owner',
+          email: 'owner@promiseofplanet.org',
+          role: AdminRole.Owner,
+          isActive: true,
+        },
+      },
+      {
+        user: {
+          uid: 'uid-admin-901',
+          email: 'admin@promiseofplanet.org',
+          displayName: 'Tariq Admin',
+          emailVerified: true,
+        } as unknown as User,
+        adminRecord: {
+          id: 'uid-admin-901',
+          name: 'Tariq Admin',
+          email: 'admin@promiseofplanet.org',
+          role: AdminRole.TrainingManager,
+          isActive: true,
+        },
+      },
+      {
+        user: {
+          uid: 'uid-editor-902',
+          email: 'editor@promiseofplanet.org',
+          displayName: 'Leila Editor',
+          emailVerified: true,
+        } as unknown as User,
+        adminRecord: {
+          id: 'uid-editor-902',
+          name: 'Leila Editor',
+          email: 'editor@promiseofplanet.org',
+          role: AdminRole.ContentEditor,
+          isActive: true,
+        },
+      },
+      {
+        user: {
+          uid: 'uid-reviewer-903',
+          email: 'reviewer@promiseofplanet.org',
+          displayName: 'Omar Reviewer',
+          emailVerified: true,
+        } as unknown as User,
+        adminRecord: {
+          id: 'uid-reviewer-903',
+          name: 'Omar Reviewer',
+          email: 'reviewer@promiseofplanet.org',
+          role: AdminRole.RightsReviewer,
+          isActive: true,
+        },
+      },
+    ];
 
-    const ownerFirebaseUser = {
-      uid: 'uid-owner-900',
-      email: 'owner@promiseofplanet.org',
-      displayName: 'Nadia Owner',
-      emailVerified: true,
-    } as unknown as User;
+    for (const item of activeAdmins) {
+      adminRepo.seed(item.adminRecord);
+    }
 
-    const ordinaryFirebaseUser = {
-      uid: 'uid-ordinary-901',
+    const ordinaryUser = {
+      uid: 'uid-ordinary-904',
       email: 'reader@example.com',
       displayName: 'Ordinary Reader',
       emailVerified: true,
     } as unknown as User;
 
-    // 1) Ordinary authenticated Firebase user sees "حسابي" / "My Account" in Header,
-    //    but is DENIED by AdminAccessGate because Firebase auth alone is NOT administrative authorization
-    const ordinaryHeaderController = new HeaderAuthSessionController({
-      initialUser: ordinaryFirebaseUser,
-      initialIsAuthLoading: false,
+    const onEnterAdminSpy = vi.fn();
+
+    // 1) Ordinary authenticated member: sees "حسابي" / "My Account", NO Admin Dashboard button
+    const ordinaryDialogController = new DialogAdminClassificationController({
+      resolveAdminForUid: (uid) =>
+        adminIdentityService.resolveAdminForAuthenticatedUid(uid),
     });
-    await i18n.changeLanguage('ar');
-    const ordinaryHeaderHtml = renderToStaticMarkup(
-      createElement(Header, {
-        authSessionController: ordinaryHeaderController,
-        onEnterAdmin: () => {},
-        onOpenMemberAccount: () => {},
+    const ordinarySnap = await ordinaryDialogController.handleAuthEvent(ordinaryUser);
+    expect(ordinarySnap.authState).toBe('authenticated');
+    expect(ordinarySnap.adminStatus).toBe('non_admin');
+    expect(ordinarySnap.adminUser).toBeNull();
+
+    const ordinaryDialogAr = renderToStaticMarkup(
+      createElement(GlobalMemberAccountDialog, {
+        isOpen: true,
+        onClose: () => {},
+        onEnterAdmin: onEnterAdminSpy,
+        isAr: true,
+        adminClassificationController: ordinaryDialogController,
       })
     );
-    expect(ordinaryHeaderHtml).toContain('>حسابي<');
-    expect(ordinaryHeaderHtml).toContain('id="header-enter-admin-btn"');
+    expect(ordinaryDialogAr).toContain('>حسابي</h2>');
+    expect(ordinaryDialogAr).toContain('data-admin-status="non_admin"');
+    expect(ordinaryDialogAr).not.toContain('id="global-member-enter-admin-btn"');
+    expect(ordinaryDialogAr).not.toContain(
+      GLOBAL_MEMBER_ADMIN_DASHBOARD_ACTION_LABELS.ar
+    );
+    expect(ordinaryDialogAr).not.toContain(
+      'data-testid="global-member-admin-error-banner"'
+    );
+    expect(
+      invokeAuthorizedDialogAdminNavigation(ordinarySnap, onEnterAdminSpy)
+    ).toBe(false);
+    expect(onEnterAdminSpy).not.toHaveBeenCalled();
 
-    await gateController.handleAuthEvent(ordinaryFirebaseUser, (uid) =>
-      adminIdentityService.resolveAdminForAuthenticatedUid(uid)
-    );
-    expect(gateController.getSnapshot().gateState).toBe('ADMIN_DENIED');
-    expect(gateController.getSnapshot().adminUser).toBeNull();
+    // 2) Active Owner, Admin (TrainingManager), Editor (ContentEditor), and RightsReviewer: each resolves as 'authorized' and renders "الانتقال إلى لوحة الإدارة" / "Open Admin Dashboard" without auto-redirecting
+    for (const item of activeAdmins) {
+      onEnterAdminSpy.mockClear();
+      const adminDialogController = new DialogAdminClassificationController({
+        resolveAdminForUid: (uid) =>
+          adminIdentityService.resolveAdminForAuthenticatedUid(uid),
+      });
+      const snap = await adminDialogController.handleAuthEvent(item.user);
+      expect(snap.authState).toBe('authenticated');
+      expect(snap.adminStatus).toBe('authorized');
+      expect(snap.adminUser?.id).toBe(item.user.uid);
+      expect(snap.adminUser?.role).toBe(item.adminRecord.role);
+      // Must NOT auto-redirect on authentication
+      expect(onEnterAdminSpy).not.toHaveBeenCalled();
 
-    // 2) Signed-in Owner sees "حسابي" / "My Account" in Header AND clicking #header-member-account-btn
-    //    opens GlobalMemberAccountDialog without automatically routing into Admin Portal
-    const ownerHeaderController = new HeaderAuthSessionController({
-      initialUser: ownerFirebaseUser,
-      initialIsAuthLoading: false,
-    });
-    const ownerHeaderHtml = renderToStaticMarkup(
-      createElement(Header, {
-        authSessionController: ownerHeaderController,
-        onEnterAdmin: () => {},
-        onOpenMemberAccount: () => {},
-      })
-    );
-    expect(ownerHeaderHtml).toContain('>حسابي<');
-    expect(ownerHeaderHtml).toContain('id="header-enter-admin-btn"');
+      const htmlAr = renderToStaticMarkup(
+        createElement(GlobalMemberAccountDialog, {
+          isOpen: true,
+          onClose: () => {},
+          onEnterAdmin: onEnterAdminSpy,
+          isAr: true,
+          adminClassificationController: adminDialogController,
+        })
+      );
+      expect(htmlAr).toContain('>حسابي</h2>');
+      expect(htmlAr).toContain('data-admin-status="authorized"');
+      expect(htmlAr).toContain('id="global-member-enter-admin-btn"');
+      expect(htmlAr).toContain(GLOBAL_MEMBER_ADMIN_DASHBOARD_ACTION_LABELS.ar);
+      expect(htmlAr).toContain(item.adminRecord.role);
 
-    const headerSource = readFileSync(
-      resolve(__dirname, '../layout/Header.tsx'),
-      'utf8'
-    );
-    // Verify #header-member-account-btn click handler only invokes onOpenMemberAccount and never onEnterAdmin
-    const memberBtnBlock = headerSource.slice(
-      headerSource.indexOf('Global Member Account Entry'),
-      headerSource.indexOf('Admin Portal Gateway')
-    );
-    expect(memberBtnBlock).toContain('onOpenMemberAccount?.()');
-    expect(memberBtnBlock).not.toContain('onEnterAdmin');
+      const htmlEn = renderToStaticMarkup(
+        createElement(GlobalMemberAccountDialog, {
+          isOpen: true,
+          onClose: () => {},
+          onEnterAdmin: onEnterAdminSpy,
+          isAr: false,
+          adminClassificationController: adminDialogController,
+        })
+      );
+      expect(htmlEn).toContain('>My Account</h2>');
+      expect(htmlEn).toContain('id="global-member-enter-admin-btn"');
+      expect(htmlEn).toContain(GLOBAL_MEMBER_ADMIN_DASHBOARD_ACTION_LABELS.en);
 
-    // Meanwhile AdminAccessGate resolves the same Owner UID via admins/{uid}
-    await gateController.handleAuthEvent(ownerFirebaseUser, (uid) =>
-      adminIdentityService.resolveAdminForAuthenticatedUid(uid)
-    );
-    expect(gateController.getSnapshot().gateState).toBe('ADMIN_AUTHORIZED');
-    expect(gateController.getSnapshot().adminUser?.role).toBe(AdminRole.Owner);
+      // Clicking Open Admin Dashboard invokes onEnterAdmin and AdminAccessGate remains final checkpoint
+      expect(onEnterAdminSpy).not.toHaveBeenCalled();
+      expect(
+        invokeAuthorizedDialogAdminNavigation(snap, onEnterAdminSpy)
+      ).toBe(true);
+      expect(onEnterAdminSpy).toHaveBeenCalledTimes(1);
+
+      await gateController.handleAuthEvent(item.user, (uid) =>
+        adminIdentityService.resolveAdminForAuthenticatedUid(uid)
+      );
+      expect(gateController.getSnapshot().gateState).toBe('ADMIN_AUTHORIZED');
+      expect(gateController.getSnapshot().adminUser?.role).toBe(
+        item.adminRecord.role
+      );
+    }
   });
 
-  it('19. AUTH-05-R1: subscribes once on mount via AccountService.observeAuthState, prevents duplicate subscriptions, and cleans up observer on unmount', () => {
+  it('19. AUTH-05-UAE1: subscribes once on mount via AccountService.observeAuthState, prevents duplicate subscriptions, and cleans up observer on unmount', () => {
     let observedCallback: ((user: User | null) => void) | null = null;
     const unsubscribeSpy = vi.fn();
     const observeSpy = vi
@@ -1123,7 +1314,6 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     const controller = new HeaderAuthSessionController();
     const snapshots: boolean[] = [];
 
-    // Mount via bindHeaderAuthSessionEffect (exact effect used in Header.tsx)
     const cleanup = bindHeaderAuthSessionEffect(controller, (snap) => {
       snapshots.push(snap.isSignedIn);
     });
@@ -1154,4 +1344,1011 @@ describe('AUTH-02B2 & AUTH-05-R1: Global Member Account Entry — Unified Accoun
     expect(controller.getSnapshot().firebaseUser?.uid).toBe('uid-lifecycle-707');
     expect(snapshots).toEqual([false, true]);
   });
+
+  it('20. AUTH-05-UAE1: denies administrative navigation for deactivated administrator, missing record, or malformed record, and never infers authority from email or displayName', async () => {
+    const adminRepo = new InMemoryAdminIdentityRepository();
+    const adminIdentityService = new AdminIdentityServiceClass(adminRepo);
+
+    // 1) Deactivated administrator (isActive: false)
+    adminRepo.seed({
+      id: 'uid-deactivated-admin',
+      name: 'Deactivated Admin',
+      email: 'deactivated@promiseofplanet.org',
+      role: AdminRole.TrainingManager,
+      isActive: false,
+    });
+
+    // 2) Malformed administrator records
+    adminRepo.seed({
+      id: 'uid-malformed-role',
+      name: 'Invalid Role User',
+      email: 'badrole@promiseofplanet.org',
+      role: 'SuperRoot',
+      isActive: true,
+    });
+
+    const controller = new DialogAdminClassificationController({
+      resolveAdminForUid: (uid) =>
+        adminIdentityService.resolveAdminForAuthenticatedUid(uid),
+    });
+
+    // Test deactivated admin
+    const deactivatedSnap = await controller.handleAuthEvent({
+      uid: 'uid-deactivated-admin',
+      email: 'deactivated@promiseofplanet.org',
+      displayName: 'Owner',
+    } as unknown as User);
+    expect(deactivatedSnap.adminStatus).toBe('non_admin');
+    expect(deactivatedSnap.adminUser).toBeNull();
+    expect(invokeAuthorizedDialogAdminNavigation(deactivatedSnap, () => {})).toBe(
+      false
+    );
+
+    const deactivatedHtml = renderToStaticMarkup(
+      createElement(GlobalMemberAccountDialog, {
+        isOpen: true,
+        onClose: () => {},
+        onEnterAdmin: () => {},
+        isAr: true,
+        adminClassificationController: controller,
+      })
+    );
+    expect(deactivatedHtml).not.toContain('id="global-member-enter-admin-btn"');
+
+    // Test malformed role record
+    const malformedSnap = await controller.handleAuthEvent({
+      uid: 'uid-malformed-role',
+      email: 'badrole@promiseofplanet.org',
+      displayName: 'Owner',
+    } as unknown as User);
+    expect(malformedSnap.adminStatus).toBe('non_admin');
+    expect(malformedSnap.adminUser).toBeNull();
+
+    // Test mismatched UID from custom resolver (e.g., returned record id !== authenticated uid)
+    const mismatchedSnap = await controller.handleAuthEvent(
+      {
+        uid: 'uid-victim-member',
+        email: 'owner@promiseofplanet.org',
+        displayName: 'Platform Owner',
+      } as unknown as User,
+      async () => ({
+        id: 'uid-other-admin',
+        name: 'Other Admin',
+        email: 'owner@promiseofplanet.org',
+        role: AdminRole.Owner,
+        isActive: true,
+      })
+    );
+    expect(mismatchedSnap.adminStatus).toBe('non_admin');
+    expect(mismatchedSnap.adminUser).toBeNull();
+  });
+
+  it('21. AUTH-05-UAE1: distinguishes Firestore read failure (AdminReadError) from confirmed non-admin, fails closed while preserving member profile, and recovers on explicit Retry without uncontrolled retry loops', async () => {
+    const adminRepo = new InMemoryAdminIdentityRepository();
+    const adminIdentityService = new AdminIdentityServiceClass(adminRepo);
+
+    const adminUserRecord: AdminUser = {
+      id: 'uid-transient-admin',
+      name: 'Transient Admin',
+      email: 'transient@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+    };
+    adminRepo.seed(adminUserRecord);
+    adminRepo.setShouldFail(true);
+
+    let lookupCalls = 0;
+    const controller = new DialogAdminClassificationController({
+      resolveAdminForUid: async (uid) => {
+        lookupCalls += 1;
+        return await adminIdentityService.resolveAdminForAuthenticatedUid(uid);
+      },
+    });
+
+    const firebaseAdminUser = {
+      uid: 'uid-transient-admin',
+      email: 'transient@promiseofplanet.org',
+      displayName: 'Transient Admin',
+    } as unknown as User;
+
+    // 1) Initial lookup fails with AdminReadError -> fails closed with status 'error' (exactly 1 read, no retry loop)
+    const errorSnap = await controller.handleAuthEvent(firebaseAdminUser);
+    expect(lookupCalls).toBe(1);
+    expect(errorSnap.authState).toBe('authenticated');
+    expect(errorSnap.adminStatus).toBe('error');
+    expect(errorSnap.errorCode).toBe('ADMIN_READ_FAILURE');
+    expect(errorSnap.adminUser).toBeNull();
+    expect(invokeAuthorizedDialogAdminNavigation(errorSnap, () => {})).toBe(
+      false
+    );
+
+    const errorHtmlAr = renderToStaticMarkup(
+      createElement(GlobalMemberAccountDialog, {
+        isOpen: true,
+        onClose: () => {},
+        onEnterAdmin: () => {},
+        isAr: true,
+        adminClassificationController: controller,
+      })
+    );
+    expect(errorHtmlAr).toContain('data-admin-status="error"');
+    expect(errorHtmlAr).toContain('data-testid="global-member-admin-error-banner"');
+    expect(errorHtmlAr).toContain('data-error-code="ADMIN_READ_FAILURE"');
+    expect(errorHtmlAr).toContain(GLOBAL_MEMBER_ADMIN_READ_ERROR_MESSAGES.ar);
+    expect(errorHtmlAr).toContain('data-testid="global-member-admin-retry-btn"');
+    expect(errorHtmlAr).toContain(GLOBAL_MEMBER_ADMIN_RETRY_LABELS.ar);
+    expect(errorHtmlAr).not.toContain('id="global-member-enter-admin-btn"');
+    // Member profile widget remains rendered and accessible
+    expect(errorHtmlAr).toContain(
+      renderToStaticMarkup(createElement(AccountAuthWidget, { isAr: true }))
+    );
+
+    const errorHtmlEn = renderToStaticMarkup(
+      createElement(GlobalMemberAccountDialog, {
+        isOpen: true,
+        onClose: () => {},
+        onEnterAdmin: () => {},
+        isAr: false,
+        adminClassificationController: controller,
+      })
+    );
+    expect(errorHtmlEn).toContain(GLOBAL_MEMBER_ADMIN_READ_ERROR_MESSAGES.en);
+    expect(errorHtmlEn).toContain(GLOBAL_MEMBER_ADMIN_RETRY_LABELS.en);
+
+    // 2) Transient failure clears -> explicit retry (recheckAdminEligibility) recovers and authorizes
+    adminRepo.setShouldFail(false);
+    const recoveredSnap = await controller.recheckAdminEligibility();
+    expect(lookupCalls).toBe(2);
+    expect(recoveredSnap.adminStatus).toBe('authorized');
+    expect(recoveredSnap.errorCode).toBeNull();
+    expect(recoveredSnap.adminUser?.role).toBe(AdminRole.ContentEditor);
+
+    const recoveredHtml = renderToStaticMarkup(
+      createElement(GlobalMemberAccountDialog, {
+        isOpen: true,
+        onClose: () => {},
+        onEnterAdmin: () => {},
+        isAr: false,
+        adminClassificationController: controller,
+      })
+    );
+    expect(recoveredHtml).toContain('data-admin-status="authorized"');
+    expect(recoveredHtml).toContain('id="global-member-enter-admin-btn"');
+    expect(recoveredHtml).not.toContain(
+      'data-testid="global-member-admin-error-banner"'
+    );
+  });
+
+  it('22. AUTH-05-UAE1: reflects role change or deactivation on re-evaluation and fails closed if re-evaluation throws AdminReadError', async () => {
+    const adminRepo = new InMemoryAdminIdentityRepository();
+    const adminIdentityService = new AdminIdentityServiceClass(adminRepo);
+
+    const uid = 'uid-mutable-admin';
+    adminRepo.seed({
+      id: uid,
+      name: 'Mutable Admin',
+      email: 'mutable@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+    });
+
+    const user = {
+      uid,
+      email: 'mutable@promiseofplanet.org',
+    } as unknown as User;
+
+    const controller = new DialogAdminClassificationController({
+      resolveAdminForUid: (targetUid) =>
+        adminIdentityService.resolveAdminForAuthenticatedUid(targetUid),
+    });
+
+    // Step 1: Initially ContentEditor
+    const snap1 = await controller.handleAuthEvent(user);
+    expect(snap1.adminStatus).toBe('authorized');
+    expect(snap1.adminUser?.role).toBe(AdminRole.ContentEditor);
+
+    // Step 2: Role changed to RightsReviewer on server -> re-evaluation updates role
+    adminRepo.seed({
+      id: uid,
+      name: 'Mutable Admin',
+      email: 'mutable@promiseofplanet.org',
+      role: AdminRole.RightsReviewer,
+      isActive: true,
+    });
+    const snap2 = await controller.recheckAdminEligibility();
+    expect(snap2.adminStatus).toBe('authorized');
+    expect(snap2.adminUser?.role).toBe(AdminRole.RightsReviewer);
+
+    // Step 3: Deactivated on server (isActive: false) -> re-evaluation immediately revokes dialog admin navigation
+    adminRepo.seed({
+      id: uid,
+      name: 'Mutable Admin',
+      email: 'mutable@promiseofplanet.org',
+      role: AdminRole.RightsReviewer,
+      isActive: false,
+    });
+    const snap3 = await controller.recheckAdminEligibility();
+    expect(snap3.adminStatus).toBe('non_admin');
+    expect(snap3.adminUser).toBeNull();
+    expect(invokeAuthorizedDialogAdminNavigation(snap3, () => {})).toBe(false);
+
+    // Step 4: Re-activated, then Firestore read fails during re-evaluation -> fails closed (does not retain stale authorization)
+    adminRepo.seed({
+      id: uid,
+      name: 'Mutable Admin',
+      email: 'mutable@promiseofplanet.org',
+      role: AdminRole.RightsReviewer,
+      isActive: true,
+    });
+    await controller.recheckAdminEligibility();
+    expect(controller.getSnapshot().adminStatus).toBe('authorized');
+
+    const failSnap = await controller.recheckAdminEligibility(async () => {
+      throw new AdminReadError('ADMIN_READ_FAILURE');
+    });
+    expect(failSnap.adminStatus).toBe('error');
+    expect(failSnap.adminUser).toBeNull();
+  });
+
+  it('23. AUTH-05-UAE1: enforces race safety across UID switch, logout, and unmount during in-flight admin lookups', async () => {
+    let resolveAdminA!: (val: AdminUser | null) => void;
+    const pendingAdminAPromise = new Promise<AdminUser | null>((res) => {
+      resolveAdminA = res;
+    });
+
+    let resolveAdminB!: (val: AdminUser | null) => void;
+    const pendingAdminBPromise = new Promise<AdminUser | null>((res) => {
+      resolveAdminB = res;
+    });
+
+    const controller = new DialogAdminClassificationController({
+      resolveAdminForUid: (uid) => {
+        if (uid === 'uid-admin-a') return pendingAdminAPromise;
+        if (uid === 'uid-member-b') return pendingAdminBPromise;
+        return Promise.resolve(null);
+      },
+    });
+
+    const userA = {
+      uid: 'uid-admin-a',
+      email: 'admin.a@promiseofplanet.org',
+    } as unknown as User;
+    const userB = {
+      uid: 'uid-member-b',
+      email: 'member.b@promiseofplanet.org',
+    } as unknown as User;
+
+    // 1) Start lookup for User A (in-flight)
+    const taskA = controller.handleAuthEvent(userA);
+    expect(controller.getSnapshot().adminStatus).toBe('resolving');
+    expect(controller.getSnapshot().firebaseUser?.uid).toBe('uid-admin-a');
+
+    // 2) Switch to User B before User A's lookup finishes
+    const taskB = controller.handleAuthEvent(userB);
+    expect(controller.getSnapshot().adminStatus).toBe('resolving');
+    expect(controller.getSnapshot().firebaseUser?.uid).toBe('uid-member-b');
+    expect(controller.getSnapshot().adminUser).toBeNull();
+
+    // User A's stale admin record resolves late -> MUST be ignored and never grant admin to User B!
+    resolveAdminA({
+      id: 'uid-admin-a',
+      name: 'Admin A',
+      email: 'admin.a@promiseofplanet.org',
+      role: AdminRole.Owner,
+      isActive: true,
+    });
+    await taskA;
+    expect(controller.getSnapshot().firebaseUser?.uid).toBe('uid-member-b');
+    expect(controller.getSnapshot().adminStatus).toBe('resolving');
+    expect(controller.getSnapshot().adminUser).toBeNull();
+
+    // User B resolves as non-admin
+    resolveAdminB(null);
+    await taskB;
+    expect(controller.getSnapshot().adminStatus).toBe('non_admin');
+    expect(controller.getSnapshot().adminUser).toBeNull();
+
+    // 3) Logout during in-flight lookup
+    let resolveAdminC!: (val: AdminUser | null) => void;
+    const pendingAdminCPromise = new Promise<AdminUser | null>((res) => {
+      resolveAdminC = res;
+    });
+    const userC = {
+      uid: 'uid-admin-c',
+      email: 'admin.c@promiseofplanet.org',
+    } as unknown as User;
+
+    const taskC = controller.handleAuthEvent(userC, () => pendingAdminCPromise);
+    expect(controller.getSnapshot().adminStatus).toBe('resolving');
+
+    // User logs out before lookup finishes
+    await controller.handleAuthEvent(null);
+    expect(controller.getSnapshot().authState).toBe('unauthenticated');
+    expect(controller.getSnapshot().adminStatus).toBe('idle');
+    expect(controller.getSnapshot().adminUser).toBeNull();
+
+    // Late resolution for User C after logout -> MUST be ignored!
+    resolveAdminC({
+      id: 'uid-admin-c',
+      name: 'Admin C',
+      email: 'admin.c@promiseofplanet.org',
+      role: AdminRole.TrainingManager,
+      isActive: true,
+    });
+    await taskC;
+    expect(controller.getSnapshot().authState).toBe('unauthenticated');
+    expect(controller.getSnapshot().adminStatus).toBe('idle');
+    expect(controller.getSnapshot().adminUser).toBeNull();
+
+    // 4) Unmount during in-flight lookup
+    let resolveAdminD!: (val: AdminUser | null) => void;
+    const pendingAdminDPromise = new Promise<AdminUser | null>((res) => {
+      resolveAdminD = res;
+    });
+    const userD = {
+      uid: 'uid-admin-d',
+      email: 'admin.d@promiseofplanet.org',
+    } as unknown as User;
+
+    const taskD = controller.handleAuthEvent(userD, () => pendingAdminDPromise);
+    expect(controller.getSnapshot().adminStatus).toBe('resolving');
+
+    controller.unmount();
+    resolveAdminD({
+      id: 'uid-admin-d',
+      name: 'Admin D',
+      email: 'admin.d@promiseofplanet.org',
+      role: AdminRole.Owner,
+      isActive: true,
+    });
+    await taskD;
+    expect(controller.getSnapshot().adminStatus).toBe('resolving');
+    expect(controller.getSnapshot().adminUser).toBeNull();
+  });
+
+  it('24. AUTH-05-UAE1: coordinates AdminInvitationAcceptancePanel with server-backed admin classification without duplicating admin navigation buttons or granting authority from client-side display alone', async () => {
+    const adminRepo = new InMemoryAdminIdentityRepository();
+    const adminIdentityService = new AdminIdentityServiceClass(adminRepo);
+
+    const inviteeUser = {
+      uid: 'uid-invitee-501',
+      email: 'invitee@promiseofplanet.org',
+      emailVerified: true,
+    } as unknown as User;
+
+    const acceptedResponse: AcceptAdminInvitationClientResponse = {
+      invitation: {
+        invitationId: 'inv_uae1_20261028_01',
+        targetUid: 'uid-invitee-501',
+        normalizedTargetEmail: 'invitee@promiseofplanet.org',
+        intendedRole: AdminRole.ContentEditor,
+        invitingOwnerUid: 'uid-owner-900',
+        createdAtIso: '2026-10-28T08:00:00.000Z',
+        expiresAtIso: '2026-11-04T08:00:00.000Z',
+        status: AdminInvitationStatus.Accepted,
+        acceptedAtIso: '2026-10-28T09:00:00.000Z',
+        acceptedByUid: 'uid-invitee-501',
+        revokedAtIso: null,
+        revokedByOwnerUid: null,
+        expiredAtIso: null,
+        revision: 2,
+      },
+      admin: {
+        id: 'uid-invitee-501',
+        name: 'Invitee Editor',
+        email: 'invitee@promiseofplanet.org',
+        role: AdminRole.ContentEditor,
+        isActive: true,
+      },
+      auditEventId: 'audit_uae1_501',
+    };
+
+    const dialogAdminController = new DialogAdminClassificationController({
+      resolveAdminForUid: (uid) =>
+        adminIdentityService.resolveAdminForAuthenticatedUid(uid),
+    });
+
+    // Before acceptance: user is an ordinary member (no admins/{uid} record yet)
+    await dialogAdminController.handleAuthEvent(inviteeUser);
+    expect(dialogAdminController.getSnapshot().adminStatus).toBe('non_admin');
+
+    // Case A: If client-side acceptance state is shown WITHOUT a backing server admins/{uid} record,
+    // recheckAdminEligibility() still resolves 'non_admin' (never grants authority from client display alone)
+    const unbackedSnap = await dialogAdminController.recheckAdminEligibility();
+    expect(unbackedSnap.adminStatus).toBe('non_admin');
+    expect(unbackedSnap.adminUser).toBeNull();
+
+    // Case B: Server transaction writes admins/{uid} during acceptance, then recheckAdminEligibility() resolves 'authorized'
+    adminRepo.seed(acceptedResponse.admin);
+    const backedSnap = await dialogAdminController.recheckAdminEligibility();
+    expect(backedSnap.adminStatus).toBe('authorized');
+    expect(backedSnap.adminUser?.role).toBe(AdminRole.ContentEditor);
+
+    // While AdminInvitationAcceptancePanel is in 'succeeded' post-acceptance state,
+    // GlobalMemberAccountDialog suppresses #global-member-enter-admin-btn so there is only ONE admin portal/dashboard button in the dialog
+    const acceptanceController = new AdminInvitationAcceptanceController({
+      status: 'succeeded',
+      result: acceptedResponse,
+      error: null,
+      submissionCount: 1,
+    });
+
+    const postAcceptanceDialogAr = renderToStaticMarkup(
+      createElement(GlobalMemberAccountDialog, {
+        isOpen: true,
+        onClose: () => {},
+        onEnterAdmin: () => {},
+        isAr: true,
+        adminClassificationController: dialogAdminController,
+        invitationAcceptanceProps: {
+          initialAuthStatus: {
+            authenticated: true,
+            uid: inviteeUser.uid,
+            email: inviteeUser.email,
+            emailVerified: true,
+          },
+          initialAcceptanceState: acceptanceController.getSnapshot(),
+        },
+      })
+    );
+    expect(postAcceptanceDialogAr).toContain(
+      'data-testid="open-admin-portal-after-acceptance-btn"'
+    );
+    expect(postAcceptanceDialogAr).toContain(OPEN_ADMIN_PORTAL_ACTION_AR);
+    expect(postAcceptanceDialogAr).not.toContain(
+      'id="global-member-enter-admin-btn"'
+    );
+
+    const postAcceptanceDialogEn = renderToStaticMarkup(
+      createElement(GlobalMemberAccountDialog, {
+        isOpen: true,
+        onClose: () => {},
+        onEnterAdmin: () => {},
+        isAr: false,
+        adminClassificationController: dialogAdminController,
+        invitationAcceptanceProps: {
+          initialAuthStatus: {
+            authenticated: true,
+            uid: inviteeUser.uid,
+            email: inviteeUser.email,
+            emailVerified: true,
+          },
+          initialAcceptanceState: acceptanceController.getSnapshot(),
+        },
+      })
+    );
+    expect(postAcceptanceDialogEn).toContain(
+      'data-testid="open-admin-portal-after-acceptance-btn"'
+    );
+    expect(postAcceptanceDialogEn).toContain(OPEN_ADMIN_PORTAL_ACTION_EN);
+    expect(postAcceptanceDialogEn).not.toContain(
+      'id="global-member-enter-admin-btn"'
+    );
+
+    // On subsequent normal dialog opens (idle invitation panel), #global-member-enter-admin-btn is shown
+    const normalAdminDialogEn = renderToStaticMarkup(
+      createElement(GlobalMemberAccountDialog, {
+        isOpen: true,
+        onClose: () => {},
+        onEnterAdmin: () => {},
+        isAr: false,
+        adminClassificationController: dialogAdminController,
+      })
+    );
+    expect(normalAdminDialogEn).toContain('id="global-member-enter-admin-btn"');
+    expect(normalAdminDialogEn).toContain(
+      GLOBAL_MEMBER_ADMIN_DASHBOARD_ACTION_LABELS.en
+    );
+    expect(normalAdminDialogEn).not.toContain(
+      'data-testid="open-admin-portal-after-acceptance-btn"'
+    );
+  });
+
+  it('25. AUTH-05-UAE1-R1: administrative Sign Out executes AccountService.signOut(), clears pop_admin_session, invokes onExitAdmin() to return to the public website without reopening GlobalMemberAccountDialog or remaining on legacy AdminAccessGate login screen, and resolves Header to Sign In / تسجيل الدخول', async () => {
+    const adminRepo = new InMemoryAdminIdentityRepository();
+    const adminIdentityService = new AdminIdentityServiceClass(adminRepo);
+    const ownerAdmin: AdminUser = {
+      id: 'uid-owner-logout-01',
+      name: 'Owner Admin',
+      email: 'owner.logout@promiseofplanet.org',
+      role: AdminRole.Owner,
+      isActive: true,
+    };
+    adminRepo.seed(ownerAdmin);
+
+    const firebaseOwnerUser = {
+      uid: ownerAdmin.id,
+      email: ownerAdmin.email,
+      displayName: ownerAdmin.name,
+    } as unknown as User;
+
+    // Set up a mock sessionStorage tracking pop_admin_session
+    const storageMap = new Map<string, string>([
+      ['pop_admin_session', JSON.stringify({ open: true, tab: 'overview' })],
+    ]);
+    const mockStorage: Pick<Storage, 'removeItem'> = {
+      removeItem: (key: string) => {
+        storageMap.delete(key);
+      },
+    };
+
+    // Set up shared auth observer bus simulating AccountService.observeAuthState + AccountService.signOut
+    let activeUser: User | null = firebaseOwnerUser;
+    const authListeners = new Set<(user: User | null) => void>();
+    const observeSpy = vi
+      .spyOn(AccountService, 'observeAuthState')
+      .mockImplementation((cb) => {
+        authListeners.add(cb);
+        cb(activeUser);
+        return () => {
+          authListeners.delete(cb);
+        };
+      });
+
+    let signOutCalls = 0;
+    const signOutSpy = vi
+      .spyOn(AccountService, 'signOut')
+      .mockImplementation(async () => {
+        signOutCalls += 1;
+        activeUser = null;
+        for (const listener of authListeners) {
+          listener(null);
+        }
+      });
+
+    // Bind Header auth controller and AdminGateResolutionController to the same auth bus
+    const headerController = new HeaderAuthSessionController();
+    const unbindHeader = bindHeaderAuthSessionEffect(
+      headerController,
+      () => {}
+    );
+    HeaderAuthSessionController.setSharedController(headerController);
+
+    const gateController = new AdminGateResolutionController();
+    gateController.mount();
+    await gateController.handleAuthEvent(firebaseOwnerUser, (uid) =>
+      adminIdentityService.resolveAdminForAuthenticatedUid(uid)
+    );
+
+    // Track top-level App routing state (isAdminOpen & isMemberAccountOpen)
+    let isAdminOpen = true;
+    let isMemberAccountOpen = false;
+    let exitAdminCallCount = 0;
+
+    const handleExitAdmin = () => {
+      exitAdminCallCount += 1;
+      isAdminOpen = false;
+      clearAdminPresentationSession(mockStorage);
+    };
+
+    try {
+      // 1) Before logout: AdminAccessGate is open and renders authorized AdminLayout with #signout-admin-btn and #exit-admin-btn
+      expect(gateController.getSnapshot().gateState).toBe('ADMIN_AUTHORIZED');
+      expect(headerController.getSnapshot().isSignedIn).toBe(true);
+
+      await i18n.changeLanguage('ar');
+      const adminAuthorizedHtmlAr = renderToStaticMarkup(
+        createElement(AdminAccessGate, {
+          onExitAdmin: handleExitAdmin,
+          identityService: adminIdentityService,
+          gateController,
+        })
+      );
+      expect(adminAuthorizedHtmlAr).toContain('id="admin-top-header"');
+      expect(adminAuthorizedHtmlAr).toContain('id="signout-admin-btn"');
+      expect(adminAuthorizedHtmlAr).toContain('id="exit-admin-btn"');
+      expect(adminAuthorizedHtmlAr).toContain('تسجيل الخروج');
+      expect(adminAuthorizedHtmlAr).not.toContain(
+        'بوابة الإدارة - التسجيل مطلوب'
+      );
+
+      // 2) Administrator clicks Sign Out / تسجيل الخروج -> executes executeAdminSignOut (which calls AccountService.signOut() by default)
+      const signOutResult = await executeAdminSignOut({
+        clearAdminSessionStorage: () =>
+          clearAdminPresentationSession(mockStorage),
+        onExitAdmin: handleExitAdmin,
+        isAr: true,
+      });
+
+      // Verify all required post-logout conditions:
+      expect(signOutResult).toEqual({
+        success: true,
+        exitedToPublic: true,
+        errorMessage: null,
+      });
+      expect(signOutCalls).toBe(1);
+      expect(storageMap.has('pop_admin_session')).toBe(false);
+      expect(exitAdminCallCount).toBe(1);
+      expect(isAdminOpen).toBe(false);
+      expect(isMemberAccountOpen).toBe(false);
+      expect(headerController.getSnapshot().isSignedIn).toBe(false);
+
+      // 3) Render the active top-level view after logout (isAdminOpen === false -> public AppShell)
+      // Verify public website is rendered, GlobalMemberAccountDialog is closed, legacy AdminAccessGate is NOT rendered,
+      // and Header displays تسجيل الدخول (AR) / Sign In (EN)
+      const publicViewAfterLogoutAr = renderToStaticMarkup(
+        createElement(
+          AppShell,
+          {
+            onEnterAdmin: () => {
+              isAdminOpen = true;
+            },
+            activePage: 'home',
+            onNavigate: () => {},
+            isMemberAccountOpen,
+            onOpenMemberAccount: () => {
+              isMemberAccountOpen = true;
+            },
+            onCloseMemberAccount: () => {
+              isMemberAccountOpen = false;
+            },
+          },
+          createElement(
+            'div',
+            { 'data-testid': 'public-home-destination' },
+            'Public Website Content'
+          )
+        )
+      );
+
+      expect(publicViewAfterLogoutAr).toContain(
+        'data-testid="public-home-destination"'
+      );
+      expect(publicViewAfterLogoutAr).toContain(
+        'id="header-member-account-btn"'
+      );
+      expect(publicViewAfterLogoutAr).toContain(
+        `>${GLOBAL_MEMBER_ACCOUNT_LABELS.signedOut.ar}<`
+      );
+      expect(publicViewAfterLogoutAr).not.toContain(
+        `>${GLOBAL_MEMBER_ACCOUNT_LABELS.signedIn.ar}<`
+      );
+      expect(publicViewAfterLogoutAr).not.toContain(
+        'id="global-member-account-dialog"'
+      );
+      expect(publicViewAfterLogoutAr).not.toContain(
+        'بوابة الإدارة - التسجيل مطلوب'
+      );
+      expect(publicViewAfterLogoutAr).not.toContain(
+        'Back-Office Access Control'
+      );
+
+      await i18n.changeLanguage('en');
+      const publicViewAfterLogoutEn = renderToStaticMarkup(
+        createElement(
+          AppShell,
+          {
+            onEnterAdmin: () => {
+              isAdminOpen = true;
+            },
+            activePage: 'home',
+            onNavigate: () => {},
+            isMemberAccountOpen,
+            onOpenMemberAccount: () => {
+              isMemberAccountOpen = true;
+            },
+            onCloseMemberAccount: () => {
+              isMemberAccountOpen = false;
+            },
+          },
+          createElement(
+            'div',
+            { 'data-testid': 'public-home-destination' },
+            'Public Website Content'
+          )
+        )
+      );
+      expect(publicViewAfterLogoutEn).toContain(
+        `>${GLOBAL_MEMBER_ACCOUNT_LABELS.signedOut.en}<`
+      );
+      expect(publicViewAfterLogoutEn).not.toContain(
+        `>${GLOBAL_MEMBER_ACCOUNT_LABELS.signedIn.en}<`
+      );
+      expect(publicViewAfterLogoutEn).not.toContain(
+        'id="global-member-account-dialog"'
+      );
+      expect(publicViewAfterLogoutEn).not.toContain(
+        'Back-Office Access Control'
+      );
+    } finally {
+      HeaderAuthSessionController.setSharedController(null);
+      unbindHeader();
+      gateController.unmount();
+      observeSpy.mockRestore();
+      signOutSpy.mockRestore();
+      await i18n.changeLanguage('ar');
+    }
+  });
+
+  it('26. AUTH-05-UAE1-R1: preserves distinct navigation semantics — Exit Portal / موقع المنصة returns to public website without signing out and keeps My Account / حسابي in Header', async () => {
+    const adminRepo = new InMemoryAdminIdentityRepository();
+    const adminIdentityService = new AdminIdentityServiceClass(adminRepo);
+    const editorAdmin: AdminUser = {
+      id: 'uid-editor-exit-02',
+      name: 'Editor Admin',
+      email: 'editor.exit@promiseofplanet.org',
+      role: AdminRole.ContentEditor,
+      isActive: true,
+    };
+    adminRepo.seed(editorAdmin);
+
+    const firebaseEditorUser = {
+      uid: editorAdmin.id,
+      email: editorAdmin.email,
+      displayName: editorAdmin.name,
+    } as unknown as User;
+
+    let activeUser: User | null = firebaseEditorUser;
+    let signOutCalls = 0;
+    const observeSpy = vi
+      .spyOn(AccountService, 'observeAuthState')
+      .mockImplementation((cb) => {
+        cb(activeUser);
+        return () => {};
+      });
+    const signOutSpy = vi
+      .spyOn(AccountService, 'signOut')
+      .mockImplementation(async () => {
+        signOutCalls += 1;
+        activeUser = null;
+      });
+
+    const headerController = new HeaderAuthSessionController();
+    const unbindHeader = bindHeaderAuthSessionEffect(
+      headerController,
+      () => {}
+    );
+    HeaderAuthSessionController.setSharedController(headerController);
+
+    const storageMap = new Map<string, string>([
+      ['pop_admin_session', JSON.stringify({ open: true, tab: 'news' })],
+    ]);
+    let isAdminOpen = true;
+    let isMemberAccountOpen = false;
+
+    try {
+      // Administrator clicks "Exit Portal / موقع المنصة" (#exit-admin-btn invokes onExitAdmin directly, NOT handleSignOut)
+      const onExitAdmin = () => {
+        isAdminOpen = false;
+        storageMap.delete('pop_admin_session');
+      };
+
+      onExitAdmin();
+
+      // Session remains authenticated; AccountService.signOut was NEVER called
+      expect(signOutCalls).toBe(0);
+      expect(activeUser).toBe(firebaseEditorUser);
+      expect(isAdminOpen).toBe(false);
+      expect(isMemberAccountOpen).toBe(false);
+      expect(storageMap.has('pop_admin_session')).toBe(false);
+      expect(headerController.getSnapshot().isSignedIn).toBe(true);
+
+      // Public website renders with Header showing حسابي (AR) and My Account (EN)
+      await i18n.changeLanguage('ar');
+      const publicAfterExitAr = renderToStaticMarkup(
+        createElement(
+          AppShell,
+          {
+            onEnterAdmin: () => {
+              isAdminOpen = true;
+            },
+            activePage: 'home',
+            onNavigate: () => {},
+            isMemberAccountOpen,
+            onOpenMemberAccount: () => {
+              isMemberAccountOpen = true;
+            },
+            onCloseMemberAccount: () => {
+              isMemberAccountOpen = false;
+            },
+          },
+          createElement('div', null, 'Public View Preserving Session')
+        )
+      );
+      expect(publicAfterExitAr).toContain(
+        `>${GLOBAL_MEMBER_ACCOUNT_LABELS.signedIn.ar}<`
+      );
+
+      await i18n.changeLanguage('en');
+      const publicAfterExitEn = renderToStaticMarkup(
+        createElement(
+          AppShell,
+          {
+            onEnterAdmin: () => {
+              isAdminOpen = true;
+            },
+            activePage: 'home',
+            onNavigate: () => {},
+            isMemberAccountOpen,
+            onOpenMemberAccount: () => {
+              isMemberAccountOpen = true;
+            },
+            onCloseMemberAccount: () => {
+              isMemberAccountOpen = false;
+            },
+          },
+          createElement('div', null, 'Public View Preserving Session')
+        )
+      );
+      expect(publicAfterExitEn).toContain(
+        `>${GLOBAL_MEMBER_ACCOUNT_LABELS.signedIn.en}<`
+      );
+    } finally {
+      HeaderAuthSessionController.setSharedController(null);
+      unbindHeader();
+      observeSpy.mockRestore();
+      signOutSpy.mockRestore();
+      await i18n.changeLanguage('ar');
+    }
+  });
+
+  it('27. AUTH-05-UAE1-R1: handles failed AccountService.signOut() safely without claiming success, clearing session state, or invoking onExitAdmin(), and surfaces a non-sensitive error message', async () => {
+    const adminRepo = new InMemoryAdminIdentityRepository();
+    const adminIdentityService = new AdminIdentityServiceClass(adminRepo);
+    const ownerAdmin: AdminUser = {
+      id: 'uid-owner-fail-signout',
+      name: 'Owner Admin',
+      email: 'owner.fail@promiseofplanet.org',
+      role: AdminRole.Owner,
+      isActive: true,
+    };
+    adminRepo.seed(ownerAdmin);
+
+    const firebaseOwnerUser = {
+      uid: ownerAdmin.id,
+      email: ownerAdmin.email,
+      displayName: ownerAdmin.name,
+    } as unknown as User;
+
+    const gateController = new AdminGateResolutionController();
+    gateController.mount();
+    await gateController.handleAuthEvent(firebaseOwnerUser, (uid) =>
+      adminIdentityService.resolveAdminForAuthenticatedUid(uid)
+    );
+
+    const storageMap = new Map<string, string>([
+      ['pop_admin_session', JSON.stringify({ open: true, tab: 'overview' })],
+    ]);
+    let isAdminOpen = true;
+    let exitAdminCalls = 0;
+    let capturedErrorAr: string | null = null;
+    let capturedErrorEn: string | null = null;
+
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    try {
+      // Simulate AccountService.signOut() throwing an error with sensitive internal details
+      const failingSignOut = async () => {
+        throw new Error(
+          'INTERNAL_AUTH_TOKEN_FAILURE: uid=uid-owner-fail-signout token=secret-jwt-xyz'
+        );
+      };
+
+      const failResultAr = await executeAdminSignOut({
+        signOut: failingSignOut,
+        clearAdminSessionStorage: () => {
+          storageMap.delete('pop_admin_session');
+        },
+        onExitAdmin: () => {
+          exitAdminCalls += 1;
+          isAdminOpen = false;
+        },
+        onSignOutError: (msg) => {
+          capturedErrorAr = msg;
+        },
+        isAr: true,
+      });
+
+      // Verify failure did NOT claim success, did NOT exit admin, did NOT clear pop_admin_session, and did NOT mark session signed out
+      expect(failResultAr).toEqual({
+        success: false,
+        exitedToPublic: false,
+        errorMessage: ADMIN_SIGNOUT_ERROR_MESSAGES.ar,
+      });
+      expect(exitAdminCalls).toBe(0);
+      expect(isAdminOpen).toBe(true);
+      expect(storageMap.has('pop_admin_session')).toBe(true);
+      expect(gateController.getSnapshot().gateState).toBe('ADMIN_AUTHORIZED');
+      expect(capturedErrorAr).toBe(ADMIN_SIGNOUT_ERROR_MESSAGES.ar);
+      expect(capturedErrorAr).not.toContain('secret-jwt-xyz');
+      expect(capturedErrorAr).not.toContain('uid-owner-fail-signout');
+
+      // Render AdminAccessGate with the captured Arabic sign-out error -> shows safe alert banner above AdminLayout
+      await i18n.changeLanguage('ar');
+      const gateWithErrorAr = renderToStaticMarkup(
+        createElement(AdminAccessGate, {
+          onExitAdmin: () => {},
+          identityService: adminIdentityService,
+          gateController,
+          initialSignOutError: capturedErrorAr,
+        })
+      );
+      expect(gateWithErrorAr).toContain(
+        'data-testid="admin-signout-error-banner"'
+      );
+      expect(gateWithErrorAr).toContain(ADMIN_SIGNOUT_ERROR_MESSAGES.ar);
+      expect(gateWithErrorAr).not.toContain('secret-jwt-xyz');
+      expect(gateWithErrorAr).toContain('id="admin-top-header"');
+
+      // Verify English error message as well
+      const failResultEn = await executeAdminSignOut({
+        signOut: failingSignOut,
+        clearAdminSessionStorage: () => {
+          storageMap.delete('pop_admin_session');
+        },
+        onExitAdmin: () => {
+          exitAdminCalls += 1;
+        },
+        onSignOutError: (msg) => {
+          capturedErrorEn = msg;
+        },
+        isAr: false,
+      });
+      expect(failResultEn.success).toBe(false);
+      expect(capturedErrorEn).toBe(ADMIN_SIGNOUT_ERROR_MESSAGES.en);
+
+      await i18n.changeLanguage('en');
+      const gateWithErrorEn = renderToStaticMarkup(
+        createElement(AdminAccessGate, {
+          onExitAdmin: () => {},
+          identityService: adminIdentityService,
+          gateController,
+          initialSignOutError: capturedErrorEn,
+        })
+      );
+      expect(gateWithErrorEn).toContain(
+        'data-testid="admin-signout-error-banner"'
+      );
+      expect(gateWithErrorEn).toContain(ADMIN_SIGNOUT_ERROR_MESSAGES.en);
+    } finally {
+      consoleErrorSpy.mockRestore();
+      gateController.unmount();
+      await i18n.changeLanguage('ar');
+    }
+  });
+
+  it('28. AUTH-05-UAE1-R1: preserves the administrative authorization boundary in AdminAccessGate and verifies handleSignOut invokes executeAdminSignOut with onExitAdmin', async () => {
+    const adminRepo = new InMemoryAdminIdentityRepository();
+    const adminIdentityService = new AdminIdentityServiceClass(adminRepo);
+
+    // 1) Ordinary member without admins/{uid} is still denied by AdminAccessGate
+    const deniedController = new AdminGateResolutionController();
+    deniedController.mount();
+    await deniedController.handleAuthEvent(
+      {
+        uid: 'uid-ordinary-member-gate',
+        email: 'member.gate@promiseofplanet.org',
+      } as unknown as User,
+      (uid) => adminIdentityService.resolveAdminForAuthenticatedUid(uid)
+    );
+    expect(deniedController.getSnapshot().gateState).toBe('ADMIN_DENIED');
+
+    await i18n.changeLanguage('en');
+    const deniedHtmlEn = renderToStaticMarkup(
+      createElement(AdminAccessGate, {
+        onExitAdmin: () => {},
+        identityService: adminIdentityService,
+        gateController: deniedController,
+      })
+    );
+    expect(deniedHtmlEn).toContain('Administrative Access Denied');
+    expect(deniedHtmlEn).not.toContain('id="admin-top-header"');
+
+    // 2) Verify AdminAccessGate source wires handleSignOut -> executeAdminSignOut with AccountService.signOut, clearAdminPresentationSession, and onExitAdmin
+    const gateSource = readFileSync(
+      resolve(process.cwd(), 'src/components/layout/AdminAccessGate.tsx'),
+      'utf-8'
+    );
+    expect(gateSource).toContain('await signOut()');
+    expect(gateSource).toContain('clearAdminSessionStorage()');
+    expect(gateSource).toContain('onExitAdmin()');
+    expect(gateSource).toContain('AccountService.signOut()');
+    expect(gateSource).toContain("storage?.removeItem('pop_admin_session')");
+
+    deniedController.unmount();
+    await i18n.changeLanguage('ar');
+  });
 });
+

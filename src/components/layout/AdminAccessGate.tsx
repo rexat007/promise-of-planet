@@ -8,22 +8,93 @@ import { AdminLayout } from './AdminLayout';
 
 export type { AdminGateState };
 
+export const ADMIN_SIGNOUT_ERROR_MESSAGES = {
+  ar: 'تعذر تسجيل الخروج حالياً. يرجى المحاولة مرة أخرى.',
+  en: 'Unable to sign out at this time. Please try again.',
+} as const;
+
+export interface ExecuteAdminSignOutOptions {
+  signOut?: () => Promise<void>;
+  clearAdminSessionStorage?: () => void;
+  onExitAdmin: () => void;
+  onSignOutError?: (errorMessage: string | null) => void;
+  isAr?: boolean;
+}
+
+export interface ExecuteAdminSignOutResult {
+  success: boolean;
+  exitedToPublic: boolean;
+  errorMessage: string | null;
+}
+
+export function clearAdminPresentationSession(
+  storage: Pick<Storage, 'removeItem'> | null | undefined = typeof sessionStorage !== 'undefined' ? sessionStorage : undefined
+): void {
+  try {
+    storage?.removeItem('pop_admin_session');
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+export async function executeAdminSignOut({
+  signOut = () => AccountService.signOut(),
+  clearAdminSessionStorage = () => clearAdminPresentationSession(),
+  onExitAdmin,
+  onSignOutError,
+  isAr = true,
+}: ExecuteAdminSignOutOptions): Promise<ExecuteAdminSignOutResult> {
+  onSignOutError?.(null);
+  try {
+    await signOut();
+    clearAdminSessionStorage();
+    onExitAdmin();
+    return {
+      success: true,
+      exitedToPublic: true,
+      errorMessage: null,
+    };
+  } catch (err) {
+    console.error('Sign out error:', err);
+    const safeMessage = isAr
+      ? ADMIN_SIGNOUT_ERROR_MESSAGES.ar
+      : ADMIN_SIGNOUT_ERROR_MESSAGES.en;
+    onSignOutError?.(safeMessage);
+    return {
+      success: false,
+      exitedToPublic: false,
+      errorMessage: safeMessage,
+    };
+  }
+}
+
 interface AdminAccessGateProps {
   onExitAdmin: () => void;
   // Optional identity service instance override for testing
   identityService?: typeof AdminIdentityService;
+  // Optional controller and sign-out overrides for deterministic testing
+  gateController?: AdminGateResolutionController;
+  initialSignOutError?: string | null;
+  signOutHandler?: () => Promise<void>;
 }
 
-export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentityService }: AdminAccessGateProps) {
+export function AdminAccessGate({
+  onExitAdmin,
+  identityService = AdminIdentityService,
+  gateController,
+  initialSignOutError = null,
+  signOutHandler,
+}: AdminAccessGateProps) {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
 
   const controllerRef = useRef<AdminGateResolutionController | null>(null);
   if (!controllerRef.current) {
-    controllerRef.current = new AdminGateResolutionController();
+    controllerRef.current = gateController ?? new AdminGateResolutionController();
   }
 
   const [snapshot, setSnapshot] = useState<AdminGateStateSnapshot>(() => controllerRef.current!.getSnapshot());
+  const [signOutError, setSignOutError] = useState<string | null>(initialSignOutError);
 
   // Observe Auth State and resolve admins/{uid} using AdminGateResolutionController
   useEffect(() => {
@@ -46,16 +117,13 @@ export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentitySe
   }, [identityService]);
 
   const handleSignOut = async () => {
-    try {
-      try {
-        sessionStorage.removeItem('pop_admin_session');
-      } catch (e) {
-        console.error(e);
-      }
-      await AccountService.signOut();
-    } catch (err) {
-      console.error('Sign out error:', err);
-    }
+    await executeAdminSignOut({
+      signOut: signOutHandler ?? (() => AccountService.signOut()),
+      clearAdminSessionStorage: () => clearAdminPresentationSession(),
+      onExitAdmin,
+      onSignOutError: setSignOutError,
+      isAr,
+    });
   };
 
   const { gateState, firebaseUser, adminUser } = snapshot;
@@ -166,6 +234,17 @@ export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentitySe
             </div>
           )}
 
+          {signOutError && (
+            <div
+              role="alert"
+              data-testid="admin-signout-error-banner"
+              className="p-3 bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 rounded-2xl text-xs font-bold text-rose-800 dark:text-rose-200 flex items-center justify-center gap-2"
+            >
+              <ShieldAlert className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+              <span>{signOutError}</span>
+            </div>
+          )}
+
           <div className="flex flex-col sm:flex-row gap-2 pt-2">
             <button
               onClick={onExitAdmin}
@@ -190,11 +269,24 @@ export function AdminAccessGate({ onExitAdmin, identityService = AdminIdentitySe
   // 4. Authorized State -> Render Admin Workspace Layout
   if (gateState === 'ADMIN_AUTHORIZED' && adminUser) {
     return (
-      <AdminLayout
-        currentUser={adminUser}
-        onExitAdmin={onExitAdmin}
-        onSignOut={handleSignOut}
-      />
+      <>
+        {signOutError && (
+          <div
+            role="alert"
+            data-testid="admin-signout-error-banner"
+            dir={isAr ? 'rtl' : 'ltr'}
+            className="bg-rose-50 dark:bg-rose-950/60 border-b border-rose-200 dark:border-rose-900 px-4 py-2.5 text-xs font-bold text-rose-800 dark:text-rose-200 flex items-center justify-center gap-2"
+          >
+            <ShieldAlert className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+            <span>{signOutError}</span>
+          </div>
+        )}
+        <AdminLayout
+          currentUser={adminUser}
+          onExitAdmin={onExitAdmin}
+          onSignOut={handleSignOut}
+        />
+      </>
     );
   }
 
