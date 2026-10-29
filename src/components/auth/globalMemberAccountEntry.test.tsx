@@ -46,6 +46,8 @@ import {
   AccountAuthWidget,
   FORGOT_PASSWORD_ACTION_LABELS,
   INCOMPLETE_ACCOUNT_SETUP_MESSAGES,
+  REGISTRATION_ERROR_MESSAGES,
+  getSafeWidgetErrorMessage,
 } from './AccountAuthWidget';
 import {
   AdminInvitationAcceptanceController,
@@ -57,10 +59,13 @@ import {
   type AcceptAdminInvitationClientResponse,
 } from '../../services/adminIdentityManagementClient';
 import {
+  AccountError,
   AccountService,
   AccountServiceClass,
   InMemoryAccountRepository,
   NEUTRAL_PASSWORD_RESET_MESSAGES,
+  classifyRegistrationAuthError,
+  getSafeRegistrationDiagnosticCode,
 } from '../../services/accountService';
 import { resolveCourseAccessWithAccountRecovery } from '../training/CourseAccessModal';
 import { MemberTrainingAccessService } from '../../services/memberTrainingAccessService';
@@ -2349,6 +2354,510 @@ describe('AUTH-02B2, AUTH-05-R1 & AUTH-05-UAE1: Unified Account Entry & Server-B
 
     deniedController.unmount();
     await i18n.changeLanguage('ar');
+  });
+
+  it('29. AUTH-05-UAE1-R2: classifies mocked Firebase registration errors (existing email, invalid email, weak password, rate limit, network failure, operation not allowed, unknown error) by error.code without inspecting message text or leaking sensitive details', async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    class ConfigurableRegisterFailureService extends AccountServiceClass {
+      public nextFailure: unknown = null;
+      public createCalls = 0;
+
+      protected isConfigured(): boolean {
+        return true;
+      }
+
+      protected async performCreateUser(
+        _email: string,
+        _password: string
+      ): Promise<User> {
+        this.createCalls += 1;
+        throw this.nextFailure;
+      }
+    }
+
+    const service = new ConfigurableRegisterFailureService(
+      new InMemoryAccountRepository()
+    );
+
+    const makeFirebaseError = (code: string, message: string) => {
+      const err = new Error(message) as Error & { code: string };
+      err.code = code;
+      return err;
+    };
+
+    try {
+      // 1. Existing email: auth/email-already-in-use -> ACCOUNT_ALREADY_EXISTS
+      service.nextFailure = makeFirebaseError(
+        'auth/email-already-in-use',
+        'Firebase: Error (auth/email-already-in-use). token=secret-tok-1'
+      );
+      await expect(
+        service.register('existing@promiseofplanet.org', 'SecretPass!1')
+      ).rejects.toMatchObject({
+        name: 'AccountError',
+        code: 'ACCOUNT_ALREADY_EXISTS',
+        message: REGISTRATION_ERROR_MESSAGES.existingAccount.en,
+      });
+
+      // 2. Invalid email: auth/invalid-email -> ACCOUNT_DATA_INVALID with email-specific message
+      service.nextFailure = makeFirebaseError(
+        'auth/invalid-email',
+        'Firebase: Error (auth/invalid-email). raw-input=bad@email'
+      );
+      await expect(
+        service.register('bad@email', 'SecretPass!1')
+      ).rejects.toMatchObject({
+        name: 'AccountError',
+        code: 'ACCOUNT_DATA_INVALID',
+        message: REGISTRATION_ERROR_MESSAGES.invalidEmail.en,
+      });
+
+      // 3. Weak password: auth/weak-password -> REGISTRATION_WEAK_PASSWORD (never ACCOUNT_DATA_INVALID)
+      service.nextFailure = makeFirebaseError(
+        'auth/weak-password',
+        'Firebase: Password should be at least 6 characters (auth/weak-password). pass=123'
+      );
+      let weakPassErr: AccountError | null = null;
+      try {
+        await service.register('weak@promiseofplanet.org', '123');
+      } catch (e: any) {
+        weakPassErr = e;
+      }
+      expect(weakPassErr).toBeInstanceOf(AccountError);
+      expect(weakPassErr?.code).toBe('REGISTRATION_WEAK_PASSWORD');
+      expect(weakPassErr?.code).not.toBe('ACCOUNT_DATA_INVALID');
+      expect(weakPassErr?.message).toBe(
+        REGISTRATION_ERROR_MESSAGES.weakPassword.en
+      );
+
+      // 4. Rate limit: auth/too-many-requests -> REGISTRATION_RATE_LIMITED
+      service.nextFailure = makeFirebaseError(
+        'auth/too-many-requests',
+        'Firebase: Access to this account has been temporarily disabled (auth/too-many-requests).'
+      );
+      await expect(
+        service.register('ratelimit@promiseofplanet.org', 'SecretPass!1')
+      ).rejects.toMatchObject({
+        name: 'AccountError',
+        code: 'REGISTRATION_RATE_LIMITED',
+        message: REGISTRATION_ERROR_MESSAGES.rateLimit.en,
+      });
+
+      // 5. Network failure: auth/network-request-failed -> REGISTRATION_NETWORK_ERROR
+      service.nextFailure = makeFirebaseError(
+        'auth/network-request-failed',
+        'Firebase: A network AuthError has occurred (auth/network-request-failed).'
+      );
+      await expect(
+        service.register('network@promiseofplanet.org', 'SecretPass!1')
+      ).rejects.toMatchObject({
+        name: 'AccountError',
+        code: 'REGISTRATION_NETWORK_ERROR',
+        message: REGISTRATION_ERROR_MESSAGES.networkFailure.en,
+      });
+
+      // 6. Operation not allowed: auth/operation-not-allowed -> AUTH_UNAVAILABLE
+      service.nextFailure = makeFirebaseError(
+        'auth/operation-not-allowed',
+        'Firebase: The given sign-in provider is disabled (auth/operation-not-allowed).'
+      );
+      await expect(
+        service.register('disabled@promiseofplanet.org', 'SecretPass!1')
+      ).rejects.toMatchObject({
+        name: 'AccountError',
+        code: 'AUTH_UNAVAILABLE',
+        message: REGISTRATION_ERROR_MESSAGES.serviceUnavailable.en,
+      });
+
+      // 7. Unknown Firebase error or message-only error without .code -> AUTH_UNAVAILABLE (never existing-account, never guesses from message text)
+      service.nextFailure = makeFirebaseError(
+        'auth/unexpected-server-fault',
+        'Firebase: Internal error mentioning auth/email-already-in-use in text token=xyz-secret'
+      );
+      let unknownErr: AccountError | null = null;
+      try {
+        await service.register('unknown@promiseofplanet.org', 'SecretPass!1');
+      } catch (e: any) {
+        unknownErr = e;
+      }
+      expect(unknownErr).toBeInstanceOf(AccountError);
+      expect(unknownErr?.code).toBe('AUTH_UNAVAILABLE');
+      expect(unknownErr?.code).not.toBe('ACCOUNT_ALREADY_EXISTS');
+      expect(unknownErr?.message).not.toContain('xyz-secret');
+
+      // Message-only Error without error.code property must NOT guess from message text
+      service.nextFailure = new Error(
+        'Firebase: Error (auth/email-already-in-use) without code property'
+      );
+      await expect(
+        service.register('nocode@promiseofplanet.org', 'SecretPass!1')
+      ).rejects.toMatchObject({
+        name: 'AccountError',
+        code: 'AUTH_UNAVAILABLE',
+      });
+
+      // Verify diagnostic logging only logs allowlisted category/firebaseCode and never logs passwords, emails, tokens, or raw Error objects
+      const loggedText = JSON.stringify(consoleErrorSpy.mock.calls);
+      expect(loggedText).not.toContain('SecretPass!1');
+      expect(loggedText).not.toContain('secret-tok-1');
+      expect(loggedText).not.toContain('xyz-secret');
+      expect(loggedText).not.toContain('existing@promiseofplanet.org');
+      expect(
+        getSafeRegistrationDiagnosticCode({ code: 'auth/email-already-in-use' })
+      ).toBe('auth/email-already-in-use');
+      expect(
+        getSafeRegistrationDiagnosticCode({ code: 'secret-unallowlisted-code' })
+      ).toBe('unknown');
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
+  it('30. AUTH-05-UAE1-R2: preserves existing AccountError instances thrown during registration without remapping', async () => {
+    class PreClassifiedErrorService extends AccountServiceClass {
+      protected isConfigured(): boolean {
+        return true;
+      }
+
+      protected async performCreateUser(
+        _email: string,
+        _password: string
+      ): Promise<User> {
+        throw new AccountError(
+          'ACCOUNT_DATA_INVALID',
+          'Custom pre-validated email error.'
+        );
+      }
+    }
+
+    const service = new PreClassifiedErrorService(
+      new InMemoryAccountRepository()
+    );
+    const direct = new AccountError(
+      'ACCOUNT_NOT_FOUND',
+      'Preserved AccountError instance.'
+    );
+    expect(classifyRegistrationAuthError(direct)).toBe(direct);
+
+    await expect(
+      service.register('custom@promiseofplanet.org', 'Password123!')
+    ).rejects.toMatchObject({
+      name: 'AccountError',
+      code: 'ACCOUNT_DATA_INVALID',
+      message: 'Custom pre-validated email error.',
+    });
+  });
+
+  it('31. AUTH-05-UAE1-R2: returns accurate Arabic and English user feedback in getSafeWidgetErrorMessage for all registration error categories', () => {
+    const existingErr = classifyRegistrationAuthError({
+      code: 'auth/email-already-in-use',
+    });
+    const invalidEmailErr = classifyRegistrationAuthError({
+      code: 'auth/invalid-email',
+    });
+    const weakPasswordErr = classifyRegistrationAuthError({
+      code: 'auth/weak-password',
+    });
+    const rateLimitErr = classifyRegistrationAuthError({
+      code: 'auth/too-many-requests',
+    });
+    const networkErr = classifyRegistrationAuthError({
+      code: 'auth/network-request-failed',
+    });
+    const unavailableErr = classifyRegistrationAuthError({
+      code: 'auth/operation-not-allowed',
+    });
+    const unknownErr = classifyRegistrationAuthError({
+      code: 'auth/unknown-code',
+    });
+
+    // Arabic messages (Case 13)
+    expect(getSafeWidgetErrorMessage(existingErr, true)).toBe(
+      'هذا البريد الإلكتروني مستخدم بالفعل. يمكنك تسجيل الدخول أو استعادة كلمة المرور.'
+    );
+    expect(getSafeWidgetErrorMessage(invalidEmailErr, true)).toBe(
+      'يرجى إدخال عنوان بريد إلكتروني صالح.'
+    );
+    expect(getSafeWidgetErrorMessage(weakPasswordErr, true)).toBe(
+      'كلمة المرور لا تستوفي متطلبات الأمان. يرجى اختيار كلمة مرور أقوى.'
+    );
+    expect(getSafeWidgetErrorMessage(rateLimitErr, true)).toBe(
+      'تم تجاوز عدد محاولات التسجيل المسموح بها مؤقتاً. يرجى الانتظار قبل المحاولة مجدداً.'
+    );
+    expect(getSafeWidgetErrorMessage(networkErr, true)).toBe(
+      'تعذر الاتصال بخدمة التسجيل. تحقق من اتصال الإنترنت ثم حاول مجدداً.'
+    );
+    expect(getSafeWidgetErrorMessage(unavailableErr, true)).toBe(
+      'خدمة المصادقة غير متاحة حالياً. يرجى المحاولة لاحقاً.'
+    );
+    expect(getSafeWidgetErrorMessage(unknownErr, true)).toBe(
+      'خدمة المصادقة غير متاحة حالياً. يرجى المحاولة لاحقاً.'
+    );
+
+    // English messages (Case 14)
+    expect(getSafeWidgetErrorMessage(existingErr, false)).toBe(
+      'This email address is already registered. You can sign in or reset your password.'
+    );
+    expect(getSafeWidgetErrorMessage(invalidEmailErr, false)).toBe(
+      'Please enter a valid email address.'
+    );
+    expect(getSafeWidgetErrorMessage(weakPasswordErr, false)).toBe(
+      'The password does not meet security requirements. Please choose a stronger password.'
+    );
+    expect(getSafeWidgetErrorMessage(rateLimitErr, false)).toBe(
+      'Too many registration attempts. Please wait before trying again.'
+    );
+    expect(getSafeWidgetErrorMessage(networkErr, false)).toBe(
+      'Unable to connect to the registration service. Check your internet connection and try again.'
+    );
+    expect(getSafeWidgetErrorMessage(unavailableErr, false)).toBe(
+      'Authentication is currently unavailable. Please try again.'
+    );
+    expect(getSafeWidgetErrorMessage(unknownErr, false)).toBe(
+      'Authentication is currently unavailable. Please try again.'
+    );
+
+    // Ensure distinct categories never collapse to the same generic message
+    const distinctAr = new Set([
+      getSafeWidgetErrorMessage(existingErr, true),
+      getSafeWidgetErrorMessage(invalidEmailErr, true),
+      getSafeWidgetErrorMessage(weakPasswordErr, true),
+      getSafeWidgetErrorMessage(rateLimitErr, true),
+      getSafeWidgetErrorMessage(networkErr, true),
+      getSafeWidgetErrorMessage(unavailableErr, true),
+    ]);
+    expect(distinctAr.size).toBe(6);
+
+    const distinctEn = new Set([
+      getSafeWidgetErrorMessage(existingErr, false),
+      getSafeWidgetErrorMessage(invalidEmailErr, false),
+      getSafeWidgetErrorMessage(weakPasswordErr, false),
+      getSafeWidgetErrorMessage(rateLimitErr, false),
+      getSafeWidgetErrorMessage(networkErr, false),
+      getSafeWidgetErrorMessage(unavailableErr, false),
+    ]);
+    expect(distinctEn.size).toBe(6);
+  });
+
+  it('32. AUTH-05-UAE1-R2: preserves Stage 1 vs Stage 2 registration lifecycle, barrier cleanup, account recovery, and no duplicate Firebase user creation', async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    try {
+      // Case 9: Successful Firebase account creation + Firestore profile provisioning
+      const successRepo = new InMemoryAccountRepository();
+      const successService = new TestableGlobalAccountService(successRepo);
+      const created = await successService.register(
+        'NewMember@PromiseOfPlanet.org',
+        'ValidPass123!',
+        'New Member'
+      );
+      expect(created.user.uid).toBe('uid-newmember');
+      expect(created.account).not.toBeNull();
+      expect(created.account?.id).toBe('uid-newmember');
+      expect(created.account?.email).toBe('newmember@promiseofplanet.org');
+      expect(created.account?.displayName).toBe('New Member');
+      expect(created.error).toBeUndefined();
+      // Barrier is settled and cleaned up after success
+      expect(
+        await successService.awaitInFlightRegistrationForUser(created.user)
+      ).toBeNull();
+
+      // Case 11 (Stage 1 error): Barrier is settled and cleaned up after Stage 1 Firebase error, and no user is authenticated
+      class Stage1FailService extends AccountServiceClass {
+        public createUserCalls = 0;
+        public observedDuringCreate: Promise<{
+          user: User | null;
+          account: Account | null;
+          error?: string;
+        } | null> | null = null;
+
+        protected isConfigured(): boolean {
+          return true;
+        }
+
+        protected async performCreateUser(
+          email: string,
+          _password: string
+        ): Promise<User> {
+          this.createUserCalls += 1;
+          this.observedDuringCreate = this.awaitInFlightRegistrationForUser({
+            uid: '',
+            email,
+          } as unknown as User);
+          const err = new Error('Email exists') as Error & { code: string };
+          err.code = 'auth/email-already-in-use';
+          throw err;
+        }
+      }
+
+      const stage1Service = new Stage1FailService(
+        new InMemoryAccountRepository()
+      );
+      await expect(
+        stage1Service.register('dup@promiseofplanet.org', 'ValidPass123!')
+      ).rejects.toMatchObject({
+        code: 'ACCOUNT_ALREADY_EXISTS',
+      });
+      // No automatic retry (Case 12)
+      expect(stage1Service.createUserCalls).toBe(1);
+      // Barrier settled to { user: null, account: null } and was cleaned up after error (Case 11)
+      expect(await stage1Service.observedDuringCreate).toEqual({
+        user: null,
+        account: null,
+      });
+      expect(
+        await stage1Service.awaitInFlightRegistrationForUser({
+          uid: 'any',
+          email: 'dup@promiseofplanet.org',
+        } as unknown as User)
+      ).toBeNull();
+
+      // Case 10 & 12: Stage 1 Firebase creation succeeds followed by Stage 2 Firestore provisioning failure
+      let shouldFailCreateAccount = true;
+      const backingRepo = new InMemoryAccountRepository();
+      const stage2Repo = {
+        getAccount: (uid: string) => backingRepo.getAccount(uid),
+        createAccount: async (acc: any) => {
+          if (shouldFailCreateAccount) {
+            throw new Error('Simulated Firestore write outage');
+          }
+          return await backingRepo.createAccount(acc);
+        },
+        updateAccount: (uid: string, data: any) =>
+          backingRepo.updateAccount(uid, data),
+      };
+
+      class Stage2TestableService extends AccountServiceClass {
+        public createUserCalls = 0;
+        public activeUser: User | null = null;
+
+        protected isConfigured(): boolean {
+          return true;
+        }
+
+        protected getAuthenticatedUser(): User | null {
+          return this.activeUser;
+        }
+
+        protected async performCreateUser(
+          email: string,
+          _password: string
+        ): Promise<User> {
+          this.createUserCalls += 1;
+          const u = {
+            uid: 'uid-stage2-user',
+            email: email.trim().toLowerCase(),
+            displayName: null,
+            emailVerified: false,
+          } as unknown as User;
+          this.activeUser = u;
+          return u;
+        }
+      }
+
+      const stage2Service = new Stage2TestableService(stage2Repo);
+      const partialResult = await stage2Service.register(
+        'stage2@promiseofplanet.org',
+        'ValidPass123!',
+        'Stage Two User'
+      );
+
+      // Stage 1 succeeded and Stage 2 failed:
+      // - Returns authenticated user without erasing identity
+      // - Reports ACCOUNT_PROVISIONING_FAILED, NOT AUTH_UNAVAILABLE
+      // - Does NOT attempt to create a second Firebase user
+      expect(stage2Service.createUserCalls).toBe(1);
+      expect(partialResult.user.uid).toBe('uid-stage2-user');
+      expect(partialResult.account).toBeNull();
+      expect(partialResult.error).toBe(
+        'ACCOUNT_PROVISIONING_FAILED: Unable to provision platform account.'
+      );
+      expect(
+        getSafeWidgetErrorMessage(partialResult.error, true)
+      ).not.toBe(REGISTRATION_ERROR_MESSAGES.serviceUnavailable.ar);
+      // Barrier cleaned up after Stage 2 failure
+      expect(
+        await stage2Service.awaitInFlightRegistrationForUser(partialResult.user)
+      ).toBeNull();
+
+      // Recovery provisions accounts/{uid} for the existing authenticated user without calling performCreateUser again
+      shouldFailCreateAccount = false;
+      const recovered = await stage2Service.recoverCurrentAccountProfile();
+      expect(stage2Service.createUserCalls).toBe(1);
+      expect(recovered.status).toBe('recovered');
+      expect(recovered.account?.id).toBe('uid-stage2-user');
+      expect(recovered.account?.displayName).toBe('Stage Two User');
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
+  it('33. AUTH-05-UAE1-R2: preserves existing sign-in, password-reset non-enumeration privacy contract, and verified-email requirements', async () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    class SignInAndResetService extends AccountServiceClass {
+      public resetError: unknown = null;
+
+      protected isConfigured(): boolean {
+        return true;
+      }
+
+      protected async performSignIn(
+        _email: string,
+        _password: string
+      ): Promise<User> {
+        const err = new Error(
+          'Firebase: Error (auth/wrong-password).'
+        ) as Error & { code: string };
+        err.code = 'auth/wrong-password';
+        throw err;
+      }
+
+      protected async performPasswordReset(_email: string): Promise<void> {
+        if (this.resetError) {
+          throw this.resetError;
+        }
+      }
+    }
+
+    const service = new SignInAndResetService(new InMemoryAccountRepository());
+
+    try {
+      // Sign-in failure continues to throw AUTH_UNAVAILABLE without leaking whether email exists
+      await expect(
+        service.signIn('user@promiseofplanet.org', 'wrong-pass')
+      ).rejects.toMatchObject({
+        name: 'AccountError',
+        code: 'AUTH_UNAVAILABLE',
+      });
+
+      // Password reset returns identical neutral confirmation for existing and non-existing accounts
+      const existingReset = await service.requestPasswordReset(
+        'known@promiseofplanet.org'
+      );
+      const notFoundErr = new Error(
+        'Firebase: Error (auth/user-not-found).'
+      ) as Error & { code: string };
+      notFoundErr.code = 'auth/user-not-found';
+      service.resetError = notFoundErr;
+      const unknownReset = await service.requestPasswordReset(
+        'unknown@promiseofplanet.org'
+      );
+
+      expect(existingReset.messageAr).toBe(NEUTRAL_PASSWORD_RESET_MESSAGES.ar);
+      expect(existingReset.messageEn).toBe(NEUTRAL_PASSWORD_RESET_MESSAGES.en);
+      expect(unknownReset.messageAr).toBe(existingReset.messageAr);
+      expect(unknownReset.messageEn).toBe(existingReset.messageEn);
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
   });
 });
 

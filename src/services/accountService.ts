@@ -18,6 +18,9 @@ export type AccountErrorType =
   | 'ACCOUNT_ALREADY_EXISTS'
   | 'ACCOUNT_DATA_INVALID'
   | 'ACCOUNT_PROVISIONING_FAILED'
+  | 'REGISTRATION_WEAK_PASSWORD'
+  | 'REGISTRATION_RATE_LIMITED'
+  | 'REGISTRATION_NETWORK_ERROR'
   | 'PASSWORD_RESET_RATE_LIMITED'
   | 'PASSWORD_RESET_NETWORK_ERROR'
   | 'EMAIL_VERIFICATION_RATE_LIMITED'
@@ -372,6 +375,100 @@ export interface RecoverAccountOptions {
 interface InFlightRegistrationEntry {
   displayName?: string;
   promise: Promise<{ user: User | null; account: Account | null; error?: string }>;
+}
+
+export const ALLOWLISTED_FIREBASE_REGISTRATION_ERROR_CODES = [
+  'auth/email-already-in-use',
+  'auth/invalid-email',
+  'auth/weak-password',
+  'auth/too-many-requests',
+  'auth/network-request-failed',
+  'auth/operation-not-allowed',
+  'auth/admin-restricted-operation',
+  'auth/configuration-not-found',
+  'auth/internal-error',
+  'auth/invalid-api-key',
+  'auth/app-not-authorized',
+  'auth/unauthorized-domain',
+  'auth/project-not-found',
+  'auth/quota-exceeded',
+] as const;
+
+const SAFE_REGISTRATION_DIAGNOSTIC_CODE_SET = new Set<string>(
+  ALLOWLISTED_FIREBASE_REGISTRATION_ERROR_CODES
+);
+
+/**
+ * Extracts a safe, explicitly allowlisted Firebase Auth error code for diagnostics.
+ * Never returns raw error messages, stack traces, tokens, emails, UIDs, or passwords.
+ */
+export function getSafeRegistrationDiagnosticCode(err: unknown): string {
+  if (!err || typeof err !== 'object') {
+    return 'unknown';
+  }
+  const rawCode = (err as { code?: unknown }).code;
+  if (typeof rawCode !== 'string') {
+    return 'unknown';
+  }
+  const trimmedCode = rawCode.trim();
+  return SAFE_REGISTRATION_DIAGNOSTIC_CODE_SET.has(trimmedCode)
+    ? trimmedCode
+    : 'unknown';
+}
+
+/**
+ * Bounded registration-error classifier that interprets narrowly validated Firebase Auth error codes.
+ * - Preserves existing AccountError instances.
+ * - Never inspects exception message text to guess Firebase error codes.
+ * - Never exposes raw Firebase exception messages, tokens, credentials, UIDs, or stack traces.
+ */
+export function classifyRegistrationAuthError(err: unknown): AccountError {
+  if (err instanceof AccountError) {
+    return err;
+  }
+
+  const rawCode =
+    err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string'
+      ? (err as { code: string }).code.trim()
+      : '';
+
+  switch (rawCode) {
+    case 'auth/email-already-in-use':
+      return new AccountError(
+        'ACCOUNT_ALREADY_EXISTS',
+        'This email address is already registered. You can sign in or reset your password.'
+      );
+    case 'auth/invalid-email':
+      return new AccountError(
+        'ACCOUNT_DATA_INVALID',
+        'Please enter a valid email address.'
+      );
+    case 'auth/weak-password':
+      return new AccountError(
+        'REGISTRATION_WEAK_PASSWORD',
+        'The password does not meet security requirements. Please choose a stronger password.'
+      );
+    case 'auth/too-many-requests':
+      return new AccountError(
+        'REGISTRATION_RATE_LIMITED',
+        'Too many registration attempts. Please wait before trying again.'
+      );
+    case 'auth/network-request-failed':
+      return new AccountError(
+        'REGISTRATION_NETWORK_ERROR',
+        'Unable to connect to the registration service. Check your internet connection and try again.'
+      );
+    case 'auth/operation-not-allowed':
+      return new AccountError(
+        'AUTH_UNAVAILABLE',
+        'Authentication is currently unavailable. Please try again.'
+      );
+    default:
+      return new AccountError(
+        'AUTH_UNAVAILABLE',
+        'Registration failed. Unable to create authentication credentials.'
+      );
+  }
 }
 
 export class AccountServiceClass {
@@ -1194,8 +1291,12 @@ export class AccountServiceClass {
       if (err instanceof AccountError) {
         throw err;
       }
-      console.error('Registration auth failed:', err);
-      throw new AccountError('AUTH_UNAVAILABLE', 'Registration failed. Unable to create authentication credentials.');
+      const classifiedError = classifyRegistrationAuthError(err);
+      console.error('Registration auth failed:', {
+        category: classifiedError.code,
+        firebaseCode: getSafeRegistrationDiagnosticCode(err),
+      });
+      throw classifiedError;
     }
 
     // Provision account profile bound to newly authenticated user UID
@@ -1205,7 +1306,11 @@ export class AccountServiceClass {
       resolveBarrier(successResult);
       return successResult;
     } catch (err: any) {
-      console.error('Account profile provisioning failed after auth creation:', err);
+      const provisioningCategory: AccountErrorType =
+        err instanceof AccountError ? err.code : 'ACCOUNT_PROVISIONING_FAILED';
+      console.error('Account profile provisioning failed after auth creation:', {
+        category: provisioningCategory,
+      });
       const failureResult = {
         user,
         account: null,

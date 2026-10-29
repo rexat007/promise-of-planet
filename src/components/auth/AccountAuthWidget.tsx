@@ -157,8 +157,55 @@ export interface AccountAuthWidgetProps {
   isAr?: boolean;
 }
 
+export const REGISTRATION_ERROR_MESSAGES = {
+  existingAccount: {
+    ar: 'هذا البريد الإلكتروني مستخدم بالفعل. يمكنك تسجيل الدخول أو استعادة كلمة المرور.',
+    en: 'This email address is already registered. You can sign in or reset your password.',
+  },
+  invalidEmail: {
+    ar: 'يرجى إدخال عنوان بريد إلكتروني صالح.',
+    en: 'Please enter a valid email address.',
+  },
+  weakPassword: {
+    ar: 'كلمة المرور لا تستوفي متطلبات الأمان. يرجى اختيار كلمة مرور أقوى.',
+    en: 'The password does not meet security requirements. Please choose a stronger password.',
+  },
+  rateLimit: {
+    ar: 'تم تجاوز عدد محاولات التسجيل المسموح بها مؤقتاً. يرجى الانتظار قبل المحاولة مجدداً.',
+    en: 'Too many registration attempts. Please wait before trying again.',
+  },
+  networkFailure: {
+    ar: 'تعذر الاتصال بخدمة التسجيل. تحقق من اتصال الإنترنت ثم حاول مجدداً.',
+    en: 'Unable to connect to the registration service. Check your internet connection and try again.',
+  },
+  serviceUnavailable: {
+    ar: 'خدمة المصادقة غير متاحة حالياً. يرجى المحاولة لاحقاً.',
+    en: 'Authentication is currently unavailable. Please try again.',
+  },
+} as const;
+
 export function getSafeWidgetErrorMessage(err: unknown, isAr: boolean): string {
   if (err instanceof AccountError) {
+    if (err.code === 'ACCOUNT_ALREADY_EXISTS') {
+      return isAr
+        ? REGISTRATION_ERROR_MESSAGES.existingAccount.ar
+        : REGISTRATION_ERROR_MESSAGES.existingAccount.en;
+    }
+    if (err.code === 'REGISTRATION_WEAK_PASSWORD') {
+      return isAr
+        ? REGISTRATION_ERROR_MESSAGES.weakPassword.ar
+        : REGISTRATION_ERROR_MESSAGES.weakPassword.en;
+    }
+    if (err.code === 'REGISTRATION_RATE_LIMITED') {
+      return isAr
+        ? REGISTRATION_ERROR_MESSAGES.rateLimit.ar
+        : REGISTRATION_ERROR_MESSAGES.rateLimit.en;
+    }
+    if (err.code === 'REGISTRATION_NETWORK_ERROR') {
+      return isAr
+        ? REGISTRATION_ERROR_MESSAGES.networkFailure.ar
+        : REGISTRATION_ERROR_MESSAGES.networkFailure.en;
+    }
     if (err.code === 'EMAIL_VERIFICATION_RATE_LIMITED') {
       return isAr
         ? 'تم تجاوز الحد المسموح من طلبات التحقق من البريد الإلكتروني. يرجى الانتظار والمحاولة لاحقاً.'
@@ -191,8 +238,8 @@ export function getSafeWidgetErrorMessage(err: unknown, isAr: boolean): string {
     }
     if (err.code === 'AUTH_UNAVAILABLE') {
       return isAr
-        ? 'خدمة المصادقة غير متاحة حالياً. يرجى المحاولة لاحقاً.'
-        : 'Authentication is currently unavailable. Please try again.';
+        ? REGISTRATION_ERROR_MESSAGES.serviceUnavailable.ar
+        : REGISTRATION_ERROR_MESSAGES.serviceUnavailable.en;
     }
     if (err.code === 'ACCOUNT_PROVISIONING_FAILED') {
       return isAr
@@ -203,8 +250,8 @@ export function getSafeWidgetErrorMessage(err: unknown, isAr: boolean): string {
       const lower = (err.message || '').toLowerCase();
       if (lower.includes('email')) {
         return isAr
-          ? 'يرجى إدخال عنوان بريد إلكتروني صالح.'
-          : 'Please enter a valid email address.';
+          ? REGISTRATION_ERROR_MESSAGES.invalidEmail.ar
+          : REGISTRATION_ERROR_MESSAGES.invalidEmail.en;
       }
       if (lower.includes('displayname') || lower.includes('forbidden')) {
         return isAr
