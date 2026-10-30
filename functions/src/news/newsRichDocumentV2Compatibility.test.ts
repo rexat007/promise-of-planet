@@ -13,6 +13,7 @@ import {
 import {
   buildEditorialImageVariantStoragePath,
   createEditorialImageAssetRecord,
+  validateEditorialImageAsset,
 } from '../shared/editorialImageAssetContract';
 import type {
   EditorialImageAssetMetadata,
@@ -889,6 +890,43 @@ describe('IMG-F3-09/D1-A — V1/V2 Rich News Validation & Plain-Text Compatibili
       await service.transitionWorkflow(created.id, 'InReview', editorActor);
       const approved = await service.transitionWorkflow(created.id, 'Approved', reviewerActor);
       expect(approved.workflowState).toBe('Approved');
+
+      // Publication is blocked while the referenced canonical image remains PendingReview
+      await expect(
+        service.transitionWorkflow(created.id, 'Published', reviewerActor)
+      ).rejects.toThrow(/EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE/);
+
+      // Establish canonical human-approved public usage rights permitting publication for this article
+      const canonicalAssetId = 'asset_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c';
+      const approvedAsset: EditorialImageAssetMetadata = {
+        ...createCanonicalTestAsset(canonicalAssetId),
+        updatedAtIso: '2026-03-20T11:00:00.000Z',
+        rights: {
+          status: 'Approved',
+          licenseType: 'ContextSpecificAssessment',
+          rightsHolder: 'Promise of Planet Field Documentation Team',
+          sourceAttributionAr: 'فريق التوثيق الميداني في وعد الكوكب',
+          sourceAttributionEn: 'Promise of Planet Field Documentation Team',
+          evidenceRefs: ['evidence_ref_nile_afforestation_001'],
+          documentedException:
+            'Verified field photography cleared for this biodiversity report.',
+          usageScope: {
+            scopeType: 'ArticleRestricted',
+            articleIds: [created.id],
+          },
+          reviewedByUid: reviewerActor.uid,
+          reviewedAtIso: '2026-03-20T11:00:00.000Z',
+          reviewReason:
+            'Approved human rights clearance for biodiversity V2 article publication.',
+        },
+      };
+      expect(validateEditorialImageAsset(approvedAsset).valid).toBe(true);
+
+      assetRepo.corruptStoredRecordForTesting(canonicalAssetId, {
+        assetId: canonicalAssetId,
+        revision: 2,
+        asset: approvedAsset,
+      });
 
       const published = await service.transitionWorkflow(created.id, 'Published', reviewerActor);
       expect(published.workflowState).toBe('Published');

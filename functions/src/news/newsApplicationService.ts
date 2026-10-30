@@ -13,16 +13,90 @@ import {
 } from '../shared/richNewsDocumentContract';
 import {
   DEFAULT_ASSET_VALIDATION_LIMITS,
+  type EditorialImageAssetMetadata,
   type EditorialImageAssetVariantKey,
 } from '../types/editorialImageAsset';
 import {
   validateEditorialImageAsset,
   validateEditorialImageAssetVariant,
+  validateEditorialImageUsageScope,
 } from '../shared/editorialImageAssetContract';
 import {
   EditorialImageAssetRepositoryError,
   type EditorialImageAssetRepository,
 } from './editorialImageAssetRepository';
+import { isEditorialImageAssetEligibleForPublicArticle } from './publicNewsRepository';
+
+export const EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE =
+  'EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE' as const;
+
+function redactSensitivePathsFromDiagnostic(message: string): string {
+  return message
+    .replace(/editorial_images\/[^\s"';)]*/gi, '[REDACTED_STORAGE_PATH]')
+    .replace(/gs:\/\/[^\s"';)]*/gi, '[REDACTED_BUCKET_URI]');
+}
+
+function describePublicationIneligibilityReason(
+  asset: EditorialImageAssetMetadata,
+  articleId: string
+): string {
+  const assetId =
+    typeof asset?.assetId === 'string' && asset.assetId.trim().length > 0
+      ? asset.assetId
+      : '<unknown>';
+
+  if (asset.status !== 'active') {
+    return `[INACTIVE_ASSET_STATUS] Editorial image asset "${assetId}" referenced by article "${articleId}" has status "${String(asset.status)}"; only "active" assets are eligible for publication.`;
+  }
+
+  if (!asset.rights || typeof asset.rights !== 'object') {
+    return `[INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${articleId}" is missing a valid rights record.`;
+  }
+
+  if (asset.rights.status !== 'Approved') {
+    return `[RIGHTS_STATUS_NOT_APPROVED] Editorial image asset "${assetId}" referenced by article "${articleId}" has rights status "${String(asset.rights.status)}"; only human-"Approved" assets are eligible for publication.`;
+  }
+
+  const usageScope = asset.rights.usageScope;
+  const scopeValidation = validateEditorialImageUsageScope(
+    usageScope,
+    DEFAULT_ASSET_VALIDATION_LIMITS
+  );
+  if (
+    !scopeValidation.valid ||
+    !usageScope ||
+    (usageScope.scopeType === 'GeneralEditorial' &&
+      asset.rights.licenseType === 'ContextSpecificAssessment') ||
+    (usageScope.scopeType === 'ArticleRestricted' &&
+      (!Array.isArray(usageScope.articleIds) ||
+        !usageScope.articleIds.includes(articleId)))
+  ) {
+    return `[USAGE_SCOPE_NOT_AUTHORIZED] Editorial image asset "${assetId}" does not have an approved usageScope authorizing publication in article "${articleId}".`;
+  }
+
+  const variants = asset.variants as Record<string, unknown> | undefined;
+  if (!variants || typeof variants !== 'object' || Array.isArray(variants)) {
+    return `[INVALID_CANONICAL_VARIANTS] Editorial image asset "${assetId}" referenced by article "${articleId}" is missing a valid canonical variants map.`;
+  }
+
+  for (const requiredKey of REQUIRED_EDITORIAL_IMAGE_VARIANT_KEYS) {
+    const candidateVariant = variants[requiredKey];
+    if (!candidateVariant) {
+      return `[INVALID_CANONICAL_VARIANTS] Editorial image asset "${assetId}" referenced by article "${articleId}" is missing required canonical variant "${requiredKey}".`;
+    }
+    const variantCheck = validateEditorialImageAssetVariant(
+      candidateVariant,
+      requiredKey,
+      DEFAULT_ASSET_VALIDATION_LIMITS,
+      assetId
+    );
+    if (!variantCheck.valid) {
+      return `[INVALID_CANONICAL_VARIANTS] Editorial image asset "${assetId}" referenced by article "${articleId}" has invalid canonical variant "${requiredKey}".`;
+    }
+  }
+
+  return `[INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${articleId}" failed canonical public eligibility validation.`;
+}
 
 export const REQUIRED_EDITORIAL_IMAGE_VARIANT_KEYS: readonly EditorialImageAssetVariantKey[] =
   Object.freeze([
@@ -473,6 +547,85 @@ export class NewsApplicationService {
   }
 
   /**
+   * Authoritatively verifies that every V2 `editorialImage` asset referenced by
+   * the persisted article documents (`richBodyAr` and `richBodyEn`) exists in
+   * `EditorialImageAssetRepository` and satisfies the canonical public article
+   * rights eligibility contract (`isEditorialImageAssetEligibleForPublicArticle`)
+   * before the article is allowed to transition to `Published`.
+   */
+  private async verifyEditorialImageAssetsForPublication(
+    article: NewsItemBackend
+  ): Promise<void> {
+    const referencedAssetIds = collectUniqueEditorialImageAssetIds(
+      article.richBodyAr,
+      article.richBodyEn
+    );
+
+    if (referencedAssetIds.length === 0) {
+      return;
+    }
+
+    if (!this.assetRepo) {
+      throw new Error(
+        `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [ASSET_REPO_MISSING] EditorialImageAssetRepository is required to verify publication eligibility for editorial image asset "${referencedAssetIds[0]}" on article "${article.id}".`
+      );
+    }
+
+    for (const assetId of referencedAssetIds) {
+      let readResult;
+      try {
+        readResult = await this.assetRepo.getById(assetId);
+      } catch (err: unknown) {
+        if (
+          err instanceof EditorialImageAssetRepositoryError &&
+          err.code === 'INVALID_ASSET'
+        ) {
+          throw new Error(
+            `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${article.id}" has an invalid or corrupted repository record.`
+          );
+        }
+        const safeDetail =
+          err instanceof Error
+            ? redactSensitivePathsFromDiagnostic(err.message)
+            : 'Unknown asset repository error.';
+        throw new Error(
+          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [ASSET_REPOSITORY_ERROR] Failed to read editorial image asset "${assetId}" for article "${article.id}": ${safeDetail}`
+        );
+      }
+
+      if (
+        !readResult ||
+        readResult.ok !== true ||
+        readResult.status !== 'FOUND' ||
+        !readResult.asset
+      ) {
+        throw new Error(
+          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [ASSET_NOT_FOUND] Editorial image asset "${assetId}" referenced by article "${article.id}" does not exist in the canonical asset repository.`
+        );
+      }
+
+      const asset = readResult.asset;
+      if (
+        !asset ||
+        typeof asset !== 'object' ||
+        Array.isArray(asset) ||
+        asset.assetId !== assetId
+      ) {
+        throw new Error(
+          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${article.id}" has a malformed or mismatched asset envelope.`
+        );
+      }
+
+      if (!isEditorialImageAssetEligibleForPublicArticle(asset, article.id)) {
+        const reason = describePublicationIneligibilityReason(asset, article.id);
+        throw new Error(
+          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: ${reason}`
+        );
+      }
+    }
+  }
+
+  /**
    * Transitions an article through the editorial workflow.
    * Human explicit publication required for state === 'Published'.
    */
@@ -492,6 +645,10 @@ export class NewsApplicationService {
     // Forward workflow transitions to InReview, Approved, or Published require a canonical category
     if (targetState === 'InReview' || targetState === 'Approved' || targetState === 'Published') {
       NewsValidator.validateCanonicalCategory(existing.category);
+    }
+
+    if (targetState === 'Published') {
+      await this.verifyEditorialImageAssetsForPublication(existing);
     }
 
     const now = new Date().toISOString();
