@@ -16,9 +16,12 @@ export const WorkflowAction = {
   Approve: 'approve',
   ReviseDraft: 'revise_draft',
   Publish: 'publish',
+  WithdrawForRevision: 'withdraw_for_revision',
 } as const;
 
 export type WorkflowAction = typeof WorkflowAction[keyof typeof WorkflowAction];
+
+export const MAX_WORKFLOW_COMMENT_LENGTH = 2000 as const;
 
 export interface WorkflowTransitionConfig {
   action: WorkflowAction;

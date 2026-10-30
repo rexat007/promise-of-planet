@@ -774,6 +774,50 @@ export async function executeManageNewsRequest(
         throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: id and targetState are required');
       }
 
+      if (targetState === 'Draft') {
+        if (!requestContext.auth || !requestContext.auth.uid || requestContext.auth.uid.trim() === '') {
+          throw new HttpsError('unauthenticated', 'UNAUTHENTICATED: Request missing valid Firebase Authentication token');
+        }
+
+        const uid = requestContext.auth.uid.trim();
+        let candidateAdmin: AdminUser | null = null;
+        try {
+          candidateAdmin = await adminRepo.getAdminByUid(uid);
+        } catch (_err) {
+          throw new HttpsError('internal', 'ADMIN_LOOKUP_FAILED: Failed to verify admin identity');
+        }
+
+        if (!candidateAdmin) {
+          throw new HttpsError('permission-denied', 'ADMIN_NOT_REGISTERED: User identity is not registered as a canonical AdminUser');
+        }
+
+        if (!candidateAdmin.isActive) {
+          throw new HttpsError('permission-denied', 'ADMIN_INACTIVE: AdminUser account is inactive');
+        }
+
+        const existingArticle = await newsService.getById(id);
+        if (existingArticle && existingArticle.workflowState === 'Published') {
+          if (
+            candidateAdmin.role !== AdminRole.Owner ||
+            !AdminAuthorizationService.hasPermission(candidateAdmin, AdminPermission.Publish)
+          ) {
+            throw new HttpsError(
+              'permission-denied',
+              'PERMISSION_DENIED: Only an active Owner may withdraw a published article to Draft'
+            );
+          }
+
+          const actor = {
+            uid: candidateAdmin.id,
+            name: candidateAdmin.name,
+            role: candidateAdmin.role,
+          };
+
+          const transitioned = await newsService.transitionWorkflow(id, targetState, actor, comment);
+          return { item: transitioned };
+        }
+      }
+
       // Check required permission based on target state
       let requiredPermission: AdminPermission = AdminPermission.Edit;
       if (targetState === 'Approved') {

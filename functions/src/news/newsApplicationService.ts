@@ -628,6 +628,7 @@ export class NewsApplicationService {
   /**
    * Transitions an article through the editorial workflow.
    * Human explicit publication required for state === 'Published'.
+   * Formal withdrawal from 'Published' to 'Draft' is restricted to an active 'Owner' with a mandatory written reason.
    */
   async transitionWorkflow(
     id: string,
@@ -638,6 +639,14 @@ export class NewsApplicationService {
     const existing = await this.repo.getById(id);
     if (!existing) {
       throw new Error(`NOT_FOUND: News article with ID ${id} does not exist`);
+    }
+
+    if (existing.workflowState === 'Published' && targetState === 'Draft') {
+      if (!actor || actor.role !== 'Owner') {
+        throw new Error(
+          'PERMISSION_DENIED: Only an active Owner may withdraw a published article to Draft'
+        );
+      }
     }
 
     const action = NewsValidator.validateTransition(existing.workflowState, targetState, comment);
@@ -652,6 +661,8 @@ export class NewsApplicationService {
     }
 
     const now = new Date().toISOString();
+    const normalizedComment =
+      typeof comment === 'string' && comment.trim() !== '' ? comment.trim() : undefined;
 
     const transitionRecord: WorkflowTransitionRecordBackend = {
       id: `trans-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -661,7 +672,7 @@ export class NewsApplicationService {
       actorName: actor.name,
       actorRole: actor.role,
       timestamp: now,
-      comment: comment || undefined,
+      comment: normalizedComment,
     };
 
     const updated: NewsItemBackend = {

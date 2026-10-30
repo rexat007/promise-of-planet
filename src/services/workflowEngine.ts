@@ -57,6 +57,15 @@ export const ALLOWED_TRANSITIONS: WorkflowTransitionConfig[] = [
     labelEn: 'Publish Content',
     requiresComment: false,
   },
+  {
+    action: WorkflowAction.WithdrawForRevision,
+    fromState: WorkflowState.Published,
+    toState: WorkflowState.Draft,
+    requiredPermission: AdminPermission.Publish,
+    labelAr: 'سحب من النشر وإعادة إلى المسودة',
+    labelEn: 'Withdraw Publication and Return to Draft',
+    requiresComment: true,
+  },
 ];
 
 export class WorkflowEngine {
@@ -73,6 +82,14 @@ export class WorkflowEngine {
   public static getAuthorizedTransitions(currentState: WorkflowState, user: AdminUser): WorkflowTransitionConfig[] {
     const valid = this.getValidTransitionsFromState(currentState);
     return valid.filter(t => {
+      if (t.action === WorkflowAction.WithdrawForRevision) {
+        return Boolean(
+          user &&
+          user.isActive &&
+          user.role === 'Owner' &&
+          AdminAccessService.hasPermission(user, AdminPermission.Publish)
+        );
+      }
       // Check if user has the specific required permission for this action
       if (t.action === WorkflowAction.SubmitForReview) {
         return AdminAccessService.hasPermission(user, AdminPermission.Create) || 
@@ -106,6 +123,12 @@ export class WorkflowEngine {
     // 2. Check RBAC authority
     const isAuthorized = this.getAuthorizedTransitions(fromState, user).some(t => t.toState === toState);
     if (!isAuthorized) {
+      if (transition.action === WorkflowAction.WithdrawForRevision) {
+        return {
+          allowed: false,
+          reason: `Only an active Owner is authorized to execute "${transition.labelEn}".`,
+        };
+      }
       return { 
         allowed: false, 
         reason: `Role (${user.role}) lacks the required permission [${transition.requiredPermission}] to execute action "${transition.labelEn}".` 
@@ -130,6 +153,15 @@ export class WorkflowEngine {
     }
 
     const transitionConfig = ALLOWED_TRANSITIONS.find(t => t.fromState === item.currentState && t.toState === toState)!;
+
+    if (transitionConfig.requiresComment) {
+      if (typeof comment !== 'string' || comment.trim() === '') {
+        throw new Error(`Written reason or comment is required to execute "${transitionConfig.labelEn}".`);
+      }
+      if (comment.length > 2000 || comment.trim().length > 2000) {
+        throw new Error(`Comment exceeds maximum length of 2000 characters.`);
+      }
+    }
 
     const transitionRecord: WorkflowTransitionRecord = {
       id: `tr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,

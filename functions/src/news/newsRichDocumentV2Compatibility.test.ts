@@ -27,6 +27,8 @@ import type {
 import type { NewsItemBackend, NewsRepository } from './newsRepository';
 import { InMemoryEditorialImageAssetRepository } from './inMemoryEditorialImageAssetRepository';
 import { NewsApplicationService, type ActorContext } from './newsApplicationService';
+import { PublicNewsRepository } from './publicNewsRepository';
+import { MAX_WORKFLOW_COMMENT_LENGTH } from './newsValidator';
 
 const CANONICAL_VARIANT_KEYS: readonly EditorialImageAssetVariantKey[] = [
   'thumbnail',
@@ -110,6 +112,12 @@ describe('IMG-F3-09/D1-A — V1/V2 Rich News Validation & Plain-Text Compatibili
     uid: 'admin-reviewer-01',
     name: 'د. عبد العظيم',
     role: 'ManagingEditor',
+  };
+
+  const ownerActor: ActorContext = {
+    uid: 'admin-owner-01',
+    name: 'عباس عبد الحليم',
+    role: 'Owner',
   };
 
   const validV1DocAr: RichNewsDocumentWrapper = {
@@ -933,6 +941,346 @@ describe('IMG-F3-09/D1-A — V1/V2 Rich News Validation & Plain-Text Compatibili
       expect(published.publishedAt).toBeDefined();
       expect(published.richBodyAr).toEqual(revisedV2Ar);
       expect(published.richBodyEn).toEqual(validV2DocEn);
+    });
+  });
+
+  describe('5. NEWS-REVISION-01 — Owner-Only Published Article Withdrawal & Redraft Lifecycle', () => {
+    const canonicalAssetId = 'asset_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c';
+
+    async function createAndPublishCanonicalArticle(): Promise<NewsItemBackend> {
+      const created = await service.createDraft(
+        {
+          titleAr: 'تحقيق استقصائي حول الغطاء النباتي في سنار',
+          titleEn: 'Investigative Report on Vegetation Cover in Sennar',
+          kickerAr: 'تقرير خاص',
+          kickerEn: 'Special Report',
+          journalisticType: 'Investigation',
+          summaryAr: 'ملخص التحقيق الميداني في سنار.',
+          summaryEn: 'Summary of the Sennar field investigation.',
+          bodyAr: '',
+          bodyEn: '',
+          richBodyAr: validV2DocAr,
+          richBodyEn: validV2DocEn,
+          category: 'Biodiversity',
+          tags: ['Sennar', 'Forests'],
+          sources: ['Sudan Forestry National Corporation'],
+          featuredImage: canonicalAssetId,
+          location: 'Sennar State / ولاية سنار',
+          urgencyLevel: 'Urgent',
+          relatedVideoIds: ['vid-sennar-01', 'vid-sennar-02'],
+        },
+        editorActor
+      );
+
+      await service.transitionWorkflow(created.id, 'InReview', editorActor, 'تقديم للمراجعة');
+      await service.transitionWorkflow(created.id, 'Approved', reviewerActor, 'اعتماد التحقيق');
+
+      const approvedAsset: EditorialImageAssetMetadata = {
+        ...createCanonicalTestAsset(canonicalAssetId),
+        updatedAtIso: '2026-03-21T10:00:00.000Z',
+        rights: {
+          status: 'Approved',
+          licenseType: 'ContextSpecificAssessment',
+          rightsHolder: 'Promise of Planet Field Documentation Team',
+          sourceAttributionAr: 'فريق التوثيق الميداني في وعد الكوكب',
+          sourceAttributionEn: 'Promise of Planet Field Documentation Team',
+          evidenceRefs: ['evidence_ref_nile_afforestation_001'],
+          documentedException: 'Verified field photography cleared for Sennar report.',
+          usageScope: {
+            scopeType: 'ArticleRestricted',
+            articleIds: [created.id],
+          },
+          reviewedByUid: reviewerActor.uid,
+          reviewedAtIso: '2026-03-21T10:00:00.000Z',
+          reviewReason: 'Approved human rights clearance for Sennar publication.',
+        },
+      };
+      expect(validateEditorialImageAsset(approvedAsset).valid).toBe(true);
+      assetRepo.corruptStoredRecordForTesting(canonicalAssetId, {
+        assetId: canonicalAssetId,
+        revision: 2,
+        asset: approvedAsset,
+      });
+
+      return service.transitionWorkflow(created.id, 'Published', ownerActor, 'نشر رسمي للجمهور');
+    }
+
+    it('allows an active Owner to withdraw a Published article to Draft with a valid reason, preserving all data, image rights, and history while removing it from public news queries', async () => {
+      const published = await createAndPublishCanonicalArticle();
+      const publicRepo = new PublicNewsRepository(repo, assetRepo);
+
+      // Verify article is initially visible in public news queries and public image delivery
+      const publicListBeforeAr = await publicRepo.listPublicNews('ar');
+      expect(publicListBeforeAr.map((a) => a.id)).toContain(published.id);
+      const publicByIdBefore = await publicRepo.getPublicNewsById(published.id, 'en');
+      expect(publicByIdBefore).not.toBeNull();
+      const imageDeliveryBefore = await publicRepo.evaluatePublicEditorialImageDelivery(
+        published.id,
+        canonicalAssetId,
+        'article_inline'
+      );
+      expect(imageDeliveryBefore.eligible).toBe(true);
+
+      // Cannot edit while Published
+      await expect(
+        service.updateDraft(
+          published.id,
+          { titleAr: 'محاولة تعديل مباشر أثناء النشر' },
+          ownerActor
+        )
+      ).rejects.toThrow(/INVALID_TRANSITION/);
+
+      // Active Owner withdraws Published -> Draft with a written reason
+      const withdrawalReason = '  سحب المقال لتحديث إحصائيات الغطاء الشجري لعام 2026 وتدقيق المصادر  ';
+      const withdrawn = await service.transitionWorkflow(
+        published.id,
+        'Draft',
+        ownerActor,
+        withdrawalReason
+      );
+
+      expect(withdrawn.workflowState).toBe('Draft');
+      expect(withdrawn.id).toBe(published.id);
+      expect(withdrawn.titleAr).toBe(published.titleAr);
+      expect(withdrawn.titleEn).toBe(published.titleEn);
+      expect(withdrawn.kickerAr).toBe(published.kickerAr);
+      expect(withdrawn.kickerEn).toBe(published.kickerEn);
+      expect(withdrawn.journalisticType).toBe(published.journalisticType);
+      expect(withdrawn.summaryAr).toBe(published.summaryAr);
+      expect(withdrawn.summaryEn).toBe(published.summaryEn);
+      expect(withdrawn.bodyAr).toBe(published.bodyAr);
+      expect(withdrawn.bodyEn).toBe(published.bodyEn);
+      expect(withdrawn.richBodyAr).toEqual(published.richBodyAr);
+      expect(withdrawn.richBodyEn).toEqual(published.richBodyEn);
+      expect(withdrawn.featuredImage).toBe(canonicalAssetId);
+      expect(withdrawn.relatedVideoIds).toEqual(['vid-sennar-01', 'vid-sennar-02']);
+      expect(withdrawn.tags).toEqual(['Sennar', 'Forests']);
+      expect(withdrawn.sources).toEqual(['Sudan Forestry National Corporation']);
+      expect(withdrawn.location).toBe('Sennar State / ولاية سنار');
+      expect(withdrawn.urgencyLevel).toBe('Urgent');
+      expect(withdrawn.createdAt).toBe(published.createdAt);
+
+      // Existing image rights decision is preserved intact in the canonical asset repository
+      const storedAssetAfterWithdrawal = await assetRepo.getById(canonicalAssetId);
+      expect(storedAssetAfterWithdrawal.status).toBe('FOUND');
+      if (storedAssetAfterWithdrawal.status === 'FOUND') {
+        expect(storedAssetAfterWithdrawal.record.asset.rights.status).toBe('Approved');
+      }
+
+      // History preserves all previous records and appends the distinct withdraw_for_revision record
+      expect(withdrawn.history).toHaveLength(published.history.length + 1);
+      expect(withdrawn.history.slice(0, published.history.length)).toEqual(published.history);
+      const lastRecord = withdrawn.history[withdrawn.history.length - 1];
+      expect(lastRecord.action).toBe('withdraw_for_revision');
+      expect(lastRecord.fromState).toBe('Published');
+      expect(lastRecord.toState).toBe('Draft');
+      expect(lastRecord.actorName).toBe(ownerActor.name);
+      expect(lastRecord.actorRole).toBe('Owner');
+      expect(lastRecord.comment).toBe(withdrawalReason.trim());
+
+      // Withdrawn article is immediately absent from public news queries and public image delivery
+      expect(await publicRepo.listPublicNews('ar')).toEqual([]);
+      expect(await publicRepo.listPublicNews('en')).toEqual([]);
+      expect(await publicRepo.getPublicNewsById(published.id, 'ar')).toBeNull();
+      expect(await publicRepo.getPublicNewsById(published.id, 'en')).toBeNull();
+      const imageDeliveryAfter = await publicRepo.evaluatePublicEditorialImageDelivery(
+        published.id,
+        canonicalAssetId,
+        'article_inline'
+      );
+      expect(imageDeliveryAfter).toEqual({
+        eligible: false,
+        articleId: published.id,
+        assetId: canonicalAssetId,
+        variantKey: 'article_inline',
+        reason: 'ARTICLE_NOT_PUBLISHED',
+      });
+    });
+
+    it('rejects non-Owner roles, missing/empty/whitespace/oversized reasons, and repeated or invalid transitions without writing to the repository', async () => {
+      const published = await createAndPublishCanonicalArticle();
+      const saveSpy = vi.spyOn(repo, 'save');
+
+      // Non-Owner roles are rejected
+      for (const nonOwner of [
+        editorActor,
+        reviewerActor,
+        { uid: 'u-rights', name: 'Rights Reviewer', role: 'RightsReviewer' },
+        { uid: 'u-tm', name: 'Training Manager', role: 'TrainingManager' },
+        { uid: 'u-viewer', name: 'Viewer', role: 'Viewer' },
+        { uid: 'u-ai', name: 'AI Assistant', role: 'AIAssistant' },
+      ]) {
+        await expect(
+          service.transitionWorkflow(
+            published.id,
+            'Draft',
+            nonOwner,
+            'محاولة سحب من غير المالك'
+          )
+        ).rejects.toThrow(/PERMISSION_DENIED: Only an active Owner may withdraw a published article to Draft/);
+      }
+
+      // Missing, empty, whitespace-only, and oversized (> 2000 chars) reasons are rejected without silent truncation
+      for (const invalidReason of [
+        undefined,
+        '',
+        '   \t\n  ',
+        'أ'.repeat(MAX_WORKFLOW_COMMENT_LENGTH + 1),
+      ]) {
+        await expect(
+          service.transitionWorkflow(published.id, 'Draft', ownerActor, invalidReason)
+        ).rejects.toThrow(/VALIDATION_ERROR/);
+      }
+
+      // Invalid transition from Published -> InReview or Published -> Approved is rejected
+      await expect(
+        service.transitionWorkflow(published.id, 'InReview', ownerActor, 'سبب')
+      ).rejects.toThrow(/VALIDATION_ERROR: Unauthorized transition path from 'Published' to 'InReview'/);
+      await expect(
+        service.transitionWorkflow(published.id, 'Approved', ownerActor, 'سبب')
+      ).rejects.toThrow(/VALIDATION_ERROR: Unauthorized transition path from 'Published' to 'Approved'/);
+
+      // Zero writes occurred during all failed attempts
+      expect(saveSpy).not.toHaveBeenCalled();
+      const persistedStillPublished = await repo.getById(published.id);
+      expect(persistedStillPublished?.workflowState).toBe('Published');
+      expect(persistedStillPublished?.history).toHaveLength(published.history.length);
+
+      // Now withdraw validly once, then verify repeated withdrawal (Draft -> Draft) is rejected without write
+      await service.transitionWorkflow(
+        published.id,
+        'Draft',
+        ownerActor,
+        'سحب رسمي للمراجعة التحريرية'
+      );
+      saveSpy.mockClear();
+
+      await expect(
+        service.transitionWorkflow(
+          published.id,
+          'Draft',
+          ownerActor,
+          'محاولة سحب مكررة للمسودة'
+        )
+      ).rejects.toThrow(/VALIDATION_ERROR: Item is already in state 'Draft'/);
+      expect(saveSpy).not.toHaveBeenCalled();
+    });
+
+    it('permits editing only after confirmed Draft state, requires the full Draft -> InReview -> Approved -> Published cycle, and re-enforces the image rights gate on re-publication', async () => {
+      const published = await createAndPublishCanonicalArticle();
+
+      const withdrawn = await service.transitionWorkflow(
+        published.id,
+        'Draft',
+        ownerActor,
+        'سحب لتحديث عنوان التحقيق وإضافة بيانات الرصد الجديدة'
+      );
+      expect(withdrawn.workflowState).toBe('Draft');
+
+      // Editing succeeds now that the article is in Draft state
+      const editedDraft = await service.updateDraft(
+        published.id,
+        {
+          titleAr: 'تحقيق استقصائي محدّث حول الغطاء النباتي في سنار 2026',
+          titleEn: 'Updated Investigative Report on Vegetation Cover in Sennar 2026',
+        },
+        ownerActor
+      );
+      expect(editedDraft.workflowState).toBe('Draft');
+      expect(editedDraft.titleAr).toBe('تحقيق استقصائي محدّث حول الغطاء النباتي في سنار 2026');
+
+      // Direct Draft -> Published jump is forbidden even for Owner
+      await expect(
+        service.transitionWorkflow(published.id, 'Published', ownerActor, 'محاولة قفز مباشر للنشر')
+      ).rejects.toThrow(/VALIDATION_ERROR: Publication forbidden/);
+
+      // Direct Draft -> Approved jump is also forbidden
+      await expect(
+        service.transitionWorkflow(published.id, 'Approved', ownerActor)
+      ).rejects.toThrow(/VALIDATION_ERROR: Unauthorized transition path from 'Draft' to 'Approved'/);
+
+      // Must pass through InReview -> Approved
+      const inReviewAgain = await service.transitionWorkflow(
+        published.id,
+        'InReview',
+        editorActor,
+        'إعادة تقديم بعد التحديث'
+      );
+      expect(inReviewAgain.workflowState).toBe('InReview');
+
+      const approvedAgain = await service.transitionWorkflow(
+        published.id,
+        'Approved',
+        reviewerActor,
+        'اعتماد النسخة المحدّثة'
+      );
+      expect(approvedAgain.workflowState).toBe('Approved');
+
+      // Simulate image rights revocation before re-publication: re-publication must be blocked by NEWS-IMG-RIGHTS-PUBLISH-01 gate
+      const revokedAsset: EditorialImageAssetMetadata = {
+        ...createCanonicalTestAsset(canonicalAssetId),
+        updatedAtIso: '2026-03-22T10:00:00.000Z',
+        rights: {
+          status: 'Revoked',
+          licenseType: 'ContextSpecificAssessment',
+          rightsHolder: 'Promise of Planet Field Documentation Team',
+          sourceAttributionAr: 'فريق التوثيق الميداني في وعد الكوكب',
+          sourceAttributionEn: 'Promise of Planet Field Documentation Team',
+          evidenceRefs: ['evidence_ref_nile_afforestation_001'],
+          documentedException: 'Revoked pending updated release verification.',
+          usageScope: {
+            scopeType: 'ArticleRestricted',
+            articleIds: [published.id],
+          },
+          reviewedByUid: reviewerActor.uid,
+          reviewedAtIso: '2026-03-22T10:00:00.000Z',
+          reviewReason: 'Rights temporarily revoked prior to re-publication.',
+        },
+      };
+      assetRepo.corruptStoredRecordForTesting(canonicalAssetId, {
+        assetId: canonicalAssetId,
+        revision: 3,
+        asset: revokedAsset,
+      });
+
+      await expect(
+        service.transitionWorkflow(published.id, 'Published', ownerActor)
+      ).rejects.toThrow(/EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE.*Revoked/);
+
+      // Re-approve image rights and complete re-publication
+      const reapprovedAsset: EditorialImageAssetMetadata = {
+        ...revokedAsset,
+        updatedAtIso: '2026-03-22T11:00:00.000Z',
+        rights: {
+          ...revokedAsset.rights,
+          status: 'Approved',
+          reviewedAtIso: '2026-03-22T11:00:00.000Z',
+          reviewReason: 'Re-approved human rights clearance for updated Sennar report.',
+        },
+      };
+      assetRepo.corruptStoredRecordForTesting(canonicalAssetId, {
+        assetId: canonicalAssetId,
+        revision: 4,
+        asset: reapprovedAsset,
+      });
+
+      const republished = await service.transitionWorkflow(
+        published.id,
+        'Published',
+        ownerActor,
+        'إعادة النشر بعد استكمال المراجعة والاعتماد'
+      );
+      expect(republished.workflowState).toBe('Published');
+      expect(republished.history.map((h) => h.action)).toEqual([
+        'revise_draft',
+        'submit_for_review',
+        'approve',
+        'publish',
+        'withdraw_for_revision',
+        'submit_for_review',
+        'approve',
+        'publish',
+      ]);
     });
   });
 });

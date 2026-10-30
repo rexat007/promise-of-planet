@@ -1,4 +1,7 @@
 import { isCanonicalCategory, type JournalisticType, type Category } from '../shared/contentContract';
+import { MAX_WORKFLOW_COMMENT_LENGTH } from '../shared/workflowContract';
+
+export { MAX_WORKFLOW_COMMENT_LENGTH };
 
 export const VALID_JOURNALISTIC_TYPES: readonly JournalisticType[] = [
   'News',
@@ -67,6 +70,17 @@ export class NewsValidator {
       throw new Error(`VALIDATION_ERROR: Item is already in state '${currentState}'`);
     }
 
+    if (
+      comment !== undefined &&
+      typeof comment === 'string' &&
+      (comment.length > MAX_WORKFLOW_COMMENT_LENGTH ||
+        comment.trim().length > MAX_WORKFLOW_COMMENT_LENGTH)
+    ) {
+      throw new Error(
+        `VALIDATION_ERROR: Workflow transition comment exceeds maximum length of ${MAX_WORKFLOW_COMMENT_LENGTH} characters`
+      );
+    }
+
     // 1. Draft -> InReview
     if (currentState === 'Draft' && targetState === 'InReview') {
       return 'submit_for_review';
@@ -74,7 +88,7 @@ export class NewsValidator {
 
     // 2. InReview -> ChangesRequested
     if (currentState === 'InReview' && targetState === 'ChangesRequested') {
-      if (!comment || comment.trim() === '') {
+      if (typeof comment !== 'string' || comment.trim() === '') {
         throw new Error('VALIDATION_ERROR: Editorial comment is required when requesting changes');
       }
       return 'request_changes';
@@ -93,6 +107,16 @@ export class NewsValidator {
     // 5. Approved -> Published (Only approved items can be published!)
     if (currentState === 'Approved' && targetState === 'Published') {
       return 'publish';
+    }
+
+    // 6. Published -> Draft (Owner-only formal editorial withdrawal for revision; requires written reason)
+    if (currentState === 'Published' && targetState === 'Draft') {
+      if (typeof comment !== 'string' || comment.trim() === '') {
+        throw new Error(
+          'VALIDATION_ERROR: Written withdrawal reason is mandatory when withdrawing a published article to Draft'
+        );
+      }
+      return 'withdraw_for_revision';
     }
 
     // Block invalid jumps (e.g. Draft directly to Published)

@@ -16,13 +16,18 @@ vi.mock('firebase-functions/v2/https', () => ({
   },
 }));
 
-// Mock react-i18next for deterministic SSR rendering
+// Mock react-i18next for deterministic SSR rendering in both English and Arabic
+const mockI18nState = { language: 'en' };
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
     i18n: {
-      language: 'en',
-      changeLanguage: vi.fn(),
+      get language() {
+        return mockI18nState.language;
+      },
+      changeLanguage: vi.fn((lang: string) => {
+        mockI18nState.language = lang;
+      }),
     },
   }),
 }));
@@ -50,6 +55,7 @@ import {
 } from './AdminLayout';
 import {
   AdminNewsManagement,
+  MAX_NEWS_TRANSITION_COMMENT_LENGTH,
   getServerRequiredNewsTransitionPermission,
   isNewsArticleTransitionAuthorized,
   getAuthorizedNewsArticleTransitions,
@@ -863,4 +869,404 @@ describe('IMG-F3-09/D3-B2-B4-R1 — RightsReviewer News Access & Workflow UI Gua
     expect(convergence.failedCount).toBe(0);
     expect(convergence.passedCount).toBeGreaterThanOrEqual(60);
   });
+
+  // -------------------------------------------------------------------------
+  // 7. NEWS-REVISION-01 — Owner-Only Published Withdrawal & Redraft
+  // -------------------------------------------------------------------------
+  it('11. authorizes Published -> Draft withdrawal exclusively for active Owner across WorkflowEngine and AdminNewsManagement helpers', () => {
+    const withdrawConfig = ALLOWED_TRANSITIONS.find(
+      (t) => t.action === WorkflowAction.WithdrawForRevision
+    )!;
+    expect(withdrawConfig).toBeDefined();
+    expect(withdrawConfig.fromState).toBe(WorkflowState.Published);
+    expect(withdrawConfig.toState).toBe(WorkflowState.Draft);
+    expect(withdrawConfig.requiresComment).toBe(true);
+    expect(withdrawConfig.labelAr).toBe('سحب من النشر وإعادة إلى المسودة');
+    expect(withdrawConfig.labelEn).toBe('Withdraw Publication and Return to Draft');
+
+    // Active Owner is authorized for Published -> Draft
+    expect(
+      WorkflowEngine.getAuthorizedTransitions(WorkflowState.Published, OWNER_USER).map(
+        (t) => t.action
+      )
+    ).toEqual([WorkflowAction.WithdrawForRevision]);
+    expect(
+      isNewsArticleTransitionAuthorized(WorkflowState.Published, WorkflowState.Draft, OWNER_USER)
+    ).toBe(true);
+    expect(
+      getAuthorizedNewsArticleTransitions(WorkflowState.Published, OWNER_USER).map(
+        (t) => t.action
+      )
+    ).toEqual([WorkflowAction.WithdrawForRevision]);
+    expect(canSelectNewsTransition(WorkflowState.Published, withdrawConfig, OWNER_USER)).toBe(true);
+
+    // Inactive Owner and all non-Owner roles are denied Published -> Draft
+    for (const nonAuthorized of [
+      INACTIVE_OWNER_USER,
+      CONTENT_EDITOR_USER,
+      RIGHTS_REVIEWER_USER,
+      LIBRARY_CURATOR_USER,
+      TRAINING_MANAGER_USER,
+      TRAINER_USER,
+      CITIZEN_MODERATOR_USER,
+      AI_ASSISTANT_USER,
+      VIEWER_USER,
+    ]) {
+      expect(
+        WorkflowEngine.getAuthorizedTransitions(WorkflowState.Published, nonAuthorized)
+      ).toEqual([]);
+      expect(
+        WorkflowEngine.canExecuteTransition(
+          WorkflowState.Published,
+          WorkflowState.Draft,
+          nonAuthorized
+        ).allowed
+      ).toBe(false);
+      expect(
+        isNewsArticleTransitionAuthorized(
+          WorkflowState.Published,
+          WorkflowState.Draft,
+          nonAuthorized
+        )
+      ).toBe(false);
+      expect(
+        getAuthorizedNewsArticleTransitions(WorkflowState.Published, nonAuthorized)
+      ).toEqual([]);
+      expect(
+        canSelectNewsTransition(WorkflowState.Published, withdrawConfig, nonAuthorized)
+      ).toBe(false);
+      expect(
+        canConfirmNewsTransitionComment(
+          WorkflowState.Published,
+          withdrawConfig,
+          'Valid reason text',
+          nonAuthorized
+        )
+      ).toBe(false);
+    }
+
+    // Comment confirmation requires non-empty trimmed reason <= 2000 chars for active Owner
+    expect(
+      canConfirmNewsTransitionComment(WorkflowState.Published, withdrawConfig, '', OWNER_USER)
+    ).toBe(false);
+    expect(
+      canConfirmNewsTransitionComment(WorkflowState.Published, withdrawConfig, '   \n\t ', OWNER_USER)
+    ).toBe(false);
+    expect(
+      canConfirmNewsTransitionComment(
+        WorkflowState.Published,
+        withdrawConfig,
+        'x'.repeat(MAX_NEWS_TRANSITION_COMMENT_LENGTH + 1),
+        OWNER_USER
+      )
+    ).toBe(false);
+    expect(
+      canConfirmNewsTransitionComment(
+        WorkflowState.Published,
+        withdrawConfig,
+        'x'.repeat(MAX_NEWS_TRANSITION_COMMENT_LENGTH),
+        OWNER_USER
+      )
+    ).toBe(true);
+    expect(
+      canConfirmNewsTransitionComment(
+        WorkflowState.Published,
+        withdrawConfig,
+        'سحب المقال لتحديث البيانات الإحصائية',
+        OWNER_USER
+      )
+    ).toBe(true);
+  });
+
+  it('12. enforces server-verified active Owner authorization and mandatory reason in executeManageNewsRequest before invoking transitionWorkflow', async () => {
+    const usersById: Record<string, AdminUser> = {
+      [OWNER_USER.id]: OWNER_USER,
+      [INACTIVE_OWNER_USER.id]: INACTIVE_OWNER_USER,
+      [CONTENT_EDITOR_USER.id]: CONTENT_EDITOR_USER,
+      [RIGHTS_REVIEWER_USER.id]: RIGHTS_REVIEWER_USER,
+      [LIBRARY_CURATOR_USER.id]: LIBRARY_CURATOR_USER,
+      [TRAINING_MANAGER_USER.id]: TRAINING_MANAGER_USER,
+      [TRAINER_USER.id]: TRAINER_USER,
+      [CITIZEN_MODERATOR_USER.id]: CITIZEN_MODERATOR_USER,
+      [AI_ASSISTANT_USER.id]: AI_ASSISTANT_USER,
+      [VIEWER_USER.id]: VIEWER_USER,
+    };
+
+    const mockAdminRepo: AdminRepository = {
+      async getAdminByUid(uid: string) {
+        return usersById[uid] ?? null;
+      },
+      async getAdminByEmail() {
+        return null;
+      },
+      async listAllAdmins() {
+        return Object.values(usersById);
+      },
+      async saveAdmin() {},
+    };
+
+    const items = new Map<string, NewsItemBackend>();
+    items.set('news-pub-201', {
+      id: 'news-pub-201',
+      titleAr: 'خبر منشور حول الطاقة الشمسية في الولاية الشمالية',
+      titleEn: 'Published News on Solar Energy in Northern State',
+      summaryAr: 'ملخص الخبر المنشور.',
+      summaryEn: 'Summary of the published news.',
+      bodyAr: 'النص الكامل للخبر المنشور.',
+      bodyEn: 'Full body of the published news.',
+      author: CONTENT_EDITOR_USER.name,
+      category: 'Climate',
+      tags: ['Solar'],
+      sources: ['Ministry of Energy'],
+      workflowState: 'Published',
+      createdAt: '2026-03-10T08:00:00.000Z',
+      updatedAt: '2026-03-10T10:00:00.000Z',
+      publishedAt: '2026-03-10T10:00:00.000Z',
+      history: [
+        {
+          id: 'tr-pub-1',
+          fromState: 'Approved',
+          toState: 'Published',
+          action: 'publish',
+          actorName: OWNER_USER.name,
+          actorRole: AdminRole.Owner,
+          timestamp: '2026-03-10T10:00:00.000Z',
+        },
+      ],
+    });
+
+    const mockNewsRepo: NewsRepository = {
+      async getById(id: string) {
+        const found = items.get(id);
+        return found ? JSON.parse(JSON.stringify(found)) : null;
+      },
+      async save(item: NewsItemBackend) {
+        items.set(item.id, JSON.parse(JSON.stringify(item)));
+      },
+      async listAll() {
+        return Array.from(items.values());
+      },
+      async listPublished() {
+        return Array.from(items.values()).filter((i) => i.workflowState === 'Published');
+      },
+      async delete(id: string) {
+        items.delete(id);
+      },
+    };
+
+    const assetRepo = new InMemoryEditorialImageAssetRepository();
+    const newsService = new NewsApplicationService(mockNewsRepo, assetRepo);
+    const transitionSpy = vi.spyOn(newsService, 'transitionWorkflow');
+    const saveSpy = vi.spyOn(mockNewsRepo, 'save');
+
+    // Inactive Owner is rejected before invoking transitionWorkflow
+    await expect(
+      executeManageNewsRequest(
+        {
+          auth: { uid: INACTIVE_OWNER_USER.id },
+          data: {
+            action: 'transitionWorkflow',
+            id: 'news-pub-201',
+            targetState: 'Draft',
+            comment: 'محاولة سحب من حساب مالك غير نشط',
+          },
+        },
+        mockAdminRepo,
+        newsService
+      )
+    ).rejects.toThrow(/ADMIN_INACTIVE/);
+
+    // Every non-Owner role (even if client supplies fake role='Owner' in data/token) is rejected before invoking transitionWorkflow
+    for (const nonOwner of [
+      CONTENT_EDITOR_USER,
+      RIGHTS_REVIEWER_USER,
+      LIBRARY_CURATOR_USER,
+      TRAINING_MANAGER_USER,
+      TRAINER_USER,
+      CITIZEN_MODERATOR_USER,
+      AI_ASSISTANT_USER,
+      VIEWER_USER,
+    ]) {
+      await expect(
+        executeManageNewsRequest(
+          {
+            auth: { uid: nonOwner.id, token: { role: 'Owner' } },
+            data: {
+              action: 'transitionWorkflow',
+              id: 'news-pub-201',
+              targetState: 'Draft',
+              comment: 'Attempted withdrawal by non-Owner',
+              role: 'Owner',
+            },
+          },
+          mockAdminRepo,
+          newsService
+        )
+      ).rejects.toThrow(/PERMISSION_DENIED: Only an active Owner may withdraw a published article to Draft/);
+    }
+
+    expect(transitionSpy).not.toHaveBeenCalled();
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(items.get('news-pub-201')?.workflowState).toBe('Published');
+
+    // Active Owner with missing/whitespace/oversized reason is rejected without write
+    for (const badReason of ['', '   ', 'x'.repeat(MAX_NEWS_TRANSITION_COMMENT_LENGTH + 1)]) {
+      await expect(
+        executeManageNewsRequest(
+          {
+            auth: { uid: OWNER_USER.id },
+            data: {
+              action: 'transitionWorkflow',
+              id: 'news-pub-201',
+              targetState: 'Draft',
+              comment: badReason,
+            },
+          },
+          mockAdminRepo,
+          newsService
+        )
+      ).rejects.toThrow(/VALIDATION_ERROR/);
+    }
+    expect(saveSpy).not.toHaveBeenCalled();
+
+    // Active Owner with valid written reason succeeds
+    const withdrawRes = await executeManageNewsRequest(
+      {
+        auth: { uid: OWNER_USER.id },
+        data: {
+          action: 'transitionWorkflow',
+          id: 'news-pub-201',
+          targetState: 'Draft',
+          comment: 'سحب رسمي لتصحيح بيانات قدرات التوليد الشمسي قبل إعادة المراجعة',
+        },
+      },
+      mockAdminRepo,
+      newsService
+    );
+    expect(withdrawRes.item.workflowState).toBe('Draft');
+    expect(withdrawRes.item.history).toHaveLength(2);
+    expect(withdrawRes.item.history[1].action).toBe('withdraw_for_revision');
+    expect(withdrawRes.item.history[1].actorRole).toBe(AdminRole.Owner);
+    expect(withdrawRes.item.history[1].comment).toBe(
+      'سحب رسمي لتصحيح بيانات قدرات التوليد الشمسي قبل إعادة المراجعة'
+    );
+  });
+
+  it('13. renders bilingual Owner-only withdrawal action and confirmation UI on Published articles while hiding it for non-Owners and non-Published states', () => {
+    const publishedArticle = makeArticleFixture(WorkflowState.Published);
+    const withdrawConfig = ALLOWED_TRANSITIONS.find(
+      (t) => t.action === WorkflowAction.WithdrawForRevision
+    )!;
+
+    try {
+      // 1. English SSR for active Owner on Published article (with confirmation drawer open)
+      mockI18nState.language = 'en';
+      const ownerPublishedEnHtml = renderToStaticMarkup(
+        createElement(AdminNewsManagement, {
+          currentUser: OWNER_USER,
+          initialActiveItem: publishedArticle,
+          initialActiveTab: 'workflow',
+          initialPendingTransition: withdrawConfig,
+        })
+      );
+      expect(ownerPublishedEnHtml).toContain('data-testid="news-workflow-transition-btn-Draft"');
+      expect(ownerPublishedEnHtml).toContain('Withdraw Publication and Return to Draft');
+      expect(ownerPublishedEnHtml).toContain('data-testid="news-workflow-comment-drawer"');
+      expect(ownerPublishedEnHtml).toContain('data-testid="news-withdrawal-public-warning"');
+      expect(ownerPublishedEnHtml).toContain(
+        'Important Warning: This action will immediately withdraw the article from public news and return it to Draft state for revision.'
+      );
+      expect(ownerPublishedEnHtml).toContain('data-testid="news-workflow-comment-input"');
+      expect(ownerPublishedEnHtml).toContain('data-testid="news-workflow-cancel-comment-btn"');
+      expect(ownerPublishedEnHtml).toContain('Confirm Withdrawal to Draft');
+      expect(ownerPublishedEnHtml).toMatch(
+        /<button[^>]*data-testid="news-workflow-confirm-comment-btn"[^>]*disabled=""/
+      );
+
+      // Content tab while Published does NOT enable Save Changes even for Owner
+      const ownerPublishedContentHtml = renderToStaticMarkup(
+        createElement(AdminNewsManagement, {
+          currentUser: OWNER_USER,
+          initialActiveItem: publishedArticle,
+          initialActiveTab: 'content',
+        })
+      );
+      expect(ownerPublishedContentHtml).not.toContain('data-testid="news-save-changes-btn"');
+
+      // Once returned to Draft, Content tab enables Save Changes for Owner
+      const ownerDraftContentHtml = renderToStaticMarkup(
+        createElement(AdminNewsManagement, {
+          currentUser: OWNER_USER,
+          initialActiveItem: makeArticleFixture(WorkflowState.Draft),
+          initialActiveTab: 'content',
+        })
+      );
+      expect(ownerDraftContentHtml).toContain('data-testid="news-save-changes-btn"');
+
+      // 2. Arabic SSR for active Owner on Published article (with confirmation drawer open)
+      mockI18nState.language = 'ar';
+      const ownerPublishedArHtml = renderToStaticMarkup(
+        createElement(AdminNewsManagement, {
+          currentUser: OWNER_USER,
+          initialActiveItem: publishedArticle,
+          initialActiveTab: 'workflow',
+          initialPendingTransition: withdrawConfig,
+        })
+      );
+      expect(ownerPublishedArHtml).toContain('data-testid="news-workflow-transition-btn-Draft"');
+      expect(ownerPublishedArHtml).toContain('سحب من النشر وإعادة إلى المسودة');
+      expect(ownerPublishedArHtml).toContain('data-testid="news-withdrawal-public-warning"');
+      expect(ownerPublishedArHtml).toContain(
+        'تحذير هام: سيؤدي هذا الإجراء إلى سحب المقال فوراً من بوابة الأخبار العامة وإخفائه عن الجمهور'
+      );
+      expect(ownerPublishedArHtml).toContain('تأكيد سحب النشر وإعادة المسودة');
+
+      // 3. Non-Owner users and inactive Owner on Published article: withdrawal action is NOT rendered
+      mockI18nState.language = 'en';
+      for (const nonOwner of [
+        INACTIVE_OWNER_USER,
+        CONTENT_EDITOR_USER,
+        RIGHTS_REVIEWER_USER,
+        TRAINING_MANAGER_USER,
+        VIEWER_USER,
+      ]) {
+        const nonOwnerPublishedHtml = renderToStaticMarkup(
+          createElement(AdminNewsManagement, {
+            currentUser: nonOwner,
+            initialActiveItem: publishedArticle,
+            initialActiveTab: 'workflow',
+            initialPendingTransition: withdrawConfig,
+          })
+        );
+        expect(nonOwnerPublishedHtml).not.toContain(
+          'data-testid="news-workflow-transition-btn-Draft"'
+        );
+        expect(nonOwnerPublishedHtml).not.toContain('Withdraw Publication and Return to Draft');
+        expect(nonOwnerPublishedHtml).not.toContain('data-testid="news-workflow-comment-drawer"');
+        expect(nonOwnerPublishedHtml).not.toContain('data-testid="news-withdrawal-public-warning"');
+        expect(nonOwnerPublishedHtml).toContain('This article is in its terminal state.');
+      }
+
+      // 4. Articles not in Published state do not show the withdrawal action even for active Owner
+      for (const nonPublishedState of [
+        WorkflowState.Draft,
+        WorkflowState.InReview,
+        WorkflowState.ChangesRequested,
+        WorkflowState.Approved,
+      ]) {
+        const html = renderToStaticMarkup(
+          createElement(AdminNewsManagement, {
+            currentUser: OWNER_USER,
+            initialActiveItem: makeArticleFixture(nonPublishedState),
+            initialActiveTab: 'workflow',
+          })
+        );
+        expect(html).not.toContain('Withdraw Publication and Return to Draft');
+        expect(html).not.toContain('سحب من النشر وإعادة إلى المسودة');
+      }
+    } finally {
+      mockI18nState.language = 'en';
+    }
+  });
 });
+

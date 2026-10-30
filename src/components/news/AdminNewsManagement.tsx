@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next';
 import type { NewsItem } from '../../types/news';
 import { CANONICAL_CATEGORY_DEFINITIONS, isCanonicalCategory } from '../../types';
 import type { JournalisticType } from '../../types';
-import { WorkflowState } from '../../types/workflow';
+import { WorkflowState, WorkflowAction } from '../../types/workflow';
+import { MAX_WORKFLOW_COMMENT_LENGTH } from '../../../functions/src/shared/workflowContract';
 import type { WorkflowTransitionConfig } from '../../types/workflow';
 import type { AdminUser } from '../../types/admin';
 import { WorkflowEngine } from '../../services/workflowEngine';
@@ -61,6 +62,8 @@ import {
   Crop
 } from 'lucide-react';
 
+export const MAX_NEWS_TRANSITION_COMMENT_LENGTH = MAX_WORKFLOW_COMMENT_LENGTH;
+
 const JOURNALISTIC_TYPE_OPTIONS: readonly { value: JournalisticType; labelAr: string; labelEn: string }[] = [
   { value: 'News', labelAr: 'خبر', labelEn: 'News' },
   { value: 'Report', labelAr: 'تقرير', labelEn: 'Report' },
@@ -86,12 +89,16 @@ function getCategoryDisplayLabel(category: string, isAr: boolean): string {
 /**
  * Mirrors the server's canonical `transitionWorkflow` permission rule in `newsAdminHandlers.ts`:
  * - `AdminPermission.Approve` for `WorkflowState.Approved`
- * - `AdminPermission.Publish` for `WorkflowState.Published`
+ * - `AdminPermission.Publish` for `WorkflowState.Published` and `Published -> Draft` withdrawal
  * - `AdminPermission.Edit` for every other target workflow state
  */
 export function getServerRequiredNewsTransitionPermission(
-  targetState: WorkflowState
+  targetState: WorkflowState,
+  currentState?: WorkflowState
 ): AdminPermission {
+  if (currentState === WorkflowState.Published && targetState === WorkflowState.Draft) {
+    return AdminPermission.Publish;
+  }
   if (targetState === WorkflowState.Approved) {
     return AdminPermission.Approve;
   }
@@ -105,7 +112,7 @@ export function getServerRequiredNewsTransitionPermission(
  * Evaluates whether an article workflow transition from `currentState` to `targetState`
  * is authorized for `user` under BOTH:
  * 1. `WorkflowEngine.getAuthorizedTransitions` for the current article state and user, AND
- * 2. The server-equivalent required permission (`Edit`, `Approve`, or `Publish`) for `targetState`.
+ * 2. The server-equivalent required permission (`Edit`, `Approve`, or `Publish`) and Owner-only rule for `Published -> Draft`.
  */
 export function isNewsArticleTransitionAuthorized(
   currentState: WorkflowState,
@@ -115,7 +122,15 @@ export function isNewsArticleTransitionAuthorized(
   if (!user || !user.isActive) {
     return false;
   }
-  const serverRequiredPermission = getServerRequiredNewsTransitionPermission(targetState);
+  if (currentState === WorkflowState.Published && targetState === WorkflowState.Draft) {
+    if (user.role !== 'Owner') {
+      return false;
+    }
+  }
+  const serverRequiredPermission = getServerRequiredNewsTransitionPermission(
+    targetState,
+    currentState
+  );
   if (!AdminAccessService.hasPermission(user, serverRequiredPermission)) {
     return false;
   }
@@ -136,10 +151,7 @@ export function getAuthorizedNewsArticleTransitions(
     return [];
   }
   return WorkflowEngine.getAuthorizedTransitions(currentState, user).filter((config) =>
-    AdminAccessService.hasPermission(
-      user,
-      getServerRequiredNewsTransitionPermission(config.toState)
-    )
+    isNewsArticleTransitionAuthorized(currentState, config.toState, user)
   );
 }
 
@@ -169,8 +181,16 @@ export function canConfirmNewsTransitionComment(
   if (!canSelectNewsTransition(currentState, pendingTransition, user)) {
     return false;
   }
-  if (pendingTransition?.requiresComment && !comment?.trim()) {
-    return false;
+  if (pendingTransition?.requiresComment) {
+    if (typeof comment !== 'string' || !comment.trim()) {
+      return false;
+    }
+    if (
+      comment.length > MAX_NEWS_TRANSITION_COMMENT_LENGTH ||
+      comment.trim().length > MAX_NEWS_TRANSITION_COMMENT_LENGTH
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -397,7 +417,7 @@ export function AdminNewsManagement({
     }, 200);
   };
 
-  // Comment prompt state for transitions requiring comments (e.g., Request Changes)
+  // Comment prompt state for transitions requiring comments (e.g., Request Changes, Withdraw Publication)
   const [pendingTransition, setPendingTransition] = useState<WorkflowTransitionConfig | null>(() => {
     if (
       initialPendingTransition &&
@@ -409,6 +429,7 @@ export function AdminNewsManagement({
     return null;
   });
   const [transitionComment, setTransitionComment] = useState('');
+  const [isTransitioning, setIsTransitioning] = useState(false);
 
   // Form state for editor
   const [editForm, setEditForm] = useState<Partial<NewsItem> & { bodyArHasEdited?: boolean; bodyEnHasEdited?: boolean; richBodyAr?: any; richBodyEn?: any }>(() => {
@@ -780,7 +801,7 @@ export function AdminNewsManagement({
 
   // Execute workflow transition on activeItem
   const handleExecuteTransition = async (config: WorkflowTransitionConfig, comment?: string) => {
-    if (!activeItem) return;
+    if (!activeItem || isTransitioning) return;
 
     if (!canSelectNewsTransition(activeItem.workflowState, config, currentUser)) {
       setPendingTransition(null);
@@ -788,25 +809,46 @@ export function AdminNewsManagement({
       return;
     }
 
-    if (config.requiresComment && !comment?.trim()) {
-      return;
+    if (config.requiresComment) {
+      if (typeof comment !== 'string' || !comment.trim()) {
+        return;
+      }
+      if (
+        comment.length > MAX_NEWS_TRANSITION_COMMENT_LENGTH ||
+        comment.trim().length > MAX_NEWS_TRANSITION_COMMENT_LENGTH
+      ) {
+        setErrorMessage(
+          isAr
+            ? `يتجاوز السبب المكتوب الحد الأقصى المسموح به (${MAX_NEWS_TRANSITION_COMMENT_LENGTH} حرف).`
+            : `Written reason exceeds the maximum length of ${MAX_NEWS_TRANSITION_COMMENT_LENGTH} characters.`
+        );
+        return;
+      }
     }
 
+    setIsTransitioning(true);
+    setErrorMessage(null);
     try {
       const updatedNewsItem = await NewsAdminClient.executeTransition(
         activeItem.id,
         config.toState,
         currentUser,
-        comment
+        comment?.trim()
       );
 
       setActiveItem(updatedNewsItem);
+      setEditForm((prev) => ({
+        ...prev,
+        ...updatedNewsItem,
+      }));
       setNewsList(newsList.map(n => n.id === updatedNewsItem.id ? updatedNewsItem : n));
       setPendingTransition(null);
       setTransitionComment('');
       setErrorMessage(null);
     } catch (err: any) {
       setErrorMessage(err.message || (isAr ? 'فشل تنفيذ عملية الانتقال' : 'Transition failed'));
+    } finally {
+      setIsTransitioning(false);
     }
   };
 
@@ -1808,7 +1850,19 @@ export function AdminNewsManagement({
                         currentUser
                       );
 
-                      const validTransitions = WorkflowEngine.getValidTransitionsFromState(activeItem.workflowState);
+                      // Owner-only withdrawal from Published -> Draft must not be rendered for non-Owner users
+                      const validTransitions = WorkflowEngine.getValidTransitionsFromState(
+                        activeItem.workflowState
+                      ).filter(config => {
+                        if (config.action === WorkflowAction.WithdrawForRevision) {
+                          return canSelectNewsTransition(
+                            activeItem.workflowState,
+                            config,
+                            currentUser
+                          );
+                        }
+                        return true;
+                      });
 
                       if (validTransitions.length === 0) {
                         return (
@@ -1824,12 +1878,14 @@ export function AdminNewsManagement({
                             const isAuthorized =
                               authorizedTransitions.some(t => t.toState === config.toState) &&
                               canSelectNewsTransition(activeItem.workflowState, config, currentUser);
+                            const isWithdrawalAction =
+                              config.action === WorkflowAction.WithdrawForRevision;
 
                             return (
                               <button
                                 key={config.toState}
                                 data-testid={`news-workflow-transition-btn-${config.toState}`}
-                                disabled={!isAuthorized}
+                                disabled={!isAuthorized || isTransitioning}
                                 onClick={() => {
                                   if (!canSelectNewsTransition(activeItem.workflowState, config, currentUser)) {
                                     setPendingTransition(null);
@@ -1839,16 +1895,20 @@ export function AdminNewsManagement({
                                   if (config.requiresComment) {
                                     setPendingTransition(config);
                                     setTransitionComment('');
+                                    setErrorMessage(null);
                                   } else {
                                     handleExecuteTransition(config);
                                   }
                                 }}
-                                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer ${
+                                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60 ${
                                   isAuthorized
-                                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
+                                    ? isWithdrawalAction
+                                      ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-xs'
+                                      : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
                                     : 'bg-gray-100 text-gray-400 dark:bg-gray-800 dark:text-gray-600 cursor-not-allowed'
                                 }`}
                               >
+                                {isWithdrawalAction && <RotateCcw className="w-3.5 h-3.5" />}
                                 <span>{isAr ? config.labelAr : config.labelEn}</span>
                                 {!isAuthorized && <ShieldAlert className="w-3.5 h-3.5 text-gray-400" />}
                               </button>
@@ -1859,36 +1919,98 @@ export function AdminNewsManagement({
                     })()}
                   </div>
 
-                  {/* Comment Prompt Drawer / Modal for Request Changes */}
+                  {/* Comment Prompt Drawer / Modal for Request Changes or Owner Withdrawal */}
                   {pendingTransition &&
                     canSelectNewsTransition(activeItem.workflowState, pendingTransition, currentUser) && (
                     <div
                       data-testid="news-workflow-comment-drawer"
                       className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 space-y-3"
                     >
-                      <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300 font-bold text-xs">
-                        <MessageSquare className="w-4 h-4" />
-                        <span>{isAr ? 'يرجى تدوين ملاحظات التعديل المطلوب:' : 'Please provide change feedback notes:'}</span>
+                      {pendingTransition.action === WorkflowAction.WithdrawForRevision && (
+                        <div
+                          data-testid="news-withdrawal-public-warning"
+                          role="alert"
+                          className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800/70 flex items-start gap-2.5 text-xs text-rose-800 dark:text-rose-200 font-semibold leading-relaxed"
+                        >
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+                          <span>
+                            {isAr
+                              ? 'تحذير هام: سيؤدي هذا الإجراء إلى سحب المقال فوراً من بوابة الأخبار العامة وإخفائه عن الجمهور، وإعادته إلى حالة المسودة للمراجعة والتحرير. لن يُعاد نشر المقال إلا بعد استكمال دورة المراجعة والاعتماد والنشر الكاملة من جديد.'
+                              : 'Important Warning: This action will immediately withdraw the article from public news and return it to Draft state for revision. It will not appear publicly again until it completes the full review, approval, and publication workflow.'}
+                          </span>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between gap-2 text-amber-800 dark:text-amber-300 font-bold text-xs">
+                        <div className="flex items-center gap-2">
+                          <MessageSquare className="w-4 h-4" />
+                          <span>
+                            {pendingTransition.action === WorkflowAction.WithdrawForRevision
+                              ? isAr
+                                ? 'يرجى تدوين سبب السحب من النشر وإعادة المسودة (إلزامي):'
+                                : 'Please provide the mandatory written reason for withdrawing publication:'
+                              : isAr
+                                ? 'يرجى تدوين ملاحظات التعديل المطلوب:'
+                                : 'Please provide change feedback notes:'}
+                          </span>
+                        </div>
+                        <span
+                          data-testid="news-workflow-comment-counter"
+                          className={`text-[11px] font-semibold ${
+                            transitionComment.length > MAX_NEWS_TRANSITION_COMMENT_LENGTH
+                              ? 'text-rose-600 dark:text-rose-400'
+                              : 'text-amber-700/80 dark:text-amber-400/80'
+                          }`}
+                        >
+                          {transitionComment.trim().length} / {MAX_NEWS_TRANSITION_COMMENT_LENGTH}
+                        </span>
                       </div>
 
                       <textarea
+                        data-testid="news-workflow-comment-input"
                         rows={3}
+                        disabled={isTransitioning}
                         value={transitionComment}
                         onChange={(e) => setTransitionComment(e.target.value)}
-                        placeholder={isAr ? 'اكتب ملاحظات التدقيق والتحسينات المطلوبة...' : 'Enter feedback notes...'}
-                        className="w-full p-3 text-xs bg-white dark:bg-gray-800 border border-amber-200 dark:border-amber-700 rounded-lg text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        placeholder={
+                          pendingTransition.action === WorkflowAction.WithdrawForRevision
+                            ? isAr
+                              ? 'اكتب السبب التحريري لسحب المقال المنشور وإعادته إلى المسودة...'
+                              : 'Enter the editorial reason for withdrawing this published article to Draft...'
+                            : isAr
+                              ? 'اكتب ملاحظات التدقيق والتحسينات المطلوبة...'
+                              : 'Enter feedback notes...'
+                        }
+                        className="w-full p-3 text-xs bg-white dark:bg-gray-800 border border-amber-200 dark:border-amber-700 rounded-lg text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-60"
                       />
+
+                      {transitionComment.length > MAX_NEWS_TRANSITION_COMMENT_LENGTH && (
+                        <p
+                          data-testid="news-workflow-comment-length-error"
+                          className="text-xs font-semibold text-rose-600 dark:text-rose-400"
+                        >
+                          {isAr
+                            ? `يتجاوز النص الحد الأقصى المسموح به (${MAX_NEWS_TRANSITION_COMMENT_LENGTH} حرف).`
+                            : `Reason exceeds the maximum length of ${MAX_NEWS_TRANSITION_COMMENT_LENGTH} characters.`}
+                        </p>
+                      )}
 
                       <div className="flex items-center justify-end gap-2">
                         <button
-                          onClick={() => setPendingTransition(null)}
-                          className="px-3 py-1.5 rounded-lg text-xs font-bold text-gray-600 dark:text-gray-300 hover:bg-amber-100/50 dark:hover:bg-amber-900/40"
+                          data-testid="news-workflow-cancel-comment-btn"
+                          disabled={isTransitioning}
+                          onClick={() => {
+                            setPendingTransition(null);
+                            setTransitionComment('');
+                          }}
+                          className="px-3 py-1.5 rounded-lg text-xs font-bold text-gray-600 dark:text-gray-300 hover:bg-amber-100/50 dark:hover:bg-amber-900/40 disabled:opacity-50"
                         >
                           {isAr ? 'إلغاء' : 'Cancel'}
                         </button>
                         <button
                           data-testid="news-workflow-confirm-comment-btn"
                           disabled={
+                            isTransitioning ||
                             !canConfirmNewsTransitionComment(
                               activeItem.workflowState,
                               pendingTransition,
@@ -1898,6 +2020,7 @@ export function AdminNewsManagement({
                           }
                           onClick={() => {
                             if (
+                              isTransitioning ||
                               !canConfirmNewsTransitionComment(
                                 activeItem.workflowState,
                                 pendingTransition,
@@ -1905,15 +2028,23 @@ export function AdminNewsManagement({
                                 currentUser
                               )
                             ) {
-                              setPendingTransition(null);
-                              setTransitionComment('');
                               return;
                             }
                             handleExecuteTransition(pendingTransition, transitionComment);
                           }}
                           className="px-4 py-1.5 rounded-lg text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50"
                         >
-                          {isAr ? 'تأكيد إرسال الملاحظات' : 'Confirm Feedback'}
+                          {pendingTransition.action === WorkflowAction.WithdrawForRevision
+                            ? isTransitioning
+                              ? isAr
+                                ? 'جارٍ سحب المقال...'
+                                : 'Withdrawing Article...'
+                              : isAr
+                                ? 'تأكيد سحب النشر وإعادة المسودة'
+                                : 'Confirm Withdrawal to Draft'
+                            : isAr
+                              ? 'تأكيد إرسال الملاحظات'
+                              : 'Confirm Feedback'}
                         </button>
                       </div>
                     </div>

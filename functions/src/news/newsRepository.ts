@@ -12,7 +12,8 @@ export type WorkflowActionBackend =
   | 'request_changes'
   | 'approve'
   | 'revise_draft'
-  | 'publish';
+  | 'publish'
+  | 'withdraw_for_revision';
 
 export interface WorkflowTransitionRecordBackend {
   id: string;
