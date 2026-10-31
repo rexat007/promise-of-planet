@@ -7,10 +7,51 @@ import {
   type VisibilityDecision,
   type RelationType,
   type Placement,
+  type ContentStatus,
+  type ApprovalStatus,
+  type AvailabilityStatus,
   isCanonicalCategory,
   isCanonicalRightsStatus,
   isCanonicalVisibilityDecision,
 } from '../types/media';
+import type { YouTubeClient } from '../youtube/youtubeClient';
+
+export const CANONICAL_APPROVAL_STATUSES: readonly ApprovalStatus[] = [
+  'Draft',
+  'Pending',
+  'InReview',
+  'Approved',
+  'ChangesRequested',
+  'Rejected',
+] as const;
+
+export function isCanonicalApprovalStatus(value: unknown): value is ApprovalStatus {
+  return typeof value === 'string' && (CANONICAL_APPROVAL_STATUSES as readonly string[]).includes(value);
+}
+
+export const CANONICAL_CONTENT_STATUSES: readonly ContentStatus[] = [
+  'Draft',
+  'PendingReview',
+  'InReview',
+  'Published',
+  'Archived',
+  'Rejected',
+] as const;
+
+export function isCanonicalContentStatus(value: unknown): value is ContentStatus {
+  return typeof value === 'string' && (CANONICAL_CONTENT_STATUSES as readonly string[]).includes(value);
+}
+
+export const CANONICAL_AVAILABILITY_STATUSES: readonly AvailabilityStatus[] = [
+  'Available',
+  'Private',
+  'Deleted',
+  'Unavailable',
+] as const;
+
+export function isCanonicalAvailabilityStatus(value: unknown): value is AvailabilityStatus {
+  return typeof value === 'string' && (CANONICAL_AVAILABILITY_STATUSES as readonly string[]).includes(value);
+}
 
 export interface RegisterMediaInput {
   contentType: 'Video';
@@ -50,9 +91,14 @@ export interface UpdateMediaMetadataInput {
 
 export class MediaApplicationService {
   private mediaRepo: MediaRepository;
+  private youtubeClient?: Pick<YouTubeClient, 'getVideoDetailsBatch'>;
 
-  constructor(mediaRepo?: MediaRepository) {
+  constructor(
+    mediaRepo?: MediaRepository,
+    youtubeClient?: Pick<YouTubeClient, 'getVideoDetailsBatch'>
+  ) {
     this.mediaRepo = mediaRepo || new FirestoreMediaRepository();
+    this.youtubeClient = youtubeClient;
   }
 
   async listAll(): Promise<Video[]> {
@@ -128,15 +174,19 @@ export class MediaApplicationService {
     const now = new Date().toISOString();
     const videoId = `video_yt_${externalVideoId}`;
 
+    const titleEn = input.titleEn?.trim();
+    const excerptEn = input.excerptEn?.trim();
+    const editorialDescriptionEn = input.editorialDescriptionEn?.trim();
+
     const newVideo: Video = {
       id: videoId,
       contentType: 'Video',
       status: input.status || 'Draft',
       category: input.category,
       titleAr: input.titleAr.trim(),
-      titleEn: input.titleEn?.trim(),
+      ...(titleEn ? { titleEn } : {}),
       excerptAr: input.excerptAr.trim(),
-      excerptEn: input.excerptEn?.trim(),
+      ...(excerptEn ? { excerptEn } : {}),
       originalLanguage: input.originalLanguage || 'ar',
       availableLanguages: input.availableLanguages || ['ar'],
       translationStatus: input.translationStatus || 'NotRequired',
@@ -145,14 +195,14 @@ export class MediaApplicationService {
       editor: input.editor?.trim() || 'Editor',
       approvalStatus: input.approvalStatus || 'Pending',
       editorialDescriptionAr: input.editorialDescriptionAr.trim(),
-      editorialDescriptionEn: input.editorialDescriptionEn?.trim(),
-      editorialThumbnail: input.editorialThumbnail,
+      ...(editorialDescriptionEn ? { editorialDescriptionEn } : {}),
+      ...(input.editorialThumbnail !== undefined ? { editorialThumbnail: input.editorialThumbnail } : {}),
       // Fail-closed defaults if not provided
       visibilityDecision: input.visibilityDecision || 'Hidden',
       rightsStatus: input.rightsStatus || 'NotStarted',
       tags: Array.isArray(input.tags) ? input.tags : [],
       sources: Array.isArray(input.sources) ? input.sources : [],
-      rightsNotes: input.rightsNotes,
+      ...(input.rightsNotes !== undefined ? { rightsNotes: input.rightsNotes } : {}),
       youtubeSource: {
         ...input.youtubeSource,
         youtubeVideoId: externalVideoId,
@@ -197,10 +247,19 @@ export class MediaApplicationService {
       throw new Error(`NOT_FOUND: Video ${id} not found`);
     }
 
+    if (video.status === 'Published' && rightsStatus !== 'Cleared') {
+      throw new Error(
+        `INVALID_TRANSITION: Cannot change rightsStatus from Cleared to ${rightsStatus} while video status is Published. Unpublish or archive the video first.`
+      );
+    }
+
+    const resolvedNotes = notes !== undefined ? notes : video.rightsNotes;
+    const { rightsNotes: _oldRightsNotes, ...videoBase } = video;
+
     const updatedVideo: Video = {
-      ...video,
+      ...videoBase,
       rightsStatus,
-      rightsNotes: notes !== undefined ? notes : video.rightsNotes,
+      ...(resolvedNotes !== undefined ? { rightsNotes: resolvedNotes } : {}),
       updatedAt: new Date().toISOString(),
     };
 
@@ -217,10 +276,236 @@ export class MediaApplicationService {
       throw new Error(`NOT_FOUND: Video ${id} not found`);
     }
 
+    if (video.status === 'Published' && visibilityDecision === 'Hidden') {
+      throw new Error(
+        'INVALID_TRANSITION: Cannot change visibilityDecision to Hidden while video status is Published. Unpublish or archive the video first.'
+      );
+    }
+
     const updatedVideo: Video = {
       ...video,
       visibilityDecision,
       updatedAt: new Date().toISOString(),
+    };
+
+    return this.mediaRepo.updateVideo(updatedVideo);
+  }
+
+  async updateApprovalStatus(
+    id: string,
+    approvalStatus: ApprovalStatus,
+    reviewNotes?: string,
+    editor?: string
+  ): Promise<Video> {
+    if (!isCanonicalApprovalStatus(approvalStatus)) {
+      throw new Error(`INVALID_APPROVAL_STATUS: Invalid approval status: ${String(approvalStatus)}`);
+    }
+
+    const video = await this.getById(id);
+    if (!video) {
+      throw new Error(`NOT_FOUND: Video ${id} not found`);
+    }
+
+    if (video.status === 'Published' && approvalStatus !== 'Approved') {
+      throw new Error(
+        `INVALID_TRANSITION: Cannot change approvalStatus from Approved to ${approvalStatus} while video status is Published. Unpublish or archive the video first.`
+      );
+    }
+
+    if (video.status === 'Rejected' && approvalStatus === 'Approved') {
+      throw new Error(
+        'INVALID_TRANSITION: Cannot approve a video while its publication status is Rejected.'
+      );
+    }
+
+    if (approvalStatus === 'Approved') {
+      if (!isCanonicalCategory(video.category)) {
+        throw new Error('APPROVAL_PREREQUISITE_FAILED: Video must have a valid canonical category before approval');
+      }
+      if (typeof video.titleAr !== 'string' || video.titleAr.trim() === '') {
+        throw new Error('APPROVAL_PREREQUISITE_FAILED: Video titleAr is required before approval');
+      }
+      if (typeof video.excerptAr !== 'string' || video.excerptAr.trim() === '') {
+        throw new Error('APPROVAL_PREREQUISITE_FAILED: Video excerptAr is required before approval');
+      }
+      if (typeof video.editorialDescriptionAr !== 'string' || video.editorialDescriptionAr.trim() === '') {
+        throw new Error('APPROVAL_PREREQUISITE_FAILED: Video editorialDescriptionAr is required before approval');
+      }
+    }
+
+    const resolvedReviewNotes =
+      reviewNotes !== undefined
+        ? reviewNotes.trim() !== ''
+          ? reviewNotes.trim()
+          : undefined
+        : video.reviewNotes;
+    const resolvedEditor =
+      typeof editor === 'string' && editor.trim() !== '' ? editor.trim() : video.editor;
+
+    const { reviewNotes: _oldNotes, editor: _oldEditor, ...videoBase } = video;
+    const updatedVideo: Video = {
+      ...videoBase,
+      approvalStatus,
+      ...(resolvedReviewNotes !== undefined ? { reviewNotes: resolvedReviewNotes } : {}),
+      ...(resolvedEditor !== undefined ? { editor: resolvedEditor } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+
+    return this.mediaRepo.updateVideo(updatedVideo);
+  }
+
+  async verifyYouTubeAvailability(id: string): Promise<Video> {
+    const video = await this.getById(id);
+    if (!video) {
+      throw new Error(`NOT_FOUND: Video ${id} not found`);
+    }
+
+    const externalVideoId =
+      typeof video.youtubeSource?.youtubeVideoId === 'string'
+        ? video.youtubeSource.youtubeVideoId.trim()
+        : '';
+    if (!externalVideoId || !/^[A-Za-z0-9_-]{3,64}$/.test(externalVideoId)) {
+      throw new Error('VALIDATION_ERROR: Video is missing a valid YouTube video ID');
+    }
+
+    let client = this.youtubeClient;
+    if (!client) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { RealYouTubeClient } = require('../youtube/realYouTubeClient') as typeof import('../youtube/realYouTubeClient');
+      client = new RealYouTubeClient();
+    }
+
+    let fetchedVideos: Awaited<ReturnType<Pick<YouTubeClient, 'getVideoDetailsBatch'>['getVideoDetailsBatch']>>;
+    try {
+      fetchedVideos = await client.getVideoDetailsBatch([externalVideoId]);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `AVAILABILITY_VERIFICATION_FAILED: Unable to verify technical YouTube availability from authoritative source (${msg})`
+      );
+    }
+
+    if (!Array.isArray(fetchedVideos)) {
+      throw new Error('AVAILABILITY_VERIFICATION_FAILED: Invalid response from YouTube verification client');
+    }
+
+    const matched = fetchedVideos.find(v => v && v.externalVideoId === externalVideoId);
+    let verifiedStatus: AvailabilityStatus = 'Unavailable';
+    if (matched) {
+      const candidateStatus = (matched as { availabilityStatus?: unknown }).availabilityStatus;
+      if (isCanonicalAvailabilityStatus(candidateStatus)) {
+        verifiedStatus = candidateStatus;
+      } else {
+        verifiedStatus = 'Available';
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedVideo: Video = {
+      ...video,
+      youtubeSource: {
+        ...video.youtubeSource,
+        availabilityStatus: verifiedStatus,
+        lastSyncedAt: nowIso,
+      },
+      updatedAt: nowIso,
+    };
+
+    return this.mediaRepo.updateVideo(updatedVideo);
+  }
+
+  async updatePublicationStatus(
+    id: string,
+    status: ContentStatus,
+    reviewNotes?: string,
+    editor?: string
+  ): Promise<Video> {
+    if (!isCanonicalContentStatus(status)) {
+      throw new Error(`INVALID_CONTENT_STATUS: Invalid publication status: ${String(status)}`);
+    }
+
+    const video = await this.getById(id);
+    if (!video) {
+      throw new Error(`NOT_FOUND: Video ${id} not found`);
+    }
+
+    if (status === 'Published') {
+      if (video.approvalStatus !== 'Approved') {
+        throw new Error(
+          `PUBLICATION_PREREQUISITE_FAILED: Video cannot be published until approvalStatus is Approved (current: ${video.approvalStatus})`
+        );
+      }
+      if (video.rightsStatus !== 'Cleared') {
+        throw new Error(
+          `PUBLICATION_PREREQUISITE_FAILED: Video cannot be published until rightsStatus is Cleared (current: ${video.rightsStatus})`
+        );
+      }
+      if (!video.youtubeSource || typeof video.youtubeSource.youtubeVideoId !== 'string' || !video.youtubeSource.youtubeVideoId.trim()) {
+        throw new Error(
+          'PUBLICATION_PREREQUISITE_FAILED: Video cannot be published without a valid YouTube source video ID'
+        );
+      }
+      if (video.youtubeSource.availabilityStatus !== 'Available') {
+        throw new Error(
+          `PUBLICATION_PREREQUISITE_FAILED: Video cannot be published until technical YouTube availabilityStatus is verified as Available (current: ${video.youtubeSource.availabilityStatus || 'Unverified'})`
+        );
+      }
+      if (!isCanonicalVisibilityDecision(video.visibilityDecision) || video.visibilityDecision === 'Hidden') {
+        throw new Error(
+          `PUBLICATION_PREREQUISITE_FAILED: Video cannot be published while visibilityDecision is Hidden (current: ${video.visibilityDecision})`
+        );
+      }
+      if (!isCanonicalCategory(video.category)) {
+        throw new Error(
+          'PUBLICATION_PREREQUISITE_FAILED: Video must have a valid canonical category before publication'
+        );
+      }
+      if (
+        typeof video.titleAr !== 'string' ||
+        !video.titleAr.trim() ||
+        typeof video.excerptAr !== 'string' ||
+        !video.excerptAr.trim() ||
+        typeof video.editorialDescriptionAr !== 'string' ||
+        !video.editorialDescriptionAr.trim()
+      ) {
+        throw new Error(
+          'PUBLICATION_PREREQUISITE_FAILED: Video is missing required Arabic editorial fields (titleAr, excerptAr, editorialDescriptionAr)'
+        );
+      }
+    }
+
+    if (status === 'Rejected' && video.approvalStatus === 'Approved') {
+      throw new Error(
+        'INVALID_TRANSITION: Cannot set publication status to Rejected while approvalStatus is Approved.'
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+    const resolvedReviewNotes =
+      reviewNotes !== undefined
+        ? reviewNotes.trim() !== ''
+          ? reviewNotes.trim()
+          : undefined
+        : video.reviewNotes;
+    const resolvedEditor =
+      typeof editor === 'string' && editor.trim() !== '' ? editor.trim() : video.editor;
+    const resolvedPublishedAt =
+      status === 'Published' ? video.publishedAt || nowIso : video.publishedAt;
+
+    const {
+      reviewNotes: _oldNotes,
+      editor: _oldEditor,
+      publishedAt: _oldPublishedAt,
+      ...videoBase
+    } = video;
+
+    const updatedVideo: Video = {
+      ...videoBase,
+      status,
+      ...(resolvedReviewNotes !== undefined ? { reviewNotes: resolvedReviewNotes } : {}),
+      ...(resolvedEditor !== undefined ? { editor: resolvedEditor } : {}),
+      ...(resolvedPublishedAt !== undefined ? { publishedAt: resolvedPublishedAt } : {}),
+      updatedAt: nowIso,
     };
 
     return this.mediaRepo.updateVideo(updatedVideo);

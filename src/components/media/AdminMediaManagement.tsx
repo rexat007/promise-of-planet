@@ -9,6 +9,8 @@ import type {
   Video, 
   RightsStatus, 
   VisibilityDecision, 
+  ApprovalStatus,
+  ContentStatus,
   Category
 } from '../../types';
 
@@ -115,8 +117,17 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   const [editThumbnailUrl, setEditThumbnailUrl] = useState('');
   const [editTags, setEditTags] = useState('');
 
-  // Rights Form State
+  // Rights & Editorial Governance Form State
   const [rightsNotes, setRightsNotes] = useState('');
+  const [approvalNotes, setApprovalNotes] = useState('');
+  const [publicationNotes, setPublicationNotes] = useState('');
+  const [isVerifyingAvailability, setIsVerifyingAvailability] = useState(false);
+  const [isSubmittingGovernance, setIsSubmittingGovernance] = useState(false);
+  const [pendingGovernanceAction, setPendingGovernanceAction] = useState<
+    | { kind: 'approval'; targetStatus: ApprovalStatus; labelAr: string; labelEn: string }
+    | { kind: 'publication'; targetStatus: ContentStatus; labelAr: string; labelEn: string }
+    | null
+  >(null);
 
   // Relation Form State
   const [selectedNewsId, setSelectedNewsId] = useState('');
@@ -143,12 +154,13 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   };
 
   useEffect(() => {
+    setPendingGovernanceAction(null);
     if (selectedVideo) {
       loadRelationsForSelectedVideo(selectedVideo.id);
     } else {
       setLinkedRelations([]);
     }
-  }, [selectedVideo, useBackend]);
+  }, [selectedVideo?.id, useBackend]);
 
   // Refresh lists exclusively from Firebase backend
   const refreshData = async () => {
@@ -208,6 +220,8 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
   const canCreate = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.Create), [currentUser]);
   const canEdit = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.Edit), [currentUser]);
   const canReview = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.Review), [currentUser]);
+  const canApprove = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.Approve), [currentUser]);
+  const canPublish = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.Publish), [currentUser]);
   const canManageRights = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.ManageRights), [currentUser]);
   const canManageSettings = useMemo(() => AdminAccessService.hasPermission(currentUser, AdminPermission.ManageSettings), [currentUser]);
 
@@ -468,24 +482,32 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
 
   // Handle Rights Change
   const handleUpdateRights = async (status: RightsStatus) => {
-    if (!selectedVideo) return;
+    if (!selectedVideo || isSubmittingGovernance) return;
     setErrorMsg(null);
+    setIsSubmittingGovernance(true);
 
     try {
-      const updated = await MediaAdminClient.updateRightsStatus(selectedVideo.id, status, rightsNotes || undefined);
+      const updated = await MediaAdminClient.updateRightsStatus(
+        selectedVideo.id,
+        status,
+        rightsNotes.trim() || undefined
+      );
       setSelectedVideo(updated);
       setRightsNotes('');
       setSuccessMsg(tText(`تم تحديث حالة حقوق النشر إلى: ${status}`, `Rights status updated to: ${status}`));
       await refreshData();
     } catch (e: any) {
       setErrorMsg(e.message || tText('فشل تحديث حقوق النشر', 'Rights update failed'));
+    } finally {
+      setIsSubmittingGovernance(false);
     }
   };
 
   // Handle Visibility Change
   const handleUpdateVisibility = async (decision: VisibilityDecision) => {
-    if (!selectedVideo) return;
+    if (!selectedVideo || isSubmittingGovernance) return;
     setErrorMsg(null);
+    setIsSubmittingGovernance(true);
 
     try {
       const updated = await MediaAdminClient.updateVisibilityDecision(selectedVideo.id, decision);
@@ -494,6 +516,96 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
       await refreshData();
     } catch (e: any) {
       setErrorMsg(e.message || tText('فشل تحديث قرار الظهور', 'Visibility update failed'));
+    } finally {
+      setIsSubmittingGovernance(false);
+    }
+  };
+
+  // Handle Editorial Approval Change
+  const handleUpdateApprovalStatus = async (approvalStatus: ApprovalStatus) => {
+    if (!selectedVideo || isSubmittingGovernance) return;
+    setErrorMsg(null);
+    setIsSubmittingGovernance(true);
+
+    try {
+      const updated = await MediaAdminClient.updateApprovalStatus(
+        selectedVideo.id,
+        approvalStatus,
+        approvalNotes.trim() || undefined
+      );
+      setSelectedVideo(updated);
+      setApprovalNotes('');
+      setPendingGovernanceAction(null);
+      setSuccessMsg(
+        tText(
+          `تم تحديث حالة الاعتماد التحريري إلى: ${approvalStatus}`,
+          `Editorial approval status updated to: ${approvalStatus}`
+        )
+      );
+      await refreshData();
+    } catch (e: any) {
+      setErrorMsg(e.message || tText('فشل تحديث حالة الاعتماد التحريري', 'Editorial approval update failed'));
+    } finally {
+      setIsSubmittingGovernance(false);
+    }
+  };
+
+  // Handle Technical YouTube Availability Verification
+  const handleVerifyYouTubeAvailability = async () => {
+    if (!selectedVideo || isVerifyingAvailability || isSubmittingGovernance) return;
+    setErrorMsg(null);
+    setIsVerifyingAvailability(true);
+
+    try {
+      const updated = await MediaAdminClient.verifyYouTubeAvailability(selectedVideo.id);
+      setSelectedVideo(updated);
+      const verifiedStatus = updated.youtubeSource?.availabilityStatus || 'Unverified';
+      setSuccessMsg(
+        tText(
+          `تم التحقق الفني من مصدر يوتيوب: ${verifiedStatus}`,
+          `Verified YouTube technical availability: ${verifiedStatus}`
+        )
+      );
+      await refreshData();
+    } catch (e: any) {
+      setErrorMsg(
+        e.message ||
+          tText(
+            'تعذر التحقق الفني من حالة فيديو يوتيوب عبر الخادم',
+            'Failed to verify YouTube video availability on server'
+          )
+      );
+    } finally {
+      setIsVerifyingAvailability(false);
+    }
+  };
+
+  // Handle Publication Status Change
+  const handleUpdatePublicationStatus = async (status: ContentStatus) => {
+    if (!selectedVideo || isSubmittingGovernance) return;
+    setErrorMsg(null);
+    setIsSubmittingGovernance(true);
+
+    try {
+      const updated = await MediaAdminClient.updatePublicationStatus(
+        selectedVideo.id,
+        status,
+        publicationNotes.trim() || undefined
+      );
+      setSelectedVideo(updated);
+      setPublicationNotes('');
+      setPendingGovernanceAction(null);
+      setSuccessMsg(
+        tText(
+          `تم تحديث حالة النشر إلى: ${status}`,
+          `Publication status updated to: ${status}`
+        )
+      );
+      await refreshData();
+    } catch (e: any) {
+      setErrorMsg(e.message || tText('فشل تحديث حالة النشر', 'Publication status update failed'));
+    } finally {
+      setIsSubmittingGovernance(false);
     }
   };
 
@@ -1534,21 +1646,6 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
                   <span className="text-gray-400 font-bold">{tText('القناة الناشرة', 'Publishing Channel')}:</span>
                   <span className="text-gray-900 dark:text-white font-bold">{selectedVideo.youtubeSource.channelName}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400 font-bold">{tText('الحالة الفنية يوتيوب', 'YouTube Availability')}:</span>
-                  <span
-                    className={`px-2 py-0.2 rounded-md font-bold ${
-                      selectedVideo.youtubeSource.availabilityStatus === 'Available'
-                        ? 'bg-emerald-100 text-emerald-800'
-                        : selectedVideo.youtubeSource.availabilityStatus
-                        ? 'bg-rose-100 text-rose-800'
-                        : 'bg-amber-100 text-amber-800'
-                    }`}
-                  >
-                    {selectedVideo.youtubeSource.availabilityStatus ||
-                      tText('غير متحقق منها', 'Unverified')}
-                  </span>
-                </div>
                 {selectedVideo.producer && (
                   <div className="flex justify-between">
                     <span className="text-gray-400 font-bold">{tText('المنتج التحريري', 'Editorial Producer')}:</span>
@@ -1608,149 +1705,671 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
                 </div>
               </div>
 
-              {/* RIGHTS GOVERNANCE WORKFLOW (Strict ManageRights Enforced) */}
-              <div className="space-y-3 bg-white dark:bg-gray-900 border border-gray-150 dark:border-gray-800 rounded-xl p-4">
-                <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wide block">
-                  {tText('تدقيق حقوق النشر وبراءة النشر (محمي بـ ManageRights)', 'Copyright Clearance & Audits (ManageRights Protected)')}
-                </span>
+              {/* UNIFIED EDITORIAL PUBLISHING & GOVERNANCE WORKFLOW */}
+              {(() => {
+                const hasEditorialMetadata =
+                  Boolean(selectedVideo.category) &&
+                  Boolean(selectedVideo.titleAr?.trim()) &&
+                  Boolean(selectedVideo.excerptAr?.trim()) &&
+                  Boolean(selectedVideo.editorialDescriptionAr?.trim());
+                const isApproved = selectedVideo.approvalStatus === 'Approved';
+                const isRightsCleared = selectedVideo.rightsStatus === 'Cleared';
+                const availabilityStatus = selectedVideo.youtubeSource?.availabilityStatus;
+                const isTechnicallyAvailable = availabilityStatus === 'Available';
+                const isVisibilityScoped = selectedVideo.visibilityDecision !== 'Hidden';
+                const isPublished = selectedVideo.status === 'Published';
 
-                <div className="space-y-2.5">
-                  <div className="flex gap-2">
-                    <span className="text-xs text-gray-400 font-bold mt-1">{tText('الحالة الحالية', 'Current Status')}:</span>
-                    <span className={`inline-flex items-center gap-1 text-xs px-2.5 py-0.5 rounded-full font-black ${
-                      selectedVideo.rightsStatus === 'Cleared' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400' :
-                      selectedVideo.rightsStatus === 'InReview' ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400' :
-                      selectedVideo.rightsStatus === 'Rejected' ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/40 dark:text-rose-400' :
-                      'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
-                    }`}>
-                      {selectedVideo.rightsStatus === 'Cleared' ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> : null}
-                      <span>{selectedVideo.rightsStatus}</span>
-                    </span>
-                  </div>
+                const missingPublishPrerequisites: string[] = [];
+                if (!hasEditorialMetadata) {
+                  missingPublishPrerequisites.push(
+                    tText(
+                      'استكمال البيانات التحريرية العربية والتصنيف الكنسي',
+                      'Complete Arabic editorial metadata and canonical category'
+                    )
+                  );
+                }
+                if (!isApproved) {
+                  missingPublishPrerequisites.push(
+                    tText(
+                      `الاعتماد التحريري (Approved) — الحالي: ${selectedVideo.approvalStatus}`,
+                      `Editorial approval (Approved) — current: ${selectedVideo.approvalStatus}`
+                    )
+                  );
+                }
+                if (!isRightsCleared) {
+                  missingPublishPrerequisites.push(
+                    tText(
+                      `براءة حقوق النشر (Cleared) — الحالي: ${selectedVideo.rightsStatus}`,
+                      `Rights clearance (Cleared) — current: ${selectedVideo.rightsStatus}`
+                    )
+                  );
+                }
+                if (!isTechnicallyAvailable) {
+                  missingPublishPrerequisites.push(
+                    tText(
+                      `التحقق الفني من توفر يوتيوب (Available) — الحالي: ${availabilityStatus || 'Unverified'}`,
+                      `Verified YouTube availability (Available) — current: ${availabilityStatus || 'Unverified'}`
+                    )
+                  );
+                }
+                if (!isVisibilityScoped) {
+                  missingPublishPrerequisites.push(
+                    tText(
+                      'نطاق ظهور علني غير مخفي (MediaHubOnly / NewsEligible / Featured)',
+                      'Non-Hidden public visibility decision (MediaHubOnly / NewsEligible / Featured)'
+                    )
+                  );
+                }
 
-                  {selectedVideo.rightsNotes && (
-                    <div className="bg-gray-50 dark:bg-gray-950 p-2.5 rounded-lg border border-gray-100 dark:border-gray-850 text-[11px] font-semibold text-gray-600 dark:text-gray-400">
-                      <span className="font-extrabold text-gray-400 block mb-1">{tText('ملاحظات التدقيق القانوني', 'Legal Audit Notes')}:</span>
-                      {selectedVideo.rightsNotes}
+                const canTransitionToPublished = missingPublishPrerequisites.length === 0;
+
+                return (
+                  <div
+                    className="space-y-4 bg-white dark:bg-gray-900 border border-gray-200/80 dark:border-gray-800 rounded-xl p-4"
+                    id="editorial-publishing-governance-panel"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 dark:border-gray-800 pb-3">
+                      <span className="text-[10px] font-extrabold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                        {tText(
+                          'حوكمة الاعتماد التحريري والنشر العلني (RBAC)',
+                          'Editorial Publishing & Governance (RBAC)'
+                        )}
+                      </span>
+                      <span
+                        className={`text-[10px] px-2.5 py-0.5 rounded-full font-black ${
+                          isVideoPubliclyEligible(selectedVideo)
+                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+                            : 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400'
+                        }`}
+                      >
+                        {isVideoPubliclyEligible(selectedVideo)
+                          ? tText('مؤهل ومنشور للجمهور العام', 'Publicly Eligible & Live')
+                          : tText('محجوب عن الظهور العام (Fail-Closed)', 'Withheld from Public (Fail-Closed)')}
+                      </span>
                     </div>
-                  )}
 
-                  {canManageRights ? (
-                    <div className="space-y-2 border-t border-gray-100 dark:border-gray-800 pt-3 mt-1">
-                      <label className="text-[10px] text-gray-400 font-extrabold block">{tText('ملاحظات أو مسوغات القرار', 'Decision Notes / Justifications')}</label>
-                      <input 
-                        type="text"
-                        placeholder={tText('اكتب ملاحظات ترخيص البث أو التنازل...', 'Write broadcasting consent details or reason...')}
-                        value={rightsNotes}
-                        onChange={(e) => setRightsNotes(e.target.value)}
-                        className="w-full px-2.5 py-1.5 text-xs bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-lg focus:outline-hidden"
-                      />
-                      <div className="flex flex-wrap gap-1.5 pt-1">
-                        <button
-                          onClick={() => { handleUpdateRights('Cleared'); setRightsNotes(''); }}
-                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-black cursor-pointer shadow-xs"
-                        >
-                          {tText('اعتماد وبراءة نشر (Cleared)', 'Clear Rights (Cleared)')}
-                        </button>
-                        <button
-                          onClick={() => { handleUpdateRights('InReview'); setRightsNotes(''); }}
-                          className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-black cursor-pointer shadow-xs"
-                        >
-                          {tText('تحويل للمراجعة الفنية', 'Set to In Review')}
-                        </button>
-                        <button
-                          onClick={() => { handleUpdateRights('NeedsChanges'); setRightsNotes(''); }}
-                          className="px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-[10px] font-black cursor-pointer shadow-xs"
-                        >
-                          {tText('طلب تعديلات (NeedsChanges)', 'Request Changes')}
-                        </button>
-                        <button
-                          onClick={() => { handleUpdateRights('Rejected'); setRightsNotes(''); }}
-                          className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[10px] font-black cursor-pointer shadow-xs"
-                        >
-                          {tText('رفض وحظر (Rejected)', 'Reject Rights')}
-                        </button>
+                    {/* DELIBERATE CONFIRMATION BANNER */}
+                    {pendingGovernanceAction && (
+                      <div
+                        className="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 rounded-xl space-y-2.5 text-xs"
+                        id="governance-action-confirmation"
+                        role="region"
+                        aria-label={tText('تأكيد القرار التحريري', 'Confirm Governance Decision')}
+                      >
+                        <div className="flex items-start gap-2 text-amber-900 dark:text-amber-300 font-bold">
+                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                          <span>
+                            {tText(
+                              `تأكيد الإجراء: هل تريد المتابعة في «${pendingGovernanceAction.labelAr}» وحفظه على الخادم الدائم؟`,
+                              `Confirm action: Proceed with "${pendingGovernanceAction.labelEn}" and persist to the durable server?`
+                            )}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            disabled={isSubmittingGovernance}
+                            onClick={() => setPendingGovernanceAction(null)}
+                            className="px-3 py-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-[11px] font-bold text-gray-700 dark:text-gray-300 cursor-pointer disabled:opacity-50"
+                          >
+                            {tText('إلغاء', 'Cancel')}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isSubmittingGovernance}
+                            onClick={() => {
+                              if (pendingGovernanceAction.kind === 'approval') {
+                                handleUpdateApprovalStatus(pendingGovernanceAction.targetStatus);
+                              } else {
+                                handleUpdatePublicationStatus(pendingGovernanceAction.targetStatus);
+                              }
+                            }}
+                            className="px-3.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-black cursor-pointer disabled:opacity-50"
+                            id="confirm-governance-action-btn"
+                          >
+                            {isSubmittingGovernance
+                              ? tText('جاري الحفظ...', 'Saving...')
+                              : tText('تأكيد وتنفيذ', 'Confirm & Execute')}
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="text-[11px] font-bold text-rose-500 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/20 p-2 rounded-lg flex items-center gap-1.5 border border-rose-100/30">
-                      <Lock className="w-3.5 h-3.5" />
-                      <span>{tText('يتطلب صلاحية تدقيق الحقوق (ManageRights)', 'Requires ManageRights permission to alter copyright status')}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
+                    )}
 
-              {/* VISIBILITY GOVERNANCE WORKFLOW (Strict Review/Approve Enforced) */}
-              <div className="space-y-3 bg-white dark:bg-gray-900 border border-gray-150 dark:border-gray-800 rounded-xl p-4">
-                <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wide block">
-                  {tText('إدارة الظهور التحريري ونشر المنصة (محمي بـ Review)', 'Editorial Visibility Scope & Publishing (Review Protected)')}
-                </span>
+                    {/* 1. EDITORIAL APPROVAL (approvalStatus) */}
+                    <div className="space-y-2 bg-gray-50/70 dark:bg-gray-950/60 p-3 rounded-lg border border-gray-100 dark:border-gray-800/80">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-extrabold text-gray-700 dark:text-gray-300">
+                          {tText('1. الاعتماد التحريري (Approval)', '1. Editorial Approval')}
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-black ${
+                            selectedVideo.approvalStatus === 'Approved'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+                              : selectedVideo.approvalStatus === 'InReview' ||
+                                selectedVideo.approvalStatus === 'ChangesRequested'
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400'
+                              : selectedVideo.approvalStatus === 'Rejected'
+                              ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/40 dark:text-rose-400'
+                              : 'bg-gray-200 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
+                          }`}
+                        >
+                          {selectedVideo.approvalStatus === 'Approved' ? (
+                            <CheckCircle2 className="w-3 h-3 shrink-0" />
+                          ) : null}
+                          <span>{selectedVideo.approvalStatus}</span>
+                        </span>
+                      </div>
 
-                <div className="space-y-2.5">
-                  <div className="flex gap-2">
-                    <span className="text-xs text-gray-400 font-bold mt-0.5">{tText('القرار الحالي', 'Current Decision')}:</span>
-                    <span className={`text-xs font-black ${
-                      selectedVideo.visibilityDecision === 'Featured' ? 'text-blue-600 dark:text-blue-400' :
-                      selectedVideo.visibilityDecision === 'NewsEligible' ? 'text-emerald-600 dark:text-emerald-400' :
-                      selectedVideo.visibilityDecision === 'MediaHubOnly' ? 'text-amber-600 dark:text-amber-400' :
-                      'text-gray-400 dark:text-gray-500'
-                    }`}>
-                      {selectedVideo.visibilityDecision}
-                    </span>
+                      {selectedVideo.reviewNotes && (
+                        <div className="bg-white dark:bg-gray-900 p-2 rounded border border-gray-100 dark:border-gray-800 text-[11px] text-gray-600 dark:text-gray-400">
+                          <span className="font-extrabold text-gray-400 block">
+                            {tText('ملاحظات المراجعة التحريرية:', 'Editorial Review Notes:')}
+                          </span>
+                          <span>{selectedVideo.reviewNotes}</span>
+                        </div>
+                      )}
+
+                      {!hasEditorialMetadata && (
+                        <p className="text-[11px] text-amber-700 dark:text-amber-400 font-semibold">
+                          {tText(
+                            'يتطلب الاعتماد التحريري استكمال العنوان والمقتطف والوصف بالعربية والتصنيف البيئي.',
+                            'Approval requires non-empty Arabic title, excerpt, description, and canonical category.'
+                          )}
+                        </p>
+                      )}
+
+                      {isPublished && (
+                        <p className="text-[11px] text-gray-500 dark:text-gray-400 font-medium">
+                          {tText(
+                            'الفيديو منشور حالياً؛ يجب إلغاء النشر إلى مسودة قبل سحب الاعتماد التحريري.',
+                            'Video is currently Published; unpublish to Draft before revoking editorial approval.'
+                          )}
+                        </p>
+                      )}
+
+                      {canApprove || canReview ? (
+                        <div className="space-y-2 pt-1">
+                          <input
+                            type="text"
+                            placeholder={tText(
+                              'ملاحظات المراجعة أو قرار الاعتماد التحريري...',
+                              'Editorial review or approval notes...'
+                            )}
+                            value={approvalNotes}
+                            onChange={(e) => setApprovalNotes(e.target.value)}
+                            disabled={isSubmittingGovernance}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg focus:outline-hidden"
+                            id="editorial-approval-notes-input"
+                          />
+                          <div className="flex flex-wrap gap-1.5">
+                            {canApprove && (
+                              <button
+                                type="button"
+                                disabled={isSubmittingGovernance || !hasEditorialMetadata}
+                                onClick={() =>
+                                  setPendingGovernanceAction({
+                                    kind: 'approval',
+                                    targetStatus: 'Approved',
+                                    labelAr: 'اعتماد الفيديو تحريرياً (Approved)',
+                                    labelEn: 'Approve Video Editorially (Approved)',
+                                  })
+                                }
+                                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                                id="approve-video-btn"
+                              >
+                                {tText('اعتماد تحريري (Approved)', 'Approve (Approved)')}
+                              </button>
+                            )}
+                            {canReview && (
+                              <button
+                                type="button"
+                                disabled={isSubmittingGovernance || isPublished}
+                                onClick={() => handleUpdateApprovalStatus('InReview')}
+                                className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                              >
+                                {tText('قيد المراجعة (InReview)', 'Set In Review')}
+                              </button>
+                            )}
+                            {canReview && (
+                              <button
+                                type="button"
+                                disabled={isSubmittingGovernance || isPublished}
+                                onClick={() => handleUpdateApprovalStatus('ChangesRequested')}
+                                className="px-2.5 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                              >
+                                {tText('طلب تعديلات (ChangesRequested)', 'Request Changes')}
+                              </button>
+                            )}
+                            {canApprove && (
+                              <button
+                                type="button"
+                                disabled={isSubmittingGovernance || isPublished}
+                                onClick={() =>
+                                  setPendingGovernanceAction({
+                                    kind: 'approval',
+                                    targetStatus: 'Rejected',
+                                    labelAr: 'رفض الفيديو تحريرياً (Rejected)',
+                                    labelEn: 'Reject Video Editorially (Rejected)',
+                                  })
+                                }
+                                className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                              >
+                                {tText('رفض تحريري (Rejected)', 'Reject (Rejected)')}
+                              </button>
+                            )}
+                          </div>
+                          {!canApprove && (
+                            <p className="text-[10px] text-gray-500 font-semibold">
+                              {tText(
+                                'ملاحظة: صلاحية المراجعة (Review) تتيح تحويل الحالة للمراجعة أو طلب التعديلات؛ الاعتماد النهائي يتطلب صلاحية Approve.',
+                                'Note: Review permission allows InReview / ChangesRequested; final approval requires Approve permission.'
+                              )}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-[11px] font-bold text-rose-500 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/20 p-2 rounded-lg flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {tText(
+                              'يتطلب صلاحية الاعتماد (Approve) أو المراجعة (Review) لتحديث الاعتماد التحريري',
+                              'Requires Approve or Review permission to update editorial approval status'
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 2. RIGHTS CLEARANCE (rightsStatus) */}
+                    <div className="space-y-2 bg-gray-50/70 dark:bg-gray-950/60 p-3 rounded-lg border border-gray-100 dark:border-gray-800/80">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-extrabold text-gray-700 dark:text-gray-300">
+                          {tText('2. تدقيق حقوق النشر (Rights)', '2. Copyright & Rights Clearance')}
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-black ${
+                            selectedVideo.rightsStatus === 'Cleared'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+                              : selectedVideo.rightsStatus === 'InReview' ||
+                                selectedVideo.rightsStatus === 'NeedsChanges'
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400'
+                              : selectedVideo.rightsStatus === 'Rejected'
+                              ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/40 dark:text-rose-400'
+                              : 'bg-gray-200 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
+                          }`}
+                        >
+                          {selectedVideo.rightsStatus === 'Cleared' ? (
+                            <CheckCircle2 className="w-3 h-3 shrink-0" />
+                          ) : null}
+                          <span>{selectedVideo.rightsStatus}</span>
+                        </span>
+                      </div>
+
+                      {selectedVideo.rightsNotes && (
+                        <div className="bg-white dark:bg-gray-900 p-2 rounded border border-gray-100 dark:border-gray-800 text-[11px] text-gray-600 dark:text-gray-400">
+                          <span className="font-extrabold text-gray-400 block">
+                            {tText('ملاحظات التدقيق القانوني:', 'Legal Audit Notes:')}
+                          </span>
+                          <span>{selectedVideo.rightsNotes}</span>
+                        </div>
+                      )}
+
+                      {canManageRights ? (
+                        <div className="space-y-2 pt-1">
+                          <input
+                            type="text"
+                            placeholder={tText(
+                              'اكتب ملاحظات ترخيص البث أو التنازل...',
+                              'Write broadcasting consent details or reason...'
+                            )}
+                            value={rightsNotes}
+                            onChange={(e) => setRightsNotes(e.target.value)}
+                            disabled={isSubmittingGovernance}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg focus:outline-hidden"
+                            id="rights-clearance-notes-input"
+                          />
+                          <div className="flex flex-wrap gap-1.5">
+                            <button
+                              type="button"
+                              disabled={isSubmittingGovernance}
+                              onClick={() => handleUpdateRights('Cleared')}
+                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                              id="clear-rights-btn"
+                            >
+                              {tText('اعتماد وبراءة نشر (Cleared)', 'Clear Rights (Cleared)')}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isSubmittingGovernance || isPublished}
+                              onClick={() => handleUpdateRights('InReview')}
+                              className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                            >
+                              {tText('تحويل للمراجعة (InReview)', 'Set to In Review')}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isSubmittingGovernance || isPublished}
+                              onClick={() => handleUpdateRights('NeedsChanges')}
+                              className="px-2.5 py-1 bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                            >
+                              {tText('طلب تعديلات (NeedsChanges)', 'Request Changes')}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isSubmittingGovernance || isPublished}
+                              onClick={() => handleUpdateRights('Rejected')}
+                              className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                            >
+                              {tText('رفض وحظر (Rejected)', 'Reject Rights')}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] font-bold text-rose-500 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/20 p-2 rounded-lg flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {tText(
+                              'يتطلب صلاحية تدقيق الحقوق (ManageRights) لتعديل حالة حقوق النشر',
+                              'Requires ManageRights permission to alter copyright status'
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 3. TECHNICAL YOUTUBE AVAILABILITY (youtubeSource.availabilityStatus) */}
+                    <div className="space-y-2 bg-gray-50/70 dark:bg-gray-950/60 p-3 rounded-lg border border-gray-100 dark:border-gray-800/80">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-extrabold text-gray-700 dark:text-gray-300">
+                          {tText('3. التحقق الفني من يوتيوب (Availability)', '3. Technical YouTube Availability')}
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-black ${
+                            availabilityStatus === 'Available'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+                              : availabilityStatus
+                              ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/40 dark:text-rose-400'
+                              : 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400'
+                          }`}
+                        >
+                          {availabilityStatus === 'Available' ? (
+                            <CheckCircle2 className="w-3 h-3 shrink-0" />
+                          ) : null}
+                          <span>{availabilityStatus || tText('غير متحقق منها (Unverified)', 'Unverified')}</span>
+                        </span>
+                      </div>
+
+                      {!isTechnicallyAvailable && (
+                        <p className="text-[11px] text-amber-700 dark:text-amber-400 font-semibold">
+                          {tText(
+                            'الحالة الفنية غير مؤكدة أو غير متاحة؛ يظل الفيديو محجوباً عن النشر العام حتى يتم التحقق الفعلي من توفره على يوتيوب.',
+                            'Technical availability is unverified or unavailable; public publication remains fail-closed until verified against YouTube.'
+                          )}
+                        </p>
+                      )}
+
+                      {selectedVideo.youtubeSource?.lastSyncedAt && (
+                        <p className="text-[10px] text-gray-400 font-mono">
+                          {tText('آخر تحقق فني: ', 'Last verified: ')}
+                          {new Date(selectedVideo.youtubeSource.lastSyncedAt).toLocaleString(
+                            isAr ? 'ar-SD' : 'en-US'
+                          )}
+                        </p>
+                      )}
+
+                      {canReview ? (
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={handleVerifyYouTubeAvailability}
+                            disabled={isVerifyingAvailability || isSubmittingGovernance}
+                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[10px] font-black flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                            id="verify-youtube-availability-btn"
+                          >
+                            <RefreshCw
+                              className={`w-3 h-3 ${isVerifyingAvailability ? 'animate-spin' : ''}`}
+                            />
+                            <span>
+                              {isVerifyingAvailability
+                                ? tText('جاري التحقق من يوتيوب...', 'Verifying with YouTube...')
+                                : tText(
+                                    'التحقق الفني من توفر الفيديو على يوتيوب',
+                                    'Verify YouTube Availability'
+                                  )}
+                            </span>
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] font-bold text-rose-500 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/20 p-2 rounded-lg flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {tText(
+                              'يتطلب صلاحية المراجعة (Review) لإجراء التحقق الفني من مصدر يوتيوب',
+                              'Requires Review permission to verify technical YouTube availability'
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 4. PUBLIC VISIBILITY DECISION (visibilityDecision) */}
+                    <div className="space-y-2 bg-gray-50/70 dark:bg-gray-950/60 p-3 rounded-lg border border-gray-100 dark:border-gray-800/80">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-extrabold text-gray-700 dark:text-gray-300">
+                          {tText('4. قرار الظهور التحريري (Visibility)', '4. Public Visibility Scope')}
+                        </span>
+                        <span
+                          className={`text-[10px] px-2 py-0.5 rounded-full font-black ${
+                            selectedVideo.visibilityDecision === 'Featured'
+                              ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-400'
+                              : selectedVideo.visibilityDecision === 'NewsEligible'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+                              : selectedVideo.visibilityDecision === 'MediaHubOnly'
+                              ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400'
+                              : 'bg-gray-200 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
+                          }`}
+                        >
+                          {selectedVideo.visibilityDecision}
+                        </span>
+                      </div>
+
+                      {canReview ? (
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                          <button
+                            type="button"
+                            disabled={isSubmittingGovernance || isPublished}
+                            onClick={() => handleUpdateVisibility('Hidden')}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50 ${
+                              selectedVideo.visibilityDecision === 'Hidden'
+                                ? 'bg-gray-300 dark:bg-gray-800 text-gray-900 dark:text-white'
+                                : 'bg-white hover:bg-gray-100 dark:bg-gray-900 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-800'
+                            }`}
+                          >
+                            {tText('مخفي (Hidden)', 'Hidden')}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isSubmittingGovernance}
+                            onClick={() => handleUpdateVisibility('MediaHubOnly')}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50 ${
+                              selectedVideo.visibilityDecision === 'MediaHubOnly'
+                                ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                                : 'bg-white hover:bg-gray-100 dark:bg-gray-900 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-800'
+                            }`}
+                          >
+                            {tText('مركز الوسائط فقط (MediaHubOnly)', 'Media Hub Only')}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isSubmittingGovernance}
+                            onClick={() => handleUpdateVisibility('NewsEligible')}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50 ${
+                              selectedVideo.visibilityDecision === 'NewsEligible'
+                                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                : 'bg-white hover:bg-gray-100 dark:bg-gray-900 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-800'
+                            }`}
+                          >
+                            {tText('مؤهل للربط الإخباري (NewsEligible)', 'News Eligible')}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isSubmittingGovernance}
+                            onClick={() => handleUpdateVisibility('Featured')}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50 ${
+                              selectedVideo.visibilityDecision === 'Featured'
+                                ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300'
+                                : 'bg-white hover:bg-gray-100 dark:bg-gray-900 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-800'
+                            }`}
+                          >
+                            {tText('متميز ومثبت (Featured)', 'Featured')}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] font-bold text-rose-500 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/20 p-2 rounded-lg flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {tText(
+                              'يتطلب صلاحية المراجعة والتنظيم (Review) لتعديل قرار الظهور',
+                              'Requires Review permission to alter visibility scope'
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 5. PUBLICATION STATUS (status) */}
+                    <div className="space-y-2.5 bg-gray-50/70 dark:bg-gray-950/60 p-3 rounded-lg border border-gray-100 dark:border-gray-800/80">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-extrabold text-gray-700 dark:text-gray-300">
+                          {tText('5. حالة النشر الكنسية (Publication Status)', '5. Canonical Publication Status')}
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-black ${
+                            selectedVideo.status === 'Published'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400'
+                              : selectedVideo.status === 'Archived' || selectedVideo.status === 'Rejected'
+                              ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/40 dark:text-rose-400'
+                              : 'bg-gray-200 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
+                          }`}
+                        >
+                          {selectedVideo.status === 'Published' ? (
+                            <Globe className="w-3 h-3 shrink-0" />
+                          ) : null}
+                          <span>{selectedVideo.status}</span>
+                        </span>
+                      </div>
+
+                      {selectedVideo.publishedAt && (
+                        <p className="text-[10px] text-gray-400 font-mono">
+                          {tText('تاريخ النشر: ', 'Published at: ')}
+                          {new Date(selectedVideo.publishedAt).toLocaleString(isAr ? 'ar-SD' : 'en-US')}
+                        </p>
+                      )}
+
+                      {missingPublishPrerequisites.length > 0 && (
+                        <div className="p-2.5 bg-amber-50/90 dark:bg-amber-950/25 border border-amber-200/80 dark:border-amber-900/50 rounded-lg text-[11px] text-amber-900 dark:text-amber-300 space-y-1">
+                          <span className="font-extrabold block">
+                            {tText(
+                              'المتطلبات الإلزامية المتبقية قبل النشر العلني (Published):',
+                              'Required prerequisites before publishing (Published):'
+                            )}
+                          </span>
+                          <ul className="list-disc ps-4 space-y-0.5 font-medium">
+                            {missingPublishPrerequisites.map((item, idx) => (
+                              <li key={idx}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {canPublish ? (
+                        <div className="space-y-2 pt-1">
+                          <input
+                            type="text"
+                            placeholder={tText(
+                              'ملاحظات قرار النشر أو الأرشفة (اختياري)...',
+                              'Publication or archival notes (optional)...'
+                            )}
+                            value={publicationNotes}
+                            onChange={(e) => setPublicationNotes(e.target.value)}
+                            disabled={isSubmittingGovernance}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg focus:outline-hidden"
+                            id="publication-status-notes-input"
+                          />
+                          <div className="flex flex-wrap gap-1.5">
+                            <button
+                              type="button"
+                              disabled={
+                                isSubmittingGovernance || !canTransitionToPublished || isPublished
+                              }
+                              onClick={() =>
+                                setPendingGovernanceAction({
+                                  kind: 'publication',
+                                  targetStatus: 'Published',
+                                  labelAr: 'نشر الفيديو للجمهور العام (Published)',
+                                  labelEn: 'Publish Video to Public (Published)',
+                                })
+                              }
+                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                              id="publish-video-btn"
+                            >
+                              {tText('نشر الفيديو (Publish)', 'Publish Video (Published)')}
+                            </button>
+
+                            {selectedVideo.status !== 'Draft' && (
+                              <button
+                                type="button"
+                                disabled={isSubmittingGovernance}
+                                onClick={() =>
+                                  setPendingGovernanceAction({
+                                    kind: 'publication',
+                                    targetStatus: 'Draft',
+                                    labelAr: 'تحويل الفيديو إلى مسودة غير منشورة (Draft)',
+                                    labelEn: 'Unpublish Video to Draft (Draft)',
+                                  })
+                                }
+                                className="px-2.5 py-1.5 bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                                id="unpublish-video-btn"
+                              >
+                                {tText('إرجاع إلى مسودة (Draft)', 'Return to Draft')}
+                              </button>
+                            )}
+
+                            {selectedVideo.status !== 'Archived' && (
+                              <button
+                                type="button"
+                                disabled={isSubmittingGovernance}
+                                onClick={() =>
+                                  setPendingGovernanceAction({
+                                    kind: 'publication',
+                                    targetStatus: 'Archived',
+                                    labelAr: 'أرشفة الفيديو وإيقاف نشره (Archived)',
+                                    labelEn: 'Archive Video (Archived)',
+                                  })
+                                }
+                                className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[10px] font-black cursor-pointer disabled:opacity-50"
+                                id="archive-video-btn"
+                              >
+                                {tText('أرشفة (Archived)', 'Archive')}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] font-bold text-rose-500 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/20 p-2 rounded-lg flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {tText(
+                              'يتطلب صلاحية النشر (Publish) لنشر الفيديو للجمهور أو أرشفته',
+                              'Requires Publish permission to publish, unpublish, or archive canonical videos'
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
-
-                  {canReview ? (
-                    <div className="flex flex-wrap gap-1.5 border-t border-gray-100 dark:border-gray-800 pt-3 mt-1">
-                      <button
-                        onClick={() => handleUpdateVisibility('Hidden')}
-                        className={`px-3 py-1.5 rounded-lg text-[10px] font-black cursor-pointer ${
-                          selectedVideo.visibilityDecision === 'Hidden'
-                            ? 'bg-gray-200 dark:bg-gray-800 text-gray-800'
-                            : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-950 text-gray-600'
-                        }`}
-                      >
-                        {tText('مخفي (Hidden)', 'Hidden')}
-                      </button>
-                      <button
-                        onClick={() => handleUpdateVisibility('MediaHubOnly')}
-                        className={`px-3 py-1.5 rounded-lg text-[10px] font-black cursor-pointer ${
-                          selectedVideo.visibilityDecision === 'MediaHubOnly'
-                            ? 'bg-amber-100 text-amber-800'
-                            : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-950 text-gray-600'
-                        }`}
-                      >
-                        {tText('مركز الوسائط فقط (MediaHubOnly)', 'Media Hub Only')}
-                      </button>
-                      <button
-                        onClick={() => handleUpdateVisibility('NewsEligible')}
-                        className={`px-3 py-1.5 rounded-lg text-[10px] font-black cursor-pointer ${
-                          selectedVideo.visibilityDecision === 'NewsEligible'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-950 text-gray-600'
-                        }`}
-                      >
-                        {tText('مؤهل للربط الإخباري', 'News Eligible')}
-                      </button>
-                      <button
-                        onClick={() => handleUpdateVisibility('Featured')}
-                        className={`px-3 py-1.5 rounded-lg text-[10px] font-black cursor-pointer ${
-                          selectedVideo.visibilityDecision === 'Featured'
-                            ? 'bg-blue-100 text-blue-800'
-                            : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-950 text-gray-600'
-                        }`}
-                      >
-                        {tText('متميز ومثبت (Featured)', 'Featured')}
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="text-[11px] font-bold text-rose-500 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/20 p-2 rounded-lg flex items-center gap-1.5 border border-rose-100/30">
-                      <Lock className="w-3.5 h-3.5" />
-                      <span>{tText('يتطلب صلاحية المراجعة والتنظيم (Review)', 'Requires Review permission to alter visibility scope')}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
+                );
+              })()}
 
               {/* NEWS RELATIONSHIP SECTION (Strict Edit Enforced) */}
               <div className="space-y-4 bg-white dark:bg-gray-900 border border-gray-150 dark:border-gray-800 rounded-xl p-4">

@@ -1,6 +1,15 @@
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { app, auth, isFirebaseConfigured } from './firebase';
-import type { Video, ContentVideoRelation, RightsStatus, VisibilityDecision, RelationType, Placement } from '../types';
+import type {
+  Video,
+  ContentVideoRelation,
+  RightsStatus,
+  VisibilityDecision,
+  ApprovalStatus,
+  ContentStatus,
+  RelationType,
+  Placement,
+} from '../types';
 
 function getFunctionsInstance() {
   if (!isFirebaseConfigured || !app) {
@@ -70,6 +79,33 @@ export const MediaAdminClient = {
     return res.data.video;
   },
 
+  async updateApprovalStatus(id: string, approvalStatus: ApprovalStatus, reviewNotes?: string): Promise<Video> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<
+      { action: string; id: string; approvalStatus: ApprovalStatus; reviewNotes?: string },
+      { video: Video }
+    >(fns, 'manageMedia');
+    const res = await callable({ action: 'updateApprovalStatus', id, approvalStatus, reviewNotes });
+    return res.data.video;
+  },
+
+  async verifyYouTubeAvailability(id: string): Promise<Video> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<{ action: string; id: string }, { video: Video }>(fns, 'manageMedia');
+    const res = await callable({ action: 'verifyYouTubeAvailability', id });
+    return res.data.video;
+  },
+
+  async updatePublicationStatus(id: string, status: ContentStatus, reviewNotes?: string): Promise<Video> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<
+      { action: string; id: string; status: ContentStatus; reviewNotes?: string },
+      { video: Video }
+    >(fns, 'manageMedia');
+    const res = await callable({ action: 'updatePublicationStatus', id, status, reviewNotes });
+    return res.data.video;
+  },
+
   async linkVideoToContent(
     videoId: string,
     contentId: string,
@@ -93,3 +129,4 @@ export const MediaAdminClient = {
     return res.data.success;
   },
 };
+
