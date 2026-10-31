@@ -98,6 +98,74 @@ jobs:
             }
             console.log("Validated VITE_EDITORIAL_IMAGE_PREVIEW_URL: " + parsed.origin + parsed.pathname);
           '
+      - name: Validate Public Editorial Image Delivery URL
+        env:
+          PUBLIC_DELIVERY_URL: ${{ vars.VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL }}
+        run: |
+          if [ -z "$PUBLIC_DELIVERY_URL" ]; then
+            echo "::error::Repository variable VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL is missing or empty. Please configure it with the deployed Cloud Functions HTTPS URL."
+            exit 1
+          fi
+          node -e '
+            const raw = process.env.PUBLIC_DELIVERY_URL;
+            if (typeof raw !== "string" || !raw.trim()) {
+              console.error("::error::VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL is empty.");
+              process.exit(1);
+            }
+            const trimmed = raw.trim();
+            if (trimmed !== raw || /\s/.test(trimmed)) {
+              console.error("::error::VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL must not contain leading, trailing, or internal whitespace.");
+              process.exit(1);
+            }
+            if (trimmed.includes("?") || trimmed.includes("#")) {
+              console.error("::error::VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL must not include query parameters or URL fragments.");
+              process.exit(1);
+            }
+            let parsed;
+            try {
+              parsed = new URL(trimmed);
+            } catch (err) {
+              console.error("::error::VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL is not a syntactically valid URL: " + err.message);
+              process.exit(1);
+            }
+            if (parsed.protocol !== "https:") {
+              console.error("::error::VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL must use the https protocol. Received: " + parsed.protocol);
+              process.exit(1);
+            }
+            if (!parsed.hostname || parsed.hostname.length === 0 || !parsed.hostname.includes(".")) {
+              console.error("::error::VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL must have a valid hostname.");
+              process.exit(1);
+            }
+            if (parsed.username || parsed.password) {
+              console.error("::error::VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL must not contain embedded credentials.");
+              process.exit(1);
+            }
+            if (parsed.search || parsed.hash) {
+              console.error("::error::VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL must not include query parameters or URL fragments.");
+              process.exit(1);
+            }
+            const lowerUrl = trimmed.toLowerCase();
+            const lowerHost = parsed.hostname.toLowerCase();
+            if (
+              lowerHost === "localhost" ||
+              lowerHost === "127.0.0.1" ||
+              lowerHost === "0.0.0.0" ||
+              lowerHost === "[::1]" ||
+              lowerHost.endsWith(".example.com") ||
+              lowerHost === "example.com" ||
+              lowerHost.endsWith(".invalid") ||
+              lowerHost.endsWith(".local") ||
+              lowerUrl.includes("placeholder") ||
+              lowerUrl.includes("changeme") ||
+              lowerUrl.includes("todo") ||
+              lowerUrl.includes("<") ||
+              lowerUrl.includes(">")
+            ) {
+              console.error("::error::VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL must not use a placeholder, local, or invented URL.");
+              process.exit(1);
+            }
+            console.log("Validated VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL: " + parsed.origin + parsed.pathname);
+          '
       - run: npx vite build
         env:
           VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
@@ -107,6 +175,7 @@ jobs:
           VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
           VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL: ${{ vars.VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL }}
           VITE_EDITORIAL_IMAGE_PREVIEW_URL: ${{ vars.VITE_EDITORIAL_IMAGE_PREVIEW_URL }}
+          VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL: ${{ vars.VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL }}
       - uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: '${{ secrets.GITHUB_TOKEN }}'

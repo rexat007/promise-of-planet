@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   deploy_editorial_image_function:
-    name: Deploy editorialNewsImageUpload and editorialImagePreviewEndpoint
+    name: Deploy editorialNewsImageUpload, editorialImagePreviewEndpoint, and publicEditorialImageDeliveryEndpoint
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
 
@@ -79,4 +79,4 @@ jobs:
 
       - name: Deploy Editorial Image Functions to Firebase
         run: |
-          firebase deploy --project promiseofplanet-bb325 --only "functions:editorialNewsImageUpload,functions:editorialImagePreviewEndpoint" --non-interactive
+          firebase deploy --project promiseofplanet-bb325 --only "functions:editorialNewsImageUpload,functions:editorialImagePreviewEndpoint,functions:publicEditorialImageDeliveryEndpoint" --non-interactive
