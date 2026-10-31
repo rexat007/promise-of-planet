@@ -16,14 +16,23 @@ import type {
   RichNewsDocumentWrapperV2,
   EditorialImageNodeAttrsV2,
 } from '../../types/richNewsDocument';
+import type { Video } from '../../types';
 import {
+  MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE,
   NewsAdminClient,
   NewsEditorImageSessionController,
+  isArbitraryUrlOrInvalidVideoId,
+  validateRelatedVideoIdsForClient,
   type NewsImageMetadataFormInput,
   type NewsImageUploadRuntimeOverrides,
 } from '../../services/newsAdminClient';
 import type { PreparedEditorialImage } from './editor/EditorialInlineImageModal';
-import { AdminNewsManagement } from './AdminNewsManagement';
+import {
+  AdminNewsManagement,
+  attachCanonicalVideoToDraftList,
+  evaluateVideoEditorialAttachmentStatus,
+  removeCanonicalVideoFromDraftList,
+} from './AdminNewsManagement';
 
 const TEST_ADMIN: AdminUser = {
   id: 'admin-newsroom-01',
@@ -72,6 +81,30 @@ const EMPTY_V2_DOC_EN: RichNewsDocumentWrapperV2 = {
     ],
   },
 };
+
+function createTestDraftItem(overrides: Partial<NewsItem> = {}): NewsItem {
+  return {
+    id: 'news-draft-test-01',
+    titleAr: 'عنوان مسودة خبر بيئي',
+    titleEn: 'Environmental Draft News Title',
+    summaryAr: 'ملخص الخبر البيئي',
+    summaryEn: 'Environmental news summary',
+    bodyAr: 'فقرة أولى بالعربية في المقال البيئي.',
+    bodyEn: 'First English paragraph in environmental story.',
+    richBodyAr: EMPTY_V2_DOC_AR,
+    richBodyEn: EMPTY_V2_DOC_EN,
+    author: TEST_ADMIN.name,
+    category: 'Water',
+    tags: ['Sudan'],
+    sources: ['Ministry of Environment'],
+    workflowState: WorkflowState.Draft,
+    createdAt: '2026-03-20T10:00:00.000Z',
+    updatedAt: '2026-03-20T10:00:00.000Z',
+    history: [],
+    relatedVideoIds: [],
+    ...overrides,
+  };
+}
 
 describe('IMG-F3-09/D2-D2B3A — Production News Editor Image Integration', () => {
   let mockRuntime: NewsImageUploadRuntimeOverrides;
@@ -1059,4 +1092,288 @@ describe('IMG-F3-09/D2-D2B3A — Production News Editor Image Integration', () =
     expect(html).toContain('.pop-editorial-figure');
     expect(html).toContain('width: 100% !important');
   });
+
+  // 33. NEWS-VIDEO-01A: Renders Related Videos section for Draft articles with Media Library videos and clear distinction between editorial attachment and public playback eligibility
+  it('33. renders Related Videos section in Draft editor with Media Library videos, publication status, rights eligibility, and locks picker outside Draft state', () => {
+    const sampleVideos: Video[] = [
+      {
+        id: 'vid-nile-01',
+        titleAr: 'وثائقي النيل الأزرق',
+        titleEn: 'Blue Nile Documentary',
+        descriptionAr: 'توثيق بيئي',
+        descriptionEn: 'Environmental doc',
+        category: 'Water',
+        sourceType: 'External',
+        sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        youtubeVideoId: 'dQw4w9WgXcQ',
+        thumbnailUrl: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg',
+        durationSeconds: 240,
+        createdAt: '2026-03-20T10:00:00.000Z',
+        updatedAt: '2026-03-20T10:00:00.000Z',
+        status: 'Published',
+        approvalStatus: 'Approved',
+        rightsStatus: 'Cleared',
+      },
+      {
+        id: 'vid-dinder-draft-02',
+        titleAr: 'مسودة فيديو محمية الدندر',
+        titleEn: 'Dinder Reserve Draft Video',
+        descriptionAr: 'توثيق قيد المراجعة',
+        descriptionEn: 'Pending review doc',
+        category: 'Biodiversity',
+        sourceType: 'External',
+        sourceUrl: 'https://www.youtube.com/watch?v=abc12345678',
+        youtubeVideoId: 'abc12345678',
+        thumbnailUrl: 'https://i.ytimg.com/vi/abc12345678/hqdefault.jpg',
+        durationSeconds: 195,
+        createdAt: '2026-03-21T10:00:00.000Z',
+        updatedAt: '2026-03-21T10:00:00.000Z',
+        status: 'Draft',
+        approvalStatus: 'PendingReview',
+        rightsStatus: 'NotStarted',
+      },
+    ];
+
+    const draftItem = createTestDraftItem({
+      relatedVideoIds: ['vid-nile-01', 'vid-dinder-draft-02'],
+    });
+
+    const draftHtml = renderToStaticMarkup(
+      React.createElement(AdminNewsManagement, {
+        currentUser: TEST_ADMIN,
+        initialActiveItem: draftItem,
+        initialMediaVideos: sampleVideos,
+      })
+    );
+
+    expect(draftHtml).toContain('data-testid="news-related-videos-section"');
+    expect(draftHtml).toContain('data-testid="news-attached-videos-list"');
+    expect(draftHtml).toContain('data-testid="news-attached-video-item-vid-nile-01"');
+    expect(draftHtml).toContain('data-testid="news-attached-video-item-vid-dinder-draft-02"');
+    expect(draftHtml).toContain('data-testid="news-remove-related-video-btn-vid-nile-01"');
+    expect(draftHtml).toContain('data-testid="news-available-videos-list"');
+    expect(draftHtml).toContain('data-testid="news-related-video-search-input"');
+
+    // Verify evaluation helper distinguishes editorial attachment vs public playback eligibility
+    const evalPublished = evaluateVideoEditorialAttachmentStatus(sampleVideos[0]);
+    expect(evalPublished.isPubliclyPlayable).toBe(true);
+    const evalDraft = evaluateVideoEditorialAttachmentStatus(sampleVideos[1]);
+    expect(evalDraft.isPubliclyPlayable).toBe(false);
+
+    // When article is Published, picker is locked and remove buttons are hidden
+    const publishedItem = createTestDraftItem({
+      workflowState: WorkflowState.Published,
+      relatedVideoIds: ['vid-nile-01'],
+    });
+    const publishedHtml = renderToStaticMarkup(
+      React.createElement(AdminNewsManagement, {
+        currentUser: TEST_ADMIN,
+        initialActiveItem: publishedItem,
+        initialMediaVideos: sampleVideos,
+      })
+    );
+    expect(publishedHtml).toContain('data-testid="news-related-videos-locked-notice"');
+    expect(publishedHtml).not.toContain('data-testid="news-remove-related-video-btn-vid-nile-01"');
+    expect(publishedHtml).not.toContain('data-testid="news-related-video-search-input"');
+  });
+
+  // 34. NEWS-VIDEO-01A: Enforces canonical video attachment rules, prevents duplicates, rejects arbitrary YouTube URLs, and enforces max 5 limit
+  it('34. validates canonical video attachment, rejects arbitrary YouTube URLs, prevents duplicate selection, and enforces max 5 videos', () => {
+    const libraryVideos: Pick<Video, 'id'>[] = [
+      { id: 'vid-01' },
+      { id: 'vid-02' },
+      { id: 'vid-03' },
+      { id: 'vid-04' },
+      { id: 'vid-05' },
+      { id: 'vid-06' },
+    ];
+
+    // 1. Attach valid canonical video
+    const r1 = attachCanonicalVideoToDraftList([], 'vid-01', libraryVideos, false);
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    expect(r1.relatedVideoIds).toEqual(['vid-01']);
+
+    // 2. Prevent duplicate selection
+    const dup = attachCanonicalVideoToDraftList(r1.relatedVideoIds, 'vid-01', libraryVideos, false);
+    expect(dup.ok).toBe(false);
+    if (!dup.ok) {
+      expect(dup.reasonCode).toBe('DUPLICATE_VIDEO');
+    }
+
+    // 3. Reject arbitrary YouTube URLs
+    expect(isArbitraryUrlOrInvalidVideoId('https://www.youtube.com/watch?v=dQw4w9WgXcQ')).toBe(true);
+    expect(isArbitraryUrlOrInvalidVideoId('https://youtu.be/dQw4w9WgXcQ')).toBe(true);
+    const urlAttempt = attachCanonicalVideoToDraftList(
+      r1.relatedVideoIds,
+      'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      libraryVideos,
+      false
+    );
+    expect(urlAttempt.ok).toBe(false);
+    if (!urlAttempt.ok) {
+      expect(urlAttempt.reasonCode).toBe('INVALID_VIDEO_ID_OR_URL');
+    }
+
+    // 4. Reject video not in Media Library
+    const unknownAttempt = attachCanonicalVideoToDraftList(
+      r1.relatedVideoIds,
+      'vid-nonexistent-99',
+      libraryVideos,
+      false
+    );
+    expect(unknownAttempt.ok).toBe(false);
+    if (!unknownAttempt.ok) {
+      expect(unknownAttempt.reasonCode).toBe('VIDEO_NOT_IN_MEDIA_LIBRARY');
+    }
+
+    // 5. Enforce max 5 videos limit
+    const fiveIds = ['vid-01', 'vid-02', 'vid-03', 'vid-04', 'vid-05'];
+    expect(fiveIds).toHaveLength(MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE);
+    const sixthAttempt = attachCanonicalVideoToDraftList(
+      fiveIds,
+      'vid-06',
+      libraryVideos,
+      false
+    );
+    expect(sixthAttempt.ok).toBe(false);
+    if (!sixthAttempt.ok) {
+      expect(sixthAttempt.reasonCode).toBe('MAX_LIMIT_EXCEEDED');
+    }
+
+    // 6. Remove attached video
+    const afterRemove = removeCanonicalVideoFromDraftList(fiveIds, 'vid-03');
+    expect(afterRemove).toEqual(['vid-01', 'vid-02', 'vid-04', 'vid-05']);
+  });
+
+  // 35. NEWS-VIDEO-01A: End-to-end client save, reload via getById, reopen draft with attached videos, and persistent removal
+  it('35. persists relatedVideoIds through executeSaveWorkflow, reloads via NewsAdminClient.getById, and persists video removal on draft update', async () => {
+    const storedArticles = new Map<string, NewsItem>();
+
+    const transportSpy = vi.fn(async (action: string, payload?: any) => {
+      if (action === 'saveDraft') {
+        const incoming = payload.item;
+        const id = incoming.id || 'news-server-video-draft-01';
+        const saved: NewsItem = {
+          id,
+          titleAr: incoming.titleAr,
+          titleEn: incoming.titleEn || '',
+          summaryAr: incoming.summaryAr || '',
+          summaryEn: incoming.summaryEn || '',
+          bodyAr: incoming.bodyAr || '',
+          bodyEn: incoming.bodyEn || '',
+          richBodyAr: incoming.richBodyAr,
+          richBodyEn: incoming.richBodyEn,
+          author: incoming.author || TEST_ADMIN.name,
+          category: incoming.category,
+          tags: incoming.tags || [],
+          sources: incoming.sources || [],
+          workflowState: WorkflowState.Draft,
+          createdAt: '2026-03-25T10:00:00.000Z',
+          updatedAt: '2026-03-25T10:05:00.000Z',
+          history: [],
+          relatedVideoIds: Array.isArray(incoming.relatedVideoIds)
+            ? [...incoming.relatedVideoIds]
+            : [],
+        };
+        storedArticles.set(id, saved);
+        return { item: saved };
+      }
+      if (action === 'getById') {
+        return { item: storedArticles.get(payload.id) ?? null };
+      }
+      throw new Error(`Unexpected action: ${action}`);
+    });
+
+    NewsAdminClient.setTransport(transportSpy);
+    const controller = new NewsEditorImageSessionController();
+
+    // 1. Create a new draft with 2 attached canonical video IDs
+    const initialDraft = createTestDraftItem({
+      id: 'news-sudan-provisional-999',
+      relatedVideoIds: ['vid-nile-01', 'vid-dinder-draft-02'],
+    });
+
+    const createOutcome = await controller.executeSaveWorkflow({
+      isDraft: true,
+      isCreating: true,
+      activeItem: initialDraft,
+      editForm: {
+        ...initialDraft,
+        relatedVideoIds: ['vid-nile-01', 'vid-dinder-draft-02'],
+        bodyArHasEdited: true,
+        bodyEnHasEdited: true,
+      },
+      tagsInput: 'السودان, المياه',
+      sourcesInput: 'وزارة الري',
+      currentUser: TEST_ADMIN,
+      isAr: true,
+    });
+
+    expect(createOutcome.ok).toBe(true);
+    if (!createOutcome.ok) return;
+    expect(createOutcome.savedItem.relatedVideoIds).toEqual([
+      'vid-nile-01',
+      'vid-dinder-draft-02',
+    ]);
+
+    // 2. Reload from server via NewsAdminClient.getById (as handleSaveForm does)
+    const reloaded = await NewsAdminClient.getById(createOutcome.savedItem.id);
+    expect(reloaded).not.toBeNull();
+    expect(reloaded!.relatedVideoIds).toEqual(['vid-nile-01', 'vid-dinder-draft-02']);
+
+    // 3. Remove 'vid-nile-01' and save updated draft
+    const remainingIds = removeCanonicalVideoFromDraftList(
+      reloaded!.relatedVideoIds,
+      'vid-nile-01'
+    );
+    expect(remainingIds).toEqual(['vid-dinder-draft-02']);
+
+    const updateOutcome = await controller.executeSaveWorkflow({
+      isDraft: true,
+      isCreating: false,
+      activeItem: reloaded!,
+      editForm: {
+        ...reloaded!,
+        relatedVideoIds: remainingIds,
+        bodyArHasEdited: false,
+        bodyEnHasEdited: false,
+      },
+      tagsInput: 'السودان, المياه',
+      sourcesInput: 'وزارة الري',
+      currentUser: TEST_ADMIN,
+      isAr: true,
+    });
+
+    expect(updateOutcome.ok).toBe(true);
+    if (!updateOutcome.ok) return;
+    expect(updateOutcome.savedItem.relatedVideoIds).toEqual(['vid-dinder-draft-02']);
+
+    const reloadedAfterRemove = await NewsAdminClient.getById(createOutcome.savedItem.id);
+    expect(reloadedAfterRemove!.relatedVideoIds).toEqual(['vid-dinder-draft-02']);
+
+    // 4. Reject arbitrary YouTube URL in executeSaveWorkflow before any network call
+    const callCountBeforeInvalid = transportSpy.mock.calls.length;
+    const invalidUrlOutcome = await controller.executeSaveWorkflow({
+      isDraft: true,
+      isCreating: false,
+      activeItem: reloadedAfterRemove!,
+      editForm: {
+        ...reloadedAfterRemove!,
+        relatedVideoIds: ['https://www.youtube.com/watch?v=dQw4w9WgXcQ'],
+      },
+      tagsInput: '',
+      sourcesInput: '',
+      currentUser: TEST_ADMIN,
+      isAr: false,
+    });
+    expect(invalidUrlOutcome.ok).toBe(false);
+    if (!invalidUrlOutcome.ok) {
+      expect(invalidUrlOutcome.reasonCode).toBe('VALIDATION_FAILED');
+      expect(invalidUrlOutcome.errorMessage).toContain('INVALID_RELATED_VIDEO_ID');
+    }
+    expect(transportSpy.mock.calls.length).toBe(callCountBeforeInvalid);
+    expect(validateRelatedVideoIdsForClient(['vid-ok-1', 'vid-ok-1'], false).valid).toBe(false);
+  });
 });
+

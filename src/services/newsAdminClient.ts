@@ -550,6 +550,89 @@ export function isForbiddenFeaturedImagePersistenceValue(value: unknown): boolea
   );
 }
 
+export const MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE = 5 as const;
+
+const FORBIDDEN_RELATED_VIDEO_ID_PATTERNS: readonly RegExp[] = [
+  /^https?:\/\//i,
+  /^\/\//,
+  /youtube\.com/i,
+  /youtu\.be/i,
+  /[/?#&=\s]/,
+];
+
+export function isArbitraryUrlOrInvalidVideoId(value: unknown): boolean {
+  if (typeof value !== 'string') {
+    return true;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 128 || trimmed !== value) {
+    return true;
+  }
+  return FORBIDDEN_RELATED_VIDEO_ID_PATTERNS.some((pattern) =>
+    pattern.test(trimmed)
+  );
+}
+
+export function validateRelatedVideoIdsForClient(
+  rawIds: unknown,
+  isAr: boolean = true
+): {
+  readonly valid: boolean;
+  readonly normalizedIds: string[];
+  readonly errorMessage?: string;
+} {
+  if (rawIds === undefined) {
+    return { valid: true, normalizedIds: [] };
+  }
+  if (!Array.isArray(rawIds)) {
+    return {
+      valid: false,
+      normalizedIds: [],
+      errorMessage: isAr
+        ? 'INVALID_RELATED_VIDEO_IDS: قائمة الفيديوهات المرتبطة بالخبر يجب أن تكون مصفوفة صالحة.'
+        : 'INVALID_RELATED_VIDEO_IDS: relatedVideoIds must be an array of canonical video IDs.',
+    };
+  }
+  if (rawIds.length > MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE) {
+    return {
+      valid: false,
+      normalizedIds: [],
+      errorMessage: isAr
+        ? `MAX_RELATED_VIDEOS_EXCEEDED: لا يمكن ربط أكثر من ${MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE} فيديوهات بالخبر الواحد.`
+        : `MAX_RELATED_VIDEOS_EXCEEDED: Cannot attach more than ${MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE} videos to a single news article.`,
+    };
+  }
+
+  const seen = new Set<string>();
+  const normalizedIds: string[] = [];
+
+  for (const entry of rawIds) {
+    if (isArbitraryUrlOrInvalidVideoId(entry)) {
+      return {
+        valid: false,
+        normalizedIds: [],
+        errorMessage: isAr
+          ? 'INVALID_RELATED_VIDEO_ID: يُسمح فقط بمعرفات الفيديوهات المعتمدة من مكتبة الوسائط ولا يُسمح بإدخال روابط يوتيوب مباشرة.'
+          : 'INVALID_RELATED_VIDEO_ID: Only canonical video IDs from the Media Library are permitted; arbitrary URLs or malformed IDs are rejected.',
+      };
+    }
+    const id = (entry as string).trim();
+    if (seen.has(id)) {
+      return {
+        valid: false,
+        normalizedIds: [],
+        errorMessage: isAr
+          ? `DUPLICATE_RELATED_VIDEO_ID: الفيديو (${id}) مرتبط بالمسودة بالفعل.`
+          : `DUPLICATE_RELATED_VIDEO_ID: Duplicate video ID "${id}" is not allowed in relatedVideoIds.`,
+      };
+    }
+    seen.add(id);
+    normalizedIds.push(id);
+  }
+
+  return { valid: true, normalizedIds };
+}
+
 export function validateRetainedCompletedUpload(
   retained: unknown,
   expectedFile: NewsImageBinaryFileLike,
@@ -1456,6 +1539,18 @@ export class NewsAdminClient {
       );
     }
 
+    let validatedRelatedVideoIds: string[] | undefined;
+    if ('relatedVideoIds' in item && item.relatedVideoIds !== undefined) {
+      const videoCheck = validateRelatedVideoIdsForClient(item.relatedVideoIds, false);
+      if (!videoCheck.valid) {
+        throw new Error(
+          videoCheck.errorMessage ||
+            'INVALID_RELATED_VIDEO_IDS: relatedVideoIds validation failed.'
+        );
+      }
+      validatedRelatedVideoIds = [...videoCheck.normalizedIds];
+    }
+
     const payload: Record<string, any> = {};
 
     if (item.titleAr !== undefined) payload.titleAr = item.titleAr.trim();
@@ -1475,7 +1570,9 @@ export class NewsAdminClient {
     if (item.featuredImage !== undefined) payload.featuredImage = item.featuredImage;
     if (item.location !== undefined) payload.location = item.location;
     if (item.urgencyLevel !== undefined) payload.urgencyLevel = item.urgencyLevel;
-    if (item.relatedVideoIds !== undefined) payload.relatedVideoIds = item.relatedVideoIds;
+    if (validatedRelatedVideoIds !== undefined) {
+      payload.relatedVideoIds = validatedRelatedVideoIds;
+    }
     if (item.author !== undefined) payload.author = item.author;
 
     if (isNew) {
@@ -4301,6 +4398,32 @@ export class NewsEditorImageSessionController {
       };
     }
 
+    if (
+      'relatedVideoIds' in input.editForm &&
+      input.editForm.relatedVideoIds !== undefined
+    ) {
+      const relatedVideosCheck = validateRelatedVideoIdsForClient(
+        input.editForm.relatedVideoIds,
+        isAr
+      );
+      if (!relatedVideosCheck.valid) {
+        return {
+          ok: false,
+          reasonCode: 'VALIDATION_FAILED',
+          errorMessage:
+            relatedVideosCheck.errorMessage ||
+            (isAr
+              ? 'قائمة الفيديوهات المرتبطة بالخبر غير صالحة.'
+              : 'Invalid relatedVideoIds in draft form.'),
+          retainedCompletedUpload: this.retainedCompletedUpload,
+          haltedAmbiguousUpload: this.haltedAmbiguousUpload,
+          retainedCompletedInlineUploads: this.getRetainedCompletedInlineUploads(),
+          haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
+          haltedInlineUploads: this.getHaltedInlineUploads(),
+        };
+      }
+    }
+
     // Resolve effective rich documents for Arabic and English bodies
     const arWasEdited =
       input.isCreating ||
@@ -4792,6 +4915,9 @@ export class NewsEditorImageSessionController {
           ...(resolvedFeaturedImage !== undefined
             ? { featuredImage: resolvedFeaturedImage }
             : {}),
+          ...(input.editForm.relatedVideoIds !== undefined
+            ? { relatedVideoIds: [...input.editForm.relatedVideoIds] }
+            : {}),
           workflowState: WorkflowState.Draft,
           richBodyAr: effectiveRichBodyAr,
           richBodyEn: effectiveRichBodyEn,
@@ -4805,6 +4931,12 @@ export class NewsEditorImageSessionController {
           true
         );
       } else if (input.activeItem) {
+        const effectiveRelatedVideoIds =
+          input.editForm.relatedVideoIds !== undefined
+            ? [...input.editForm.relatedVideoIds]
+            : Array.isArray(input.activeItem.relatedVideoIds)
+              ? [...input.activeItem.relatedVideoIds]
+              : undefined;
         const itemToSave: Partial<NewsItem> = {
           ...(input.editForm as NewsItem),
           id: input.activeItem.id,
@@ -4812,6 +4944,9 @@ export class NewsEditorImageSessionController {
           sources: parsedSources,
           ...(resolvedFeaturedImage !== undefined
             ? { featuredImage: resolvedFeaturedImage }
+            : {}),
+          ...(effectiveRelatedVideoIds !== undefined
+            ? { relatedVideoIds: effectiveRelatedVideoIds }
             : {}),
           richBodyAr: effectiveRichBodyAr,
           richBodyEn: effectiveRichBodyEn,

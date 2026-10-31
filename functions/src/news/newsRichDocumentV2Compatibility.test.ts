@@ -26,6 +26,8 @@ import type {
 } from '../types/richNewsDocument';
 import type { NewsItemBackend, NewsRepository } from './newsRepository';
 import { InMemoryEditorialImageAssetRepository } from './inMemoryEditorialImageAssetRepository';
+import { InMemoryMediaRepository } from '../media/inMemoryMediaRepository';
+import type { Video } from '../shared/contentContract';
 import { NewsApplicationService, type ActorContext } from './newsApplicationService';
 import { PublicNewsRepository } from './publicNewsRepository';
 import { MAX_WORKFLOW_COMMENT_LENGTH } from './newsValidator';
@@ -97,9 +99,35 @@ class InMemoryTestNewsRepository implements NewsRepository {
   }
 }
 
+function createCanonicalTestMediaVideo(
+  id: string,
+  overrides: Partial<Video> = {}
+): Video {
+  return {
+    id,
+    titleAr: `فيديو وثائقي (${id})`,
+    titleEn: `Documentary Video (${id})`,
+    descriptionAr: 'توثيق ميداني للتنوع الحيوي في السودان.',
+    descriptionEn: 'Field documentation of biodiversity in Sudan.',
+    category: 'Biodiversity',
+    sourceType: 'External',
+    sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    youtubeVideoId: 'dQw4w9WgXcQ',
+    thumbnailUrl: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg',
+    durationSeconds: 180,
+    createdAt: '2026-03-20T10:00:00.000Z',
+    updatedAt: '2026-03-20T10:00:00.000Z',
+    status: 'Published',
+    approvalStatus: 'Approved',
+    rightsStatus: 'Approved',
+    ...overrides,
+  };
+}
+
 describe('IMG-F3-09/D1-A — V1/V2 Rich News Validation & Plain-Text Compatibility', () => {
   let repo: InMemoryTestNewsRepository;
   let assetRepo: InMemoryEditorialImageAssetRepository;
+  let mediaRepo: InMemoryMediaRepository;
   let service: NewsApplicationService;
 
   const editorActor: ActorContext = {
@@ -244,13 +272,16 @@ describe('IMG-F3-09/D1-A — V1/V2 Rich News Validation & Plain-Text Compatibili
   beforeEach(async () => {
     repo = new InMemoryTestNewsRepository();
     assetRepo = new InMemoryEditorialImageAssetRepository();
+    mediaRepo = new InMemoryMediaRepository();
+    await mediaRepo.createVideo(createCanonicalTestMediaVideo('vid-sennar-01'));
+    await mediaRepo.createVideo(createCanonicalTestMediaVideo('vid-sennar-02'));
     await assetRepo.createIfAbsent(
       createCanonicalTestAsset('asset_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c')
     );
     await assetRepo.createIfAbsent(
       createCanonicalTestAsset('asset_abcdef0123456789abcdef0123456789')
     );
-    service = new NewsApplicationService(repo, assetRepo);
+    service = new NewsApplicationService(repo, assetRepo, mediaRepo);
   });
 
   describe('1. Validator & Plain-Text Extraction Contract', () => {
@@ -1283,4 +1314,203 @@ describe('IMG-F3-09/D1-A — V1/V2 Rich News Validation & Plain-Text Compatibili
       ]);
     });
   });
+
+  describe('7. NEWS-VIDEO-01A — Server-Authoritative Editorial Video Attachment for Drafts', () => {
+    it('attaches existing canonical Media Library videos (including Draft/PendingReview videos) to a Draft article, persists relatedVideoIds, reloads via getById, and supports removal on updateDraft', async () => {
+      // Seed a canonical video that is not yet publicly playable (Draft / PendingReview / NotStarted rights)
+      const draftMediaVideo = createCanonicalTestMediaVideo('vid-blue-nile-draft-03', {
+        status: 'Draft',
+        approvalStatus: 'PendingReview',
+        rightsStatus: 'NotStarted',
+      });
+      await mediaRepo.createVideo(draftMediaVideo);
+
+      const created = await service.createDraft(
+        {
+          titleAr: 'تقرير حول الموارد المائية في النيل الأزرق',
+          titleEn: 'Report on Water Resources in the Blue Nile',
+          summaryAr: 'ملخص التقرير المائي.',
+          summaryEn: 'Water report summary.',
+          bodyAr: 'نص التقرير بالعربية.',
+          bodyEn: 'Report body in English.',
+          category: 'Water',
+          relatedVideoIds: ['vid-sennar-01', 'vid-blue-nile-draft-03'],
+        },
+        editorActor
+      );
+
+      expect(created.workflowState).toBe('Draft');
+      expect(created.relatedVideoIds).toEqual(['vid-sennar-01', 'vid-blue-nile-draft-03']);
+
+      // Reload from repository via getById
+      const reloaded = await service.getById(created.id);
+      expect(reloaded).not.toBeNull();
+      expect(reloaded!.relatedVideoIds).toEqual(['vid-sennar-01', 'vid-blue-nile-draft-03']);
+
+      // Remove one video and keep the other on updateDraft
+      const updated = await service.updateDraft(
+        created.id,
+        {
+          relatedVideoIds: ['vid-blue-nile-draft-03'],
+        },
+        editorActor
+      );
+      expect(updated.relatedVideoIds).toEqual(['vid-blue-nile-draft-03']);
+
+      const reloadedAfterRemove = await service.getById(created.id);
+      expect(reloadedAfterRemove!.relatedVideoIds).toEqual(['vid-blue-nile-draft-03']);
+
+      // Clear all attached videos
+      const cleared = await service.updateDraft(
+        created.id,
+        {
+          relatedVideoIds: [],
+        },
+        editorActor
+      );
+      expect(cleared.relatedVideoIds).toEqual([]);
+    });
+
+    it('rejects non-array relatedVideoIds, empty/whitespace IDs, arbitrary YouTube URLs, duplicate IDs, nonexistent Media Library video IDs, and > 5 videos on createDraft and updateDraft', async () => {
+      for (let i = 1; i <= 6; i++) {
+        await mediaRepo.createVideo(createCanonicalTestMediaVideo(`vid-extra-0${i}`));
+      }
+
+      const baseDraftInput = {
+        titleAr: 'خبر تجريبي للتحقق من الفيديوهات المرتبطة',
+        titleEn: 'Test draft for related videos validation',
+        summaryAr: 'ملخص',
+        summaryEn: 'Summary',
+        bodyAr: 'محتوى الخبر',
+        bodyEn: 'Article body',
+        category: 'Climate',
+      };
+
+      // 1. Non-array relatedVideoIds
+      await expect(
+        service.createDraft(
+          {
+            ...baseDraftInput,
+            relatedVideoIds: 'vid-sennar-01' as unknown as string[],
+          },
+          editorActor
+        )
+      ).rejects.toThrow(/INVALID_RELATED_VIDEO_IDS/);
+
+      // 2. Empty or whitespace video ID
+      await expect(
+        service.createDraft(
+          {
+            ...baseDraftInput,
+            relatedVideoIds: ['   '],
+          },
+          editorActor
+        )
+      ).rejects.toThrow(/INVALID_RELATED_VIDEO_ID/);
+
+      // 3. Arbitrary YouTube URL instead of canonical video ID
+      await expect(
+        service.createDraft(
+          {
+            ...baseDraftInput,
+            relatedVideoIds: ['https://www.youtube.com/watch?v=dQw4w9WgXcQ'],
+          },
+          editorActor
+        )
+      ).rejects.toThrow(/INVALID_RELATED_VIDEO_ID/);
+
+      await expect(
+        service.createDraft(
+          {
+            ...baseDraftInput,
+            relatedVideoIds: ['youtu.be/dQw4w9WgXcQ'],
+          },
+          editorActor
+        )
+      ).rejects.toThrow(/INVALID_RELATED_VIDEO_ID/);
+
+      // 4. Duplicate video IDs
+      await expect(
+        service.createDraft(
+          {
+            ...baseDraftInput,
+            relatedVideoIds: ['vid-sennar-01', 'vid-sennar-01'],
+          },
+          editorActor
+        )
+      ).rejects.toThrow(/DUPLICATE_RELATED_VIDEO_ID/);
+
+      // 5. Nonexistent / unresolvable video ID in MediaRepository
+      await expect(
+        service.createDraft(
+          {
+            ...baseDraftInput,
+            relatedVideoIds: ['vid-sennar-01', 'vid-does-not-exist-999'],
+          },
+          editorActor
+        )
+      ).rejects.toThrow(/RELATED_VIDEO_NOT_FOUND.*vid-does-not-exist-999/);
+
+      // 6. More than 5 videos
+      await expect(
+        service.createDraft(
+          {
+            ...baseDraftInput,
+            relatedVideoIds: [
+              'vid-extra-01',
+              'vid-extra-02',
+              'vid-extra-03',
+              'vid-extra-04',
+              'vid-extra-05',
+              'vid-extra-06',
+            ],
+          },
+          editorActor
+        )
+      ).rejects.toThrow(/RELATED_VIDEOS_LIMIT_EXCEEDED/);
+
+      // Valid draft creation with 5 videos succeeds
+      const validDraft = await service.createDraft(
+        {
+          ...baseDraftInput,
+          relatedVideoIds: [
+            'vid-extra-01',
+            'vid-extra-02',
+            'vid-extra-03',
+            'vid-extra-04',
+            'vid-extra-05',
+          ],
+        },
+        editorActor
+      );
+      expect(validDraft.relatedVideoIds).toHaveLength(5);
+
+      // Verify updateDraft also enforces nonexistent ID, URL, duplicate, and > 5 checks without mutating stored record
+      await expect(
+        service.updateDraft(
+          validDraft.id,
+          { relatedVideoIds: ['https://youtu.be/abc12345678'] },
+          editorActor
+        )
+      ).rejects.toThrow(/INVALID_RELATED_VIDEO_ID/);
+
+      await expect(
+        service.updateDraft(
+          validDraft.id,
+          { relatedVideoIds: ['vid-missing-id'] },
+          editorActor
+        )
+      ).rejects.toThrow(/RELATED_VIDEO_NOT_FOUND.*vid-missing-id/);
+
+      const unchanged = await service.getById(validDraft.id);
+      expect(unchanged!.relatedVideoIds).toEqual([
+        'vid-extra-01',
+        'vid-extra-02',
+        'vid-extra-03',
+        'vid-extra-04',
+        'vid-extra-05',
+      ]);
+    });
+  });
 });
+

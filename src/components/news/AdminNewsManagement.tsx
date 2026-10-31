@@ -3,7 +3,7 @@ import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NewsItem } from '../../types/news';
 import { CANONICAL_CATEGORY_DEFINITIONS, isCanonicalCategory } from '../../types';
-import type { JournalisticType } from '../../types';
+import type { JournalisticType, Video } from '../../types';
 import { WorkflowState, WorkflowAction } from '../../types/workflow';
 import { MAX_WORKFLOW_COMMENT_LENGTH } from '../../../functions/src/shared/workflowContract';
 import type { WorkflowTransitionConfig } from '../../types/workflow';
@@ -11,9 +11,13 @@ import type { AdminUser } from '../../types/admin';
 import { WorkflowEngine } from '../../services/workflowEngine';
 import { AdminAccessService } from '../../services/adminAccess';
 import { AdminPermission } from '../../types/admin';
+import { MediaAdminClient } from '../../services/mediaAdminClient';
 import {
+  MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE,
   NewsAdminClient,
   NewsEditorImageSessionController,
+  isArbitraryUrlOrInvalidVideoId,
+  validateRelatedVideoIdsForClient,
   type HaltedAmbiguousImageUpload,
   type NewsImageBinaryFileLike,
   type NewsImageMetadataFormInput,
@@ -59,10 +63,165 @@ import {
   AlertCircle,
   Image as ImageIcon,
   Trash2,
-  Crop
+  Crop,
+  Video as VideoIcon
 } from 'lucide-react';
 
+export { MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE };
 export const MAX_NEWS_TRANSITION_COMMENT_LENGTH = MAX_WORKFLOW_COMMENT_LENGTH;
+
+export interface VideoEditorialAttachmentEvaluation {
+  readonly isPubliclyPlayable: boolean;
+  readonly publicationStatus: string;
+  readonly approvalStatus: string;
+  readonly rightsStatus: string;
+  readonly editorialAssociationLabelAr: string;
+  readonly editorialAssociationLabelEn: string;
+  readonly publicEligibilityLabelAr: string;
+  readonly publicEligibilityLabelEn: string;
+}
+
+/**
+ * Evaluates a canonical Media Library video's status for editorial draft attachment,
+ * clearly distinguishing between editorial association with the draft and public playback eligibility.
+ */
+export function evaluateVideoEditorialAttachmentStatus(
+  video: Pick<Video, 'status' | 'approvalStatus' | 'rightsStatus'>
+): VideoEditorialAttachmentEvaluation {
+  const publicationStatus = video.status || 'Draft';
+  const approvalStatus = video.approvalStatus || 'Draft';
+  const rightsStatus = video.rightsStatus || 'NotStarted';
+
+  const isPubliclyPlayable =
+    publicationStatus === 'Published' &&
+    approvalStatus === 'Approved' &&
+    (rightsStatus === 'Cleared' || (rightsStatus as string) === 'Approved');
+
+  return {
+    isPubliclyPlayable,
+    publicationStatus,
+    approvalStatus,
+    rightsStatus,
+    editorialAssociationLabelAr: 'مرتبط تحريرياً بالمسودة',
+    editorialAssociationLabelEn: 'Editorially attached to draft',
+    publicEligibilityLabelAr: isPubliclyPlayable
+      ? 'مؤهل للعرض العام (منشور ومعتمد الحقوق)'
+      : 'محجوب عن العرض العام حتى استكمال النشر واعتماد الحقوق',
+    publicEligibilityLabelEn: isPubliclyPlayable
+      ? 'Eligible for public playback (Published & Rights Approved)'
+      : 'Withheld from public playback until published and rights-approved',
+  };
+}
+
+export type AttachCanonicalVideoResult =
+  | {
+      readonly ok: true;
+      readonly relatedVideoIds: string[];
+    }
+  | {
+      readonly ok: false;
+      readonly reasonCode:
+        | 'INVALID_VIDEO_ID_OR_URL'
+        | 'DUPLICATE_VIDEO'
+        | 'MAX_LIMIT_EXCEEDED'
+        | 'VIDEO_NOT_IN_MEDIA_LIBRARY';
+      readonly errorMessage: string;
+    };
+
+/**
+ * Attaches a canonical video from the Media Library to a draft's `relatedVideoIds` list.
+ * Rejects arbitrary YouTube URLs, malformed IDs, duplicates, > 5 videos, and IDs missing from the Media Library.
+ */
+export function attachCanonicalVideoToDraftList(
+  currentIds: readonly string[] | undefined,
+  candidateInput: string | Pick<Video, 'id'>,
+  availableVideos?: readonly Pick<Video, 'id'>[],
+  isAr: boolean = true
+): AttachCanonicalVideoResult {
+  const baseList = Array.isArray(currentIds) ? [...currentIds] : [];
+  const rawCandidateId =
+    typeof candidateInput === 'string'
+      ? candidateInput
+      : candidateInput && typeof candidateInput.id === 'string'
+        ? candidateInput.id
+        : '';
+
+  if (isArbitraryUrlOrInvalidVideoId(rawCandidateId)) {
+    return {
+      ok: false,
+      reasonCode: 'INVALID_VIDEO_ID_OR_URL',
+      errorMessage: isAr
+        ? 'لا يُسمح بإدخال روابط يوتيوب مباشرة في محرر الأخبار؛ يرجى اختيار فيديو موجود من مكتبة الوسائط.'
+        : 'Pasting arbitrary YouTube URLs is not allowed in the news editor; please select an existing video from the Media Library.',
+    };
+  }
+
+  const candidateId = rawCandidateId.trim();
+
+  if (baseList.includes(candidateId)) {
+    return {
+      ok: false,
+      reasonCode: 'DUPLICATE_VIDEO',
+      errorMessage: isAr
+        ? 'هذا الفيديو مرتبط بمسودة الخبر بالفعل.'
+        : 'This video is already attached to the draft article.',
+    };
+  }
+
+  if (baseList.length >= MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE) {
+    return {
+      ok: false,
+      reasonCode: 'MAX_LIMIT_EXCEEDED',
+      errorMessage: isAr
+        ? `لا يمكن ربط أكثر من ${MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE} فيديوهات بالخبر الواحد.`
+        : `Cannot attach more than ${MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE} videos to a single news article.`,
+    };
+  }
+
+  if (
+    Array.isArray(availableVideos) &&
+    !availableVideos.some((video) => video.id === candidateId)
+  ) {
+    return {
+      ok: false,
+      reasonCode: 'VIDEO_NOT_IN_MEDIA_LIBRARY',
+      errorMessage: isAr
+        ? 'الفيديو المختار غير موجود في مكتبة الوسائط المعتمدة.'
+        : 'Selected video does not exist in the canonical Media Library.',
+    };
+  }
+
+  const nextList = [...baseList, candidateId];
+  const check = validateRelatedVideoIdsForClient(nextList, isAr);
+  if (!check.valid) {
+    return {
+      ok: false,
+      reasonCode: 'INVALID_VIDEO_ID_OR_URL',
+      errorMessage:
+        check.errorMessage ||
+        (isAr ? 'معرّف الفيديو غير صالح.' : 'Invalid canonical video ID.'),
+    };
+  }
+
+  return {
+    ok: true,
+    relatedVideoIds: check.normalizedIds,
+  };
+}
+
+/**
+ * Removes an attached video ID from a draft's `relatedVideoIds` list.
+ */
+export function removeCanonicalVideoFromDraftList(
+  currentIds: readonly string[] | undefined,
+  videoIdToRemove: string
+): string[] {
+  if (!Array.isArray(currentIds)) {
+    return [];
+  }
+  const target = typeof videoIdToRemove === 'string' ? videoIdToRemove.trim() : '';
+  return currentIds.filter((id) => id !== target);
+}
 
 const JOURNALISTIC_TYPE_OPTIONS: readonly { value: JournalisticType; labelAr: string; labelEn: string }[] = [
   { value: 'News', labelAr: 'خبر', labelEn: 'News' },
@@ -201,6 +360,7 @@ interface AdminNewsManagementProps {
   initialIsCreating?: boolean;
   initialActiveTab?: 'content' | 'workflow';
   initialPendingTransition?: WorkflowTransitionConfig | null;
+  initialMediaVideos?: Video[];
 }
 
 const INITIAL_IMAGE_METADATA: NewsImageMetadataFormInput = {
@@ -218,6 +378,7 @@ export function AdminNewsManagement({
   initialIsCreating = false,
   initialActiveTab = 'content',
   initialPendingTransition = null,
+  initialMediaVideos = [],
 }: AdminNewsManagementProps) {
   const { i18n } = useTranslation();
   const isAr = i18n.language === 'ar';
@@ -227,6 +388,13 @@ export function AdminNewsManagement({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<string>('All');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
+
+  // Media Library videos state for editorial video attachment (NEWS-VIDEO-01A)
+  const [mediaVideos, setMediaVideos] = useState<Video[]>(initialMediaVideos);
+  const [isLoadingMediaVideos, setIsLoadingMediaVideos] = useState(false);
+  const [mediaVideosLoadError, setMediaVideosLoadError] = useState<string | null>(null);
+  const [videoSearchQuery, setVideoSearchQuery] = useState('');
+  const [videoAttachmentFeedback, setVideoAttachmentFeedback] = useState<string | null>(null);
 
   // Featured image session controller & UI state
   const imageSessionRef = useRef<NewsEditorImageSessionController>(
@@ -357,6 +525,7 @@ export function AdminNewsManagement({
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         history: [],
+        relatedVideoIds: [],
       };
     }
     return null;
@@ -450,6 +619,7 @@ export function AdminNewsManagement({
         tags: [],
         sources: [],
         workflowState: WorkflowState.Draft,
+        relatedVideoIds: [],
         bodyArHasEdited: true,
         bodyEnHasEdited: true,
       };
@@ -462,6 +632,40 @@ export function AdminNewsManagement({
   // Check user permission to save draft content
   const isDraft = isCreating || activeItem?.workflowState === WorkflowState.Draft;
   const canSaveContent = canEdit && isDraft;
+
+  // Load canonical Media Library videos via MediaAdminClient.listAll() when editing a news article
+  useEffect(() => {
+    if (!activeItem) {
+      return;
+    }
+    let isMounted = true;
+    async function loadMediaLibraryVideos() {
+      setIsLoadingMediaVideos(true);
+      setMediaVideosLoadError(null);
+      try {
+        const videos = await MediaAdminClient.listAll();
+        if (isMounted && Array.isArray(videos)) {
+          setMediaVideos(videos);
+        }
+      } catch {
+        if (isMounted) {
+          setMediaVideosLoadError(
+            isAr
+              ? 'تعذر تحميل قائمة الفيديوهات من مكتبة الوسائط.'
+              : 'Failed to load videos from the Media Library.'
+          );
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingMediaVideos(false);
+        }
+      }
+    }
+    void loadMediaLibraryVideos();
+    return () => {
+      isMounted = false;
+    };
+  }, [activeItem?.id, isAr]);
 
   // Filtered news items
   const filteredNews = newsList.filter(item => {
@@ -488,15 +692,24 @@ export function AdminNewsManagement({
     resetImageEditorSession();
     setPendingTransition(null);
     setTransitionComment('');
+    setVideoSearchQuery('');
+    setVideoAttachmentFeedback(null);
     const nextRichBodyAr = item.richBodyAr
       ? JSON.parse(JSON.stringify(item.richBodyAr))
       : convertPlainTextToRichDocument(item.bodyAr || '', 'rtl');
     const nextRichBodyEn = item.richBodyEn
       ? JSON.parse(JSON.stringify(item.richBodyEn))
       : convertPlainTextToRichDocument(item.bodyEn || '', 'ltr');
-    setActiveItem(item);
+    const normalizedRelatedVideoIds = Array.isArray(item.relatedVideoIds)
+      ? [...item.relatedVideoIds]
+      : [];
+    setActiveItem({
+      ...item,
+      relatedVideoIds: normalizedRelatedVideoIds,
+    });
     setEditForm({
       ...item,
+      relatedVideoIds: normalizedRelatedVideoIds,
       richBodyAr: nextRichBodyAr,
       richBodyEn: nextRichBodyEn,
       bodyArHasEdited: false,
@@ -520,6 +733,8 @@ export function AdminNewsManagement({
     resetImageEditorSession();
     setPendingTransition(null);
     setTransitionComment('');
+    setVideoSearchQuery('');
+    setVideoAttachmentFeedback(null);
     const newItem: NewsItem = {
       id: `news-sudan-${Date.now()}`,
       titleAr: '',
@@ -538,10 +753,12 @@ export function AdminNewsManagement({
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       history: [],
+      relatedVideoIds: [],
     };
     setActiveItem(newItem);
     setEditForm({
       ...newItem,
+      relatedVideoIds: [],
       bodyArHasEdited: true,
       bodyEnHasEdited: true,
     });
@@ -552,6 +769,44 @@ export function AdminNewsManagement({
     setSuccessNotification(null);
     setActiveTab('content');
     setErrorMessage(null);
+  };
+
+  const handleAttachRelatedVideo = (video: Video) => {
+    if (!canSaveContent || imageSessionRef.current.isSaving() || isSaving) {
+      return;
+    }
+    const attachResult = attachCanonicalVideoToDraftList(
+      editForm.relatedVideoIds,
+      video,
+      mediaVideos,
+      isAr
+    );
+    if (!attachResult.ok) {
+      setVideoAttachmentFeedback(attachResult.errorMessage);
+      return;
+    }
+    setVideoAttachmentFeedback(null);
+    setErrorMessage(null);
+    setEditForm((prev) => ({
+      ...prev,
+      relatedVideoIds: attachResult.relatedVideoIds,
+    }));
+  };
+
+  const handleRemoveRelatedVideo = (videoId: string) => {
+    if (!canSaveContent || imageSessionRef.current.isSaving() || isSaving) {
+      return;
+    }
+    const nextIds = removeCanonicalVideoFromDraftList(
+      editForm.relatedVideoIds,
+      videoId
+    );
+    setVideoAttachmentFeedback(null);
+    setErrorMessage(null);
+    setEditForm((prev) => ({
+      ...prev,
+      relatedVideoIds: nextIds,
+    }));
   };
 
   const handleSelectImageFile = (event: ChangeEvent<HTMLInputElement>) => {
@@ -766,7 +1021,26 @@ export function AdminNewsManagement({
       return;
     }
 
-    const savedItem = outcome.savedItem;
+    let savedItem = outcome.savedItem;
+    try {
+      const reloadedFromServer = await NewsAdminClient.getById(outcome.savedItem.id);
+      if (reloadedFromServer) {
+        savedItem = reloadedFromServer;
+      }
+    } catch {
+      // Fall back to server saveDraft response if getById is unavailable in partial test transports
+    }
+
+    const persistedRelatedVideoIds = Array.isArray(savedItem.relatedVideoIds)
+      ? [...savedItem.relatedVideoIds]
+      : Array.isArray(editForm.relatedVideoIds)
+        ? [...editForm.relatedVideoIds]
+        : [];
+    const normalizedSavedItem: NewsItem = {
+      ...savedItem,
+      relatedVideoIds: persistedRelatedVideoIds,
+    };
+
     setSelectedImageFile(null);
     setLocalPreviewUrl(null);
     setImageMetadata(INITIAL_IMAGE_METADATA);
@@ -775,20 +1049,22 @@ export function AdminNewsManagement({
     }
 
     if (isCreating) {
-      setNewsList([savedItem, ...newsList]);
-      setActiveItem(savedItem);
+      setNewsList([normalizedSavedItem, ...newsList]);
+      setActiveItem(normalizedSavedItem);
       setEditForm((prev) => ({
         ...prev,
-        id: savedItem.id,
-        featuredImage: savedItem.featuredImage,
+        id: normalizedSavedItem.id,
+        featuredImage: normalizedSavedItem.featuredImage,
+        relatedVideoIds: persistedRelatedVideoIds,
       }));
       setIsCreating(false);
     } else {
-      setNewsList(newsList.map(item => item.id === savedItem.id ? savedItem : item));
-      setActiveItem(savedItem);
+      setNewsList(newsList.map(item => item.id === normalizedSavedItem.id ? normalizedSavedItem : item));
+      setActiveItem(normalizedSavedItem);
       setEditForm((prev) => ({
         ...prev,
-        featuredImage: savedItem.featuredImage,
+        featuredImage: normalizedSavedItem.featuredImage,
+        relatedVideoIds: persistedRelatedVideoIds,
       }));
     }
 
@@ -1797,6 +2073,313 @@ export function AdminNewsManagement({
                         </div>
                       </div>
                     </div>
+                  </div>
+
+                  {/* Related Videos from Canonical Media Library (NEWS-VIDEO-01A) */}
+                  <div
+                    data-testid="news-related-videos-section"
+                    className="p-4 sm:p-5 rounded-2xl bg-gray-50/70 dark:bg-gray-800/40 border border-gray-200/80 dark:border-gray-700/80 space-y-4"
+                  >
+                    <div className="flex items-start justify-between gap-3 flex-wrap">
+                      <div className="space-y-1">
+                        <h3 className="text-xs sm:text-sm font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
+                          <VideoIcon className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                          <span>{isAr ? 'الفيديوهات المرتبطة بالخبر' : 'Related Videos'}</span>
+                        </h3>
+                        <p className="text-[11px] text-gray-600 dark:text-gray-400 leading-relaxed">
+                          {isAr
+                            ? 'يرتبط الخبر تحريرياً بفيديوهات موجودة في مكتبة الوسائط المعتمدة فقط. الربط بالمسودة يوثّق العلاقة التحريرية، بينما يتطلب العرض العام نشر الفيديو واعتماد حقوقه.'
+                            : 'Attach existing canonical videos from the Media Library to this draft. Editorial attachment records the association on the draft, while public playback requires the video to be Published and Rights-Approved.'}
+                        </p>
+                      </div>
+                      <span
+                        data-testid="news-related-videos-counter"
+                        className="px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-bold text-xs shrink-0"
+                      >
+                        {(editForm.relatedVideoIds ?? []).length} / {MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE}
+                      </span>
+                    </div>
+
+                    {!isDraft ? (
+                      <div
+                        data-testid="news-related-videos-locked-notice"
+                        className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200/60 dark:border-amber-800/50 text-xs text-amber-800 dark:text-amber-300 font-medium"
+                      >
+                        {isAr
+                          ? 'إدارة الفيديوهات المرتبطة متاحة فقط عندما يكون الخبر في مرحلة المسودة.'
+                          : 'Managing related videos is available only while the article is in Draft state.'}
+                      </div>
+                    ) : null}
+
+                    {/* Attached Videos List */}
+                    <div className="space-y-2">
+                      <p className="text-xs font-bold text-gray-700 dark:text-gray-300">
+                        {isAr ? 'الفيديوهات المرتبطة حالياً بالمسودة:' : 'Videos Currently Attached to Draft:'}
+                      </p>
+                      {(editForm.relatedVideoIds ?? []).length === 0 ? (
+                        <div
+                          data-testid="news-attached-videos-empty"
+                          className="p-3 rounded-xl bg-white dark:bg-gray-900/60 border border-dashed border-gray-200 dark:border-gray-700 text-xs text-gray-500 dark:text-gray-400"
+                        >
+                          {isAr
+                            ? 'لا توجد فيديوهات مرتبطة بهذه المسودة حالياً.'
+                            : 'No videos are currently attached to this draft.'}
+                        </div>
+                      ) : (
+                        <div
+                          data-testid="news-attached-videos-list"
+                          className="space-y-2"
+                        >
+                          {(editForm.relatedVideoIds ?? []).map((attachedId) => {
+                            const matchedVideo = mediaVideos.find((v) => v.id === attachedId);
+                            const evaluation = matchedVideo
+                              ? evaluateVideoEditorialAttachmentStatus(matchedVideo)
+                              : null;
+
+                            return (
+                              <div
+                                key={attachedId}
+                                data-testid={`news-attached-video-item-${attachedId}`}
+                                className="p-3 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 flex items-start justify-between gap-3"
+                              >
+                                <div className="min-w-0 space-y-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-bold text-xs sm:text-sm text-gray-900 dark:text-white">
+                                      {matchedVideo
+                                        ? isAr
+                                          ? matchedVideo.titleAr || matchedVideo.titleEn
+                                          : matchedVideo.titleEn || matchedVideo.titleAr
+                                        : attachedId}
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-[11px] font-mono text-gray-600 dark:text-gray-400">
+                                      {attachedId}
+                                    </span>
+                                  </div>
+
+                                  {matchedVideo && evaluation ? (
+                                    <div className="flex items-center gap-2 flex-wrap text-[11px]">
+                                      <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 font-semibold">
+                                        {isAr
+                                          ? evaluation.editorialAssociationLabelAr
+                                          : evaluation.editorialAssociationLabelEn}
+                                      </span>
+                                      <span className="px-2 py-0.5 rounded-md bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 font-medium">
+                                        {isAr
+                                          ? `حالة النشر: ${evaluation.publicationStatus}`
+                                          : `Status: ${evaluation.publicationStatus}`}
+                                      </span>
+                                      <span className="px-2 py-0.5 rounded-md bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 font-medium">
+                                        {isAr
+                                          ? `الاعتماد: ${evaluation.approvalStatus} | الحقوق: ${evaluation.rightsStatus}`
+                                          : `Approval: ${evaluation.approvalStatus} | Rights: ${evaluation.rightsStatus}`}
+                                      </span>
+                                      <span
+                                        data-testid={`news-attached-video-eligibility-${attachedId}`}
+                                        className={`px-2 py-0.5 rounded-md font-semibold ${
+                                          evaluation.isPubliclyPlayable
+                                            ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                            : 'bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                                        }`}
+                                      >
+                                        {isAr
+                                          ? evaluation.publicEligibilityLabelAr
+                                          : evaluation.publicEligibilityLabelEn}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                                      {isAr
+                                        ? 'معرّف فيديو محفوظ من مكتبة الوسائط.'
+                                        : 'Persisted canonical video ID from Media Library.'}
+                                    </p>
+                                  )}
+                                </div>
+
+                                {canSaveContent && (
+                                  <button
+                                    type="button"
+                                    data-testid={`news-remove-related-video-btn-${attachedId}`}
+                                    onClick={() => handleRemoveRelatedVideo(attachedId)}
+                                    className="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:hover:bg-rose-900/60 dark:text-rose-300 text-xs font-bold inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>{isAr ? 'إزالة الربط' : 'Remove'}</span>
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Media Library Picker (Draft only) */}
+                    {isDraft && (
+                      <div className="space-y-3 pt-2 border-t border-gray-200/70 dark:border-gray-700/70">
+                        <div className="space-y-1.5">
+                          <label
+                            htmlFor="news-related-video-search"
+                            className="text-xs font-bold text-gray-700 dark:text-gray-300 flex items-center gap-1.5"
+                          >
+                            <Search className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>
+                              {isAr
+                                ? 'البحث في مكتبة الوسائط لاختيار فيديو موجود'
+                                : 'Search Media Library to Select an Existing Video'}
+                            </span>
+                          </label>
+                          <input
+                            id="news-related-video-search"
+                            data-testid="news-related-video-search-input"
+                            type="text"
+                            value={videoSearchQuery}
+                            onChange={(e) => {
+                              setVideoSearchQuery(e.target.value);
+                              setVideoAttachmentFeedback(null);
+                            }}
+                            disabled={!canSaveContent}
+                            placeholder={
+                              isAr
+                                ? 'ابحث بعنوان الفيديو أو المعرف في مكتبة الوسائط (لا يُسمح بلصق روابط يوتيوب)...'
+                                : 'Search by video title or ID in Media Library (pasting YouTube URLs is not allowed)...'
+                            }
+                            className="w-full px-3.5 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                          />
+                        </div>
+
+                        {videoSearchQuery.trim().length > 0 &&
+                          isArbitraryUrlOrInvalidVideoId(videoSearchQuery.trim()) &&
+                          /https?:\/\/|youtube\.com|youtu\.be/i.test(videoSearchQuery) && (
+                            <div
+                              data-testid="news-related-video-url-rejected-warning"
+                              role="alert"
+                              className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 font-semibold flex items-center gap-2"
+                            >
+                              <AlertCircle className="w-4 h-4 shrink-0" />
+                              <span>
+                                {isAr
+                                  ? 'لا يُسمح بلصق روابط يوتيوب مباشرة داخل محرر الأخبار. يرجى اختيار فيديو مسجل مسبقاً في مكتبة الوسائط.'
+                                  : 'Pasting arbitrary YouTube URLs is prohibited in the news editor. Please select a canonical video from the Media Library.'}
+                              </span>
+                            </div>
+                          )}
+
+                        {videoAttachmentFeedback && (
+                          <div
+                            data-testid="news-related-video-feedback"
+                            role="alert"
+                            className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 font-semibold flex items-center gap-2"
+                          >
+                            <AlertCircle className="w-4 h-4 shrink-0" />
+                            <span>{videoAttachmentFeedback}</span>
+                          </div>
+                        )}
+
+                        {mediaVideosLoadError && (
+                          <div
+                            data-testid="news-related-videos-load-error"
+                            className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-300 font-medium"
+                          >
+                            {mediaVideosLoadError}
+                          </div>
+                        )}
+
+                        {isLoadingMediaVideos ? (
+                          <p className="text-xs text-gray-500 dark:text-gray-400">
+                            {isAr ? 'جاري تحميل فيديوهات مكتبة الوسائط...' : 'Loading Media Library videos...'}
+                          </p>
+                        ) : (
+                          <div
+                            data-testid="news-available-videos-list"
+                            className="max-h-56 overflow-y-auto space-y-2 pr-1"
+                          >
+                            {mediaVideos
+                              .filter((video) => {
+                                const q = videoSearchQuery.trim().toLowerCase();
+                                if (!q) return true;
+                                return (
+                                  video.id.toLowerCase().includes(q) ||
+                                  (video.titleAr || '').toLowerCase().includes(q) ||
+                                  (video.titleEn || '').toLowerCase().includes(q) ||
+                                  (video.category || '').toLowerCase().includes(q)
+                                );
+                              })
+                              .map((video) => {
+                                const isAlreadyAttached = (editForm.relatedVideoIds ?? []).includes(video.id);
+                                const isLimitReached =
+                                  (editForm.relatedVideoIds ?? []).length >= MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE;
+                                const evaluation = evaluateVideoEditorialAttachmentStatus(video);
+
+                                return (
+                                  <div
+                                    key={video.id}
+                                    data-testid={`news-available-video-option-${video.id}`}
+                                    className="p-2.5 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 flex items-center justify-between gap-3"
+                                  >
+                                    <div className="min-w-0 space-y-1">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="font-bold text-xs text-gray-900 dark:text-white">
+                                          {isAr
+                                            ? video.titleAr || video.titleEn
+                                            : video.titleEn || video.titleAr}
+                                        </span>
+                                        <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-[10px] font-mono text-gray-600 dark:text-gray-400">
+                                          {video.id}
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                                        <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">
+                                          {isAr
+                                            ? `النشر: ${evaluation.publicationStatus}`
+                                            : `Status: ${evaluation.publicationStatus}`}
+                                        </span>
+                                        <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">
+                                          {isAr
+                                            ? `الحقوق: ${evaluation.rightsStatus}`
+                                            : `Rights: ${evaluation.rightsStatus}`}
+                                        </span>
+                                        <span
+                                          className={`px-1.5 py-0.5 rounded font-semibold ${
+                                            evaluation.isPubliclyPlayable
+                                              ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                              : 'bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                                          }`}
+                                        >
+                                          {isAr
+                                            ? evaluation.publicEligibilityLabelAr
+                                            : evaluation.publicEligibilityLabelEn}
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    <button
+                                      type="button"
+                                      data-testid={`news-attach-related-video-btn-${video.id}`}
+                                      disabled={!canSaveContent || isAlreadyAttached || isLimitReached}
+                                      onClick={() => handleAttachRelatedVideo(video)}
+                                      className={`px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 transition-colors ${
+                                        isAlreadyAttached
+                                          ? 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 cursor-not-allowed'
+                                          : isLimitReached || !canSaveContent
+                                            ? 'bg-gray-100 text-gray-400 dark:bg-gray-800 dark:text-gray-500 cursor-not-allowed'
+                                            : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+                                      }`}
+                                    >
+                                      {isAlreadyAttached
+                                        ? isAr
+                                          ? 'مرتبط بالمسودة'
+                                          : 'Attached'
+                                        : isAr
+                                          ? 'ربط بالمسودة'
+                                          : 'Attach Video'}
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : (

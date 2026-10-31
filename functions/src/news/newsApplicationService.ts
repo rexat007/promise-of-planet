@@ -26,9 +26,40 @@ import {
   type EditorialImageAssetRepository,
 } from './editorialImageAssetRepository';
 import { isEditorialImageAssetEligibleForPublicArticle } from './publicNewsRepository';
+import type { MediaRepository } from '../media/mediaRepository';
+import { FirestoreMediaRepository } from '../media/firestoreMediaRepository';
 
 export const EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE =
   'EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE' as const;
+
+export const MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE = 5 as const;
+
+const CANONICAL_RELATED_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{3,128}$/;
+
+export function isMalformedOrUrlRelatedVideoId(candidate: unknown): boolean {
+  if (typeof candidate !== 'string') {
+    return true;
+  }
+  const trimmed = candidate.trim();
+  if (!trimmed || candidate !== trimmed || /\s/.test(candidate)) {
+    return true;
+  }
+  const lower = candidate.toLowerCase();
+  if (
+    /^(https?:|ftp:|file:|data:|blob:|gs:|javascript:)/i.test(candidate) ||
+    lower.includes('youtube.com') ||
+    lower.includes('youtu.be') ||
+    candidate.includes('/') ||
+    candidate.includes('\\') ||
+    candidate.includes('..') ||
+    candidate.includes('?') ||
+    candidate.includes('#') ||
+    candidate.includes(':')
+  ) {
+    return true;
+  }
+  return !CANONICAL_RELATED_VIDEO_ID_REGEX.test(candidate);
+}
 
 function redactSensitivePathsFromDiagnostic(message: string): string {
   return message
@@ -213,13 +244,85 @@ export interface ActorContext {
 export class NewsApplicationService {
   private repo: NewsRepository;
   private assetRepo?: EditorialImageAssetRepository;
+  private mediaRepo: Pick<MediaRepository, 'getVideoById'>;
 
   constructor(
     repo?: NewsRepository,
-    assetRepo?: EditorialImageAssetRepository
+    assetRepo?: EditorialImageAssetRepository,
+    mediaRepo?: Pick<MediaRepository, 'getVideoById'>
   ) {
     this.repo = repo || new FirestoreNewsRepository();
     this.assetRepo = assetRepo;
+    this.mediaRepo = mediaRepo || new FirestoreMediaRepository();
+  }
+
+  /**
+   * Authoritatively validates `relatedVideoIds` for Draft creation and updates:
+   * - Rejects non-array values when provided
+   * - Enforces 0..5 canonical video IDs per news article
+   * - Rejects empty, whitespace, malformed, or arbitrary YouTube URL strings
+   * - Rejects duplicate video IDs
+   * - Verifies every video ID exists in the canonical MediaRepository
+   * - Does NOT require selected videos to be publicly eligible merely to save a Draft
+   */
+  private async validateAndVerifyRelatedVideoIds(
+    rawRelatedVideoIds: unknown
+  ): Promise<string[]> {
+    if (rawRelatedVideoIds === undefined) {
+      return [];
+    }
+
+    if (!Array.isArray(rawRelatedVideoIds)) {
+      throw new Error(
+        'VALIDATION_ERROR: INVALID_RELATED_VIDEO_IDS: relatedVideoIds must be an array of canonical video IDs.'
+      );
+    }
+
+    if (rawRelatedVideoIds.length > MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE) {
+      throw new Error(
+        `VALIDATION_ERROR: RELATED_VIDEOS_LIMIT_EXCEEDED: A news article cannot have more than ${MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE} related videos (received ${rawRelatedVideoIds.length}).`
+      );
+    }
+
+    if (rawRelatedVideoIds.length === 0) {
+      return [];
+    }
+
+    const seen = new Set<string>();
+    const validatedIds: string[] = [];
+
+    for (let i = 0; i < rawRelatedVideoIds.length; i++) {
+      const candidate = rawRelatedVideoIds[i];
+      if (isMalformedOrUrlRelatedVideoId(candidate) || typeof candidate !== 'string') {
+        throw new Error(
+          `VALIDATION_ERROR: INVALID_RELATED_VIDEO_ID: relatedVideoIds[${i}] is malformed, empty, whitespace, or an arbitrary URL instead of a canonical video ID.`
+        );
+      }
+      if (seen.has(candidate)) {
+        throw new Error(
+          `VALIDATION_ERROR: DUPLICATE_RELATED_VIDEO_ID: relatedVideoIds contains duplicate video ID "${candidate}".`
+        );
+      }
+      seen.add(candidate);
+      validatedIds.push(candidate);
+    }
+
+    for (const videoId of validatedIds) {
+      const existingVideo = await this.mediaRepo.getVideoById(videoId);
+      if (
+        !existingVideo ||
+        typeof existingVideo !== 'object' ||
+        typeof existingVideo.id !== 'string' ||
+        existingVideo.id.trim() !== videoId ||
+        (existingVideo.contentType !== undefined && existingVideo.contentType !== 'Video')
+      ) {
+        throw new Error(
+          `VALIDATION_ERROR: RELATED_VIDEO_NOT_FOUND: Canonical video "${videoId}" does not exist in the media repository.`
+        );
+      }
+    }
+
+    return validatedIds;
   }
 
   /**
@@ -386,6 +489,10 @@ export class NewsApplicationService {
       bodyEn = derived;
     }
 
+    const validatedRelatedVideoIds = await this.validateAndVerifyRelatedVideoIds(
+      input.relatedVideoIds
+    );
+
     const item: NewsItemBackend = {
       id,
       titleAr: input.titleAr,
@@ -421,7 +528,7 @@ export class NewsApplicationService {
       ],
       location: input.location,
       urgencyLevel: input.urgencyLevel || 'Standard',
-      relatedVideoIds: input.relatedVideoIds || [],
+      relatedVideoIds: validatedRelatedVideoIds,
     };
 
     NewsValidator.validateNewsPayload(item);
@@ -494,6 +601,13 @@ export class NewsApplicationService {
       }
     }
 
+    const nextRelatedVideoIds =
+      'relatedVideoIds' in input && input.relatedVideoIds !== undefined
+        ? await this.validateAndVerifyRelatedVideoIds(input.relatedVideoIds)
+        : Array.isArray(existing.relatedVideoIds)
+          ? [...existing.relatedVideoIds]
+          : [];
+
     const updated: NewsItemBackend = {
       ...existing,
       id: existing.id,
@@ -514,7 +628,7 @@ export class NewsApplicationService {
       featuredImage: input.featuredImage !== undefined ? input.featuredImage : existing.featuredImage,
       location: input.location !== undefined ? input.location : existing.location,
       urgencyLevel: input.urgencyLevel !== undefined ? input.urgencyLevel : existing.urgencyLevel,
-      relatedVideoIds: input.relatedVideoIds !== undefined ? input.relatedVideoIds : existing.relatedVideoIds,
+      relatedVideoIds: nextRelatedVideoIds,
       updatedAt: now,
       author: existing.author || input.author || actor.name,
       workflowState: existing.workflowState,
