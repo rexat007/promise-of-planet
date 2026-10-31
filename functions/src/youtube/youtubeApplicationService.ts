@@ -289,7 +289,6 @@ export class YoutubeApplicationService {
               excerptEn: '',
               editorialDescriptionAr: snapshot.sourceDescription,
               editorialDescriptionEn: '',
-              category: undefined, // Unset until human review
               tags: [],
             },
             status: 'PendingReview',
@@ -461,7 +460,6 @@ export class YoutubeApplicationService {
         excerptEn: '',
         editorialDescriptionAr: snapshot.sourceDescription,
         editorialDescriptionEn: '',
-        category: undefined,
         tags: [],
       };
     }
