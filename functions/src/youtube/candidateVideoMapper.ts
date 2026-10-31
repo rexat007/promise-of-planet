@@ -43,17 +43,21 @@ export function mapCandidateToCanonicalVideo(
     },
   };
 
+  const { titleEn, excerptEn, editorialDescriptionEn } = candidate.editorialDraft;
+
   const video: Video = {
     id: canonicalId,
     contentType: 'Video',
     status: 'Draft',
     category: candidate.editorialDraft.category,
     titleAr: candidate.editorialDraft.titleAr,
-    titleEn: candidate.editorialDraft.titleEn || undefined,
+    ...(typeof titleEn === 'string' && titleEn.trim() !== '' ? { titleEn } : {}),
     excerptAr: candidate.editorialDraft.excerptAr,
-    excerptEn: candidate.editorialDraft.excerptEn || undefined,
+    ...(typeof excerptEn === 'string' && excerptEn.trim() !== '' ? { excerptEn } : {}),
     editorialDescriptionAr: candidate.editorialDraft.editorialDescriptionAr,
-    editorialDescriptionEn: candidate.editorialDraft.editorialDescriptionEn || undefined,
+    ...(typeof editorialDescriptionEn === 'string' && editorialDescriptionEn.trim() !== ''
+      ? { editorialDescriptionEn }
+      : {}),
     tags: [...candidate.editorialDraft.tags],
     approvalStatus: 'Pending',
     rightsStatus: 'NotStarted', // FAIL-CLOSED
