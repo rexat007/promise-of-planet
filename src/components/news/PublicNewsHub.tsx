@@ -17,16 +17,22 @@ import {
 import {
   NewsCard,
   ContentSourceList,
+  VideoEmbed,
   getUrgencyLabel,
 } from '../content';
 import {
   PublicNewsClient,
   extractOrderedEditorialImagesFromDocument,
 } from '../../services/publicNewsClient';
+import { PublicMediaClient } from '../../services/publicMediaClient';
+import { isVideoVisibleInMediaHub } from '../../services/contentVisibility';
 import { validateRichNewsDocumentByVersion } from '../../services/richNewsDocumentContract';
 import { useDebounce } from '../../hooks/useDebounce';
-import { CANONICAL_CATEGORY_DEFINITIONS } from '../../types';
-import type { News, Language, JournalisticType } from '../../types';
+import {
+  CANONICAL_CATEGORY_DEFINITIONS,
+  isCanonicalCategory,
+} from '../../types';
+import type { News, Video, Language, JournalisticType } from '../../types';
 import type { PublicNewsArticle } from '../../types/news';
 import type {
   Alignment,
@@ -54,6 +60,171 @@ const PUBLIC_JOURNALISTIC_TYPE_LABELS: Readonly<
   Explainer: { ar: 'مادة تفسيرية', en: 'Explainer' },
   Feature: { ar: 'قصة معمقة', en: 'Feature' },
 };
+
+export const MAX_PUBLIC_ARTICLE_RELATED_VIDEOS = 5;
+
+export function getLocalizedPublicVideoTitle(
+  video: Video,
+  isAr: boolean
+): string {
+  if (isAr) {
+    return video.titleAr?.trim() || video.titleEn?.trim() || '';
+  }
+  return video.titleEn?.trim() || video.titleAr?.trim() || '';
+}
+
+export function isPublicArticleVideoEligible(
+  video: unknown
+): video is Video {
+  if (!video || typeof video !== 'object') {
+    return false;
+  }
+  const candidate = video as Video;
+  if (typeof candidate.id !== 'string' || !candidate.id.trim()) {
+    return false;
+  }
+  if (candidate.contentType !== 'Video') {
+    return false;
+  }
+  if (candidate.status !== 'Published') {
+    return false;
+  }
+  if (candidate.approvalStatus !== 'Approved') {
+    return false;
+  }
+  if (candidate.rightsStatus !== 'Cleared') {
+    return false;
+  }
+  if (
+    candidate.visibilityDecision !== 'Featured' &&
+    candidate.visibilityDecision !== 'NewsEligible' &&
+    candidate.visibilityDecision !== 'MediaHubOnly'
+  ) {
+    return false;
+  }
+  if (!isCanonicalCategory(candidate.category)) {
+    return false;
+  }
+  if (typeof candidate.titleAr !== 'string' || !candidate.titleAr.trim()) {
+    return false;
+  }
+  if (!candidate.youtubeSource || typeof candidate.youtubeSource !== 'object') {
+    return false;
+  }
+  if (
+    typeof candidate.youtubeSource.youtubeVideoId !== 'string' ||
+    !candidate.youtubeSource.youtubeVideoId.trim()
+  ) {
+    return false;
+  }
+  if (candidate.youtubeSource.availabilityStatus !== 'Available') {
+    return false;
+  }
+  return isVideoVisibleInMediaHub(candidate).visible;
+}
+
+export function getArticleRelatedVideoIds(
+  article: (News | PublicNewsArticle) | null | undefined
+): string[] {
+  if (!article || typeof article !== 'object') {
+    return [];
+  }
+  const rawIds = (article as PublicNewsArticle).relatedVideoIds;
+  if (!Array.isArray(rawIds)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const rawId of rawIds) {
+    if (typeof rawId !== 'string') {
+      continue;
+    }
+    const trimmed = rawId.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+export function resolveArticleEligibleRelatedVideos(
+  articleOrRelatedIds:
+    | (News | PublicNewsArticle)
+    | readonly string[]
+    | null
+    | undefined,
+  publicVideos: readonly Video[] | null | undefined
+): Video[] {
+  if (!articleOrRelatedIds || !Array.isArray(publicVideos) || publicVideos.length === 0) {
+    return [];
+  }
+
+  let candidateIds: readonly string[] = [];
+  if (Array.isArray(articleOrRelatedIds)) {
+    candidateIds = articleOrRelatedIds;
+  } else if (typeof articleOrRelatedIds === 'object') {
+    const hostArticle = articleOrRelatedIds as News | PublicNewsArticle;
+    if (
+      ('status' in hostArticle && hostArticle.status !== 'Published') ||
+      ('approvalStatus' in hostArticle &&
+        hostArticle.approvalStatus !== 'Approved')
+    ) {
+      return [];
+    }
+    const rawIds = (hostArticle as PublicNewsArticle).relatedVideoIds;
+    if (!Array.isArray(rawIds)) {
+      return [];
+    }
+    candidateIds = rawIds;
+  }
+
+  if (candidateIds.length === 0) {
+    return [];
+  }
+
+  const eligibleVideosById = new Map<string, Video>();
+  for (const video of publicVideos) {
+    if (!isPublicArticleVideoEligible(video)) {
+      continue;
+    }
+    const trimmedId = video.id.trim();
+    if (!eligibleVideosById.has(trimmedId)) {
+      eligibleVideosById.set(trimmedId, video);
+    }
+  }
+
+  if (eligibleVideosById.size === 0) {
+    return [];
+  }
+
+  const seenIds = new Set<string>();
+  const resolved: Video[] = [];
+
+  for (const rawId of candidateIds) {
+    if (typeof rawId !== 'string') {
+      continue;
+    }
+    const trimmedId = rawId.trim();
+    if (!trimmedId || seenIds.has(trimmedId)) {
+      continue;
+    }
+    seenIds.add(trimmedId);
+
+    const eligibleVideo = eligibleVideosById.get(trimmedId);
+    if (!eligibleVideo) {
+      continue;
+    }
+
+    resolved.push(eligibleVideo);
+    if (resolved.length >= MAX_PUBLIC_ARTICLE_RELATED_VIDEOS) {
+      break;
+    }
+  }
+
+  return resolved;
+}
 
 function getLocalizedKickerForArticle(
   article: News,
@@ -590,16 +761,22 @@ export const PublicRichNewsDocumentRenderer: React.FC<
 export interface PublicNewsHubProps {
   initialArticleIdOrSlug?: string;
   initialArticles?: PublicNewsArticle[];
+  initialPublicVideos?: Video[];
+  initialLanguage?: Language;
   onNavigate?: (page: any) => void;
 }
 
 export function PublicNewsHub({
   initialArticleIdOrSlug,
   initialArticles,
+  initialPublicVideos,
+  initialLanguage,
   onNavigate: _onNavigate,
 }: PublicNewsHubProps) {
   const { i18n } = useTranslation();
-  const currentLang = (i18n.language === 'en' ? 'en' : 'ar') as Language;
+  const resolvedLanguage =
+    initialLanguage ?? (i18n?.language === 'en' ? 'en' : 'ar');
+  const currentLang = (resolvedLanguage === 'en' ? 'en' : 'ar') as Language;
   const isAr = currentLang === 'ar';
 
   const [articles, setArticles] = useState<PublicNewsArticle[]>(
@@ -634,6 +811,13 @@ export function PublicNewsHub({
   const [failedCoverUrls, setFailedCoverUrls] = useState<
     Record<string, boolean>
   >({});
+  const [publicMultimediaState, setPublicMultimediaState] = useState<{
+    readonly articleId: string | null;
+    readonly videos: readonly Video[];
+  }>(() => ({
+    articleId: null,
+    videos: [],
+  }));
 
   const articleTopRef = useRef<HTMLDivElement>(null);
 
@@ -701,6 +885,71 @@ export function PublicNewsHub({
       });
     }
   }, [selectedArticle]);
+
+  const selectedArticleId = selectedArticle?.id ?? null;
+  const selectedArticleRelatedIdsKey = useMemo(
+    () => getArticleRelatedVideoIds(selectedArticle).join(','),
+    [selectedArticle]
+  );
+
+  // Load canonical public multimedia when an article with relatedVideoIds is active
+  useEffect(() => {
+    if (initialPublicVideos !== undefined) {
+      return;
+    }
+
+    if (!selectedArticleId || !selectedArticleRelatedIdsKey) {
+      setPublicMultimediaState((prev) =>
+        prev.articleId === null && prev.videos.length === 0
+          ? prev
+          : { articleId: null, videos: [] }
+      );
+      return;
+    }
+
+    let isCancelled = false;
+
+    async function loadPublicMediaForArticle(targetArticleId: string) {
+      try {
+        const mediaData = await PublicMediaClient.fetchPublicMultimedia();
+        if (!isCancelled) {
+          setPublicMultimediaState({
+            articleId: targetArticleId,
+            videos: Array.isArray(mediaData?.videos) ? mediaData.videos : [],
+          });
+        }
+      } catch {
+        if (!isCancelled) {
+          setPublicMultimediaState({
+            articleId: targetArticleId,
+            videos: [],
+          });
+        }
+      }
+    }
+
+    loadPublicMediaForArticle(selectedArticleId);
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedArticleId, selectedArticleRelatedIdsKey, initialPublicVideos]);
+
+  const eligibleRelatedVideos = useMemo(() => {
+    if (!selectedArticle) {
+      return [];
+    }
+    const candidateVideos =
+      initialPublicVideos !== undefined
+        ? initialPublicVideos
+        : publicMultimediaState.articleId === selectedArticle.id
+          ? publicMultimediaState.videos
+          : [];
+    return resolveArticleEligibleRelatedVideos(
+      selectedArticle,
+      candidateVideos
+    );
+  }, [selectedArticle, initialPublicVideos, publicMultimediaState]);
 
   // Filtered and sorted articles
   const filteredArticles = useMemo(() => {
@@ -1094,6 +1343,92 @@ export function PublicNewsHub({
                 </p>
               )}
             </div>
+
+            {/* Eligible Related Videos (rendered only inside full article reader when eligible videos exist) */}
+            {eligibleRelatedVideos.length > 0 && (
+              <section
+                dir={isAr ? 'rtl' : 'ltr'}
+                aria-label={
+                  isAr ? 'الفيديوهات المرتبطة بالخبر' : 'Related Videos'
+                }
+                data-testid="public-article-related-videos-section"
+                className="pt-8 border-t border-gray-100 dark:border-gray-800/80 space-y-6 clear-both"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-lg sm:text-xl font-extrabold text-gray-900 dark:text-white tracking-tight">
+                    {isAr ? 'الفيديوهات المرتبطة بالخبر' : 'Related Videos'}
+                  </h2>
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200/70 dark:border-emerald-800/60">
+                    {eligibleRelatedVideos.length}
+                  </span>
+                </div>
+
+                <div className="space-y-6">
+                  {eligibleRelatedVideos.map((video) => {
+                    const videoTitle = getLocalizedPublicVideoTitle(
+                      video,
+                      isAr
+                    );
+                    const channelName =
+                      video.youtubeSource.channelName?.trim() || '';
+                    const safeWatchUrl = isSafeArticleLinkHref(
+                      video.youtubeSource.youtubeUrl
+                    )
+                      ? video.youtubeSource.youtubeUrl
+                      : `https://www.youtube.com/watch?v=${encodeURIComponent(
+                          video.youtubeSource.youtubeVideoId
+                        )}`;
+
+                    return (
+                      <div
+                        key={video.id}
+                        dir={isAr ? 'rtl' : 'ltr'}
+                        data-testid={`public-article-related-video-${video.id}`}
+                        data-video-id={video.id}
+                        className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-gray-50/70 dark:bg-gray-800/40 p-4 sm:p-5 space-y-3.5 shadow-2xs"
+                      >
+                        <VideoEmbed
+                          youtubeSource={video.youtubeSource}
+                          title={videoTitle}
+                          isArabic={isAr}
+                          aspectRatio="16/9"
+                        />
+
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
+                          <h3 className="text-sm sm:text-base font-bold text-gray-900 dark:text-white leading-snug">
+                            {videoTitle}
+                          </h3>
+
+                          <div
+                            data-testid={`public-article-related-video-attribution-${video.id}`}
+                            className="inline-flex items-center gap-2 text-xs font-medium text-gray-500 dark:text-gray-400 shrink-0"
+                          >
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-gray-900 border border-gray-200/80 dark:border-gray-700/80 text-gray-700 dark:text-gray-300">
+                              <span
+                                className="w-2 h-2 rounded-full bg-red-600 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                {isAr ? 'المصدر: يوتيوب' : 'Source: YouTube'}
+                                {channelName ? ` • ${channelName}` : ''}
+                              </span>
+                            </span>
+                            <a
+                              href={safeWatchUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-emerald-700 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-300 underline underline-offset-4 font-semibold transition-colors"
+                            >
+                              {isAr ? 'يوتيوب' : 'YouTube'}
+                            </a>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
 
             {/* Tags */}
             {selectedArticle.tags && selectedArticle.tags.length > 0 && (

@@ -12,6 +12,57 @@ import {
 } from '../types';
 import { WorkflowState } from '../types/workflow';
 
+declare module '../../functions/src/shared/contentContract' {
+  interface News {
+    relatedVideoIds?: string[];
+  }
+}
+
+const CANONICAL_RELATED_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{3,128}$/;
+
+function isCanonicalRelatedVideoId(candidate: unknown): candidate is string {
+  if (typeof candidate !== 'string') {
+    return false;
+  }
+  const trimmed = candidate.trim();
+  if (!trimmed || candidate !== trimmed || /\s/.test(candidate)) {
+    return false;
+  }
+  const lower = candidate.toLowerCase();
+  if (
+    /^(https?:|ftp:|file:|data:|blob:|gs:|javascript:)/i.test(candidate) ||
+    lower.includes('youtube.com') ||
+    lower.includes('youtu.be') ||
+    candidate.includes('/') ||
+    candidate.includes('\\') ||
+    candidate.includes('..') ||
+    candidate.includes('?') ||
+    candidate.includes('#') ||
+    candidate.includes(':') ||
+    candidate.includes('<') ||
+    candidate.includes('>')
+  ) {
+    return false;
+  }
+  return CANONICAL_RELATED_VIDEO_ID_REGEX.test(candidate);
+}
+
+function sanitizeRelatedVideoIds(rawIds: unknown): string[] {
+  if (!Array.isArray(rawIds)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const sanitized: string[] = [];
+  for (const item of rawIds) {
+    if (!isCanonicalRelatedVideoId(item) || seen.has(item)) {
+      continue;
+    }
+    seen.add(item);
+    sanitized.push(item);
+  }
+  return sanitized;
+}
+
 /**
  * Strictly maps category string to canonical Category if valid, otherwise returns null.
  * Zero heuristic guessing, zero keyword inference, zero Climate fallback.
@@ -79,6 +130,10 @@ export function toCanonicalNews(item: NewsItem): News {
   if (hasArabic) availableLanguages.push('ar');
   if (hasEnglish) availableLanguages.push('en');
 
+  const relatedVideoIds = Array.isArray(item.relatedVideoIds)
+    ? sanitizeRelatedVideoIds(item.relatedVideoIds)
+    : undefined;
+
   return {
     id: item.id,
     contentType: 'News',
@@ -106,6 +161,7 @@ export function toCanonicalNews(item: NewsItem): News {
     location: item.location || 'Sudan / السودان',
     urgencyLevel: (item.urgencyLevel as UrgencyLevel) || 'Standard',
     sources,
+    ...(relatedVideoIds !== undefined ? { relatedVideoIds } : {}),
   };
 }
 
@@ -123,6 +179,10 @@ export function toWorkflowNewsItem(news: News): NewsItem {
   } else if (news.approvalStatus === 'ChangesRequested') {
     workflowState = WorkflowState.ChangesRequested;
   }
+
+  const relatedVideoIds = Array.isArray(news.relatedVideoIds)
+    ? sanitizeRelatedVideoIds(news.relatedVideoIds)
+    : undefined;
 
   return {
     id: news.id,
@@ -147,6 +207,7 @@ export function toWorkflowNewsItem(news: News): NewsItem {
     location: news.location,
     urgencyLevel: news.urgencyLevel,
     publishedAt: news.publishedAt,
+    ...(relatedVideoIds !== undefined ? { relatedVideoIds } : {}),
   };
 }
 
@@ -202,7 +263,7 @@ export function sanitizeForPublic(item: NewsItem): SanitizedPublicNewsDTO | null
     urgencyLevel: item.urgencyLevel || 'Standard',
     publishedAt: item.publishedAt || item.updatedAt || item.createdAt,
     createdAt: item.createdAt,
-    relatedVideoIds: item.relatedVideoIds || [],
+    relatedVideoIds: sanitizeRelatedVideoIds(item.relatedVideoIds),
   };
 }
 
@@ -238,6 +299,10 @@ export function publicDtoToCanonicalNews(dto: SanitizedPublicNewsDTO): News {
   if (hasArabic) availableLanguages.push('ar');
   if (hasEnglish) availableLanguages.push('en');
 
+  const relatedVideoIds = Array.isArray(dto.relatedVideoIds)
+    ? sanitizeRelatedVideoIds(dto.relatedVideoIds)
+    : undefined;
+
   return {
     id: dto.id,
     contentType: 'News',
@@ -265,5 +330,6 @@ export function publicDtoToCanonicalNews(dto: SanitizedPublicNewsDTO): News {
     location: dto.location || 'Sudan / السودان',
     urgencyLevel: (dto.urgencyLevel as UrgencyLevel) || 'Standard',
     sources,
+    ...(relatedVideoIds !== undefined ? { relatedVideoIds } : {}),
   };
 }
