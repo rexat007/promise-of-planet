@@ -5,13 +5,23 @@ import { AdminPermission } from '../../types/admin';
 import type { AdminUser } from '../../types/admin';
 import type { NewsItem } from '../../types/news';
 import { NewsAdminClient } from '../../services/newsAdminClient';
-import { VideoEmbed } from '../content/VideoEmbed';
 import type { 
   Video, 
   RightsStatus, 
   VisibilityDecision, 
   Category
 } from '../../types';
+
+const ADMIN_YOUTUBE_VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{6,64}$/;
+
+export const resolveAdminYouTubeEmbedUrl = (rawVideoId: unknown): string | null => {
+  if (typeof rawVideoId !== 'string') return null;
+  const trimmed = rawVideoId.trim();
+  if (!trimmed || !ADMIN_YOUTUBE_VIDEO_ID_PATTERN.test(trimmed)) {
+    return null;
+  }
+  return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(trimmed)}`;
+};
 
 const isVideoPubliclyEligible = (video: Video): boolean =>
   video.status === 'Published' &&
@@ -1433,12 +1443,73 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
                 <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wide block">
                   {tText('معاينة آمنة للمشغل (دون ملفات تعريف الارتباط)', 'Privacy-Safe Video Preview')}
                 </span>
-                
-                <VideoEmbed 
-                  youtubeSource={selectedVideo.youtubeSource} 
-                  title={isAr ? selectedVideo.titleAr : (selectedVideo.titleEn || selectedVideo.titleAr)}
-                  isArabic={isAr}
-                />
+
+                {(selectedVideo.youtubeSource?.availabilityStatus === 'Private' ||
+                  selectedVideo.youtubeSource?.availabilityStatus === 'Deleted' ||
+                  selectedVideo.youtubeSource?.availabilityStatus === 'Unavailable') && (
+                  <div
+                    className="p-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 rounded-xl text-xs text-amber-900 dark:text-amber-300 flex items-start gap-2 font-semibold"
+                    role="status"
+                  >
+                    <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                    <span>
+                      {selectedVideo.youtubeSource.availabilityStatus === 'Private'
+                        ? tText(
+                            'تنبيه فني: حالة المصدر مسجلة كـ «خاص (Private)». قد يرفض يوتيوب تشغيل المعاينة أو تضمينها.',
+                            'Technical notice: Source status is marked Private. YouTube may reject preview playback or embedding.'
+                          )
+                        : selectedVideo.youtubeSource.availabilityStatus === 'Deleted'
+                        ? tText(
+                            'تنبيه فني: حالة المصدر مسجلة كـ «محذوف (Deleted)». قد يرفض يوتيوب تشغيل المعاينة أو تضمينها.',
+                            'Technical notice: Source status is marked Deleted. YouTube may reject preview playback or embedding.'
+                          )
+                        : tText(
+                            'تنبيه فني: حالة المصدر مسجلة كـ «غير متاح (Unavailable)». قد يرفض يوتيوب تشغيل المعاينة أو تضمينها.',
+                            'Technical notice: Source status is marked Unavailable. YouTube may reject preview playback or embedding.'
+                          )}
+                    </span>
+                  </div>
+                )}
+
+                {(() => {
+                  const adminEmbedUrl = resolveAdminYouTubeEmbedUrl(
+                    selectedVideo.youtubeSource?.youtubeVideoId
+                  );
+                  const previewTitle = isAr
+                    ? selectedVideo.titleAr
+                    : selectedVideo.titleEn || selectedVideo.titleAr;
+
+                  if (!adminEmbedUrl) {
+                    return (
+                      <div
+                        className="w-full rounded-xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 p-6 flex flex-col items-center justify-center text-center aspect-video"
+                        role="alert"
+                      >
+                        <AlertCircle className="w-8 h-8 text-amber-500 mb-2" />
+                        <p className="text-xs font-bold text-gray-800 dark:text-gray-200">
+                          {tText(
+                            'تعذر تحميل المعاينة الإدارية: معرف فيديو يوتيوب مفقود أو غير صالح.',
+                            'Administrative preview unavailable: missing or invalid YouTube video ID.'
+                          )}
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="relative w-full overflow-hidden rounded-xl bg-gray-900 aspect-video shadow-md border border-gray-200 dark:border-gray-800">
+                      <iframe
+                        src={adminEmbedUrl}
+                        title={previewTitle}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                        allowFullScreen
+                        loading="lazy"
+                        referrerPolicy="strict-origin-when-cross-origin"
+                        className="absolute inset-0 w-full h-full border-0"
+                      />
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* TECHNICAL IDENTITY & METADATA SECTION */}
@@ -1465,8 +1536,17 @@ export function AdminMediaManagement({ currentUser }: AdminMediaManagementProps)
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-400 font-bold">{tText('الحالة الفنية يوتيوب', 'YouTube Availability')}:</span>
-                  <span className={`px-2 py-0.2 rounded-md font-bold ${selectedVideo.youtubeSource.availabilityStatus === 'Available' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
-                    {selectedVideo.youtubeSource.availabilityStatus}
+                  <span
+                    className={`px-2 py-0.2 rounded-md font-bold ${
+                      selectedVideo.youtubeSource.availabilityStatus === 'Available'
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : selectedVideo.youtubeSource.availabilityStatus
+                        ? 'bg-rose-100 text-rose-800'
+                        : 'bg-amber-100 text-amber-800'
+                    }`}
+                  >
+                    {selectedVideo.youtubeSource.availabilityStatus ||
+                      tText('غير متحقق منها', 'Unverified')}
                   </span>
                 </div>
                 {selectedVideo.producer && (
