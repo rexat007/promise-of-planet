@@ -253,7 +253,7 @@ export class MediaApplicationService {
       placement,
       displayOrder: options?.displayOrder || 0,
       isPrimary: options?.isPrimary || false,
-      caption: options?.caption,
+      ...(options?.caption !== undefined ? { caption: options.caption } : {}),
       isActive: true,
       createdAt: now,
       updatedAt: now,
