@@ -484,20 +484,20 @@ export const YouTubeCandidateReviewModal: React.FC<YouTubeCandidateReviewModalPr
               </span>
             </div>
 
-            {/* Explicit Architectural Limitation Notice (Section 18 Contract) */}
+            {/* Atomic Server Acceptance & Editorial Safeguards Notice */}
             <div className="p-3 bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200/60 dark:border-amber-900/40 rounded-xl text-xs text-amber-900 dark:text-amber-300 flex items-start gap-2.5">
               <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
               <div className="space-y-1">
                 <p className="font-bold">
                   {tText(
-                    'تنبيه فني بشأن الاعتماد: مسار تسجيل الوسائط الدائم على الخادم قيد التطوير',
-                    'Technical Limitation: Durable Media Registration Boundary Pending'
+                    'ضوابط الاعتماد التحريري والتسجيل الذري في سجل الوسائط الدائم',
+                    'Editorial Acceptance Safeguards & Atomic Durable Media Registration'
                   )}
                 </p>
                 <p className="text-[11px] leading-relaxed text-amber-800 dark:text-amber-400">
                   {tText(
-                    'سجلات مرشحي يوتيوب محفوظة في قاعدة بيانات Firestore، بينما يعمل سجل الوسائط الحالي على مستوى جلسة الواجهة. تم قفل زر الاعتماد عمداً لمنع انفصال البيانات (Split-Brain) بين الخادم والواجهة حتى اكتمال البنية التحتية للخادم.',
-                    'YouTube import candidates reside in Firestore, whereas the Media Registry currently runs at client session level. The Accept action is intentionally locked to avoid split-brain state between server candidates and browser media registry until full durable server persistence is established.'
+                    'سجلات مرشحي يوتيوب محفوظة في قاعدة بيانات Firestore. يؤدي الاعتماد إلى إنشاء سجل وسائط رسمي في مجموعة الوسائط الدائمة وتحديث حالة المرشح إلى «معتمد» في عملية ذرية واحدة على الخادم، بشرط توفر صلاحية المراجعة وتحديد تصنيف بيئي معتمد. لا يؤدي الاعتماد وحده إلى النشر العام أو تصفية الحقوق تلقائياً (يُنشأ السجل كمسودة مخفية بانتظار المراجعة وتصفية الحقوق).',
+                    'YouTube import candidates are persisted in Firestore. Acceptance atomically creates a canonical Media record in Firestore and transitions the candidate to Accepted on the server. Acceptance requires human review permission and a valid canonical category, and does not automatically publish the video or clear rights (records start as Draft with Pending approval, NotStarted rights, and Hidden visibility).'
                   )}
                 </p>
               </div>
@@ -526,9 +526,9 @@ export const YouTubeCandidateReviewModal: React.FC<YouTubeCandidateReviewModalPr
               </div>
 
               <div className="flex items-center gap-2 p-2 rounded-xl bg-white dark:bg-gray-900 border border-gray-200/70 dark:border-gray-800">
-                <Clock className="w-4 h-4 text-amber-500 shrink-0" />
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                 <span className="font-medium text-gray-700 dark:text-gray-300">
-                  {tText('تسجيل الخادم الدائم معلق', 'Durable server Media pending')}
+                  {tText('تسجيل ذري كمسودة محمية', 'Atomic server Media (Draft)')}
                 </span>
               </div>
             </div>

@@ -289,6 +289,12 @@ export class MediaApplicationService {
   }
 
   isPubliclyEligible(video: Video): boolean {
-    return video.visibilityDecision !== 'Hidden' && video.rightsStatus === 'Cleared';
+    return (
+      video.status === 'Published' &&
+      video.approvalStatus === 'Approved' &&
+      video.rightsStatus === 'Cleared' &&
+      video.visibilityDecision !== 'Hidden' &&
+      video.youtubeSource?.availabilityStatus === 'Available'
+    );
   }
 }

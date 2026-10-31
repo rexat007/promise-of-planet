@@ -106,10 +106,7 @@ export function isEligiblePublicVideo(video: unknown): video is Video {
   if (typeof v.editorialDescriptionAr !== 'string' || !v.editorialDescriptionAr.trim()) return false;
   if (!v.youtubeSource || typeof v.youtubeSource !== 'object') return false;
   if (typeof v.youtubeSource.youtubeVideoId !== 'string' || !v.youtubeSource.youtubeVideoId.trim()) return false;
-  if (
-    v.youtubeSource.availabilityStatus !== 'Available' &&
-    v.youtubeSource.availabilityStatus !== undefined
-  ) {
+  if (v.youtubeSource.availabilityStatus !== 'Available') {
     return false;
   }
   return true;
@@ -263,7 +260,7 @@ export class PublicMediaRepository {
    * - approvalStatus === 'Approved'
    * - rightsStatus === 'Cleared'
    * - visibilityDecision in ['Featured', 'NewsEligible', 'MediaHubOnly'] (non-Hidden)
-   * - availabilityStatus === 'Available' (or undefined if not yet flagged unavailable)
+   * - availabilityStatus === 'Available' (strictly fail-closed; unknown/undefined availability is excluded)
    * - strips internal fields (rightsNotes, reviewNotes, editor, author, _relations, etc.)
    */
   async listPublicVideos(): Promise<Video[]> {
