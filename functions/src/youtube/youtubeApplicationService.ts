@@ -11,6 +11,96 @@ import type {
   YouTubePlaylistSyncResult,
 } from '../types/youtube';
 
+export const YOUTUBE_SYNC_DIAGNOSTIC_STAGES = [
+  'CONFIG_READ',
+  'CONFIG_VALIDATE',
+  'UPLOADS_PLAYLIST_LOOKUP',
+  'PLAYLIST_ITEMS_FETCH',
+  'VIDEO_DETAILS_FETCH',
+  'CANDIDATE_READ',
+  'CANDIDATE_CREATE',
+  'CANDIDATE_UPDATE',
+] as const;
+
+export type YouTubeSyncDiagnosticStage = (typeof YOUTUBE_SYNC_DIAGNOSTIC_STAGES)[number];
+
+const DIAGNOSTIC_STAGE_SYMBOL = Symbol.for('pop.youtube.sync.diagnosticStage');
+
+export function isYouTubeSyncDiagnosticStage(value: unknown): value is YouTubeSyncDiagnosticStage {
+  return (
+    typeof value === 'string' &&
+    (YOUTUBE_SYNC_DIAGNOSTIC_STAGES as readonly string[]).includes(value)
+  );
+}
+
+export class YouTubeSyncStageError extends Error {
+  public readonly diagnosticStage: YouTubeSyncDiagnosticStage;
+  public readonly cause?: unknown;
+
+  constructor(message: string, stage: YouTubeSyncDiagnosticStage, cause?: unknown) {
+    super(message);
+    this.name = 'YouTubeSyncStageError';
+    this.diagnosticStage = stage;
+    this.cause = cause;
+    Object.defineProperty(this, DIAGNOSTIC_STAGE_SYMBOL, {
+      value: stage,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+  }
+}
+
+export function extractYouTubeSyncStage(err: unknown): YouTubeSyncDiagnosticStage | null {
+  if (!err || typeof err !== 'object') {
+    return null;
+  }
+  const record = err as Record<string | symbol, unknown>;
+  const symbolStage = record[DIAGNOSTIC_STAGE_SYMBOL];
+  if (isYouTubeSyncDiagnosticStage(symbolStage)) {
+    return symbolStage;
+  }
+  const propStage = record.diagnosticStage ?? record.stage;
+  if (isYouTubeSyncDiagnosticStage(propStage)) {
+    return propStage;
+  }
+  if (record.cause && record.cause !== err) {
+    return extractYouTubeSyncStage(record.cause);
+  }
+  return null;
+}
+
+export function attachYouTubeSyncStage(err: unknown, stage: YouTubeSyncDiagnosticStage): Error {
+  const existingStage = extractYouTubeSyncStage(err);
+  const resolvedStage = existingStage ?? stage;
+
+  if (err instanceof Error) {
+    if (!existingStage) {
+      try {
+        Object.defineProperty(err, DIAGNOSTIC_STAGE_SYMBOL, {
+          value: resolvedStage,
+          enumerable: false,
+          configurable: true,
+          writable: false,
+        });
+        Object.defineProperty(err, 'diagnosticStage', {
+          value: resolvedStage,
+          enumerable: false,
+          configurable: true,
+          writable: false,
+        });
+        return err;
+      } catch {
+        return new YouTubeSyncStageError(err.message, resolvedStage, err);
+      }
+    }
+    return err;
+  }
+
+  const fallbackMessage = typeof err === 'string' ? err : 'YouTube synchronization failed';
+  return new YouTubeSyncStageError(fallbackMessage, resolvedStage, err);
+}
+
 export class YoutubeApplicationService {
   private repository: YouTubeRepository;
   private client: YouTubeClient;
@@ -94,122 +184,135 @@ export class YoutubeApplicationService {
     pageToken?: string;
     maxResults?: number;
   }): Promise<YouTubeFetchResult> {
-    const config = await this.repository.getConfiguration('youtube-primary');
+    let currentStage: YouTubeSyncDiagnosticStage = 'CONFIG_READ';
 
-    if (!config) {
-      throw new Error('Configuration missing: youtube-primary is not initialized');
-    }
+    try {
+      const config = await this.repository.getConfiguration('youtube-primary');
 
-    if (!config.enabled) {
-      throw new Error('YouTube integration is disabled');
-    }
-
-    if (!config.channelId || config.channelId.trim() === '') {
-      throw new Error('Invalid Configuration: channelId is required');
-    }
-
-    // 1. Resolve channel's uploads playlist ID
-    const uploadsPlaylistId = await this.client.getUploadsPlaylistId(config.channelId);
-
-    // 2. Fetch playlist items (default 25 newest videos)
-    const playlistPage = await this.client.getPlaylistItems(
-      uploadsPlaylistId,
-      input?.pageToken,
-      input?.maxResults || 25
-    );
-
-    const videoIds = playlistPage.items.map((item) => item.videoId);
-    if (videoIds.length === 0) {
-      return {
-        fetched: 0,
-        created: 0,
-        updated: 0,
-        unchanged: 0,
-        skippedTerminal: 0,
-        nextPageToken: playlistPage.nextPageToken,
-      };
-    }
-
-    // 3. Batch fetch video details
-    const fetchedVideos = await this.client.getVideoDetailsBatch(videoIds);
-
-    let created = 0;
-    let updated = 0;
-    let unchanged = 0;
-    let skippedTerminal = 0;
-
-    // 4. Normalize and upsert candidates
-    for (const fetchedVideo of fetchedVideos) {
-      const snapshot: CandidateSourceSnapshot = {
-        sourceTitle: fetchedVideo.sourceTitle,
-        sourceDescription: fetchedVideo.sourceDescription,
-        sourceThumbnailUrl: fetchedVideo.sourceThumbnailUrl,
-        youtubePublishedAt: fetchedVideo.youtubePublishedAt,
-      };
-
-      const candidateId = `youtube_${fetchedVideo.externalVideoId}`;
-      const existing = await this.repository.getCandidate(candidateId);
-
-      if (existing && (existing.status === 'Accepted' || existing.status === 'Rejected')) {
-        skippedTerminal++;
-        continue;
+      currentStage = 'CONFIG_VALIDATE';
+      if (!config) {
+        throw new Error('Configuration missing: youtube-primary is not initialized');
       }
 
-      if (existing) {
-        const sourceHasChanged =
-          existing.sourceSnapshot.sourceTitle !== snapshot.sourceTitle ||
-          existing.sourceSnapshot.sourceDescription !== snapshot.sourceDescription ||
-          existing.sourceSnapshot.sourceThumbnailUrl !== snapshot.sourceThumbnailUrl ||
-          existing.sourceSnapshot.youtubePublishedAt !== snapshot.youtubePublishedAt;
+      if (!config.enabled) {
+        throw new Error('YouTube integration is disabled');
+      }
 
-        if (!sourceHasChanged) {
-          unchanged++;
+      if (!config.channelId || config.channelId.trim() === '') {
+        throw new Error('Invalid Configuration: channelId is required');
+      }
+
+      // 1. Resolve channel's uploads playlist ID
+      currentStage = 'UPLOADS_PLAYLIST_LOOKUP';
+      const uploadsPlaylistId = await this.client.getUploadsPlaylistId(config.channelId);
+
+      // 2. Fetch playlist items (default 25 newest videos)
+      currentStage = 'PLAYLIST_ITEMS_FETCH';
+      const playlistPage = await this.client.getPlaylistItems(
+        uploadsPlaylistId,
+        input?.pageToken,
+        input?.maxResults || 25
+      );
+
+      const videoIds = playlistPage.items.map((item) => item.videoId);
+      if (videoIds.length === 0) {
+        return {
+          fetched: 0,
+          created: 0,
+          updated: 0,
+          unchanged: 0,
+          skippedTerminal: 0,
+          nextPageToken: playlistPage.nextPageToken,
+        };
+      }
+
+      // 3. Batch fetch video details
+      currentStage = 'VIDEO_DETAILS_FETCH';
+      const fetchedVideos = await this.client.getVideoDetailsBatch(videoIds);
+
+      let created = 0;
+      let updated = 0;
+      let unchanged = 0;
+      let skippedTerminal = 0;
+
+      // 4. Normalize and upsert candidates
+      for (const fetchedVideo of fetchedVideos) {
+        const snapshot: CandidateSourceSnapshot = {
+          sourceTitle: fetchedVideo.sourceTitle,
+          sourceDescription: fetchedVideo.sourceDescription,
+          sourceThumbnailUrl: fetchedVideo.sourceThumbnailUrl,
+          youtubePublishedAt: fetchedVideo.youtubePublishedAt,
+        };
+
+        const candidateId = `youtube_${fetchedVideo.externalVideoId}`;
+        currentStage = 'CANDIDATE_READ';
+        const existing = await this.repository.getCandidate(candidateId);
+
+        if (existing && (existing.status === 'Accepted' || existing.status === 'Rejected')) {
+          skippedTerminal++;
+          continue;
+        }
+
+        if (existing) {
+          currentStage = 'CANDIDATE_UPDATE';
+          const sourceHasChanged =
+            existing.sourceSnapshot.sourceTitle !== snapshot.sourceTitle ||
+            existing.sourceSnapshot.sourceDescription !== snapshot.sourceDescription ||
+            existing.sourceSnapshot.sourceThumbnailUrl !== snapshot.sourceThumbnailUrl ||
+            existing.sourceSnapshot.youtubePublishedAt !== snapshot.youtubePublishedAt;
+
+          if (!sourceHasChanged) {
+            unchanged++;
+          } else {
+            const updatedCandidate: YouTubeImportCandidate = {
+              ...existing,
+              sourceSnapshot: { ...snapshot },
+              candidateVersion: existing.candidateVersion + 1,
+              updatedAt: new Date().toISOString(),
+            };
+            await this.repository.saveCandidate(updatedCandidate);
+            updated++;
+          }
         } else {
-          const updatedCandidate: YouTubeImportCandidate = {
-            ...existing,
+          currentStage = 'CANDIDATE_CREATE';
+          const newCandidate: YouTubeImportCandidate = {
+            id: candidateId,
+            provider: 'YouTube',
+            externalVideoId: fetchedVideo.externalVideoId,
             sourceSnapshot: { ...snapshot },
-            candidateVersion: existing.candidateVersion + 1,
+            editorialDraft: {
+              titleAr: snapshot.sourceTitle,
+              titleEn: '',
+              excerptAr:
+                snapshot.sourceDescription.substring(0, 150) +
+                (snapshot.sourceDescription.length > 150 ? '...' : ''),
+              excerptEn: '',
+              editorialDescriptionAr: snapshot.sourceDescription,
+              editorialDescriptionEn: '',
+              category: undefined, // Unset until human review
+              tags: [],
+            },
+            status: 'PendingReview',
+            candidateVersion: 1,
+            createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           };
-          await this.repository.saveCandidate(updatedCandidate);
-          updated++;
+          await this.repository.saveCandidate(newCandidate);
+          created++;
         }
-      } else {
-        const newCandidate: YouTubeImportCandidate = {
-          id: candidateId,
-          provider: 'YouTube',
-          externalVideoId: fetchedVideo.externalVideoId,
-          sourceSnapshot: { ...snapshot },
-          editorialDraft: {
-            titleAr: snapshot.sourceTitle,
-            titleEn: '',
-            excerptAr:
-              snapshot.sourceDescription.substring(0, 150) +
-              (snapshot.sourceDescription.length > 150 ? '...' : ''),
-            excerptEn: '',
-            editorialDescriptionAr: snapshot.sourceDescription,
-            editorialDescriptionEn: '',
-            category: undefined, // Unset until human review
-            tags: [],
-          },
-          status: 'PendingReview',
-          candidateVersion: 1,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        await this.repository.saveCandidate(newCandidate);
-        created++;
       }
-    }
 
-    return {
-      fetched: fetchedVideos.length,
-      created,
-      updated,
-      unchanged,
-      skippedTerminal,
-      nextPageToken: playlistPage.nextPageToken,
-    };
+      return {
+        fetched: fetchedVideos.length,
+        created,
+        updated,
+        unchanged,
+        skippedTerminal,
+        nextPageToken: playlistPage.nextPageToken,
+      };
+    } catch (err: unknown) {
+      throw attachYouTubeSyncStage(err, currentStage);
+    }
   }
 
   /**
