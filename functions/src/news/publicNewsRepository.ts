@@ -69,6 +69,23 @@ export interface PublicEditorialImageDeliveryDecision {
   reason?: PublicEditorialImageDeliveryDenialReason;
 }
 
+export type PublicArticleCoverSource = 'explicit' | 'derived_first_inline';
+
+export interface PublicArticleCoverMetadata {
+  readonly assetId?: string;
+  readonly url?: string;
+  readonly source: PublicArticleCoverSource;
+  readonly sourceLocale?: 'ar' | 'en';
+  readonly altAr: string;
+  readonly altEn?: string;
+  readonly captionAr?: string;
+  readonly captionEn?: string;
+}
+
+export interface PublicNewsArticleDTO extends SanitizedPublicNewsDTO {
+  readonly coverImage?: PublicArticleCoverMetadata;
+}
+
 export function isPublicDeliveryEditorialImageVariantKey(
   variantKey: unknown
 ): variantKey is PublicEditorialImageDeliveryVariantKey {
@@ -78,6 +95,15 @@ export function isPublicDeliveryEditorialImageVariantKey(
       variantKey
     )
   );
+}
+
+function isSafeLegacyExternalImageUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || /\s/.test(trimmed)) {
+    return false;
+  }
+  const lower = trimmed.toLowerCase();
+  return lower.startsWith('https://') || lower.startsWith('http://');
 }
 
 function isValidCanonicalArticleId(
@@ -224,6 +250,232 @@ function sanitizeEditorialImageNode(
   };
 }
 
+/**
+ * Extracts canonical `editorialImage` nodes in deterministic document traversal order
+ * from a validated Schema V2 RichNewsDocument.
+ */
+export function extractOrderedEditorialImageNodes(
+  rawRichDoc: unknown
+): EditorialImageNodeV2[] {
+  try {
+    if (!rawRichDoc || typeof rawRichDoc !== 'object' || Array.isArray(rawRichDoc)) {
+      return [];
+    }
+
+    const wrapper = rawRichDoc as Record<string, unknown>;
+    if (wrapper.schemaVersion !== 2) {
+      return [];
+    }
+
+    const validation = validateRichNewsDocumentV2(rawRichDoc);
+    if (!validation.valid) {
+      return [];
+    }
+
+    const typedDoc = rawRichDoc as RichNewsDocumentWrapperV2;
+    const ordered: EditorialImageNodeV2[] = [];
+
+    function walk(nodes: readonly BlockNodeV2[]): void {
+      for (const node of nodes) {
+        if (!node || typeof node !== 'object') {
+          continue;
+        }
+        if (node.type === 'editorialImage') {
+          if (
+            node.attrs &&
+            typeof node.attrs.assetId === 'string' &&
+            validateAssetId(node.attrs.assetId).valid
+          ) {
+            ordered.push(sanitizeEditorialImageNode(node));
+          }
+          continue;
+        }
+        if ('content' in node && Array.isArray(node.content)) {
+          walk(node.content as readonly BlockNodeV2[]);
+        }
+      }
+    }
+
+    walk(typedDoc.doc.content);
+    return ordered;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Resolves the public cover image for a published news article according to
+ * canonical priority and rights rules:
+ *
+ * 1. Valid explicit editorial cover (`item.featuredImage`), when present and authorized:
+ *    - If `item.featuredImage` is a canonical `assetId`, it must pass
+ *      `isEditorialImageAssetEligibleForPublicArticle`. If ineligible, no cover is returned.
+ *    - If `item.featuredImage` is a safe legacy external HTTP(S) URL, it is preserved.
+ * 2. Otherwise (when no explicit `item.featuredImage` is set), the first canonical
+ *    `editorialImage` node in deterministic document order:
+ *    - Prefers `item.richBodyAr` when it contains any `editorialImage` nodes;
+ *      otherwise inspects `item.richBodyEn`.
+ *    - If the first inline `editorialImage` is publicly eligible for this article, it is
+ *      selected as the derived cover (`source: 'derived_first_inline'`).
+ *    - If the first inline `editorialImage` is NOT publicly eligible, no cover is returned
+ *      (never skips an ineligible first inline image to select a later image).
+ * 3. If an article has no explicit cover and no eligible first inline image, returns `undefined`.
+ */
+export function resolvePublicArticleCover(
+  item: NewsItemBackend,
+  resolvedAssetsById: ReadonlyMap<string, EditorialImageAssetMetadata | null>,
+  limits?: EditorialImageAssetValidationLimits
+): PublicArticleCoverMetadata | undefined {
+  const effectiveLimits = limits ?? DEFAULT_ASSET_VALIDATION_LIMITS;
+  const rawFeatured =
+    typeof item.featuredImage === 'string' ? item.featuredImage.trim() : '';
+
+  if (rawFeatured.length > 0) {
+    if (validateAssetId(rawFeatured, effectiveLimits).valid) {
+      const asset = resolvedAssetsById.get(rawFeatured) ?? null;
+      if (
+        !asset ||
+        !isEditorialImageAssetEligibleForPublicArticle(
+          asset,
+          item.id,
+          effectiveLimits
+        )
+      ) {
+        return undefined;
+      }
+
+      const arInlineMatch = extractOrderedEditorialImageNodes(
+        item.richBodyAr
+      ).find((node) => node.attrs.assetId === rawFeatured);
+      const enInlineMatch = extractOrderedEditorialImageNodes(
+        item.richBodyEn
+      ).find((node) => node.attrs.assetId === rawFeatured);
+      const inlineMatch = arInlineMatch ?? enInlineMatch;
+
+      const altAr =
+        inlineMatch?.attrs.altAr ||
+        asset.altAr ||
+        item.titleAr ||
+        item.titleEn ||
+        '';
+      const altEn =
+        inlineMatch?.attrs.altEn ||
+        asset.altEn ||
+        item.titleEn ||
+        item.titleAr ||
+        altAr;
+      const captionAr = inlineMatch?.attrs.captionAr;
+      const captionEn = inlineMatch?.attrs.captionEn;
+
+      return {
+        assetId: asset.assetId,
+        source: 'explicit',
+        altAr,
+        ...(altEn ? { altEn } : {}),
+        ...(captionAr ? { captionAr } : {}),
+        ...(captionEn ? { captionEn } : {}),
+      };
+    }
+
+    if (isSafeLegacyExternalImageUrl(rawFeatured)) {
+      return {
+        url: rawFeatured,
+        source: 'explicit',
+        altAr: item.titleAr || item.titleEn || '',
+        altEn: item.titleEn || item.titleAr || '',
+        ...(item.summaryAr ? { captionAr: item.summaryAr } : {}),
+        ...(item.summaryEn ? { captionEn: item.summaryEn } : {}),
+      };
+    }
+
+    return undefined;
+  }
+
+  const arImageNodes = extractOrderedEditorialImageNodes(item.richBodyAr);
+  const enImageNodes =
+    arImageNodes.length === 0
+      ? extractOrderedEditorialImageNodes(item.richBodyEn)
+      : [];
+
+  const firstCandidate:
+    | { readonly node: EditorialImageNodeV2; readonly locale: 'ar' | 'en' }
+    | undefined =
+    arImageNodes.length > 0
+      ? { node: arImageNodes[0], locale: 'ar' }
+      : enImageNodes.length > 0
+        ? { node: enImageNodes[0], locale: 'en' }
+        : undefined;
+
+  if (!firstCandidate) {
+    return undefined;
+  }
+
+  const firstAssetId = firstCandidate.node.attrs.assetId;
+  const firstAsset = resolvedAssetsById.get(firstAssetId) ?? null;
+  if (
+    !firstAsset ||
+    !isEditorialImageAssetEligibleForPublicArticle(
+      firstAsset,
+      item.id,
+      effectiveLimits
+    )
+  ) {
+    // Do NOT silently skip an ineligible first inline image to select a later image.
+    return undefined;
+  }
+
+  const altAr =
+    firstCandidate.node.attrs.altAr ||
+    firstAsset.altAr ||
+    item.titleAr ||
+    item.titleEn ||
+    '';
+  const altEn =
+    firstCandidate.node.attrs.altEn ||
+    firstAsset.altEn ||
+    item.titleEn ||
+    item.titleAr ||
+    altAr;
+  const captionAr = firstCandidate.node.attrs.captionAr;
+  const captionEn = firstCandidate.node.attrs.captionEn;
+
+  return {
+    assetId: firstAsset.assetId,
+    source: 'derived_first_inline',
+    sourceLocale: firstCandidate.locale,
+    altAr,
+    ...(altEn ? { altEn } : {}),
+    ...(captionAr ? { captionAr } : {}),
+    ...(captionEn ? { captionEn } : {}),
+  };
+}
+
+function collectArticleReferencedAssetIds(
+  item: NewsItemBackend
+): Set<string> {
+  const referencedIds = new Set<string>();
+  const rawFeatured =
+    typeof item.featuredImage === 'string' ? item.featuredImage.trim() : '';
+  if (rawFeatured.length > 0 && validateAssetId(rawFeatured).valid) {
+    referencedIds.add(rawFeatured);
+  }
+  if (validateRichNewsDocumentByVersion(item.richBodyAr).valid) {
+    for (const id of extractEditorialImageAssetIdsFromRichDocument(
+      item.richBodyAr
+    )) {
+      referencedIds.add(id);
+    }
+  }
+  if (validateRichNewsDocumentByVersion(item.richBodyEn).valid) {
+    for (const id of extractEditorialImageAssetIdsFromRichDocument(
+      item.richBodyEn
+    )) {
+      referencedIds.add(id);
+    }
+  }
+  return referencedIds;
+}
+
 function sanitizeRichNodesRecursive<
   T extends { type: string; content?: unknown[]; attrs?: unknown }
 >(
@@ -368,14 +620,7 @@ export class PublicNewsRepository {
   ): Set<string> {
     const assetIds = new Set<string>();
     for (const item of items) {
-      for (const id of extractEditorialImageAssetIdsFromRichDocument(
-        item.richBodyAr
-      )) {
-        assetIds.add(id);
-      }
-      for (const id of extractEditorialImageAssetIdsFromRichDocument(
-        item.richBodyEn
-      )) {
+      for (const id of collectArticleReferencedAssetIds(item)) {
         assetIds.add(id);
       }
     }
@@ -440,7 +685,12 @@ export class PublicNewsRepository {
   private toSanitizedPublicNewsDTO(
     item: NewsItemBackend,
     resolvedAssetsById: ReadonlyMap<string, EditorialImageAssetMetadata | null>
-  ): SanitizedPublicNewsDTO {
+  ): PublicNewsArticleDTO {
+    const resolvedCover = resolvePublicArticleCover(item, resolvedAssetsById);
+    const effectiveFeaturedImage = resolvedCover
+      ? (resolvedCover.assetId ?? resolvedCover.url)
+      : undefined;
+
     return {
       id: item.id,
       titleAr: item.titleAr,
@@ -466,7 +716,8 @@ export class PublicNewsRepository {
       category: item.category,
       tags: item.tags ? [...item.tags] : [],
       sources: item.sources ? [...item.sources] : [],
-      featuredImage: item.featuredImage,
+      featuredImage: effectiveFeaturedImage,
+      ...(resolvedCover ? { coverImage: resolvedCover } : {}),
       location: item.location || 'Sudan / السودان',
       urgencyLevel: item.urgencyLevel || 'Standard',
       publishedAt: item.publishedAt || item.updatedAt || item.createdAt,
@@ -483,7 +734,7 @@ export class PublicNewsRepository {
    */
   async listPublicNews(
     language?: 'ar' | 'en'
-  ): Promise<SanitizedPublicNewsDTO[]> {
+  ): Promise<PublicNewsArticleDTO[]> {
     const rawItems = await this.repo.listPublished(language);
 
     // Double-check workflowState is strictly 'Published' and category is canonical
@@ -507,7 +758,7 @@ export class PublicNewsRepository {
   async getPublicNewsById(
     id: string,
     language?: 'ar' | 'en'
-  ): Promise<SanitizedPublicNewsDTO | null> {
+  ): Promise<PublicNewsArticleDTO | null> {
     const item = await this.repo.getById(id);
     if (
       !item ||
@@ -528,12 +779,12 @@ export class PublicNewsRepository {
   }
 
   /**
-   * Read-only eligibility check for future B2 public editorial image binary delivery.
+   * Read-only eligibility check for public editorial image binary delivery.
    * Verifies that:
    * - articleId, assetId, and optional variantKey are canonical
    * - variantKey (when supplied) is a permitted public delivery variant (original_processed is denied)
    * - the article exists, has workflowState === 'Published', and has a canonical category
-   * - the article's validated richBodyAr or richBodyEn actually references assetId
+   * - the article's validated richBodyAr, richBodyEn, or explicit featuredImage actually references assetId
    * - the asset passes isEditorialImageAssetEligibleForPublicArticle for articleId
    * Never exposes storagePath, evidenceRefs, or internal repository error details.
    */
@@ -591,13 +842,7 @@ export class PublicNewsRepository {
       };
     }
 
-    const validArIds = validateRichNewsDocumentByVersion(item.richBodyAr).valid
-      ? extractEditorialImageAssetIdsFromRichDocument(item.richBodyAr)
-      : [];
-    const validEnIds = validateRichNewsDocumentByVersion(item.richBodyEn).valid
-      ? extractEditorialImageAssetIdsFromRichDocument(item.richBodyEn)
-      : [];
-    const referencedAssetIds = new Set<string>([...validArIds, ...validEnIds]);
+    const referencedAssetIds = collectArticleReferencedAssetIds(item);
 
     if (!referencedAssetIds.has(assetId)) {
       return {

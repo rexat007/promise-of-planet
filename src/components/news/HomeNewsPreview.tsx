@@ -5,7 +5,8 @@ import { Container } from '../layout/Container';
 import { NewsCard } from '../content';
 import { ErrorBanner } from '../common/ErrorBanner';
 import { PublicNewsClient } from '../../services/publicNewsClient';
-import type { News, Language } from '../../types';
+import type { Language } from '../../types';
+import type { PublicNewsArticle } from '../../types/news';
 import type { PublicPageKey } from '../layout/Header';
 
 export interface HomeNewsPreviewProps {
@@ -20,7 +21,7 @@ export const HomeNewsPreview: React.FC<HomeNewsPreviewProps> = ({
   className = '',
 }) => {
   const isArabic = currentLanguage === 'ar';
-  const [articles, setArticles] = useState<News[]>([]);
+  const [articles, setArticles] = useState<PublicNewsArticle[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<unknown | null>(null);
 
@@ -32,7 +33,11 @@ export const HomeNewsPreview: React.FC<HomeNewsPreviewProps> = ({
         language: currentLanguage,
       });
       // Cap at up to 3 published articles for the homepage preview
-      setArticles(fetched.slice(0, 3));
+      setArticles(
+        fetched
+          .slice(0, 3)
+          .map((item) => PublicNewsClient.normalizeNewsForCard(item, 'card'))
+      );
     } catch (err: unknown) {
       setError(err);
       setArticles([]);
@@ -45,7 +50,7 @@ export const HomeNewsPreview: React.FC<HomeNewsPreviewProps> = ({
     loadPublishedNews();
   }, [loadPublishedNews]);
 
-  const handleSelectArticle = (article: News) => {
+  const handleSelectArticle = (article: PublicNewsArticle) => {
     const titleForSlug = isArabic
       ? article.titleAr
       : (article.titleEn || article.titleAr);

@@ -17,6 +17,7 @@ export { PublicMediaRepository } from "./media/publicMediaRepository";
 export { manageNews, getPublicNews } from "./news/newsAdminHandlers";
 export { editorialNewsImageUpload } from "./news/editorialNewsImageUploadEndpoint";
 export { editorialImagePreviewEndpoint } from "./news/editorialImagePreviewEndpoint";
+export { publicEditorialImageDeliveryEndpoint } from "./news/publicEditorialImageDeliveryEndpoint";
 export { submitCitizenReport, manageCitizenSubmissions } from "./community/communityHandlers";
 export { listAdminUsers } from "./admin/adminUserDirectoryHandlers";
 export { manageAdminInvitations } from "./admin/adminInvitationHandlers";

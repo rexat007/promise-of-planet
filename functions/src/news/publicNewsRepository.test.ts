@@ -1,4 +1,21 @@
-import { describe, it, expect, vi } from 'vitest';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+let mockUiLanguage: 'ar' | 'en' = 'ar';
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: (key: string) => key,
+    i18n: {
+      get language() {
+        return mockUiLanguage;
+      },
+      changeLanguage: async (lang: 'ar' | 'en') => {
+        mockUiLanguage = lang;
+      },
+    },
+  }),
+}));
 
 vi.mock('firebase-admin/firestore', () => ({
   getFirestore: () => ({}),
@@ -11,6 +28,15 @@ import {
   isPublicDeliveryEditorialImageVariantKey,
   PUBLIC_DELIVERY_EDITORIAL_IMAGE_VARIANT_KEYS,
 } from './publicNewsRepository';
+import { PublicNewsClient } from '../../../src/services/publicNewsClient';
+import { NewsCard } from '../../../src/components/content/NewsCard';
+import { HomeNewsPreview } from '../../../src/components/news/HomeNewsPreview';
+import {
+  PublicNewsHub,
+  PublicRichNewsDocumentRenderer,
+  getEditorialImageFigureClasses,
+  shouldSuppressDuplicateCoverBanner,
+} from '../../../src/components/news/PublicNewsHub';
 import { InMemoryNewsRepository } from './inMemoryNewsRepository';
 import { InMemoryEditorialImageAssetRepository } from './inMemoryEditorialImageAssetRepository';
 import {
@@ -1272,3 +1298,1067 @@ describe('IMG-F3-09/D3-B1: Public News Editorial Image Rights Gate', () => {
     });
   });
 });
+
+describe('NEWS-IMG-PUBLIC-DELIVERY-01 — Automatic Cover Selection & DTO Resolution', () => {
+  it('1. Explicit valid cover takes precedence over inline images', async () => {
+    const explicitCoverId = 'asset_explicit_cover_priority_01';
+    const inlineImageId = 'asset_inline_body_image_02';
+
+    const explicitCoverAsset = buildApprovedAsset(explicitCoverId);
+    const inlineAsset = buildApprovedAsset(inlineImageId);
+
+    const richV2: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: inlineImageId,
+              altAr: 'صورة داخل المتن',
+              altEn: 'Inline body image',
+              captionAr: 'تسمية الصورة الداخلية',
+              captionEn: 'Inline image caption',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-explicit-cover', {
+        featuredImage: explicitCoverId,
+        richBodyAr: richV2,
+      }),
+    ]);
+    const assetRepo = new InMemoryEditorialImageAssetRepository();
+    seedAssetsIntoRepo(assetRepo, [explicitCoverAsset, inlineAsset]);
+    const publicRepo = new PublicNewsRepository(newsRepo, assetRepo);
+
+    const dto = await publicRepo.getPublicNewsById('article-explicit-cover');
+    expect(dto?.featuredImage).toBe(explicitCoverId);
+    expect(dto?.coverImage).toEqual({
+      assetId: explicitCoverId,
+      source: 'explicit',
+      altAr: explicitCoverAsset.altAr,
+      altEn: explicitCoverAsset.altEn,
+    });
+
+    // Delivery evaluation also authorizes the explicit cover assetId
+    const deliveryDecision =
+      await publicRepo.evaluatePublicEditorialImageDelivery(
+        'article-explicit-cover',
+        explicitCoverId,
+        'article_cover'
+      );
+    expect(deliveryDecision.eligible).toBe(true);
+  });
+
+  it('2. Missing explicit cover selects first eligible Arabic inline image', async () => {
+    const firstArId = 'asset_first_ar_inline_01';
+    const secondArId = 'asset_second_ar_inline_02';
+    const firstEnId = 'asset_first_en_inline_03';
+
+    const assetRepo = new InMemoryEditorialImageAssetRepository();
+    seedAssetsIntoRepo(assetRepo, [
+      buildApprovedAsset(firstArId),
+      buildApprovedAsset(secondArId),
+      buildApprovedAsset(firstEnId),
+    ]);
+
+    const richAr: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [{ type: 'text', text: 'الفقرة الافتتاحية' }],
+          },
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: firstArId,
+              altAr: 'الصورة العربية الأولى',
+              altEn: 'First Arabic inline image',
+              captionAr: 'توثيق أول من الخرطوم',
+              captionEn: 'First documentation from Khartoum',
+              width: '100%',
+              layout: 'block-full',
+            },
+          },
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: secondArId,
+              altAr: 'الصورة العربية الثانية',
+              width: '50%',
+              layout: 'float-start',
+            },
+          },
+        ],
+      },
+    };
+
+    const richEn: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: firstEnId,
+              altAr: 'صورة النسخة الإنجليزية',
+              altEn: 'English version inline image',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-derived-ar', {
+        featuredImage: undefined,
+        richBodyAr: richAr,
+        richBodyEn: richEn,
+      }),
+    ]);
+    const publicRepo = new PublicNewsRepository(newsRepo, assetRepo);
+
+    const dto = await publicRepo.getPublicNewsById('article-derived-ar');
+    expect(dto?.featuredImage).toBe(firstArId);
+    expect(dto?.coverImage).toEqual({
+      assetId: firstArId,
+      source: 'derived_first_inline',
+      sourceLocale: 'ar',
+      altAr: 'الصورة العربية الأولى',
+      altEn: 'First Arabic inline image',
+      captionAr: 'توثيق أول من الخرطوم',
+      captionEn: 'First documentation from Khartoum',
+    });
+  });
+
+  it('3. Missing Arabic inline images selects first eligible English inline image', async () => {
+    const firstEnId = 'asset_first_en_only_01';
+    const secondEnId = 'asset_second_en_only_02';
+
+    const assetRepo = new InMemoryEditorialImageAssetRepository();
+    seedAssetsIntoRepo(assetRepo, [
+      buildApprovedAsset(firstEnId),
+      buildApprovedAsset(secondEnId),
+    ]);
+
+    const richArTextOnly: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [{ type: 'text', text: 'نص عربي بدون صور مدمجة' }],
+          },
+        ],
+      },
+    };
+
+    const richEnWithImages: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: firstEnId,
+              altAr: 'صورة التقرير الإنجليزي الأولى',
+              altEn: 'First English report image',
+              captionEn: 'Blue Nile monitoring station',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: secondEnId,
+              altAr: 'صورة التقرير الإنجليزي الثانية',
+              altEn: 'Second English report image',
+              width: '50%',
+              layout: 'float-end',
+            },
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-derived-en', {
+        featuredImage: undefined,
+        richBodyAr: richArTextOnly,
+        richBodyEn: richEnWithImages,
+      }),
+    ]);
+    const publicRepo = new PublicNewsRepository(newsRepo, assetRepo);
+
+    const dto = await publicRepo.getPublicNewsById('article-derived-en');
+    expect(dto?.featuredImage).toBe(firstEnId);
+    expect(dto?.coverImage).toEqual({
+      assetId: firstEnId,
+      source: 'derived_first_inline',
+      sourceLocale: 'en',
+      altAr: 'صورة التقرير الإنجليزي الأولى',
+      altEn: 'First English report image',
+      captionEn: 'Blue Nile monitoring station',
+    });
+  });
+
+  it('4. Ineligible first inline image is not used as cover and does not skip to a later image', async () => {
+    const firstIneligibleId = 'asset_first_ineligible_revoked_01';
+    const secondEligibleId = 'asset_second_eligible_approved_02';
+
+    const revokedAsset = buildAssetWithState(firstIneligibleId, {
+      rights: {
+        status: 'Revoked',
+        licenseType: 'DirectLicense',
+        rightsHolder: 'Agency',
+        sourceAttributionAr: 'وكالة',
+        sourceAttributionEn: 'Agency',
+        evidenceRefs: ['revoked-1'],
+        usageScope: { scopeType: 'GeneralEditorial' },
+        reviewedByUid: 'admin-1',
+        reviewedAtIso: '2026-04-10T10:00:00.000Z',
+        reviewReason: 'Withdrawn rights.',
+      },
+    });
+    const secondApprovedAsset = buildApprovedAsset(secondEligibleId);
+
+    const richAr: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: firstIneligibleId,
+              altAr: 'صورة أولى مسحوبة الحقوق',
+              width: '100%',
+              layout: 'block-full',
+            },
+          },
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: secondEligibleId,
+              altAr: 'صورة ثانية معتمدة',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-ineligible-first', {
+        featuredImage: undefined,
+        richBodyAr: richAr,
+      }),
+    ]);
+    const assetRepo = new InMemoryEditorialImageAssetRepository();
+    seedAssetsIntoRepo(assetRepo, [revokedAsset, secondApprovedAsset]);
+    const publicRepo = new PublicNewsRepository(newsRepo, assetRepo);
+
+    const dto = await publicRepo.getPublicNewsById('article-ineligible-first');
+    // Cover must NOT be derived from the ineligible first image and must NOT skip to the second image
+    expect(dto?.featuredImage).toBeUndefined();
+    expect(dto?.coverImage).toBeUndefined();
+    // Meanwhile, the second eligible inline image remains in the sanitized rich body
+    expect(dto?.richBodyAr?.doc.content).toEqual([
+      {
+        type: 'editorialImage',
+        attrs: {
+          assetId: secondEligibleId,
+          altAr: 'صورة ثانية معتمدة',
+          width: '75%',
+          layout: 'block-center',
+        },
+      },
+    ]);
+  });
+
+  it('5. Article without images returns no cover cleanly', async () => {
+    const richV2TextOnly: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [{ type: 'text', text: 'تقرير نصي فقط بدون أي صور' }],
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-no-images', {
+        featuredImage: undefined,
+        richBodyAr: richV2TextOnly,
+      }),
+    ]);
+    const publicRepo = new PublicNewsRepository(newsRepo);
+
+    const dto = await publicRepo.getPublicNewsById('article-no-images');
+    expect(dto?.featuredImage).toBeUndefined();
+    expect(dto?.coverImage).toBeUndefined();
+  });
+
+  it('6. Mixed eligible/ineligible inline images preserve only eligible inline nodes', async () => {
+    const eligibleFirstId = 'asset_mixed_cover_first_ok_01';
+    const ineligibleSecondId = 'asset_mixed_cover_second_pending_02';
+
+    const assetRepo = new InMemoryEditorialImageAssetRepository();
+    seedAssetsIntoRepo(assetRepo, [
+      buildApprovedAsset(eligibleFirstId),
+      buildPendingReviewAsset(ineligibleSecondId),
+    ]);
+
+    const richAr: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: eligibleFirstId,
+              altAr: 'صورة أولى معتمدة',
+              width: '50%',
+              layout: 'float-start',
+            },
+          },
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [{ type: 'text', text: 'فقرة وسطى' }],
+          },
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: ineligibleSecondId,
+              altAr: 'صورة ثانية قيد المراجعة',
+              width: '50%',
+              layout: 'float-end',
+            },
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-mixed-cover', {
+        featuredImage: undefined,
+        richBodyAr: richAr,
+      }),
+    ]);
+    const publicRepo = new PublicNewsRepository(newsRepo, assetRepo);
+
+    const dto = await publicRepo.getPublicNewsById('article-mixed-cover');
+    expect(dto?.featuredImage).toBe(eligibleFirstId);
+    expect(dto?.coverImage?.source).toBe('derived_first_inline');
+    expect(dto?.richBodyAr?.doc.content).toHaveLength(2);
+    expect(dto?.richBodyAr?.doc.content[0]).toEqual({
+      type: 'editorialImage',
+      attrs: {
+        assetId: eligibleFirstId,
+        altAr: 'صورة أولى معتمدة',
+        width: '50%',
+        layout: 'float-start',
+      },
+    });
+  });
+
+  it('7. V1 and plain-text articles remain unaffected', async () => {
+    const richV1: RichNewsDocumentWrapper = {
+      schemaVersion: 1,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [{ type: 'text', text: 'مقال بصيغة النسخة الأولى' }],
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-v1-no-cover', {
+        featuredImage: undefined,
+        richBodyAr: richV1,
+      }),
+      buildPublishedNewsItem('article-plain-legacy-cover', {
+        featuredImage: 'https://images.unsplash.com/photo-1500000000000',
+        richBodyAr: undefined,
+      }),
+    ]);
+    const publicRepo = new PublicNewsRepository(newsRepo);
+
+    const v1Dto = await publicRepo.getPublicNewsById('article-v1-no-cover');
+    expect(v1Dto?.featuredImage).toBeUndefined();
+    expect(v1Dto?.coverImage).toBeUndefined();
+    expect(v1Dto?.richBodyAr).toEqual(richV1);
+
+    const plainDto = await publicRepo.getPublicNewsById(
+      'article-plain-legacy-cover'
+    );
+    expect(plainDto?.featuredImage).toBe(
+      'https://images.unsplash.com/photo-1500000000000'
+    );
+    expect(plainDto?.coverImage?.source).toBe('explicit');
+    expect(plainDto?.richBodyAr).toBeUndefined();
+  });
+
+  it('8. Underlying repository records are not mutated during cover derivation and sanitization', async () => {
+    const firstId = 'asset_immutable_derived_01';
+    const assetRepo = new InMemoryEditorialImageAssetRepository();
+    seedAssetsIntoRepo(assetRepo, [buildApprovedAsset(firstId)]);
+
+    const richAr: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: firstId,
+              altAr: 'صورة الأصل',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-immutable-check', {
+        featuredImage: undefined,
+        richBodyAr: richAr,
+      }),
+    ]);
+    const publicRepo = new PublicNewsRepository(newsRepo, assetRepo);
+
+    const dto = await publicRepo.getPublicNewsById('article-immutable-check');
+    expect(dto?.featuredImage).toBe(firstId);
+
+    const storedAfter = await newsRepo.getById('article-immutable-check');
+    expect(storedAfter?.featuredImage).toBeUndefined();
+    expect(storedAfter?.richBodyAr).toEqual(richAr);
+  });
+});
+
+describe('NEWS-IMG-PUBLIC-DELIVERY-01 — Frontend Rich V2 Rendering, Cards & Duplicate Cover Prevention', () => {
+  const TEST_DELIVERY_ENDPOINT =
+    'https://us-central1-promise-of-planet.cloudfunctions.net/publicEditorialImageDeliveryEndpoint';
+
+  beforeEach(() => {
+    mockUiLanguage = 'ar';
+    PublicNewsClient.setPublicImageDeliveryEndpointUrl(TEST_DELIVERY_ENDPOINT);
+  });
+
+  afterEach(() => {
+    PublicNewsClient.setPublicImageDeliveryEndpointUrl(undefined);
+    PublicNewsClient.setTransport(null);
+  });
+
+  it('1. Rich News Document V2 article renders text blocks, marks, and approved editorialImage nodes in order', () => {
+    const asset1 = 'asset_render_order_01';
+    const asset2 = 'asset_render_order_02';
+
+    const docV2: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'heading',
+            attrs: { level: 2, dir: 'rtl' },
+            content: [{ type: 'text', text: 'عنوان رئيسي أول' }],
+          },
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [
+              {
+                type: 'text',
+                text: 'فقرة تمهيدية عريضة ',
+                marks: [{ type: 'bold' }],
+              },
+              {
+                type: 'text',
+                text: 'ورابط رسمي',
+                marks: [
+                  {
+                    type: 'link',
+                    attrs: { href: 'https://www.unep.org' },
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: asset1,
+              altAr: 'صورة الترتيب الأولى',
+              altEn: 'First ordered image',
+              captionAr: 'وصف الصورة الأولى',
+              captionEn: 'First image caption',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+          {
+            type: 'blockquote',
+            attrs: { dir: 'rtl' },
+            content: [
+              {
+                type: 'paragraph',
+                attrs: { dir: 'rtl' },
+                content: [
+                  {
+                    type: 'text',
+                    text: 'اقتباس ميداني موثق',
+                    marks: [{ type: 'italic' }],
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: asset2,
+              altAr: 'صورة الترتيب الثانية',
+              altEn: 'Second ordered image',
+              captionAr: 'وصف الصورة الثانية',
+              captionEn: 'Second image caption',
+              width: '50%',
+              layout: 'float-start',
+            },
+          },
+          {
+            type: 'bulletList',
+            content: [
+              {
+                type: 'listItem',
+                content: [
+                  {
+                    type: 'paragraph',
+                    attrs: { dir: 'rtl' },
+                    content: [{ type: 'text', text: 'عنصر قائمة ختامي' }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(
+      React.createElement(PublicRichNewsDocumentRenderer, {
+        articleId: 'article-order-1',
+        document: docV2,
+        isAr: true,
+        defaultDir: 'rtl',
+      })
+    );
+
+    const h2Idx = html.indexOf('عنوان رئيسي أول');
+    const pIdx = html.indexOf('فقرة تمهيدية عريضة');
+    const linkIdx = html.indexOf('href="https://www.unep.org"');
+    const img1Idx = html.indexOf(
+      `articleId=article-order-1&amp;assetId=${asset1}&amp;variant=article_inline`
+    );
+    const bqIdx = html.indexOf('اقتباس ميداني موثق');
+    const img2Idx = html.indexOf(
+      `articleId=article-order-1&amp;assetId=${asset2}&amp;variant=article_inline`
+    );
+    const liIdx = html.indexOf('عنصر قائمة ختامي');
+
+    expect(h2Idx).toBeGreaterThan(-1);
+    expect(pIdx).toBeGreaterThan(h2Idx);
+    expect(linkIdx).toBeGreaterThan(pIdx);
+    expect(img1Idx).toBeGreaterThan(linkIdx);
+    expect(bqIdx).toBeGreaterThan(img1Idx);
+    expect(img2Idx).toBeGreaterThan(bqIdx);
+    expect(liIdx).toBeGreaterThan(img2Idx);
+  });
+
+  it('2. Localized alt and caption render correctly in Arabic and English', () => {
+    const assetId = 'asset_localized_alt_caption_01';
+    const docV2: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId,
+              altAr: 'نص بديل بالعربية',
+              altEn: 'English alternative text',
+              captionAr: 'تعليق الصورة بالعربية',
+              captionEn: 'English photo caption',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+        ],
+      },
+    };
+
+    const arHtml = renderToStaticMarkup(
+      React.createElement(PublicRichNewsDocumentRenderer, {
+        articleId: 'article-loc-1',
+        document: docV2,
+        isAr: true,
+        defaultDir: 'rtl',
+      })
+    );
+    expect(arHtml).toContain('alt="نص بديل بالعربية"');
+    expect(arHtml).toContain('تعليق الصورة بالعربية');
+    expect(arHtml).not.toContain('English photo caption');
+
+    const enHtml = renderToStaticMarkup(
+      React.createElement(PublicRichNewsDocumentRenderer, {
+        articleId: 'article-loc-1',
+        document: docV2,
+        isAr: false,
+        defaultDir: 'ltr',
+      })
+    );
+    expect(enHtml).toContain('alt="English alternative text"');
+    expect(enHtml).toContain('English photo caption');
+    expect(enHtml).not.toContain('تعليق الصورة بالعربية');
+  });
+
+  it('3. Image width and layout classes render with mobile-safe responsive behavior', () => {
+    const floatStartRtl = getEditorialImageFigureClasses(
+      '50%',
+      'float-start',
+      'rtl'
+    );
+    expect(floatStartRtl).toContain('w-full');
+    expect(floatStartRtl).toContain('sm:w-1/2');
+    expect(floatStartRtl).toContain('max-w-full');
+    expect(floatStartRtl).toContain('md:float-right');
+
+    const floatEndLtr = getEditorialImageFigureClasses(
+      '25%',
+      'float-end',
+      'ltr'
+    );
+    expect(floatEndLtr).toContain('w-full');
+    expect(floatEndLtr).toContain('md:w-1/4');
+    expect(floatEndLtr).toContain('md:float-right');
+
+    const blockCenter75 = getEditorialImageFigureClasses(
+      '75%',
+      'block-center',
+      'rtl'
+    );
+    expect(blockCenter75).toContain('w-full');
+    expect(blockCenter75).toContain('md:w-3/4');
+    expect(blockCenter75).toContain('mx-auto');
+    expect(blockCenter75).toContain('clear-both');
+
+    const blockFull = getEditorialImageFigureClasses(
+      '100%',
+      'block-full',
+      'rtl'
+    );
+    expect(blockFull).toContain('w-full');
+    expect(blockFull).toContain('max-w-full');
+    expect(blockFull).toContain('clear-both');
+  });
+
+  it('4. Explicit cover renders in article view and cards', async () => {
+    const explicitAssetId = 'asset_explicit_cover_view_01';
+    const inlineAssetId = 'asset_inline_view_02';
+
+    const assetRepo = new InMemoryEditorialImageAssetRepository();
+    seedAssetsIntoRepo(assetRepo, [
+      buildApprovedAsset(explicitAssetId),
+      buildApprovedAsset(inlineAssetId),
+    ]);
+
+    const richAr: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [{ type: 'text', text: 'محتوى المقال مع صورة غلاف صريحة' }],
+          },
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: inlineAssetId,
+              altAr: 'صورة داخلية',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-explicit-ui', {
+        featuredImage: explicitAssetId,
+        richBodyAr: richAr,
+      }),
+    ]);
+    const publicRepo = new PublicNewsRepository(newsRepo, assetRepo);
+    const dto = await publicRepo.getPublicNewsById('article-explicit-ui');
+    expect(dto).not.toBeNull();
+
+    const publicArticle = PublicNewsClient.toPublicNewsArticle(dto!);
+
+    // Card renders explicit cover using variant=card
+    const cardHtml = renderToStaticMarkup(
+      React.createElement(NewsCard, {
+        news: publicArticle,
+        currentLanguage: 'ar',
+      })
+    );
+    expect(cardHtml).toContain(
+      `articleId=article-explicit-ui&amp;assetId=${explicitAssetId}&amp;variant=card`
+    );
+
+    // Full article reader renders BOTH the explicit cover banner (variant=article_cover) AND the inline image (variant=article_inline)
+    const hubReaderHtml = renderToStaticMarkup(
+      React.createElement(PublicNewsHub, {
+        initialArticles: [publicArticle],
+        initialArticleIdOrSlug: 'article-explicit-ui',
+      })
+    );
+    expect(hubReaderHtml).toContain('data-article-cover="explicit"');
+    expect(hubReaderHtml).toContain(
+      `articleId=article-explicit-ui&amp;assetId=${explicitAssetId}&amp;variant=article_cover`
+    );
+    expect(hubReaderHtml).toContain(
+      `articleId=article-explicit-ui&amp;assetId=${inlineAssetId}&amp;variant=article_inline`
+    );
+  });
+
+  it('5. Automatically derived cover renders in cards without duplicating the cover block above the first inline image in full article view', async () => {
+    const derivedAssetId = 'asset_derived_first_inline_ui_01';
+
+    const assetRepo = new InMemoryEditorialImageAssetRepository();
+    seedAssetsIntoRepo(assetRepo, [buildApprovedAsset(derivedAssetId)]);
+
+    const richAr: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [{ type: 'text', text: 'الفقرة الأولى من التحقيق' }],
+          },
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId: derivedAssetId,
+              altAr: 'صورة مشتقة كغلاف تلقائي',
+              captionAr: 'تظهر كغلاف في البطاقات وداخل المتن مرة واحدة في القارئ',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-derived-ui', {
+        featuredImage: undefined,
+        richBodyAr: richAr,
+      }),
+    ]);
+    const publicRepo = new PublicNewsRepository(newsRepo, assetRepo);
+    const dto = await publicRepo.getPublicNewsById('article-derived-ui');
+    const publicArticle = PublicNewsClient.toPublicNewsArticle(dto!);
+
+    expect(publicArticle.coverImage?.source).toBe('derived_first_inline');
+    expect(
+      shouldSuppressDuplicateCoverBanner(
+        publicArticle,
+        publicArticle.richBodyAr!
+      )
+    ).toBe(true);
+
+    // 1. NewsCard uses the derived cover (variant=card)
+    const cardHtml = renderToStaticMarkup(
+      React.createElement(NewsCard, {
+        news: publicArticle,
+        currentLanguage: 'ar',
+      })
+    );
+    expect(cardHtml).toContain(
+      `articleId=article-derived-ui&amp;assetId=${derivedAssetId}&amp;variant=card`
+    );
+
+    // 2. Hub catalog view Featured Coverage hero card uses the derived cover
+    const hubCatalogHtml = renderToStaticMarkup(
+      React.createElement(PublicNewsHub, {
+        initialArticles: [publicArticle],
+      })
+    );
+    expect(hubCatalogHtml).toContain(
+      `articleId=article-derived-ui&amp;assetId=${derivedAssetId}&amp;variant=article_cover`
+    );
+
+    // 3. Full article reader suppresses the top duplicate cover banner and renders the image ONCE inline
+    const hubReaderHtml = renderToStaticMarkup(
+      React.createElement(PublicNewsHub, {
+        initialArticles: [publicArticle],
+        initialArticleIdOrSlug: 'article-derived-ui',
+      })
+    );
+    expect(hubReaderHtml).not.toContain('data-article-cover="explicit"');
+    expect(hubReaderHtml).not.toContain('variant=article_cover');
+    const inlineMatches =
+      hubReaderHtml.match(new RegExp(derivedAssetId, 'g')) || [];
+    // Appears in data-editorial-asset-id and img src of the single inline figure
+    expect(hubReaderHtml).toContain(
+      `articleId=article-derived-ui&amp;assetId=${derivedAssetId}&amp;variant=article_inline`
+    );
+    expect(inlineMatches.length).toBe(2);
+  });
+
+  it('6. Article with no images renders cleanly in full view, cards, and homepage preview without broken image tags', async () => {
+    const richArNoImages: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [{ type: 'text', text: 'مقال تحليلي بدون صور مرفقة' }],
+          },
+        ],
+      },
+    };
+
+    const newsRepo = new InMemoryNewsRepository([
+      buildPublishedNewsItem('article-clean-no-images', {
+        featuredImage: undefined,
+        richBodyAr: richArNoImages,
+      }),
+    ]);
+    const publicRepo = new PublicNewsRepository(newsRepo);
+    const dto = await publicRepo.getPublicNewsById('article-clean-no-images');
+    const publicArticle = PublicNewsClient.toPublicNewsArticle(dto!);
+
+    expect(publicArticle.featuredImage).toBeUndefined();
+    expect(publicArticle.coverImage).toBeUndefined();
+
+    const cardHtml = renderToStaticMarkup(
+      React.createElement(NewsCard, {
+        news: publicArticle,
+        currentLanguage: 'ar',
+      })
+    );
+    expect(cardHtml).not.toContain('<img');
+    expect(cardHtml).toContain('تقرير مناخي حول السودان');
+
+    const hubCatalogHtml = renderToStaticMarkup(
+      React.createElement(PublicNewsHub, {
+        initialArticles: [publicArticle],
+      })
+    );
+    expect(hubCatalogHtml).not.toContain('<img');
+
+    const hubReaderHtml = renderToStaticMarkup(
+      React.createElement(PublicNewsHub, {
+        initialArticles: [publicArticle],
+        initialArticleIdOrSlug: 'article-clean-no-images',
+      })
+    );
+    expect(hubReaderHtml).not.toContain('<img');
+    expect(hubReaderHtml).toContain('مقال تحليلي بدون صور مرفقة');
+
+    const homePreviewHtml = renderToStaticMarkup(
+      React.createElement(HomeNewsPreview, {
+        currentLanguage: 'ar',
+      })
+    );
+    expect(homePreviewHtml).not.toContain('<img');
+  });
+
+  it('7. Image load error or unconfigured endpoint falls back cleanly without breaking the article or card', () => {
+    const assetId = 'asset_error_fallback_01';
+    const docV2: RichNewsDocumentWrapperV2 = {
+      schemaVersion: 2,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'editorialImage',
+            attrs: {
+              assetId,
+              altAr: 'صورة تعذر تحميلها',
+              captionAr: 'يبقى التعليق واضحاً عند فشل التحميل',
+              width: '75%',
+              layout: 'block-center',
+            },
+          },
+        ],
+      },
+    };
+
+    const failedHtml = renderToStaticMarkup(
+      React.createElement(PublicRichNewsDocumentRenderer, {
+        articleId: 'article-img-err',
+        document: docV2,
+        isAr: true,
+        defaultDir: 'rtl',
+        failedAssetIds: new Set([assetId]),
+      })
+    );
+
+    expect(failedHtml).not.toContain('<img');
+    expect(failedHtml).toContain('تعذر تحميل الصورة التحريرية المعتمدة');
+    expect(failedHtml).toContain('يبقى التعليق واضحاً عند فشل التحميل');
+
+    // When public delivery endpoint is unconfigured, raw assetId is never rendered as <img src="asset_...">
+    PublicNewsClient.setPublicImageDeliveryEndpointUrl(null);
+    const articleWhenUnconfigured = PublicNewsClient.toPublicNewsArticle({
+      id: 'article-unconfigured',
+      titleAr: 'عنوان المقال',
+      titleEn: 'Article Title',
+      summaryAr: 'ملخص',
+      summaryEn: 'Summary',
+      bodyAr: 'متن',
+      bodyEn: 'Body',
+      author: 'Editor',
+      category: 'Climate',
+      tags: [],
+      sources: [],
+      featuredImage: assetId,
+      urgencyLevel: 'Standard',
+      publishedAt: '2026-04-15T12:00:00.000Z',
+      createdAt: '2026-04-15T08:00:00.000Z',
+    });
+
+    expect(articleWhenUnconfigured.featuredImage).toBeUndefined();
+    const cardUnconfiguredHtml = renderToStaticMarkup(
+      React.createElement(NewsCard, {
+        news: articleWhenUnconfigured,
+        currentLanguage: 'ar',
+      })
+    );
+    expect(cardUnconfiguredHtml).not.toContain('<img');
+  });
+
+  it('8. V1 and plain-text articles still render correctly in PublicNewsHub', () => {
+    const richV1: RichNewsDocumentWrapper = {
+      schemaVersion: 1,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'heading',
+            attrs: { level: 3, dir: 'rtl' },
+            content: [{ type: 'text', text: 'عنوان فرعي في النسخة الأولى' }],
+          },
+          {
+            type: 'paragraph',
+            attrs: { dir: 'rtl' },
+            content: [
+              {
+                type: 'text',
+                text: 'فقرة نصية من النسخة الأولى للمستندات الغنية.',
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const v1Article = PublicNewsClient.toPublicNewsArticle({
+      id: 'article-v1-render',
+      titleAr: 'مقال النسخة الأولى',
+      titleEn: 'V1 Article',
+      summaryAr: 'ملخص',
+      summaryEn: 'Summary',
+      bodyAr: 'نص احتياطي',
+      bodyEn: 'Fallback body',
+      richBodyAr: richV1,
+      author: 'Editor',
+      category: 'Climate',
+      tags: ['v1'],
+      sources: ['https://www.un.org'],
+      urgencyLevel: 'Standard',
+      publishedAt: '2026-04-15T12:00:00.000Z',
+      createdAt: '2026-04-15T08:00:00.000Z',
+    });
+
+    const v1Html = renderToStaticMarkup(
+      React.createElement(PublicNewsHub, {
+        initialArticles: [v1Article],
+        initialArticleIdOrSlug: 'article-v1-render',
+      })
+    );
+    expect(v1Html).toContain('عنوان فرعي في النسخة الأولى');
+    expect(v1Html).toContain('فقرة نصية من النسخة الأولى للمستندات الغنية.');
+
+    const plainArticle = PublicNewsClient.toPublicNewsArticle({
+      id: 'article-plain-render',
+      titleAr: 'مقال نصي تقليدي',
+      titleEn: 'Plain Text Article',
+      summaryAr: 'ملخص نصي',
+      summaryEn: 'Plain summary',
+      bodyAr: 'الفقرة النصية الأولى.\n\nالفقرة النصية الثانية.',
+      bodyEn: 'First plain paragraph.\n\nSecond plain paragraph.',
+      author: 'Editor',
+      category: 'Climate',
+      tags: [],
+      sources: [],
+      urgencyLevel: 'Standard',
+      publishedAt: '2026-04-15T12:00:00.000Z',
+      createdAt: '2026-04-15T08:00:00.000Z',
+    });
+
+    const plainHtml = renderToStaticMarkup(
+      React.createElement(PublicNewsHub, {
+        initialArticles: [plainArticle],
+        initialArticleIdOrSlug: 'article-plain-render',
+      })
+    );
+    expect(plainHtml).toContain('الفقرة النصية الأولى.');
+    expect(plainHtml).toContain('الفقرة النصية الثانية.');
+  });
+});
+
