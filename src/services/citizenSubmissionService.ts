@@ -568,19 +568,34 @@ export class FirestoreCitizenSubmissionRepository implements CitizenSubmissionRe
     if (!this.isConfigured()) {
       throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', 'Firebase backend is unavailable.');
     }
-    try {
-      const snap = await getDocs(collection(db, 'citizen_submissions'));
-      return snap.docs
-        .map(d => validateCitizenSubmissionData(d.data(), d.id))
-        .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
-    } catch (err: any) {
-      if (err instanceof CitizenSubmissionError) throw err;
+    if (app && auth?.currentUser) {
       try {
-        handleFirestoreError(err, OperationType.LIST, 'citizen_submissions');
-      } catch {
-        throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', 'Failed to list citizen submissions.');
+        const fns = getFunctions(app);
+        const callable = httpsCallable<{ action: string }, { submissions: any[] }>(
+          fns,
+          'manageCitizenSubmissions'
+        );
+        const res = await callable({ action: 'listAll' });
+        const raw = res.data?.submissions ?? [];
+        return raw
+          .map(d => validateCitizenSubmissionData(d, d.id))
+          .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+      } catch (callableErr: any) {
+        const code = String(callableErr?.code || '');
+        const message = callableErr?.message || 'Failed to list submissions from server.';
+        if (code.includes('unauthenticated')) {
+          throw new CitizenSubmissionError('AUTH_REQUIRED', message);
+        }
+        if (code.includes('permission-denied')) {
+          throw new CitizenSubmissionError('UNAUTHORIZED', message);
+        }
+        throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', message);
       }
     }
+    throw new CitizenSubmissionError(
+      'UNAUTHORIZED',
+      'Administrative listing of citizen submissions requires authenticated server callable.'
+    );
   }
 
   async listSubmissionsByUid(uid: string): Promise<CitizenSubmission[]> {
@@ -608,18 +623,56 @@ export class FirestoreCitizenSubmissionRepository implements CitizenSubmissionRe
       throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', 'Firebase backend is unavailable.');
     }
     const validated = validateCitizenSubmissionData(submission, submission.id);
-    try {
-      const docRef = doc(db, 'citizen_submissions', validated.id);
-      await setDoc(docRef, serializeSubmissionForFirestore(validated));
-      return validated;
-    } catch (err: any) {
-      if (err instanceof CitizenSubmissionError) throw err;
+
+    if (app && auth?.currentUser) {
       try {
-        handleFirestoreError(err, OperationType.UPDATE, `citizen_submissions/${validated.id}`);
-      } catch {
-        throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', 'Failed to update submission moderation state.');
+        const fns = getFunctions(app);
+        const callable = httpsCallable<
+          { action: string; id: string; status: string; moderatorNotes?: string; editorialReferenceId?: string },
+          { submission: any }
+        >(fns, 'manageCitizenSubmissions');
+
+        const payload: {
+          action: string;
+          id: string;
+          status: string;
+          moderatorNotes?: string;
+          editorialReferenceId?: string;
+        } = {
+          action: 'moderate',
+          id: validated.id,
+          status: validated.status,
+        };
+        if (validated.moderatorNotes) payload.moderatorNotes = validated.moderatorNotes;
+        if (validated.editorialReferenceId) payload.editorialReferenceId = validated.editorialReferenceId;
+
+        const res = await callable(payload);
+        if (res.data?.submission) {
+          return validateCitizenSubmissionData(res.data.submission, validated.id);
+        }
+      } catch (callableErr: any) {
+        const code = String(callableErr?.code || '');
+        const message = callableErr?.message || 'Moderation rejected by server.';
+        if (code.includes('unauthenticated')) {
+          throw new CitizenSubmissionError('AUTH_REQUIRED', message);
+        }
+        if (code.includes('permission-denied')) {
+          throw new CitizenSubmissionError('UNAUTHORIZED', message);
+        }
+        if (code.includes('not-found') || message.includes('NOT_FOUND')) {
+          throw new CitizenSubmissionError('NOT_FOUND', message);
+        }
+        if (code.includes('invalid-argument') || message.includes('VALIDATION_ERROR')) {
+          throw new CitizenSubmissionError('VALIDATION_ERROR', message);
+        }
+        throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', message);
       }
     }
+
+    throw new CitizenSubmissionError(
+      'UNAUTHORIZED',
+      'Administrative moderation updates must be performed via authenticated server callable.'
+    );
   }
 }
 
@@ -854,6 +907,9 @@ export class CitizenSubmissionServiceClass {
 
   /**
    * Lists all citizen submissions for authorized administrative staff.
+   * - Client-side permission checks act as UX guard.
+   * - In production, manageCitizenSubmissions callable with action "listAll" is the authoritative data source.
+   * - In-memory repository is preserved for testing environments.
    */
   async listSubmissionsForAdmin(adminUser: AdminUser | null | undefined): Promise<CitizenSubmission[]> {
     if (!adminUser || !adminUser.isActive) {
@@ -865,14 +921,111 @@ export class CitizenSubmissionServiceClass {
     if (!canView) {
       throw new CitizenSubmissionError('UNAUTHORIZED', 'Admin user lacks permission to view citizen submissions.');
     }
-    return await this.repository.listAllSubmissions();
+
+    if (this.repository instanceof InMemoryCitizenSubmissionRepository) {
+      return await this.repository.listAllSubmissions();
+    }
+
+    if (!isFirebaseConfigured || !app) {
+      throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', 'Firebase backend is unavailable.');
+    }
+    if (!auth?.currentUser) {
+      throw new CitizenSubmissionError(
+        'AUTH_REQUIRED',
+        'Active authenticated session required for administrative operations.'
+      );
+    }
+
+    try {
+      const fns = getFunctions(app);
+      const callable = httpsCallable<{ action: string }, { submissions: any[] }>(
+        fns,
+        'manageCitizenSubmissions'
+      );
+      const res = await callable({ action: 'listAll' });
+      const rawSubmissions = res.data?.submissions ?? [];
+      return rawSubmissions
+        .map(s => validateCitizenSubmissionData(s, s.id))
+        .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+    } catch (err: any) {
+      if (err instanceof CitizenSubmissionError) throw err;
+      const code = String(err?.code || '');
+      const message = err?.message || 'Failed to list submissions from server.';
+      if (code.includes('unauthenticated')) {
+        throw new CitizenSubmissionError('AUTH_REQUIRED', message);
+      }
+      if (code.includes('permission-denied')) {
+        throw new CitizenSubmissionError('UNAUTHORIZED', message);
+      }
+      throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', message);
+    }
+  }
+
+  /**
+   * Retrieves a single citizen submission for an authorized administrator via server callable.
+   */
+  async getSubmissionForAdmin(
+    submissionId: string,
+    adminUser: AdminUser | null | undefined
+  ): Promise<CitizenSubmission | null> {
+    if (!adminUser || !adminUser.isActive) {
+      throw new CitizenSubmissionError('UNAUTHORIZED', 'Active administrative credentials are required.');
+    }
+    const canView =
+      AdminAccessService.hasPermission(adminUser, AdminPermission.View) ||
+      AdminAccessService.hasPermission(adminUser, AdminPermission.Review);
+    if (!canView) {
+      throw new CitizenSubmissionError('UNAUTHORIZED', 'Admin user lacks permission to view citizen submissions.');
+    }
+
+    if (this.repository instanceof InMemoryCitizenSubmissionRepository) {
+      return await this.repository.getSubmissionById(submissionId);
+    }
+
+    if (!isFirebaseConfigured || !app) {
+      throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', 'Firebase backend is unavailable.');
+    }
+    if (!auth?.currentUser) {
+      throw new CitizenSubmissionError(
+        'AUTH_REQUIRED',
+        'Active authenticated session required for administrative operations.'
+      );
+    }
+
+    try {
+      const fns = getFunctions(app);
+      const callable = httpsCallable<{ action: string; id: string }, { submission: any | null }>(
+        fns,
+        'manageCitizenSubmissions'
+      );
+      const res = await callable({ action: 'getById', id: submissionId });
+      if (!res.data?.submission) return null;
+      return validateCitizenSubmissionData(res.data.submission, submissionId);
+    } catch (err: any) {
+      if (err instanceof CitizenSubmissionError) throw err;
+      const code = String(err?.code || '');
+      const message = err?.message || 'Failed to retrieve submission from server.';
+      if (code.includes('unauthenticated')) {
+        throw new CitizenSubmissionError('AUTH_REQUIRED', message);
+      }
+      if (code.includes('permission-denied')) {
+        throw new CitizenSubmissionError('UNAUTHORIZED', message);
+      }
+      if (code.includes('not-found') || message.includes('NOT_FOUND')) {
+        return null;
+      }
+      throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', message);
+    }
   }
 
   /**
    * Updates moderation status and notes on a submission.
-   * - Requires AdminPermission.Review (public users and unpermitted admins are blocked).
-   * - Preserves contributor ownership and original submission content.
+   * - Client-side permission checks act as UX guard.
+   * - In production, uses manageCitizenSubmissions callable with action "moderate".
+   * - Does NOT send privileged actor identities from the client (server authenticates and assigns reviewedByUid/Name).
+   * - Preserves contributor ownership, submission timestamp, and attachments.
    * - AcceptedForEditorial strictly marks editorial intake status and NEVER automatically publishes to News.
+   * - In-memory repository is preserved for testing environments.
    */
   async moderateSubmission(
     submissionId: string,
@@ -892,33 +1045,96 @@ export class CitizenSubmissionServiceClass {
       );
     }
 
-    const existing = await this.repository.getSubmissionById(submissionId);
-    if (!existing) {
-      throw new CitizenSubmissionError('NOT_FOUND', `Submission '${submissionId}' not found.`);
-    }
-
     const validStatuses = Object.values(SubmissionStatus);
     if (!validStatuses.includes(update.status)) {
       throw new CitizenSubmissionError('VALIDATION_ERROR', `Invalid moderation status '${update.status}'.`);
     }
 
-    const updated: CitizenSubmission = {
-      ...existing,
-      id: existing.id,
-      submittedAt: existing.submittedAt,
-      submittedByUid: existing.submittedByUid,
+    // In unit test environment with an InMemory repository, update in-memory store
+    if (this.repository instanceof InMemoryCitizenSubmissionRepository) {
+      const existing = await this.repository.getSubmissionById(submissionId);
+      if (!existing) {
+        throw new CitizenSubmissionError('NOT_FOUND', `Submission '${submissionId}' not found.`);
+      }
+
+      const updated: CitizenSubmission = {
+        ...existing,
+        id: existing.id,
+        submittedAt: existing.submittedAt,
+        submittedByUid: existing.submittedByUid,
+        status: update.status,
+        moderatorNotes: update.moderatorNotes?.trim() ? update.moderatorNotes.trim() : undefined,
+        editorialReferenceId:
+          update.editorialReferenceId !== undefined
+            ? (update.editorialReferenceId.trim() || undefined)
+            : existing.editorialReferenceId,
+        reviewedByUid: adminUser.id,
+        reviewedByName: adminUser.name,
+        updatedAt: new Date().toISOString(),
+      };
+
+      return await this.repository.updateSubmission(updated);
+    }
+
+    // Production environment: call manageCitizenSubmissions with action 'moderate'
+    if (!isFirebaseConfigured || !app) {
+      throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', 'Firebase backend is unavailable.');
+    }
+    if (!auth?.currentUser) {
+      throw new CitizenSubmissionError(
+        'AUTH_REQUIRED',
+        'Active authenticated session required to moderate submissions.'
+      );
+    }
+
+    const payload: {
+      action: string;
+      id: string;
+      status: string;
+      moderatorNotes?: string;
+      editorialReferenceId?: string;
+    } = {
+      action: 'moderate',
+      id: submissionId,
       status: update.status,
-      moderatorNotes: update.moderatorNotes?.trim() ? update.moderatorNotes.trim() : undefined,
-      editorialReferenceId:
-        update.editorialReferenceId !== undefined
-          ? (update.editorialReferenceId.trim() || undefined)
-          : existing.editorialReferenceId,
-      reviewedByUid: adminUser.id,
-      reviewedByName: adminUser.name,
-      updatedAt: new Date().toISOString(),
     };
 
-    return await this.repository.updateSubmission(updated);
+    if (update.moderatorNotes !== undefined && update.moderatorNotes.trim()) {
+      payload.moderatorNotes = update.moderatorNotes.trim();
+    }
+    if (update.editorialReferenceId !== undefined && update.editorialReferenceId.trim()) {
+      payload.editorialReferenceId = update.editorialReferenceId.trim();
+    }
+
+    try {
+      const fns = getFunctions(app);
+      const callable = httpsCallable<typeof payload, { submission: any }>(
+        fns,
+        'manageCitizenSubmissions'
+      );
+      const res = await callable(payload);
+      if (!res.data?.submission) {
+        throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', 'Server returned empty submission response.');
+      }
+      return validateCitizenSubmissionData(res.data.submission, submissionId);
+    } catch (err: any) {
+      if (err instanceof CitizenSubmissionError) throw err;
+      const code = String(err?.code || '');
+      const message = err?.message || 'Moderation operation failed.';
+      if (code.includes('unauthenticated')) {
+        throw new CitizenSubmissionError('AUTH_REQUIRED', message);
+      }
+      if (code.includes('permission-denied')) {
+        throw new CitizenSubmissionError('UNAUTHORIZED', message);
+      }
+      if (code.includes('not-found') || message.includes('NOT_FOUND')) {
+        throw new CitizenSubmissionError('NOT_FOUND', message);
+      }
+      if (code.includes('invalid-argument') || message.includes('VALIDATION_ERROR')) {
+        throw new CitizenSubmissionError('VALIDATION_ERROR', message);
+      }
+      throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', message);
+    }
   }
 
   /**
