@@ -1,0 +1,149 @@
+name: Deploy Storage Rules Live
+
+# PREREQUISITE NOTICE FOR PROJECT OWNER:
+# 1. SEPARATE AUTHORIZATION REQUIRED: This workflow must NOT be dispatched without separate,
+#    explicit owner authorization.
+# 2. VERIFICATION BOUNDARY: Deploys storage.rules via 'firebase deploy --only storage'.
+#    Deployment of rules alone does not constitute end-to-end upload testing; verified smoke
+#    and permissions testing must be conducted following deployment.
+# 3. SCOPE INTEGRITY: This workflow deploys only Firebase Storage security rules ('--only storage').
+#    No Cloud Functions, Firestore security rules, Firestore indexes, or Hosting bundles are deployed.
+# 4. ROLLBACK SAFETY: Reverting storage.rules locally or in git does NOT automatically undeploy
+#    active rules in Google Cloud / Firebase. Rollback requires explicitly re-running this workflow
+#    from an authorized rollback commit or re-deploying previous rules.
+# 5. CREDENTIAL SAFETY: Never echo, log, or expose secret values or service account credentials.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-firebase-storage-rules-live
+  cancel-in-progress: false
+
+jobs:
+  deploy_storage_rules:
+    name: Deploy Storage Rules
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Verify Main Branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::This workflow can only be run on the main branch."
+            exit 1
+          fi
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify Firebase Configuration and Storage Rules Source
+        run: |
+          node -e '
+            const fs = require("fs");
+
+            // 1. Verify firebase.json storage configuration
+            if (!fs.existsSync("firebase.json")) {
+              console.error("::error::Missing firebase.json in repository root.");
+              process.exit(1);
+            }
+            let fbConfig;
+            try {
+              fbConfig = JSON.parse(fs.readFileSync("firebase.json", "utf8"));
+            } catch (err) {
+              console.error("::error::Failed to parse firebase.json: " + err.message);
+              process.exit(1);
+            }
+            if (!fbConfig.storage || fbConfig.storage.rules !== "storage.rules") {
+              console.error("::error::firebase.json must define storage.rules: " + JSON.stringify(fbConfig.storage));
+              process.exit(1);
+            }
+            console.log("Verified firebase.json storage configuration: " + fbConfig.storage.rules);
+
+            // 2. Verify storage.rules exists and contains expected rule blocks
+            if (!fs.existsSync("storage.rules")) {
+              console.error("::error::Missing storage.rules file.");
+              process.exit(1);
+            }
+            const rulesContent = fs.readFileSync("storage.rules", "utf8");
+            if (!rulesContent.trim()) {
+              console.error("::error::storage.rules is empty.");
+              process.exit(1);
+            }
+
+            if (!rulesContent.includes("rules_version = \x272\x27;")) {
+              console.error("::error::storage.rules must declare rules_version = \x272\x27;");
+              process.exit(1);
+            }
+
+            if (!rulesContent.includes("match /branding/platform-logo/{fileName}")) {
+              console.error("::error::storage.rules missing branding platform logo namespace.");
+              process.exit(1);
+            }
+
+            if (!rulesContent.includes("match /citizen_submissions/{userId}/{submissionId}/{fileName}")) {
+              console.error("::error::storage.rules missing citizen journalism submissions namespace.");
+              process.exit(1);
+            }
+
+            console.log("Verified storage.rules integrity and namespace declarations successfully.");
+          '
+
+      - name: Verify Service Account Credential
+        env:
+          CREDENTIAL_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+        run: |
+          if [ -z "$CREDENTIAL_JSON" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 secret is empty or missing."
+            exit 1
+          fi
+          node -e '
+            const raw = process.env.CREDENTIAL_JSON;
+            let cred;
+            try {
+              cred = JSON.parse(raw);
+            } catch (err) {
+              console.error("::error::Failed to parse credential JSON.");
+              process.exit(1);
+            }
+            if (cred.type !== "service_account") {
+              console.error("::error::Credential is not a service_account (type: " + cred.type + ")");
+              process.exit(1);
+            }
+            if (cred.project_id !== "promiseofplanet-bb325") {
+              console.error("::error::Credential project_id mismatch. Expected promiseofplanet-bb325, found: " + cred.project_id);
+              process.exit(1);
+            }
+            console.log("Verified service-account credential for project: " + cred.project_id);
+          '
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy Storage Rules to Firebase
+        run: |
+          firebase deploy --project promiseofplanet-bb325 --only storage --non-interactive
+
+      - name: Generate Deployment Summary
+        if: always()
+        run: |
+          echo "### Firebase Storage Rules Deployment Summary 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Project:** \`promiseofplanet-bb325\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Ref:** \`${{ github.ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit SHA:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deploy Target:** \`storage.rules\` (\`--only storage\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Workflow Status:** \`${{ job.status }}\`" >> $GITHUB_STEP_SUMMARY
