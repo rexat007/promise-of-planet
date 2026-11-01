@@ -106,7 +106,8 @@ export async function executeSubmitCitizenReport(
 export async function executeManageCitizenSubmissions(
   requestContext: CommunityRequestContext,
   adminRepo: AdminRepository = new FirestoreAdminRepository(),
-  communityService: CommunityApplicationService = new CommunityApplicationService()
+  communityService: CommunityApplicationService = new CommunityApplicationService(),
+  newsService?: any
 ): Promise<any> {
   const data = requestContext.data || {};
   const action = data.action;
@@ -152,6 +153,24 @@ export async function executeManageCitizenSubmissions(
       return { submission: updated };
     }
 
+    if (action === 'createNewsDraft') {
+      const admin = await authenticateAndAuthorizeAdmin(requestContext, AdminPermission.Create, adminRepo);
+      const submissionId = data.submissionId || data.id;
+      if (!submissionId || typeof submissionId !== 'string') {
+        throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: Submission id is required');
+      }
+      const actor = {
+        uid: admin.id,
+        name: admin.name,
+        role: admin.role,
+      };
+      const result = await communityService.createNewsDraft(submissionId.trim(), actor, newsService);
+      return {
+        item: result.item,
+        alreadyExisted: result.alreadyExisted,
+      };
+    }
+
     throw new HttpsError('invalid-argument', `INVALID_ARGUMENT: Unrecognized action '${action}'`);
   } catch (err: any) {
     if (err instanceof HttpsError) throw err;
@@ -161,6 +180,9 @@ export async function executeManageCitizenSubmissions(
     }
     if (msg.startsWith('NOT_FOUND')) {
       throw new HttpsError('not-found', msg);
+    }
+    if (msg.startsWith('FAILED_PRECONDITION')) {
+      throw new HttpsError('failed-precondition', msg);
     }
     throw new HttpsError('internal', msg);
   }

@@ -37,6 +37,7 @@ import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
 import { AdminPermission, AdminRole } from '../types/admin';
 import type { AdminUser } from '../types/admin';
+import type { CommunityRepository } from '../community/communityRepository';
 
 export const MAX_GET_EDITORIAL_IMAGE_RIGHTS_ASSET_IDS = 20 as const;
 export const GET_EDITORIAL_IMAGE_RIGHTS_CONCURRENCY = 5 as const;
@@ -618,7 +619,8 @@ export async function executeManageNewsRequest(
   adminRepo: AdminRepository = new FirestoreAdminRepository(),
   newsService: NewsApplicationService = createProductionNewsApplicationService(),
   rightsService?: EditorialImageRightsReviewService,
-  assetRepo?: EditorialImageAssetRepository
+  assetRepo?: EditorialImageAssetRepository,
+  communityRepo?: CommunityRepository
 ): Promise<any> {
   const data =
     requestContext &&
@@ -837,10 +839,40 @@ export async function executeManageNewsRequest(
       return { item: transitioned };
     }
 
+    if (action === 'createDraftFromCitizenSubmission') {
+      const submissionId = data.submissionId || data.id;
+      if (!submissionId || typeof submissionId !== 'string') {
+        throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: submissionId is required');
+      }
+
+      const admin = await authenticateAndAuthorize(requestContext, AdminPermission.Create, adminRepo);
+      const actor = {
+        uid: admin.id,
+        name: admin.name,
+        role: admin.role,
+      };
+
+      const result = await newsService.createDraftFromCitizenSubmission(submissionId.trim(), actor, communityRepo);
+      return {
+        item: result.item,
+        alreadyExisted: result.alreadyExisted,
+      };
+    }
+
     throw new HttpsError('invalid-argument', `INVALID_ARGUMENT: Unrecognized action '${action}'`);
   } catch (err: any) {
     if (err instanceof HttpsError) throw err;
-    throw new HttpsError('internal', err.message || 'Operation failed');
+    const msg = err?.message || 'Operation failed';
+    if (msg.startsWith('NOT_FOUND')) {
+      throw new HttpsError('not-found', msg);
+    }
+    if (msg.startsWith('FAILED_PRECONDITION')) {
+      throw new HttpsError('failed-precondition', msg);
+    }
+    if (msg.startsWith('INVALID_ARGUMENT')) {
+      throw new HttpsError('invalid-argument', msg);
+    }
+    throw new HttpsError('internal', msg);
   }
 }
 

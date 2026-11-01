@@ -5,6 +5,7 @@ import type {
 } from './communityRepository';
 import { FirestoreCommunityRepository } from './firestoreCommunityRepository';
 import { CommunityValidator } from './communityValidator';
+import { NewsApplicationService } from '../news/newsApplicationService';
 
 export interface SubmitCitizenReportInput {
   id?: string;
@@ -136,5 +137,26 @@ export class CommunityApplicationService {
 
     await this.repo.save(updated);
     return updated;
+  }
+
+  /**
+   * Completes the editorial handoff from an AcceptedForEditorial citizen submission into a canonical News Draft.
+   * Delegates to NewsApplicationService.createDraftFromCitizenSubmission.
+   */
+  async createNewsDraft(
+    submissionId: string,
+    actor: AdminModeratorActor,
+    newsService?: NewsApplicationService
+  ): Promise<{ item: any; alreadyExisted: boolean }> {
+    const effectiveNewsService = newsService || new NewsApplicationService();
+    return await effectiveNewsService.createDraftFromCitizenSubmission(
+      submissionId,
+      {
+        uid: actor.uid,
+        name: actor.name,
+        role: actor.role,
+      },
+      this.repo
+    );
   }
 }

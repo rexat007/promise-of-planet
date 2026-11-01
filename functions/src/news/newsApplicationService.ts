@@ -5,7 +5,10 @@ import type {
   WorkflowStateBackend, 
   WorkflowTransitionRecordBackend 
 } from './newsRepository';
-import { FirestoreNewsRepository } from './firestoreNewsRepository';
+import { getFirestore } from 'firebase-admin/firestore';
+import { FirestoreNewsRepository, sanitizeForFirestore } from './firestoreNewsRepository';
+import type { CommunityRepository, CitizenSubmissionBackend } from '../community/communityRepository';
+import { FirestoreCommunityRepository } from '../community/firestoreCommunityRepository';
 import { NewsValidator } from './newsValidator';
 import { 
   validateRichNewsDocumentByVersion, 
@@ -241,19 +244,50 @@ export interface ActorContext {
   role: string;
 }
 
+export function mapCitizenCategoryToNewsCategory(category: unknown): string {
+  if (typeof category !== 'string') return 'Climate';
+  const trimmed = category.trim();
+  const lower = trimmed.toLowerCase();
+  switch (lower) {
+    case 'water':
+      return 'Water';
+    case 'climate':
+      return 'Climate';
+    case 'desertification':
+      return 'Agriculture';
+    case 'marine':
+      return 'Water';
+    case 'biodiversity':
+      return 'Biodiversity';
+    case 'pollution':
+      return 'Pollution';
+    case 'energy':
+      return 'Energy';
+    case 'agriculture':
+      return 'Agriculture';
+    case 'environmentalpolicy':
+      return 'EnvironmentalPolicy';
+    default:
+      return trimmed;
+  }
+}
+
 export class NewsApplicationService {
   private repo: NewsRepository;
   private assetRepo?: EditorialImageAssetRepository;
   private mediaRepo: Pick<MediaRepository, 'getVideoById'>;
+  private communityRepo?: CommunityRepository;
 
   constructor(
     repo?: NewsRepository,
     assetRepo?: EditorialImageAssetRepository,
-    mediaRepo?: Pick<MediaRepository, 'getVideoById'>
+    mediaRepo?: Pick<MediaRepository, 'getVideoById'>,
+    communityRepo?: CommunityRepository
   ) {
     this.repo = repo || new FirestoreNewsRepository();
     this.assetRepo = assetRepo;
     this.mediaRepo = mediaRepo || new FirestoreMediaRepository();
+    this.communityRepo = communityRepo;
   }
 
   /**
@@ -800,4 +834,222 @@ export class NewsApplicationService {
     await this.repo.save(updated);
     return updated;
   }
+
+  /**
+   * Completes the editorial handoff from an AcceptedForEditorial citizen submission into a canonical News Draft.
+   * - Human authorized action.
+   * - Verifies submission exists and is in AcceptedForEditorial status.
+   * - Idempotent: returns existing draft if submission already has an editorialReferenceId pointing to an existing draft.
+   * - Atomic Firestore transaction writes draft and updates submission's editorialReferenceId.
+   * - Safe field mapping: canonical category, titleAr/titleEn, summaryAr/summaryEn, bodyAr/bodyEn, kickerAr/kickerEn, journalisticType, author.
+   * - Private evidence attachments remain private (never in featuredImage or public fields).
+   */
+  async createDraftFromCitizenSubmission(
+    submissionId: string,
+    actor: ActorContext,
+    communityRepo?: CommunityRepository
+  ): Promise<{ item: NewsItemBackend; alreadyExisted: boolean }> {
+    const cleanSubId = (submissionId || '').trim();
+    if (!cleanSubId) {
+      throw new Error('INVALID_ARGUMENT: Submission ID is required.');
+    }
+
+    const effectiveCommunityRepo = communityRepo || this.communityRepo || new FirestoreCommunityRepository();
+
+    // Check if Firestore transaction is supported in the current environment
+    let db: any = null;
+    try {
+      db = getFirestore();
+    } catch {
+      db = null;
+    }
+
+    if (db && typeof db.runTransaction === 'function') {
+      const newsCol = db.collection(FirestoreNewsRepository.COLLECTION);
+      const subCol = db.collection(FirestoreCommunityRepository.COLLECTION);
+      const subRef = subCol.doc(cleanSubId);
+
+      return await db.runTransaction(async (transaction: any) => {
+        const subSnap = await transaction.get(subRef);
+        if (!subSnap.exists) {
+          throw new Error(`NOT_FOUND: Citizen submission '${cleanSubId}' not found`);
+        }
+        const subData = subSnap.data() as CitizenSubmissionBackend;
+
+        if (subData.status !== 'AcceptedForEditorial') {
+          throw new Error(
+            `FAILED_PRECONDITION: Submission must be in AcceptedForEditorial status to create a news draft (current status: ${subData.status})`
+          );
+        }
+
+        // Idempotency: If editorialReferenceId already exists and points to an existing news item, return it
+        if (subData.editorialReferenceId && subData.editorialReferenceId.trim()) {
+          const existingNewsRef = newsCol.doc(subData.editorialReferenceId.trim());
+          const existingNewsSnap = await transaction.get(existingNewsRef);
+          if (existingNewsSnap.exists) {
+            return {
+              item: existingNewsSnap.data() as NewsItemBackend,
+              alreadyExisted: true,
+            };
+          }
+        }
+
+        const canonicalCategory = mapCitizenCategoryToNewsCategory(subData.category);
+        NewsValidator.validateCanonicalCategory(canonicalCategory);
+
+        const now = new Date().toISOString();
+        const draftId = `news-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        const newsRef = newsCol.doc(draftId);
+
+        const summaryAr = subData.sourceLanguage === 'ar' ? subData.body.slice(0, 300) : '';
+        const summaryEn = subData.sourceLanguage === 'en' ? subData.body.slice(0, 300) : '';
+        const bodyAr = subData.sourceLanguage === 'ar' ? subData.body : '';
+        const bodyEn = subData.sourceLanguage === 'en' ? subData.body : '';
+        const titleAr = subData.title;
+        const titleEn = subData.sourceLanguage === 'en' ? subData.title : '';
+
+        const author = subData.contributorName
+          ? `مواطن صحفي: ${subData.contributorName}`
+          : actor.name;
+
+        const sourceAttribution = subData.contributorName
+          ? `Citizen Report: ${subData.contributorName} (${subData.id})`
+          : `Citizen Report: ${subData.id}`;
+
+        const draftItem: NewsItemBackend = {
+          id: draftId,
+          titleAr,
+          titleEn,
+          kickerAr: 'صحافة المواطن',
+          kickerEn: 'Citizen Journalism',
+          journalisticType: 'Report',
+          summaryAr,
+          summaryEn,
+          bodyAr,
+          bodyEn,
+          author,
+          category: canonicalCategory,
+          tags: ['citizen-journalism', canonicalCategory.toLowerCase()],
+          sources: [sourceAttribution],
+          featuredImage: undefined, // Private evidence attachments remain private
+          workflowState: 'Draft',
+          createdAt: now,
+          updatedAt: now,
+          history: [
+            {
+              id: `trans-${Date.now()}-init`,
+              fromState: 'Draft',
+              toState: 'Draft',
+              action: 'revise_draft',
+              actorName: actor.name,
+              actorRole: actor.role,
+              timestamp: now,
+              comment: `Draft created from citizen submission ${subData.id}`,
+            },
+          ],
+          location: subData.locationDescription || undefined,
+          urgencyLevel: 'Standard',
+          relatedVideoIds: [],
+        };
+
+        NewsValidator.validateNewsPayload(draftItem);
+
+        transaction.set(newsRef, sanitizeForFirestore(draftItem));
+        transaction.update(subRef, {
+          editorialReferenceId: draftId,
+          updatedAt: now,
+        });
+
+        return {
+          item: draftItem,
+          alreadyExisted: false,
+        };
+      });
+    }
+
+    // Fallback for in-memory or non-Firestore environments (e.g., test harnesses)
+    const sub = await effectiveCommunityRepo.getById(cleanSubId);
+    if (!sub) {
+      throw new Error(`NOT_FOUND: Citizen submission '${cleanSubId}' not found`);
+    }
+    if (sub.status !== 'AcceptedForEditorial') {
+      throw new Error(
+        `FAILED_PRECONDITION: Submission must be in AcceptedForEditorial status to create a news draft (current status: ${sub.status})`
+      );
+    }
+    if (sub.editorialReferenceId && sub.editorialReferenceId.trim()) {
+      const existing = await this.repo.getById(sub.editorialReferenceId.trim());
+      if (existing) {
+        return { item: existing, alreadyExisted: true };
+      }
+    }
+
+    const canonicalCategory = mapCitizenCategoryToNewsCategory(sub.category);
+    NewsValidator.validateCanonicalCategory(canonicalCategory);
+
+    const now = new Date().toISOString();
+    const draftId = `news-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+
+    const summaryAr = sub.sourceLanguage === 'ar' ? sub.body.slice(0, 300) : '';
+    const summaryEn = sub.sourceLanguage === 'en' ? sub.body.slice(0, 300) : '';
+    const bodyAr = sub.sourceLanguage === 'ar' ? sub.body : '';
+    const bodyEn = sub.sourceLanguage === 'en' ? sub.body : '';
+    const titleAr = sub.title;
+    const titleEn = sub.sourceLanguage === 'en' ? sub.title : '';
+
+    const author = sub.contributorName
+      ? `مواطن صحفي: ${sub.contributorName}`
+      : actor.name;
+
+    const sourceAttribution = sub.contributorName
+      ? `Citizen Report: ${sub.contributorName} (${sub.id})`
+      : `Citizen Report: ${sub.id}`;
+
+    const draftItem: NewsItemBackend = {
+      id: draftId,
+      titleAr,
+      titleEn,
+      kickerAr: 'صحافة المواطن',
+      kickerEn: 'Citizen Journalism',
+      journalisticType: 'Report',
+      summaryAr,
+      summaryEn,
+      bodyAr,
+      bodyEn,
+      author,
+      category: canonicalCategory,
+      tags: ['citizen-journalism', canonicalCategory.toLowerCase()],
+      sources: [sourceAttribution],
+      featuredImage: undefined,
+      workflowState: 'Draft',
+      createdAt: now,
+      updatedAt: now,
+      history: [
+        {
+          id: `trans-${Date.now()}-init`,
+          fromState: 'Draft',
+          toState: 'Draft',
+          action: 'revise_draft',
+          actorName: actor.name,
+          actorRole: actor.role,
+          timestamp: now,
+          comment: `Draft created from citizen submission ${sub.id}`,
+        },
+      ],
+      location: sub.locationDescription || undefined,
+      urgencyLevel: 'Standard',
+      relatedVideoIds: [],
+    };
+
+    NewsValidator.validateNewsPayload(draftItem);
+    await this.repo.save(draftItem);
+    await effectiveCommunityRepo.save({
+      ...sub,
+      editorialReferenceId: draftId,
+      updatedAt: now,
+    });
+
+    return { item: draftItem, alreadyExisted: false };
+  }
 }
+

@@ -725,6 +725,55 @@ export function AdminNewsManagement({
     triggerPersistedPreviewsForArticle(nextRichBodyAr, nextRichBodyEn);
   };
 
+  const openDraftById = async (draftId: string) => {
+    if (!draftId) return;
+    try {
+      sessionStorage.removeItem('pop_open_news_draft_id');
+    } catch {
+      // ignore
+    }
+    const cleanId = draftId.trim();
+    const existing = newsList.find(n => n.id === cleanId);
+    if (existing) {
+      handleOpenItem(existing);
+      return;
+    }
+    try {
+      const fetched = await NewsAdminClient.getById(cleanId);
+      if (fetched) {
+        setNewsList(prev => [fetched, ...prev.filter(n => n.id !== cleanId)]);
+        handleOpenItem(fetched);
+      }
+    } catch (err) {
+      console.error('Failed to open requested news draft:', err);
+    }
+  };
+
+  useEffect(() => {
+    const handleOpenDraftEvent = (e: Event) => {
+      const customEvent = e as CustomEvent<{ draftId?: string }>;
+      const draftId = customEvent.detail?.draftId;
+      if (draftId) {
+        openDraftById(draftId);
+      }
+    };
+
+    window.addEventListener('pop:open-news-draft', handleOpenDraftEvent);
+
+    try {
+      const pendingDraftId = sessionStorage.getItem('pop_open_news_draft_id');
+      if (pendingDraftId) {
+        openDraftById(pendingDraftId);
+      }
+    } catch {
+      // ignore
+    }
+
+    return () => {
+      window.removeEventListener('pop:open-news-draft', handleOpenDraftEvent);
+    };
+  }, [newsList]);
+
   // Start creating new article
   const handleStartCreate = () => {
     if (!canCreate) {

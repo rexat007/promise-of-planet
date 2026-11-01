@@ -11,7 +11,8 @@ import {
   FileCheck,
   Languages,
   AlertCircle,
-  ExternalLink
+  ExternalLink,
+  FileEdit
 } from 'lucide-react';
 import type { CitizenSubmission, CitizenSubmissionAttachment } from '../../types/community';
 import { SubmissionStatus } from '../../types/community';
@@ -47,6 +48,9 @@ export function CitizenSubmissionReviewModal({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [resolvingAttachmentId, setResolvingAttachmentId] = useState<string | null>(null);
+  const [isCreatingDraft, setIsCreatingDraft] = useState<boolean>(false);
+  const [draftCreationSuccess, setDraftCreationSuccess] = useState<string | null>(null);
+  const [draftCreationError, setDraftCreationError] = useState<string | null>(null);
 
   useEffect(() => {
     if (submission) {
@@ -56,6 +60,9 @@ export function CitizenSubmissionReviewModal({
       setShowOriginalSource(false);
       setSaveError(null);
       setAttachmentError(null);
+      setDraftCreationSuccess(null);
+      setDraftCreationError(null);
+      setIsCreatingDraft(false);
     }
   }, [submission]);
 
@@ -131,6 +138,54 @@ export function CitizenSubmissionReviewModal({
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const canCreateDraft = AdminAccessService.hasPermission(currentUser, AdminPermission.Create);
+  const effectiveRefId = (editorialReferenceId || submission.editorialReferenceId || '').trim();
+  const isAccepted = status === SubmissionStatus.AcceptedForEditorial || submission.status === SubmissionStatus.AcceptedForEditorial;
+
+  const handleCreateNewsDraft = async () => {
+    setDraftCreationError(null);
+    setDraftCreationSuccess(null);
+    setIsCreatingDraft(true);
+    try {
+      const res = await CitizenSubmissionService.createNewsDraft(submission.id, currentUser);
+      const newDraftId = res.item.id;
+      setEditorialReferenceId(newDraftId);
+      const updated: CitizenSubmission = {
+        ...submission,
+        status: SubmissionStatus.AcceptedForEditorial,
+        editorialReferenceId: newDraftId,
+        updatedAt: new Date().toISOString(),
+      };
+      onUpdate(updated);
+      setDraftCreationSuccess(
+        res.alreadyExisted
+          ? (isAr ? `تم ربط مسودة الخبر الموجودة مسبقاً (${newDraftId})` : `Existing news draft linked (${newDraftId})`)
+          : (isAr ? `تم إنشاء مسودة الخبر بنجاح (${newDraftId})` : `News draft successfully created (${newDraftId})`)
+      );
+    } catch (err: any) {
+      setDraftCreationError(
+        err?.message || (isAr ? 'فشل إنشاء مسودة الخبر' : 'Failed to create news draft')
+      );
+    } finally {
+      setIsCreatingDraft(false);
+    }
+  };
+
+  const handleOpenNewsDraft = (draftId: string) => {
+    if (!draftId) return;
+    try {
+      sessionStorage.setItem('pop_open_news_draft_id', draftId);
+      window.dispatchEvent(
+        new CustomEvent('pop:open-news-draft', {
+          detail: { draftId },
+        })
+      );
+    } catch {
+      // sessionStorage safety
+    }
+    onClose();
   };
 
   const getStatusBadge = (s: SubmissionStatus) => {
@@ -396,29 +451,113 @@ export function CitizenSubmissionReviewModal({
                 ? 'ملاحظة: حالة "مقبول للتحرير" تعني إحالة البلاغ لفريق التحرير ولا تنشر الخبر تلقائياً للجمهور.'
                 : 'Note: "Accepted for Editorial" marks the report for human editorial drafting and never automatically publishes a public News article.'}
             </div>
+
+            {/* Editorial Draft Handoff Section */}
+            {isAccepted && (
+              <div className="p-4 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 space-y-3">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <FileCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <span className="text-xs font-bold text-emerald-900 dark:text-emerald-200">
+                      {isAr ? 'المعالجة التحريرية لمسودة الخبر' : 'Editorial News Draft Handoff'}
+                    </span>
+                  </div>
+                  {effectiveRefId && (
+                    <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300">
+                      {effectiveRefId}
+                    </span>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-emerald-800 dark:text-emerald-300/90 leading-relaxed">
+                  {effectiveRefId
+                    ? (isAr
+                        ? 'تم ربط هذا البلاغ بمسودة خبر رسمية في غرفة الأخبار. يمكنك فتح المسودة لمراجعتها وتعديلها أو الانتقال بها عبر دورة النشر التحريرية.'
+                        : 'This report is linked to an official news draft in the Newsroom. You can open the draft to review, edit, or transition it through the editorial publishing workflow.')
+                    : (isAr
+                        ? 'تم قبول هذا البلاغ للتحرير. يمكنك الآن إنشاء مسودة خبر رسمية تنقل البيانات بأمان مع عزل المرفقات الخاصة.'
+                        : 'This report is accepted for editorial treatment. You can now create an official news draft with safe mapping while keeping private evidence attachments isolated.')}
+                </p>
+
+                {draftCreationSuccess && (
+                  <div className="p-2.5 rounded-lg bg-emerald-100 dark:bg-emerald-900/40 text-xs font-bold text-emerald-800 dark:text-emerald-200 flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>{draftCreationSuccess}</span>
+                  </div>
+                )}
+
+                {draftCreationError && (
+                  <div className="p-2.5 rounded-lg bg-red-100 dark:bg-red-900/40 text-xs font-bold text-red-800 dark:text-red-200 flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                    <span>{draftCreationError}</span>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-1">
+                  {effectiveRefId ? (
+                    <button
+                      type="button"
+                      onClick={() => handleOpenNewsDraft(effectiveRefId)}
+                      className="px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <FileEdit className="w-4 h-4" />
+                      <span>{isAr ? 'فتح مسودة الخبر' : 'Open News Draft'}</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isCreatingDraft || !canCreateDraft}
+                      onClick={handleCreateNewsDraft}
+                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <FileCheck className="w-4 h-4" />
+                      <span>
+                        {isCreatingDraft
+                          ? (isAr ? 'جاري إنشاء المسودة...' : 'Creating Draft...')
+                          : (isAr ? 'إنشاء مسودة خبر' : 'Create News Draft')}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
         </div>
 
         {/* Modal Footer */}
-        <div className="px-6 py-4 border-t border-gray-100 dark:border-gray-800 bg-gray-50/80 dark:bg-gray-950/50 flex items-center justify-end gap-3">
-          <button
-            onClick={onClose}
-            disabled={isSaving}
-            className="px-4 py-2 rounded-xl text-xs font-bold text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors cursor-pointer"
-          >
-            {isAr ? 'إغلاق' : 'Close'}
-          </button>
-          {canReview && (
+        <div className="px-6 py-4 border-t border-gray-100 dark:border-gray-800 bg-gray-50/80 dark:bg-gray-950/50 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            {isAccepted && effectiveRefId && (
+              <button
+                type="button"
+                onClick={() => handleOpenNewsDraft(effectiveRefId)}
+                className="px-4 py-2 rounded-xl bg-emerald-100 hover:bg-emerald-200 text-emerald-800 dark:bg-emerald-950/60 dark:hover:bg-emerald-900/80 dark:text-emerald-300 text-xs font-bold transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <FileEdit className="w-4 h-4" />
+                <span>{isAr ? 'فتح مسودة الخبر' : 'Open News Draft'}</span>
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
             <button
-              onClick={handleSave}
+              onClick={onClose}
               disabled={isSaving}
-              className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className="px-4 py-2 rounded-xl text-xs font-bold text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors cursor-pointer"
             >
-              <CheckCircle className="w-4 h-4" />
-              <span>{isSaving ? (isAr ? 'جاري الحفظ...' : 'Saving...') : (isAr ? 'حفظ التحديثات' : 'Save Changes')}</span>
+              {isAr ? 'إغلاق' : 'Close'}
             </button>
-          )}
+            {canReview && (
+              <button
+                onClick={handleSave}
+                disabled={isSaving}
+                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <CheckCircle className="w-4 h-4" />
+                <span>{isSaving ? (isAr ? 'جاري الحفظ...' : 'Saving...') : (isAr ? 'حفظ التحديثات' : 'Save Changes')}</span>
+              </button>
+            )}
+          </div>
         </div>
 
       </div>

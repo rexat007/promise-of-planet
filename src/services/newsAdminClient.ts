@@ -1618,6 +1618,26 @@ export class NewsAdminClient {
   }
 
   /**
+   * Completes the editorial handoff from an AcceptedForEditorial citizen submission into a canonical News Draft.
+   * Server creates or retrieves the draft atomically and links the submission.
+   */
+  public static async createDraftFromCitizenSubmission(
+    submissionId: string
+  ): Promise<{ item: NewsItem; alreadyExisted: boolean }> {
+    if (!submissionId || typeof submissionId !== 'string' || !submissionId.trim()) {
+      throw new Error('INVALID_ARGUMENT: submissionId is required');
+    }
+    const data = await this.executeAction<{ item: NewsItem; alreadyExisted: boolean }>(
+      'createDraftFromCitizenSubmission',
+      { submissionId: submissionId.trim() }
+    );
+    return {
+      item: data.item,
+      alreadyExisted: Boolean(data.alreadyExisted),
+    };
+  }
+
+  /**
    * Retrieves sanitized editorial image rights metadata for 1 to 20 unique canonical asset IDs
    * through the server-authoritative manageNews callable.
    * Preserves found vs NOT_FOUND status explicitly and rejects any malformed or leaked storage fields.

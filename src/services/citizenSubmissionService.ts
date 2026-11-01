@@ -1138,6 +1138,148 @@ export class CitizenSubmissionServiceClass {
   }
 
   /**
+   * Completes the editorial handoff from an AcceptedForEditorial citizen submission into a canonical News Draft.
+   * - Requires active admin credentials and AdminPermission.Create.
+   * - Server-authoritative draft creation via manageNews callable.
+   * - In-memory repository fallback for test environments.
+   */
+  async createNewsDraft(
+    submissionId: string,
+    adminUser: AdminUser | null | undefined
+  ): Promise<{ item: any; alreadyExisted: boolean }> {
+    if (!adminUser || !adminUser.isActive) {
+      throw new CitizenSubmissionError(
+        'UNAUTHORIZED',
+        'Active administrative credentials are required to create a news draft.'
+      );
+    }
+    if (!AdminAccessService.hasPermission(adminUser, AdminPermission.Create)) {
+      throw new CitizenSubmissionError(
+        'UNAUTHORIZED',
+        'Create permission is required to create a news draft from a citizen submission.'
+      );
+    }
+
+    const cleanId = (submissionId || '').trim();
+    if (!cleanId) {
+      throw new CitizenSubmissionError('VALIDATION_ERROR', 'Submission ID is required.');
+    }
+
+    // In unit test environment with an InMemory repository
+    if (this.repository instanceof InMemoryCitizenSubmissionRepository) {
+      const existing = await this.repository.getSubmissionById(cleanId);
+      if (!existing) {
+        throw new CitizenSubmissionError('NOT_FOUND', `Submission '${cleanId}' not found.`);
+      }
+      if (existing.status !== SubmissionStatus.AcceptedForEditorial) {
+        throw new CitizenSubmissionError(
+          'VALIDATION_ERROR',
+          `Submission must be in AcceptedForEditorial status to create a news draft (current: ${existing.status}).`
+        );
+      }
+      if (existing.editorialReferenceId && existing.editorialReferenceId.trim()) {
+        return {
+          item: {
+            id: existing.editorialReferenceId.trim(),
+            workflowState: 'Draft',
+            category: existing.category,
+            titleAr: existing.title,
+          },
+          alreadyExisted: true,
+        };
+      }
+
+      const lowerCat = (existing.category || '').toLowerCase();
+      let canonicalCat = 'Climate';
+      if (lowerCat === 'water' || lowerCat === 'marine') canonicalCat = 'Water';
+      else if (lowerCat === 'desertification' || lowerCat === 'agriculture') canonicalCat = 'Agriculture';
+      else if (lowerCat === 'biodiversity') canonicalCat = 'Biodiversity';
+      else if (lowerCat === 'pollution') canonicalCat = 'Pollution';
+      else if (lowerCat === 'energy') canonicalCat = 'Energy';
+      else if (lowerCat === 'environmentalpolicy') canonicalCat = 'EnvironmentalPolicy';
+      else if (lowerCat === 'climate') canonicalCat = 'Climate';
+
+      const draftId = `news-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const now = new Date().toISOString();
+      const updatedSub: CitizenSubmission = {
+        ...existing,
+        editorialReferenceId: draftId,
+        updatedAt: now,
+      };
+      await this.repository.updateSubmission(updatedSub);
+      return {
+        item: {
+          id: draftId,
+          titleAr: existing.title,
+          titleEn: existing.sourceLanguage === 'en' ? existing.title : '',
+          summaryAr: existing.sourceLanguage === 'ar' ? existing.body.slice(0, 300) : '',
+          summaryEn: existing.sourceLanguage === 'en' ? existing.body.slice(0, 300) : '',
+          bodyAr: existing.sourceLanguage === 'ar' ? existing.body : '',
+          bodyEn: existing.sourceLanguage === 'en' ? existing.body : '',
+          kickerAr: 'صحافة المواطن',
+          kickerEn: 'Citizen Journalism',
+          journalisticType: 'Report',
+          author: existing.contributorName ? `مواطن صحفي: ${existing.contributorName}` : adminUser.name,
+          category: canonicalCat,
+          tags: ['citizen-journalism', canonicalCat.toLowerCase()],
+          sources: [
+            existing.contributorName
+              ? `Citizen Report: ${existing.contributorName} (${existing.id})`
+              : `Citizen Report: ${existing.id}`,
+          ],
+          workflowState: 'Draft',
+          createdAt: now,
+          updatedAt: now,
+        },
+        alreadyExisted: false,
+      };
+    }
+
+    if (!isFirebaseConfigured || !app) {
+      throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', 'Firebase backend is unavailable.');
+    }
+    if (!auth?.currentUser) {
+      throw new CitizenSubmissionError(
+        'AUTH_REQUIRED',
+        'Active authenticated session required to create news drafts.'
+      );
+    }
+
+    try {
+      const fns = getFunctions(app);
+      const callable = httpsCallable<{ action: string; submissionId: string }, { item: any; alreadyExisted: boolean }>(
+        fns,
+        'manageNews'
+      );
+      const res = await callable({
+        action: 'createDraftFromCitizenSubmission',
+        submissionId: cleanId,
+      });
+      return {
+        item: res.data?.item,
+        alreadyExisted: Boolean(res.data?.alreadyExisted),
+      };
+    } catch (err: any) {
+      if (err instanceof CitizenSubmissionError) throw err;
+      const code = String(err?.code || '');
+      const message = err?.message || 'Failed to create news draft from citizen submission.';
+      if (code.includes('unauthenticated')) {
+        throw new CitizenSubmissionError('AUTH_REQUIRED', message);
+      }
+      if (code.includes('permission-denied')) {
+        throw new CitizenSubmissionError('UNAUTHORIZED', message);
+      }
+      if (code.includes('not-found') || message.includes('NOT_FOUND')) {
+        throw new CitizenSubmissionError('NOT_FOUND', message);
+      }
+      if (code.includes('failed-precondition') || message.includes('FAILED_PRECONDITION')) {
+        throw new CitizenSubmissionError('VALIDATION_ERROR', message);
+      }
+      throw new CitizenSubmissionError('BACKEND_UNAVAILABLE', message);
+    }
+  }
+
+  /**
    * Resolves private evidence attachment access URL strictly for authorized admin or the owning contributor.
    */
   async resolveAttachmentAccessUrl(
