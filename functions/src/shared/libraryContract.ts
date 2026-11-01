@@ -42,6 +42,8 @@ export interface LibraryOrganization {
   countryRegionAr: string;
   countryRegionEn: string;
   websiteUrl?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 /**
@@ -55,6 +57,31 @@ export interface LibrarySource {
   sourceUrl?: string;
   sourceType: 'OfficialGazette' | 'GovernmentPortal' | 'AcademicJournal' | 'InstitutionalArchive';
   verificationStatus: 'Verified' | 'PendingVerification' | 'ThirdPartyIndex';
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * Administrative Input DTOs for Registry Records
+ */
+export interface RegisterOrganizationInput {
+  id?: string;
+  nameAr: string;
+  nameEn: string;
+  type: 'Ministry' | 'InternationalBody' | 'ResearchCenter' | 'NGO' | 'Judicial';
+  countryRegionAr: string;
+  countryRegionEn: string;
+  websiteUrl?: string;
+}
+
+export interface RegisterSourceInput {
+  id?: string;
+  organizationId: string;
+  sourceNameAr: string;
+  sourceNameEn: string;
+  sourceUrl?: string;
+  sourceType: 'OfficialGazette' | 'GovernmentPortal' | 'AcademicJournal' | 'InstitutionalArchive';
+  verificationStatus?: 'Verified' | 'PendingVerification' | 'ThirdPartyIndex';
 }
 
 /**

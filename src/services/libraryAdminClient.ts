@@ -1,6 +1,11 @@
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { app, auth, isFirebaseConfigured } from './firebase';
-import type { LibraryDocument, LibraryRightsStatus } from '../types/library';
+import type { 
+  LibraryDocument, 
+  LibraryRightsStatus,
+  LibraryOrganization,
+  LibrarySource
+} from '../types/library';
 import type { WorkflowState } from '../types/workflow';
 
 function getFunctionsInstance() {
@@ -78,5 +83,43 @@ export const LibraryAdminClient = {
     >(fns, 'manageLibraryDocuments');
     const res = await callable({ action: 'addVersion', id, versionInput });
     return res.data.document;
+  },
+
+  async listSources(): Promise<LibrarySource[]> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<{ action: string }, { sources: LibrarySource[] }>(fns, 'manageLibraryDocuments');
+    const res = await callable({ action: 'listSources' });
+    return res.data?.sources ?? [];
+  },
+
+  async listOrganizations(): Promise<LibraryOrganization[]> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<{ action: string }, { organizations: LibraryOrganization[] }>(fns, 'manageLibraryDocuments');
+    const res = await callable({ action: 'listOrganizations' });
+    return res.data?.organizations ?? [];
+  },
+
+  async registerSource(input: any): Promise<LibrarySource> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<{ action: string; input: any }, { source: LibrarySource }>(fns, 'manageLibraryDocuments');
+    const res = await callable({ action: 'registerSource', input });
+    return res.data.source;
+  },
+
+  async registerOrganization(input: any): Promise<LibraryOrganization> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<{ action: string; input: any }, { organization: LibraryOrganization }>(fns, 'manageLibraryDocuments');
+    const res = await callable({ action: 'registerOrganization', input });
+    return res.data.organization;
+  },
+
+  async verifySource(sourceId: string, status: 'Verified' | 'PendingVerification' | 'ThirdPartyIndex'): Promise<LibrarySource> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<
+      { action: string; sourceId: string; status: string },
+      { source: LibrarySource }
+    >(fns, 'manageLibraryDocuments');
+    const res = await callable({ action: 'verifySource', sourceId, status });
+    return res.data.source;
   },
 };

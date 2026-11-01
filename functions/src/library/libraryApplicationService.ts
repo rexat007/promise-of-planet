@@ -1,5 +1,12 @@
 import type { LibraryRepository } from './libraryRepository';
-import type { LibraryDocument, LibraryDocumentVersion } from '../shared/libraryContract';
+import type { 
+  LibraryDocument, 
+  LibraryDocumentVersion,
+  LibraryOrganization,
+  LibrarySource,
+  RegisterOrganizationInput,
+  RegisterSourceInput
+} from '../shared/libraryContract';
 import { LibraryDocumentType, LibraryRightsStatus } from '../shared/libraryContract';
 import { WorkflowState, WorkflowAction, type WorkflowTransitionRecord } from '../shared/workflowContract';
 import type { AdminUser } from '../types/admin';
@@ -57,6 +64,8 @@ export interface UpdateLibraryMetadataInput {
 
 export class LibraryApplicationService {
   private repo: LibraryRepository;
+  private inMemoryOrgs: Map<string, LibraryOrganization> = new Map();
+  private inMemorySources: Map<string, LibrarySource> = new Map();
 
   constructor(repo: LibraryRepository) {
     this.repo = repo;
@@ -329,5 +338,232 @@ export class LibraryApplicationService {
     
     if (input.rightsStatus !== undefined && !Object.values(LibraryRightsStatus).includes(input.rightsStatus)) throw new Error('VALIDATION_ERROR: Invalid rightsStatus');
     if ((input.rightsNotesAr !== undefined && typeof input.rightsNotesAr !== 'string') || (input.rightsNotesEn !== undefined && typeof input.rightsNotesEn !== 'string')) throw new Error('VALIDATION_ERROR: Malformed rights notes');
+  }
+
+  // --- Organization Registry Operations ---
+
+  async listOrganizations(): Promise<LibraryOrganization[]> {
+    if (typeof (this.repo as any).listOrganizations === 'function') {
+      return (this.repo as any).listOrganizations();
+    }
+    return Array.from(this.inMemoryOrgs.values());
+  }
+
+  async getOrganizationById(id: string): Promise<LibraryOrganization | null> {
+    if (!id || typeof id !== 'string' || id.trim() === '') return null;
+    const cleanId = id.trim();
+    if (typeof (this.repo as any).getOrganizationById === 'function') {
+      return (this.repo as any).getOrganizationById(cleanId);
+    }
+    return this.inMemoryOrgs.get(cleanId) || null;
+  }
+
+  async registerOrganization(input: RegisterOrganizationInput, actor: AdminUser): Promise<LibraryOrganization> {
+    if (!actor.isActive) {
+      throw new Error('PERMISSION_DENIED: Inactive admin user');
+    }
+    const canRegister = AdminAuthorizationService.hasPermission(actor, AdminPermission.Create) ||
+                        AdminAuthorizationService.hasPermission(actor, AdminPermission.ManageRights);
+    if (!canRegister) {
+      throw new Error('PERMISSION_DENIED: Admin lacks required permission to register organizations');
+    }
+
+    this.validateOrganizationInput(input);
+
+    const now = new Date().toISOString();
+    const id = input.id && input.id.trim() !== ''
+      ? input.id.trim()
+      : `org-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+    const newOrg: LibraryOrganization = {
+      id,
+      nameAr: input.nameAr.trim(),
+      nameEn: input.nameEn.trim(),
+      type: input.type,
+      countryRegionAr: input.countryRegionAr.trim(),
+      countryRegionEn: input.countryRegionEn.trim(),
+      websiteUrl: input.websiteUrl?.trim() || undefined,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    if (typeof (this.repo as any).createOrganization === 'function') {
+      return (this.repo as any).createOrganization(newOrg);
+    }
+    if (this.inMemoryOrgs.has(id)) {
+      throw new Error(`DUPLICATE_ORGANIZATION: Organization with ID ${id} already exists`);
+    }
+    this.inMemoryOrgs.set(id, newOrg);
+    return newOrg;
+  }
+
+  // --- Source Registry Operations ---
+
+  async listSources(): Promise<LibrarySource[]> {
+    if (typeof (this.repo as any).listSources === 'function') {
+      return (this.repo as any).listSources();
+    }
+    return Array.from(this.inMemorySources.values());
+  }
+
+  async getSourceById(id: string): Promise<LibrarySource | null> {
+    if (!id || typeof id !== 'string' || id.trim() === '') return null;
+    const cleanId = id.trim();
+    if (typeof (this.repo as any).getSourceById === 'function') {
+      return (this.repo as any).getSourceById(cleanId);
+    }
+    return this.inMemorySources.get(cleanId) || null;
+  }
+
+  async registerSource(input: RegisterSourceInput, actor: AdminUser): Promise<LibrarySource> {
+    if (!actor.isActive) {
+      throw new Error('PERMISSION_DENIED: Inactive admin user');
+    }
+    const canRegister = AdminAuthorizationService.hasPermission(actor, AdminPermission.Create) ||
+                        AdminAuthorizationService.hasPermission(actor, AdminPermission.ManageRights);
+    if (!canRegister) {
+      throw new Error('PERMISSION_DENIED: Admin lacks required permission to register sources');
+    }
+
+    this.validateSourceInput(input);
+
+    // Enforce: "A source cannot reference a nonexistent organization."
+    const org = await this.getOrganizationById(input.organizationId.trim());
+    if (!org) {
+      throw new Error(`VALIDATION_ERROR: Referenced organization does not exist: ${input.organizationId}`);
+    }
+
+    // Enforce: "Never automatically assign Verified to a newly registered source without an authorized verification decision."
+    let verificationStatus: 'Verified' | 'PendingVerification' | 'ThirdPartyIndex' = 'PendingVerification';
+    if (input.verificationStatus === 'Verified') {
+      const hasRightsPerm = AdminAuthorizationService.hasPermission(actor, AdminPermission.ManageRights);
+      if (!hasRightsPerm) {
+        throw new Error('PERMISSION_DENIED: Only administrators with ManageRights permission can assign Verified status');
+      }
+      verificationStatus = 'Verified';
+    } else if (input.verificationStatus === 'ThirdPartyIndex') {
+      verificationStatus = 'ThirdPartyIndex';
+    } else {
+      verificationStatus = 'PendingVerification';
+    }
+
+    const now = new Date().toISOString();
+    const id = input.id && input.id.trim() !== ''
+      ? input.id.trim()
+      : `src-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+    const newSource: LibrarySource = {
+      id,
+      organizationId: input.organizationId.trim(),
+      sourceNameAr: input.sourceNameAr.trim(),
+      sourceNameEn: input.sourceNameEn.trim(),
+      sourceUrl: input.sourceUrl?.trim() || undefined,
+      sourceType: input.sourceType,
+      verificationStatus,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    if (typeof (this.repo as any).createSource === 'function') {
+      return (this.repo as any).createSource(newSource);
+    }
+    if (this.inMemorySources.has(id)) {
+      throw new Error(`DUPLICATE_SOURCE: Source with ID ${id} already exists`);
+    }
+    this.inMemorySources.set(id, newSource);
+    return newSource;
+  }
+
+  async verifySource(sourceId: string, status: 'Verified' | 'PendingVerification' | 'ThirdPartyIndex', actor: AdminUser): Promise<LibrarySource> {
+    if (!actor.isActive) {
+      throw new Error('PERMISSION_DENIED: Inactive admin user');
+    }
+    if (!AdminAuthorizationService.hasPermission(actor, AdminPermission.ManageRights)) {
+      throw new Error('PERMISSION_DENIED: Verifying sources requires ManageRights permission');
+    }
+    const validStatuses = ['Verified', 'PendingVerification', 'ThirdPartyIndex'];
+    if (!validStatuses.includes(status)) {
+      throw new Error(`INVALID_ARGUMENT: Invalid verification status: ${status}`);
+    }
+
+    const source = await this.getSourceById(sourceId);
+    if (!source) {
+      throw new Error(`NOT_FOUND: Source with ID ${sourceId} not found`);
+    }
+
+    const updated: LibrarySource = {
+      ...source,
+      verificationStatus: status,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (typeof (this.repo as any).updateSource === 'function') {
+      return (this.repo as any).updateSource(updated);
+    }
+    this.inMemorySources.set(sourceId, updated);
+    return updated;
+  }
+
+  private validateOrganizationInput(input: any): void {
+    if (!input || typeof input !== 'object') {
+      throw new Error('VALIDATION_ERROR: Organization input object is required');
+    }
+    if (!input.nameAr || typeof input.nameAr !== 'string' || input.nameAr.trim() === '') {
+      throw new Error('VALIDATION_ERROR: nameAr is required');
+    }
+    if (!input.nameEn || typeof input.nameEn !== 'string' || input.nameEn.trim() === '') {
+      throw new Error('VALIDATION_ERROR: nameEn is required');
+    }
+    const allowedTypes = ['Ministry', 'InternationalBody', 'ResearchCenter', 'NGO', 'Judicial'];
+    if (!input.type || !allowedTypes.includes(input.type)) {
+      throw new Error(`VALIDATION_ERROR: Invalid organization type: ${input.type}`);
+    }
+    if (!input.countryRegionAr || typeof input.countryRegionAr !== 'string' || input.countryRegionAr.trim() === '') {
+      throw new Error('VALIDATION_ERROR: countryRegionAr is required');
+    }
+    if (!input.countryRegionEn || typeof input.countryRegionEn !== 'string' || input.countryRegionEn.trim() === '') {
+      throw new Error('VALIDATION_ERROR: countryRegionEn is required');
+    }
+    if (input.websiteUrl !== undefined && input.websiteUrl !== null && input.websiteUrl.trim() !== '') {
+      const urlStr = input.websiteUrl.trim();
+      try {
+        const parsed = new URL(urlStr);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new Error('Invalid protocol');
+        }
+      } catch {
+        throw new Error('VALIDATION_ERROR: Invalid websiteUrl format');
+      }
+    }
+  }
+
+  private validateSourceInput(input: any): void {
+    if (!input || typeof input !== 'object') {
+      throw new Error('VALIDATION_ERROR: Source input object is required');
+    }
+    if (!input.sourceNameAr || typeof input.sourceNameAr !== 'string' || input.sourceNameAr.trim() === '') {
+      throw new Error('VALIDATION_ERROR: sourceNameAr is required');
+    }
+    if (!input.sourceNameEn || typeof input.sourceNameEn !== 'string' || input.sourceNameEn.trim() === '') {
+      throw new Error('VALIDATION_ERROR: sourceNameEn is required');
+    }
+    if (!input.organizationId || typeof input.organizationId !== 'string' || input.organizationId.trim() === '') {
+      throw new Error('VALIDATION_ERROR: organizationId is required');
+    }
+    const allowedSourceTypes = ['OfficialGazette', 'GovernmentPortal', 'AcademicJournal', 'InstitutionalArchive'];
+    if (!input.sourceType || !allowedSourceTypes.includes(input.sourceType)) {
+      throw new Error(`VALIDATION_ERROR: Invalid sourceType: ${input.sourceType}`);
+    }
+    if (input.sourceUrl !== undefined && input.sourceUrl !== null && input.sourceUrl.trim() !== '') {
+      const urlStr = input.sourceUrl.trim();
+      try {
+        const parsed = new URL(urlStr);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new Error('Invalid protocol');
+        }
+      } catch {
+        throw new Error('VALIDATION_ERROR: Invalid sourceUrl format');
+      }
+    }
   }
 }

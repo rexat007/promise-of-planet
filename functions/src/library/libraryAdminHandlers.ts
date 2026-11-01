@@ -42,6 +42,31 @@ export const manageLibraryDocuments = onCall(async (request) => {
       case 'addVersion':
         if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Edit)) throw new HttpsError('permission-denied', 'Missing permission');
         return { document: await service.addVersion(data.id, data.versionInput, adminUser) };
+      case 'listSources':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.View)) throw new HttpsError('permission-denied', 'Missing permission');
+        return { sources: await service.listSources() };
+      case 'listOrganizations':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.View)) throw new HttpsError('permission-denied', 'Missing permission');
+        return { organizations: await service.listOrganizations() };
+      case 'registerSource':
+      case 'createSource':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Create) &&
+            !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.ManageRights)) {
+          throw new HttpsError('permission-denied', 'Missing permission to register source');
+        }
+        return { source: await service.registerSource(data.input, adminUser) };
+      case 'registerOrganization':
+      case 'createOrganization':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Create) &&
+            !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.ManageRights)) {
+          throw new HttpsError('permission-denied', 'Missing permission to register organization');
+        }
+        return { organization: await service.registerOrganization(data.input, adminUser) };
+      case 'verifySource':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.ManageRights)) {
+          throw new HttpsError('permission-denied', 'Only rights reviewers or owners may verify sources');
+        }
+        return { source: await service.verifySource(data.sourceId, data.status, adminUser) };
       default:
         throw new HttpsError('invalid-argument', 'Invalid action');
     }
@@ -55,7 +80,7 @@ export const manageLibraryDocuments = onCall(async (request) => {
     if (error.message.startsWith('NOT_FOUND')) {
       throw new HttpsError('not-found', error.message);
     }
-    if (error.message.startsWith('DUPLICATE_DOCUMENT')) {
+    if (error.message.startsWith('DUPLICATE_DOCUMENT') || error.message.startsWith('DUPLICATE_ORGANIZATION') || error.message.startsWith('DUPLICATE_SOURCE')) {
       throw new HttpsError('already-exists', error.message);
     }
     throw new HttpsError('internal', error.message);
