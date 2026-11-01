@@ -17,6 +17,7 @@ import {
   Database,
   Globe,
   Inbox,
+  Sparkles,
   X
 } from 'lucide-react';
 import type { AdminUser } from '../../types/admin';
@@ -34,6 +35,7 @@ import type {
 } from '../../types/library';
 import { 
   LibraryIntakeStatus,
+  LibraryIntakeAIInputBasis,
   type LibraryIntakeRecord 
 } from '../../../functions/src/shared/libraryContract';
 import { LibraryDocumentEditorModal } from './LibraryDocumentEditorModal';
@@ -112,6 +114,12 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
   const [submittingReview, setSubmittingReview] = useState(false);
   const [reviewModalError, setReviewModalError] = useState<string | null>(null);
 
+  // Modal State for Human-Triggered AI Preparation Assistant
+  const [aiPrepIntake, setAiPrepIntake] = useState<LibraryIntakeRecord | null>(null);
+  const [aiPrepExcerpt, setAiPrepExcerpt] = useState('');
+  const [generatingAiPrep, setGeneratingAiPrep] = useState(false);
+  const [aiPrepError, setAiPrepError] = useState<string | null>(null);
+
   // Registry Action Feedback State
   const [submittingRegistry, setSubmittingRegistry] = useState(false);
   const [registryFormError, setRegistryFormError] = useState<string | null>(null);
@@ -125,6 +133,7 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
   const canRegisterRegistry = canCreate || canManageRights;
   const canSubmitIntake = canCreate || canEdit;
   const canReviewIntake = canReview || canApprove || canManageRights;
+  const canPrepareAiIntake = canCreate || canEdit || canReview || canApprove || canManageRights;
 
   const loadAllData = useCallback(async () => {
     setLoading(true);
@@ -523,6 +532,25 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
       setReviewModalError(err.message || 'Failed to update intake review status');
     } finally {
       setSubmittingReview(false);
+    }
+  };
+
+  const handleGenerateAiSuggestions = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!aiPrepIntake) return;
+    setGeneratingAiPrep(true);
+    setAiPrepError(null);
+    try {
+      const updatedRecord = await LibraryAdminClient.generateIntakeAISuggestions(
+        aiPrepIntake.id,
+        aiPrepExcerpt.trim() || undefined
+      );
+      setAiPrepIntake(updatedRecord);
+      await loadAllData();
+    } catch (err: any) {
+      setAiPrepError(err.message || (isAr ? 'تعذر توليد مقترحات الذكاء الاصطناعي' : 'Failed to generate AI preparation suggestions'));
+    } finally {
+      setGeneratingAiPrep(false);
     }
   };
 
@@ -1437,8 +1465,8 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
                       <th className="p-3.5 sm:p-4">{isAr ? 'اللغة والملاحظات' : 'Language & Notes'}</th>
                       <th className="p-3.5 sm:p-4">{isAr ? 'حالة المراجعة' : 'Intake Status'}</th>
                       <th className="p-3.5 sm:p-4">{isAr ? 'تتبع الإيداع والتدقيق' : 'Submission & Review Audit'}</th>
-                      {canReviewIntake && (
-                        <th className="p-3.5 sm:p-4 text-center">{isAr ? 'إجراء المراجعة' : 'Review Action'}</th>
+                      {(canReviewIntake || canPrepareAiIntake) && (
+                        <th className="p-3.5 sm:p-4 text-center">{isAr ? 'إجراءات التحضير والمراجعة' : 'Preparation & Review Actions'}</th>
                       )}
                     </tr>
                   </thead>
@@ -1479,9 +1507,17 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
                         </td>
 
                         <td className="p-3.5 sm:p-4 max-w-xs">
-                          <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold text-[11px] uppercase">
-                            {rec.language}
-                          </span>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold text-[11px] uppercase">
+                              {rec.language}
+                            </span>
+                            {rec.aiSuggestion && (
+                              <span className="px-2 py-0.5 rounded-md bg-purple-100 dark:bg-purple-950/70 text-purple-800 dark:text-purple-300 border border-purple-300 dark:border-purple-800 font-extrabold text-[10px] inline-flex items-center gap-1">
+                                <Sparkles className="h-2.5 w-2.5" />
+                                <span>{isAr ? 'مقترحات آلية (غير موثقة)' : 'AI Suggestions (Unverified)'}</span>
+                              </span>
+                            )}
+                          </div>
                           {rec.notes && (
                             <p className="text-xs text-gray-600 dark:text-gray-400 mt-1.5 line-clamp-2">
                               {rec.notes}
@@ -1514,20 +1550,37 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
                           )}
                         </td>
 
-                        {canReviewIntake && (
+                        {(canReviewIntake || canPrepareAiIntake) && (
                           <td className="p-3.5 sm:p-4 whitespace-nowrap text-center">
-                            <button
-                              onClick={() => {
-                                setReviewingIntake(rec);
-                                setReviewTargetStatus(rec.status);
-                                setReviewEditorialNotes(rec.reviewNotes || '');
-                                setReviewModalError(null);
-                              }}
-                              className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 text-xs font-extrabold transition-all border border-indigo-200 dark:border-indigo-800 cursor-pointer inline-flex items-center gap-1"
-                            >
-                              <Edit3 className="h-3.5 w-3.5" />
-                              <span>{isAr ? 'تحديث الحالة' : 'Review Status'}</span>
-                            </button>
+                            <div className="flex flex-col sm:flex-row items-center justify-center gap-1.5">
+                              {canPrepareAiIntake && (
+                                <button
+                                  onClick={() => {
+                                    setAiPrepIntake(rec);
+                                    setAiPrepExcerpt(rec.suppliedExcerpt || '');
+                                    setAiPrepError(null);
+                                  }}
+                                  className="px-3 py-1.5 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-800 dark:bg-purple-950/80 dark:text-purple-300 text-xs font-extrabold transition-all border border-purple-200 dark:border-purple-800 cursor-pointer inline-flex items-center gap-1"
+                                >
+                                  <Sparkles className="h-3.5 w-3.5" />
+                                  <span>{isAr ? 'إعداد مقترحات الذكاء الاصطناعي' : 'Generate AI Preparation Suggestions'}</span>
+                                </button>
+                              )}
+                              {canReviewIntake && (
+                                <button
+                                  onClick={() => {
+                                    setReviewingIntake(rec);
+                                    setReviewTargetStatus(rec.status);
+                                    setReviewEditorialNotes(rec.reviewNotes || '');
+                                    setReviewModalError(null);
+                                  }}
+                                  className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 text-xs font-extrabold transition-all border border-indigo-200 dark:border-indigo-800 cursor-pointer inline-flex items-center gap-1"
+                                >
+                                  <Edit3 className="h-3.5 w-3.5" />
+                                  <span>{isAr ? 'تحديث الحالة' : 'Review Status'}</span>
+                                </button>
+                              )}
+                            </div>
                           </td>
                         )}
                       </tr>
@@ -2077,6 +2130,287 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ================= HUMAN-TRIGGERED AI PREPARATION ASSISTANT MODAL ================= */}
+      {aiPrepIntake && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b border-gray-100 dark:border-gray-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-purple-600" />
+                <div>
+                  <h3 className="font-extrabold text-sm sm:text-base text-gray-900 dark:text-gray-100">
+                    {isAr
+                      ? 'مساعد الإعداد التحريري بالذكاء الاصطناعي (مراجعة بشرية إلزامية)'
+                      : 'Human-Reviewed AI Preparation Assistant'}
+                  </h3>
+                  <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                    {isAr
+                      ? 'توليد مقترحات استرشادية غير موثقة لسجل الاستقبال دون أي ترقية أو نشر تلقائي.'
+                      : 'Generates unverified advisory recommendations for an intake record without automatic promotion or publication.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setAiPrepIntake(null)}
+                className="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Canonical Intake Summary Box */}
+            <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-800 text-xs space-y-1.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-extrabold text-gray-900 dark:text-gray-100">{aiPrepIntake.title}</span>
+                {getIntakeStatusBadge(aiPrepIntake.status)}
+              </div>
+              <div className="text-emerald-700 dark:text-emerald-400 break-all font-mono text-[11px]">
+                {aiPrepIntake.normalizedUrl}
+              </div>
+              {aiPrepIntake.notes && (
+                <p className="text-gray-600 dark:text-gray-400 text-[11px]">
+                  <span className="font-bold">{isAr ? 'ملاحظات الإيداع: ' : 'Intake Notes: '}</span>
+                  {aiPrepIntake.notes}
+                </p>
+              )}
+            </div>
+
+            {aiPrepError && (
+              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-bold">
+                {aiPrepError}
+              </div>
+            )}
+
+            {/* Trigger Form with Optional Excerpt */}
+            <form onSubmit={handleGenerateAiSuggestions} className="space-y-3 text-xs border border-purple-200/70 dark:border-purple-900/60 rounded-xl p-4 bg-purple-50/30 dark:bg-purple-950/15">
+              <div>
+                <label className="block font-bold mb-1 text-gray-800 dark:text-gray-200">
+                  {isAr
+                    ? 'مقتطف نصي أو مستخلص من الوثيقة (اختياري — بحد أقصى 12,000 حرف)'
+                    : 'Admin-Supplied Document Excerpt / Abstract (Optional — Max 12,000 chars)'}
+                </label>
+                <textarea
+                  rows={3}
+                  maxLength={12000}
+                  value={aiPrepExcerpt}
+                  onChange={(e) => setAiPrepExcerpt(e.target.value)}
+                  placeholder={
+                    isAr
+                      ? 'ألصق هنا ديباجة القانون أو مستخلص التقرير في حال رغبتك بتوليد ملخص تحريري مقترح. في حال ترك هذا الحقل فارغاً سيعمل المساعد بوضع (البيانات الوصفية فقط MetadataOnly) ولن يولّد ملخصاً لوثيقة لم يُقرأ نصها.'
+                      : 'Paste an official abstract or legal preamble here if you want bilingual summary suggestions. If left blank, the assistant runs in MetadataOnly mode and will NOT fabricate a summary of an unread document.'
+                  }
+                  className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none"
+                />
+                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
+                  {aiPrepExcerpt.trim().length > 0
+                    ? isAr
+                      ? `أساس الإدخال الحالي: مقتطف نصي + بيانات وصفية (SuppliedExcerptAndMetadata — ${aiPrepExcerpt.trim().length} حرف)`
+                      : `Current Input Basis: SuppliedExcerptAndMetadata (${aiPrepExcerpt.trim().length} chars)`
+                    : isAr
+                      ? 'أساس الإدخال الحالي: بيانات وصفية فقط (MetadataOnly — بدون قراءة نص الوثيقة الخارجي أو توليد ملخص)'
+                      : 'Current Input Basis: MetadataOnly (no external document body read; summary generation disabled)'}
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="submit"
+                  disabled={generatingAiPrep}
+                  className="px-4 py-2 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-extrabold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {generatingAiPrep ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                  <span>
+                    {isAr ? 'إعداد مقترحات الذكاء الاصطناعي' : 'Generate AI Preparation Suggestions'}
+                  </span>
+                </button>
+              </div>
+            </form>
+
+            {/* Persisted AI Suggestion Display */}
+            {aiPrepIntake.aiSuggestion && (
+              <div className="space-y-4 pt-2">
+                {/* Mandatory Unverified Machine-Generated Warning Banner */}
+                <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs space-y-1">
+                  <div className="font-extrabold flex items-center gap-1.5">
+                    <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                    <span>
+                      {isAr
+                        ? 'مقترحات آلية غير موثقة — تتطلب مراجعة واعتماداً بشرياً'
+                        : 'Unverified Machine-Generated Recommendations — Requires Human Review'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    {isAr
+                      ? aiPrepIntake.aiSuggestion.verificationWarningAr
+                      : aiPrepIntake.aiSuggestion.verificationWarningEn}
+                  </p>
+                  <div className="flex flex-wrap gap-3 pt-1 text-[10px] font-mono text-amber-800 dark:text-amber-300">
+                    <span>Model: {aiPrepIntake.aiSuggestion.modelId}</span>
+                    <span>Basis: {aiPrepIntake.aiSuggestion.inputBasis}</span>
+                    <span>By: {aiPrepIntake.aiSuggestion.generatedByAdminName}</span>
+                    <span>At: {new Date(aiPrepIntake.aiSuggestion.generatedAt).toLocaleString(isAr ? 'ar-EG' : 'en-US')}</span>
+                  </div>
+                </div>
+
+                {/* Suggested Bibliographic & Classification Fields */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase">
+                      {isAr ? 'العنوان المقترح (عربي)' : 'Suggested Title (Arabic)'}
+                    </span>
+                    <p className="font-extrabold text-gray-900 dark:text-gray-100 select-all">
+                      {aiPrepIntake.aiSuggestion.suggestedTitleAr}
+                    </p>
+                  </div>
+
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase">
+                      {isAr ? 'العنوان المقترح (إنجليزي)' : 'Suggested Title (English)'}
+                    </span>
+                    <p className="font-extrabold text-gray-900 dark:text-gray-100 select-all">
+                      {aiPrepIntake.aiSuggestion.suggestedTitleEn}
+                    </p>
+                  </div>
+
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase">
+                      {isAr ? 'الجهة المصدرة المقترحة' : 'Suggested Issuing Organization'}
+                    </span>
+                    <p className="font-bold text-gray-800 dark:text-gray-200 select-all">
+                      {aiPrepIntake.aiSuggestion.suggestedIssuingOrganization}
+                    </p>
+                  </div>
+
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase">
+                      {isAr ? 'نوع الوثيقة المقترح' : 'Suggested Document Type'}
+                    </span>
+                    <p className="font-extrabold text-emerald-700 dark:text-emerald-400">
+                      {aiPrepIntake.aiSuggestion.suggestedDocumentType}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Domains & Topics */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                      {isAr ? 'المجالات البيئية المقترحة' : 'Suggested Environmental Domains'}
+                    </span>
+                    <div className="flex flex-wrap gap-1">
+                      {aiPrepIntake.aiSuggestion.suggestedEnvironmentalDomains.map((dom, idx) => (
+                        <span key={idx} className="px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 font-bold text-[11px]">
+                          {dom}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                      {isAr ? 'الكلمات المفتاحية (عربي)' : 'Suggested Topics (Arabic)'}
+                    </span>
+                    <div className="flex flex-wrap gap-1">
+                      {aiPrepIntake.aiSuggestion.suggestedTopicsAr.map((t, idx) => (
+                        <span key={idx} className="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-950/70 text-blue-800 dark:text-blue-300 font-bold text-[11px]">
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                      {isAr ? 'الكلمات المفتاحية (إنجليزي)' : 'Suggested Topics (English)'}
+                    </span>
+                    <div className="flex flex-wrap gap-1">
+                      {aiPrepIntake.aiSuggestion.suggestedTopicsEn.map((t, idx) => (
+                        <span key={idx} className="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-950/70 text-indigo-800 dark:text-indigo-300 font-bold text-[11px]">
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Conditional Bilingual Summaries vs Metadata-Only Truthfulness Notice */}
+                {aiPrepIntake.aiSuggestion.inputBasis === LibraryIntakeAIInputBasis.SuppliedExcerptAndMetadata &&
+                (aiPrepIntake.aiSuggestion.suggestedSummaryAr || aiPrepIntake.aiSuggestion.suggestedSummaryEn) ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                      <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                        {isAr ? 'الملخص المقترح من المقتطف (عربي)' : 'Suggested Excerpt Summary (Arabic)'}
+                      </span>
+                      <p className="text-gray-800 dark:text-gray-200 leading-relaxed select-all">
+                        {aiPrepIntake.aiSuggestion.suggestedSummaryAr}
+                      </p>
+                    </div>
+                    <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                      <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                        {isAr ? 'الملخص المقترح من المقتطف (إنجليزي)' : 'Suggested Excerpt Summary (English)'}
+                      </span>
+                      <p className="text-gray-800 dark:text-gray-200 leading-relaxed select-all">
+                        {aiPrepIntake.aiSuggestion.suggestedSummaryEn}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-100/70 dark:bg-gray-800/50 text-xs text-gray-600 dark:text-gray-400">
+                    <span className="font-extrabold">
+                      {isAr ? 'ملاحظة النزاهة التحريرية للملخص: ' : 'Summary Truthfulness Notice: '}
+                    </span>
+                    {isAr
+                      ? 'لم يتم توليد ملخص عربي أو إنجليزي لأن الإدخال اعتمد على البيانات الوصفية فقط (MetadataOnly) دون تزويد مقتطف نصي من الوثيقة.'
+                      : 'No Arabic/English document summary was generated because inputBasis is MetadataOnly and the remote document body/PDF was not read.'}
+                  </div>
+                )}
+
+                {/* Provenance Observations & Uncertainty Notices */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                      {isAr ? 'ملاحظات المصدر والأصل المرجعي' : 'Provenance & Source Observations'}
+                    </span>
+                    <ul className="list-disc list-inside space-y-1 text-gray-700 dark:text-gray-300">
+                      {(isAr
+                        ? aiPrepIntake.aiSuggestion.provenanceObservationsAr
+                        : aiPrepIntake.aiSuggestion.provenanceObservationsEn
+                      ).map((obs, idx) => (
+                        <li key={idx}>{obs}</li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div className="p-3 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/40 dark:bg-amber-950/20 space-y-1.5">
+                    <span className="text-[10px] font-bold text-amber-800 dark:text-amber-300 uppercase block">
+                      {isAr ? 'تنبيهات عدم اليقين والتحقق البشري' : 'Uncertainty & Verification Notices'}
+                    </span>
+                    <ul className="list-disc list-inside space-y-1 text-amber-900 dark:text-amber-200">
+                      {(isAr
+                        ? aiPrepIntake.aiSuggestion.uncertaintyNoticesAr
+                        : aiPrepIntake.aiSuggestion.uncertaintyNoticesEn
+                      ).map((notice, idx) => (
+                        <li key={idx}>{notice}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="pt-3 border-t border-gray-100 dark:border-gray-800 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setAiPrepIntake(null)}
+                className="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold text-xs cursor-pointer"
+              >
+                {isAr ? 'إغلاق نافذة التحضير' : 'Close Preparation Assistant'}
+              </button>
+            </div>
           </div>
         </div>
       )}

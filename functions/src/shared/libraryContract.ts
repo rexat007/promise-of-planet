@@ -196,6 +196,46 @@ export const LibraryIntakeStatus = {
 export type LibraryIntakeStatus = typeof LibraryIntakeStatus[keyof typeof LibraryIntakeStatus];
 
 /**
+ * Input basis for AI Preparation Assistant on Library Intake records.
+ * Strictly distinguishes metadata-only inference from analysis of an admin-supplied text excerpt.
+ */
+export const LibraryIntakeAIInputBasis = {
+  MetadataOnly: 'MetadataOnly',
+  SuppliedExcerptAndMetadata: 'SuppliedExcerptAndMetadata',
+} as const;
+
+export type LibraryIntakeAIInputBasis = typeof LibraryIntakeAIInputBasis[keyof typeof LibraryIntakeAIInputBasis];
+
+/**
+ * Advisory, non-canonical AI preparation suggestions attached to a LibraryIntakeRecord.
+ * Must NEVER overwrite canonical organizationId, sourceId, status, or LibraryDocument fields.
+ */
+export interface LibraryIntakeAISuggestion {
+  readonly isAdvisoryOnly: true;
+  readonly verificationWarningAr: string;
+  readonly verificationWarningEn: string;
+  readonly modelId: string;
+  readonly generatedAt: string;
+  readonly generatedByAdminId: string;
+  readonly generatedByAdminName: string;
+  readonly inputBasis: LibraryIntakeAIInputBasis;
+  readonly sourceIntakeUpdatedAt: string;
+  readonly suggestedTitleAr: string;
+  readonly suggestedTitleEn: string;
+  readonly suggestedIssuingOrganization: string;
+  readonly suggestedDocumentType: LibraryDocumentType;
+  readonly suggestedEnvironmentalDomains: string[];
+  readonly suggestedTopicsAr: string[];
+  readonly suggestedTopicsEn: string[];
+  readonly suggestedSummaryAr?: string | null;
+  readonly suggestedSummaryEn?: string | null;
+  readonly provenanceObservationsAr: string[];
+  readonly provenanceObservationsEn: string[];
+  readonly uncertaintyNoticesAr: string[];
+  readonly uncertaintyNoticesEn: string[];
+}
+
+/**
  * Library Intake Record (Durable Candidate Reference)
  */
 export interface LibraryIntakeRecord {
@@ -207,6 +247,8 @@ export interface LibraryIntakeRecord {
   sourceId?: string;
   language: 'ar' | 'en' | 'bilingual' | 'other';
   notes?: string;
+  suppliedExcerpt?: string;
+  aiSuggestion?: LibraryIntakeAISuggestion;
   status: LibraryIntakeStatus;
   submittedByAdminId: string;
   submittedByAdminName: string;
@@ -235,4 +277,10 @@ export interface UpdateLibraryIntakeStatusInput {
   status: LibraryIntakeStatus;
   reviewNotes?: string;
 }
+
+export interface GenerateLibraryIntakeAISuggestionsInput {
+  intakeId: string;
+  suppliedExcerpt?: string;
+}
+
 

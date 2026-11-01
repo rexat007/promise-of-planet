@@ -1,4 +1,5 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { defineSecret } from 'firebase-functions/params';
 import { LibraryApplicationService } from './libraryApplicationService';
 import { FirestoreLibraryRepository } from './firestoreLibraryRepository';
 import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
@@ -7,7 +8,9 @@ import { AdminPermission } from '../types/admin';
 import { PublicLibraryRepository } from './publicLibraryRepository';
 import type { PublicLibraryDocument } from '../shared/libraryContract';
 
-export const manageLibraryDocuments = onCall(async (request) => {
+const geminiApiKey = defineSecret('GEMINI_API_KEY');
+
+export const manageLibraryDocuments = onCall({ secrets: [geminiApiKey] }, async (request) => {
   const { data, auth } = request;
   if (!auth) throw new HttpsError('unauthenticated', 'User not authenticated');
 
@@ -90,23 +93,61 @@ export const manageLibraryDocuments = onCall(async (request) => {
           throw new HttpsError('permission-denied', 'Only reviewers or rights managers may update intake status');
         }
         return { intakeRecord: await service.updateIntakeStatus(data.intakeId || data.id, data.status, data.reviewNotes, adminUser) };
+      case 'generateIntakeAISuggestions':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Create) &&
+            !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Edit) &&
+            !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Review) &&
+            !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Approve) &&
+            !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.ManageRights)) {
+          throw new HttpsError('permission-denied', 'Missing editorial or curation permission to generate AI preparation suggestions');
+        }
+        {
+          let secretKey = '';
+          try {
+            secretKey = geminiApiKey.value() || '';
+          } catch {
+            secretKey = process.env.GEMINI_API_KEY || '';
+          }
+          const intakeRecord = await service.generateIntakeAISuggestions(
+            {
+              intakeId: data.intakeId || data.id || data.input?.intakeId,
+              suppliedExcerpt: data.suppliedExcerpt ?? data.input?.suppliedExcerpt,
+            },
+            adminUser,
+            { apiKey: secretKey }
+          );
+          return { intakeRecord };
+        }
       default:
         throw new HttpsError('invalid-argument', 'Invalid action');
     }
   } catch (error: any) {
-    if (error.message.startsWith('VALIDATION_ERROR') || error.message.startsWith('INVALID_ARGUMENT') || error.message.startsWith('INVALID_TRANSITION')) {
-      throw new HttpsError('invalid-argument', error.message);
+    if (error instanceof HttpsError) {
+      throw error;
     }
-    if (error.message.startsWith('PERMISSION_DENIED')) {
-      throw new HttpsError('permission-denied', error.message);
+    const msg = error?.message || 'Internal server error';
+    if (msg.startsWith('VALIDATION_ERROR') || msg.startsWith('INVALID_ARGUMENT') || msg.startsWith('INVALID_TRANSITION')) {
+      throw new HttpsError('invalid-argument', msg);
     }
-    if (error.message.startsWith('NOT_FOUND')) {
-      throw new HttpsError('not-found', error.message);
+    if (msg.startsWith('PERMISSION_DENIED')) {
+      throw new HttpsError('permission-denied', msg);
     }
-    if (error.message.startsWith('DUPLICATE_INTAKE') || error.message.startsWith('DUPLICATE_DOCUMENT') || error.message.startsWith('DUPLICATE_ORGANIZATION') || error.message.startsWith('DUPLICATE_SOURCE')) {
-      throw new HttpsError('already-exists', error.message);
+    if (msg.startsWith('NOT_FOUND')) {
+      throw new HttpsError('not-found', msg);
     }
-    throw new HttpsError('internal', error.message);
+    if (msg.startsWith('DUPLICATE_INTAKE') || msg.startsWith('DUPLICATE_DOCUMENT') || msg.startsWith('DUPLICATE_ORGANIZATION') || msg.startsWith('DUPLICATE_SOURCE')) {
+      throw new HttpsError('already-exists', msg);
+    }
+    if (msg.startsWith('CONFIG_ERROR')) {
+      throw new HttpsError('failed-precondition', msg);
+    }
+    if (msg.startsWith('CONFLICT')) {
+      throw new HttpsError('aborted', msg);
+    }
+    if (msg.startsWith('AI_PROVIDER_ERROR')) {
+      throw new HttpsError('unavailable', msg);
+    }
+    throw new HttpsError('internal', msg);
   }
 });
 

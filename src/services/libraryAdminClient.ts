@@ -158,4 +158,19 @@ export const LibraryAdminClient = {
     const res = await callable({ action: 'updateIntakeStatus', intakeId, status, reviewNotes });
     return res.data.intakeRecord;
   },
+
+  async generateIntakeAISuggestions(intakeId: string, suppliedExcerpt?: string): Promise<LibraryIntakeRecord> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<
+      { action: string; intakeId: string; suppliedExcerpt?: string },
+      { intakeRecord: LibraryIntakeRecord }
+    >(fns, 'manageLibraryDocuments');
+    const res = await callable({
+      action: 'generateIntakeAISuggestions',
+      intakeId,
+      suppliedExcerpt: suppliedExcerpt && suppliedExcerpt.trim() !== '' ? suppliedExcerpt.trim() : undefined,
+    });
+    return res.data.intakeRecord;
+  },
 };
+

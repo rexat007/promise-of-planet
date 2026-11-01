@@ -5,7 +5,8 @@ import type {
   LibraryDocument, 
   LibraryOrganization, 
   LibrarySource,
-  LibraryIntakeRecord 
+  LibraryIntakeRecord,
+  LibraryIntakeAISuggestion
 } from '../shared/libraryContract';
 import { LibraryValidator } from './libraryValidator';
 
@@ -157,6 +158,51 @@ export class FirestoreLibraryRepository implements LibraryRepository {
     });
 
     return record;
+  }
+
+  async saveIntakeAISuggestion(
+    intakeId: string,
+    expectedUpdatedAt: string,
+    suppliedExcerpt: string | undefined,
+    aiSuggestion: LibraryIntakeAISuggestion,
+    updatedAt: string
+  ): Promise<LibraryIntakeRecord> {
+    const docRef = this.db.collection(FirestoreLibraryRepository.INTAKE_COLLECTION).doc(intakeId.trim());
+    let committedRecord: LibraryIntakeRecord | null = null;
+
+    await this.db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(docRef);
+      if (!snapshot.exists) {
+        throw new Error(`NOT_FOUND: Intake record with ID ${intakeId} not found`);
+      }
+      const existingData = snapshot.data() as LibraryIntakeRecord | undefined;
+      if (!existingData) {
+        throw new Error(`NOT_FOUND: Intake record with ID ${intakeId} has empty data`);
+      }
+      if (existingData.updatedAt !== expectedUpdatedAt) {
+        throw new Error(
+          `CONFLICT: Intake record ${intakeId} was modified by a newer editorial action while AI preparation was in flight.`
+        );
+      }
+
+      // Preserve canonical intake fields strictly (url, normalizedUrl, title, organizationId, sourceId, status, reviewNotes, etc.)
+      const nextRecord: LibraryIntakeRecord = {
+        ...existingData,
+        id: snapshot.id,
+        ...(suppliedExcerpt !== undefined ? { suppliedExcerpt } : {}),
+        aiSuggestion,
+        updatedAt,
+      };
+
+      const cleanRecord = JSON.parse(JSON.stringify(nextRecord));
+      transaction.set(docRef, cleanRecord);
+      committedRecord = nextRecord;
+    });
+
+    if (!committedRecord) {
+      throw new Error(`INTERNAL_ERROR: Transaction failed to return updated intake record ${intakeId}`);
+    }
+    return committedRecord;
   }
 
   async getById(id: string): Promise<LibraryDocument | null> {

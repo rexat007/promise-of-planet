@@ -7,9 +7,16 @@ import type {
   RegisterOrganizationInput,
   RegisterSourceInput,
   LibraryIntakeRecord,
-  SubmitLibraryIntakeInput
+  SubmitLibraryIntakeInput,
+  LibraryIntakeAISuggestion,
+  GenerateLibraryIntakeAISuggestionsInput
 } from '../shared/libraryContract';
-import { LibraryDocumentType, LibraryRightsStatus, LibraryIntakeStatus } from '../shared/libraryContract';
+import {
+  LibraryDocumentType,
+  LibraryRightsStatus,
+  LibraryIntakeStatus,
+  LibraryIntakeAIInputBasis
+} from '../shared/libraryContract';
 import { WorkflowState, WorkflowAction, type WorkflowTransitionRecord } from '../shared/workflowContract';
 import type { AdminUser } from '../types/admin';
 import { AdminPermission } from '../types/admin';
@@ -707,6 +714,380 @@ export class LibraryApplicationService {
     this.inMemoryIntake.set(intakeId, updated);
     return updated;
   }
+
+  // --- Human-Triggered AI Preparation Assistant for Intake Records ---
+
+  async generateIntakeAISuggestions(
+    input: GenerateLibraryIntakeAISuggestionsInput,
+    actor: AdminUser,
+    options?: {
+      apiKey?: string;
+      fetchImpl?: typeof fetch;
+      timeoutMs?: number;
+    }
+  ): Promise<LibraryIntakeRecord> {
+    if (!actor || !actor.isActive) {
+      throw new Error('PERMISSION_DENIED: Inactive or unauthenticated admin user');
+    }
+
+    const canPrepare =
+      AdminAuthorizationService.hasPermission(actor, AdminPermission.Create) ||
+      AdminAuthorizationService.hasPermission(actor, AdminPermission.Edit) ||
+      AdminAuthorizationService.hasPermission(actor, AdminPermission.Review) ||
+      AdminAuthorizationService.hasPermission(actor, AdminPermission.Approve) ||
+      AdminAuthorizationService.hasPermission(actor, AdminPermission.ManageRights);
+
+    if (!canPrepare) {
+      throw new Error(
+        'PERMISSION_DENIED: Generating AI preparation suggestions requires editorial or curation permission'
+      );
+    }
+
+    if (!input || typeof input !== 'object' || !input.intakeId || typeof input.intakeId !== 'string' || input.intakeId.trim() === '') {
+      throw new Error('VALIDATION_ERROR: A valid intakeId is required to generate AI preparation suggestions');
+    }
+
+    const intakeId = input.intakeId.trim();
+    const record = await this.getIntakeById(intakeId);
+    if (!record) {
+      throw new Error(`NOT_FOUND: Intake record with ID ${intakeId} not found`);
+    }
+
+    let cleanExcerpt: string | undefined = undefined;
+    if (input.suppliedExcerpt !== undefined && input.suppliedExcerpt !== null) {
+      if (typeof input.suppliedExcerpt !== 'string') {
+        throw new Error('VALIDATION_ERROR: suppliedExcerpt must be a string when provided');
+      }
+      const trimmed = input.suppliedExcerpt.trim();
+      if (trimmed.length > 12000) {
+        throw new Error('VALIDATION_ERROR: suppliedExcerpt exceeds maximum allowed length of 12000 characters');
+      }
+      if (trimmed.length > 0) {
+        cleanExcerpt = trimmed;
+      }
+    }
+
+    const inputBasis = cleanExcerpt
+      ? LibraryIntakeAIInputBasis.SuppliedExcerptAndMetadata
+      : LibraryIntakeAIInputBasis.MetadataOnly;
+
+    const resolvedApiKey = (options?.apiKey ?? process.env.GEMINI_API_KEY ?? '').trim();
+    if (!resolvedApiKey) {
+      throw new Error(
+        'CONFIG_ERROR: GEMINI_API_KEY is not configured on the server. AI preparation assistant is unavailable until the secret is provisioned.'
+      );
+    }
+
+    const expectedUpdatedAt = record.updatedAt;
+
+    // Load linked canonical registry context if available
+    const linkedOrg = record.organizationId ? await this.getOrganizationById(record.organizationId) : null;
+    const linkedSource = record.sourceId ? await this.getSourceById(record.sourceId) : null;
+
+    const modelId = 'gemini-2.5-flash';
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`;
+    const fetchFn = options?.fetchImpl || globalThis.fetch;
+    if (typeof fetchFn !== 'function') {
+      throw new Error('CONFIG_ERROR: Server runtime does not provide a global fetch implementation');
+    }
+
+    const promptPayload = buildGeminiIntakePreparationPrompt(record, linkedOrg, linkedSource, cleanExcerpt, inputBasis);
+    const timeoutMs = options?.timeoutMs ?? 25000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let rawResponseText = '';
+    try {
+      const response = await fetchFn(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': resolvedApiKey,
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: promptPayload }],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            temperature: 0.1,
+          },
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`AI_PROVIDER_ERROR: Gemini API request failed with HTTP status ${response.status}`);
+      }
+
+      rawResponseText = await response.text();
+      if (rawResponseText.length > 65536) {
+        throw new Error('AI_PROVIDER_ERROR: Gemini API response exceeded maximum allowed payload size');
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        throw new Error(`AI_PROVIDER_ERROR: Gemini API request timed out after ${timeoutMs}ms`);
+      }
+      if (err?.message?.startsWith('AI_PROVIDER_ERROR:') || err?.message?.startsWith('VALIDATION_ERROR:')) {
+        throw err;
+      }
+      throw new Error('AI_PROVIDER_ERROR: Failed to communicate with Gemini API provider');
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const parsedCandidate = parseAndValidateGeminiSuggestion(rawResponseText, inputBasis);
+    const now = new Date().toISOString();
+
+    const aiSuggestion: LibraryIntakeAISuggestion = {
+      isAdvisoryOnly: true,
+      verificationWarningAr:
+        'مقترحات آلية غير موثقة — استرشادية فقط وتتطلب مراجعة واعتماداً بشرياً قبل أي تسجيل رسمي في المكتبة.',
+      verificationWarningEn:
+        'Unverified machine-generated recommendations — advisory only and require human editorial verification before canonical library registration.',
+      modelId,
+      generatedAt: now,
+      generatedByAdminId: (actor as any).uid || actor.id,
+      generatedByAdminName: (actor as any).displayName || actor.name || actor.email,
+      inputBasis,
+      sourceIntakeUpdatedAt: expectedUpdatedAt,
+      suggestedTitleAr: parsedCandidate.suggestedTitleAr,
+      suggestedTitleEn: parsedCandidate.suggestedTitleEn,
+      suggestedIssuingOrganization: parsedCandidate.suggestedIssuingOrganization,
+      suggestedDocumentType: parsedCandidate.suggestedDocumentType,
+      suggestedEnvironmentalDomains: parsedCandidate.suggestedEnvironmentalDomains,
+      suggestedTopicsAr: parsedCandidate.suggestedTopicsAr,
+      suggestedTopicsEn: parsedCandidate.suggestedTopicsEn,
+      suggestedSummaryAr: parsedCandidate.suggestedSummaryAr,
+      suggestedSummaryEn: parsedCandidate.suggestedSummaryEn,
+      provenanceObservationsAr: parsedCandidate.provenanceObservationsAr,
+      provenanceObservationsEn: parsedCandidate.provenanceObservationsEn,
+      uncertaintyNoticesAr: parsedCandidate.uncertaintyNoticesAr,
+      uncertaintyNoticesEn: parsedCandidate.uncertaintyNoticesEn,
+    };
+
+    if (typeof (this.repo as any).saveIntakeAISuggestion === 'function') {
+      return (this.repo as any).saveIntakeAISuggestion(
+        record.id,
+        expectedUpdatedAt,
+        cleanExcerpt,
+        aiSuggestion,
+        now
+      );
+    }
+
+    // In-memory repository path with optimistic concurrency protection
+    const latestInMemory = this.inMemoryIntake.get(record.id);
+    if (!latestInMemory) {
+      throw new Error(`NOT_FOUND: Intake record with ID ${record.id} not found`);
+    }
+    if (latestInMemory.updatedAt !== expectedUpdatedAt) {
+      throw new Error(
+        `CONFLICT: Intake record ${record.id} was modified by a newer editorial action while AI preparation was in flight.`
+      );
+    }
+
+    const updatedRecord: LibraryIntakeRecord = {
+      ...latestInMemory,
+      ...(cleanExcerpt !== undefined ? { suppliedExcerpt: cleanExcerpt } : {}),
+      aiSuggestion,
+      updatedAt: now,
+    };
+
+    this.inMemoryIntake.set(record.id, updatedRecord);
+    return updatedRecord;
+  }
+}
+
+function buildGeminiIntakePreparationPrompt(
+  record: LibraryIntakeRecord,
+  linkedOrg: LibraryOrganization | null,
+  linkedSource: LibrarySource | null,
+  suppliedExcerpt: string | undefined,
+  inputBasis: LibraryIntakeAIInputBasis
+): string {
+  const allowedDocTypes = Object.values(LibraryDocumentType).join(', ');
+  const contextObj = {
+    intakeId: record.id,
+    title: record.title,
+    normalizedHttpsUrl: record.normalizedUrl,
+    originalLanguage: record.language,
+    intakeNotes: record.notes || null,
+    linkedOrganization: linkedOrg
+      ? { id: linkedOrg.id, nameAr: linkedOrg.nameAr, nameEn: linkedOrg.nameEn, type: linkedOrg.type }
+      : null,
+    linkedSource: linkedSource
+      ? {
+          id: linkedSource.id,
+          sourceNameAr: linkedSource.sourceNameAr,
+          sourceNameEn: linkedSource.sourceNameEn,
+          sourceType: linkedSource.sourceType,
+          verificationStatus: linkedSource.verificationStatus,
+        }
+      : null,
+    inputBasis,
+    suppliedDocumentExcerpt: suppliedExcerpt || null,
+  };
+
+  return [
+    'You are an internal editorial preparation assistant for the Promise of Planet Environmental Library.',
+    'Analyze ONLY the provided canonical LibraryIntakeRecord metadata and optional admin-supplied document excerpt.',
+    'STRICT TRUTHFULNESS RULES:',
+    '1. You have NOT fetched or read the external URL or any remote PDF file.',
+    '2. If inputBasis is "MetadataOnly" (suppliedDocumentExcerpt is null), you MUST set suggestedSummaryAr and suggestedSummaryEn to null, and include explicit uncertainty notices stating that the remote document body was not read.',
+    '3. If inputBasis is "SuppliedExcerptAndMetadata", summarize ONLY what is substantiated by suppliedDocumentExcerpt without inventing legal articles or provisions.',
+    `4. suggestedDocumentType MUST be one of: [${allowedDocTypes}].`,
+    '5. Return ONLY a valid JSON object matching this exact structure:',
+    JSON.stringify({
+      suggestedTitleAr: 'string',
+      suggestedTitleEn: 'string',
+      suggestedIssuingOrganization: 'string',
+      suggestedDocumentType: 'Law | ExecutiveRegulation | Decision | InstitutionalReport | PolicyPaper | ResearchStudy | InternationalAgreement',
+      suggestedEnvironmentalDomains: ['string'],
+      suggestedTopicsAr: ['string'],
+      suggestedTopicsEn: ['string'],
+      suggestedSummaryAr: inputBasis === LibraryIntakeAIInputBasis.SuppliedExcerptAndMetadata ? 'string' : null,
+      suggestedSummaryEn: inputBasis === LibraryIntakeAIInputBasis.SuppliedExcerptAndMetadata ? 'string' : null,
+      provenanceObservationsAr: ['string'],
+      provenanceObservationsEn: ['string'],
+      uncertaintyNoticesAr: ['string'],
+      uncertaintyNoticesEn: ['string'],
+    }),
+    'CANONICAL INTAKE CONTEXT:',
+    JSON.stringify(contextObj),
+  ].join('\n');
+}
+
+function sanitizeStringArray(arr: unknown, fieldName: string, maxItems = 10, maxItemLength = 300): string[] {
+  if (!Array.isArray(arr)) {
+    throw new Error(`AI_PROVIDER_ERROR: Invalid AI response schema: ${fieldName} must be an array`);
+  }
+  const cleaned = arr
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    .map(item => item.trim().slice(0, maxItemLength))
+    .slice(0, maxItems);
+
+  if (cleaned.length === 0) {
+    throw new Error(`AI_PROVIDER_ERROR: Invalid AI response schema: ${fieldName} must contain at least one non-empty string`);
+  }
+  return cleaned;
+}
+
+function parseAndValidateGeminiSuggestion(
+  rawResponseText: string,
+  inputBasis: LibraryIntakeAIInputBasis
+): {
+  suggestedTitleAr: string;
+  suggestedTitleEn: string;
+  suggestedIssuingOrganization: string;
+  suggestedDocumentType: LibraryDocumentType;
+  suggestedEnvironmentalDomains: string[];
+  suggestedTopicsAr: string[];
+  suggestedTopicsEn: string[];
+  suggestedSummaryAr: string | null;
+  suggestedSummaryEn: string | null;
+  provenanceObservationsAr: string[];
+  provenanceObservationsEn: string[];
+  uncertaintyNoticesAr: string[];
+  uncertaintyNoticesEn: string[];
+} {
+  let envelope: any;
+  try {
+    envelope = JSON.parse(rawResponseText);
+  } catch {
+    throw new Error('AI_PROVIDER_ERROR: Gemini API returned non-JSON HTTP payload');
+  }
+
+  const candidateText = envelope?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!candidateText || typeof candidateText !== 'string') {
+    throw new Error('AI_PROVIDER_ERROR: Gemini API response missing candidate text content');
+  }
+
+  const strippedJson = candidateText
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(strippedJson);
+  } catch {
+    throw new Error('AI_PROVIDER_ERROR: Model candidate output is not valid JSON');
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('AI_PROVIDER_ERROR: Model candidate JSON must be an object');
+  }
+
+  if (typeof parsed.suggestedTitleAr !== 'string' || parsed.suggestedTitleAr.trim() === '') {
+    throw new Error('AI_PROVIDER_ERROR: Invalid AI response schema: suggestedTitleAr is required');
+  }
+  if (typeof parsed.suggestedTitleEn !== 'string' || parsed.suggestedTitleEn.trim() === '') {
+    throw new Error('AI_PROVIDER_ERROR: Invalid AI response schema: suggestedTitleEn is required');
+  }
+  if (typeof parsed.suggestedIssuingOrganization !== 'string' || parsed.suggestedIssuingOrganization.trim() === '') {
+    throw new Error('AI_PROVIDER_ERROR: Invalid AI response schema: suggestedIssuingOrganization is required');
+  }
+
+  const allowedDocTypes = Object.values(LibraryDocumentType) as string[];
+  if (typeof parsed.suggestedDocumentType !== 'string' || !allowedDocTypes.includes(parsed.suggestedDocumentType)) {
+    throw new Error(`AI_PROVIDER_ERROR: Invalid AI response schema: unsupported suggestedDocumentType "${String(parsed.suggestedDocumentType)}"`);
+  }
+
+  const suggestedEnvironmentalDomains = sanitizeStringArray(parsed.suggestedEnvironmentalDomains, 'suggestedEnvironmentalDomains', 8, 120);
+  const suggestedTopicsAr = sanitizeStringArray(parsed.suggestedTopicsAr, 'suggestedTopicsAr', 10, 120);
+  const suggestedTopicsEn = sanitizeStringArray(parsed.suggestedTopicsEn, 'suggestedTopicsEn', 10, 120);
+  const provenanceObservationsAr = sanitizeStringArray(parsed.provenanceObservationsAr, 'provenanceObservationsAr', 6, 400);
+  const provenanceObservationsEn = sanitizeStringArray(parsed.provenanceObservationsEn, 'provenanceObservationsEn', 6, 400);
+  const uncertaintyNoticesAr = sanitizeStringArray(parsed.uncertaintyNoticesAr, 'uncertaintyNoticesAr', 6, 400);
+  const uncertaintyNoticesEn = sanitizeStringArray(parsed.uncertaintyNoticesEn, 'uncertaintyNoticesEn', 6, 400);
+
+  let suggestedSummaryAr: string | null = null;
+  let suggestedSummaryEn: string | null = null;
+
+  if (inputBasis === LibraryIntakeAIInputBasis.MetadataOnly) {
+    // Strictly enforce truthfulness: never output a document summary when no document excerpt was provided
+    suggestedSummaryAr = null;
+    suggestedSummaryEn = null;
+
+    const mandatoryNoticeAr = 'تم توليد هذه المقترحات بناءً على البيانات الوصفية فقط دون قراءة نص الوثيقة أو ملف PDF الخارجي.';
+    const mandatoryNoticeEn = 'Generated from intake metadata only; the external document body/PDF was not fetched or read.';
+    if (!uncertaintyNoticesAr.some(n => n.includes('البيانات الوصفية') || n.includes('PDF'))) {
+      uncertaintyNoticesAr.unshift(mandatoryNoticeAr);
+    }
+    if (!uncertaintyNoticesEn.some(n => n.toLowerCase().includes('metadata only') || n.toLowerCase().includes('not fetched'))) {
+      uncertaintyNoticesEn.unshift(mandatoryNoticeEn);
+    }
+  } else {
+    if (typeof parsed.suggestedSummaryAr !== 'string' || parsed.suggestedSummaryAr.trim() === '') {
+      throw new Error('AI_PROVIDER_ERROR: Invalid AI response schema: suggestedSummaryAr is required when excerpt is supplied');
+    }
+    if (typeof parsed.suggestedSummaryEn !== 'string' || parsed.suggestedSummaryEn.trim() === '') {
+      throw new Error('AI_PROVIDER_ERROR: Invalid AI response schema: suggestedSummaryEn is required when excerpt is supplied');
+    }
+    suggestedSummaryAr = parsed.suggestedSummaryAr.trim().slice(0, 2000);
+    suggestedSummaryEn = parsed.suggestedSummaryEn.trim().slice(0, 2000);
+  }
+
+  return {
+    suggestedTitleAr: parsed.suggestedTitleAr.trim().slice(0, 300),
+    suggestedTitleEn: parsed.suggestedTitleEn.trim().slice(0, 300),
+    suggestedIssuingOrganization: parsed.suggestedIssuingOrganization.trim().slice(0, 250),
+    suggestedDocumentType: parsed.suggestedDocumentType as LibraryDocumentType,
+    suggestedEnvironmentalDomains,
+    suggestedTopicsAr,
+    suggestedTopicsEn,
+    suggestedSummaryAr,
+    suggestedSummaryEn,
+    provenanceObservationsAr,
+    provenanceObservationsEn,
+    uncertaintyNoticesAr,
+    uncertaintyNoticesEn,
+  };
 }
 
 function isPrivateOrLocalHost(hostname: string): boolean {
