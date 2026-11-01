@@ -1,12 +1,20 @@
+import * as crypto from 'crypto';
 import { getFirestore } from 'firebase-admin/firestore';
 import type { LibraryRepository } from './libraryRepository';
-import type { LibraryDocument, LibraryOrganization, LibrarySource } from '../shared/libraryContract';
+import type { 
+  LibraryDocument, 
+  LibraryOrganization, 
+  LibrarySource,
+  LibraryIntakeRecord 
+} from '../shared/libraryContract';
 import { LibraryValidator } from './libraryValidator';
 
 export class FirestoreLibraryRepository implements LibraryRepository {
   public static readonly COLLECTION = 'library_documents' as const;
   public static readonly ORGANIZATIONS_COLLECTION = 'library_organizations' as const;
   public static readonly SOURCES_COLLECTION = 'library_sources' as const;
+  public static readonly INTAKE_COLLECTION = 'library_intake' as const;
+  public static readonly INTAKE_URLS_COLLECTION = 'library_intake_urls' as const;
 
   private get db() {
     return getFirestore();
@@ -87,6 +95,68 @@ export class FirestoreLibraryRepository implements LibraryRepository {
     });
 
     return source;
+  }
+
+  // --- Intake Inbox Persistence ---
+
+  async getIntakeById(id: string): Promise<LibraryIntakeRecord | null> {
+    if (!id || typeof id !== 'string') return null;
+    const docSnap = await this.db.collection(FirestoreLibraryRepository.INTAKE_COLLECTION).doc(id.trim()).get();
+    if (!docSnap.exists) return null;
+    const data = docSnap.data();
+    if (!data) return null;
+    return { ...data, id: docSnap.id } as LibraryIntakeRecord;
+  }
+
+  async listIntake(): Promise<LibraryIntakeRecord[]> {
+    const snapshot = await this.db.collection(FirestoreLibraryRepository.INTAKE_COLLECTION).get();
+    const records = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as LibraryIntakeRecord));
+    return records.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  async createIntake(record: LibraryIntakeRecord): Promise<LibraryIntakeRecord> {
+    const docRef = this.db.collection(FirestoreLibraryRepository.INTAKE_COLLECTION).doc(record.id);
+    const urlHash = crypto.createHash('sha256').update(record.normalizedUrl.trim().toLowerCase()).digest('hex');
+    const urlRef = this.db.collection(FirestoreLibraryRepository.INTAKE_URLS_COLLECTION).doc(urlHash);
+    const cleanRecord = JSON.parse(JSON.stringify(record));
+
+    await this.db.runTransaction(async transaction => {
+      const [docSnap, urlSnap] = await Promise.all([
+        transaction.get(docRef),
+        transaction.get(urlRef),
+      ]);
+
+      if (docSnap.exists) {
+        throw new Error(`DUPLICATE_INTAKE: Intake record with ID ${record.id} already exists`);
+      }
+      if (urlSnap.exists) {
+        throw new Error(`DUPLICATE_INTAKE: Reference URL already exists in intake queue: ${record.normalizedUrl}`);
+      }
+
+      transaction.set(docRef, cleanRecord);
+      transaction.set(urlRef, {
+        intakeId: record.id,
+        normalizedUrl: record.normalizedUrl,
+        createdAt: record.createdAt,
+      });
+    });
+
+    return record;
+  }
+
+  async updateIntake(record: LibraryIntakeRecord): Promise<LibraryIntakeRecord> {
+    const docRef = this.db.collection(FirestoreLibraryRepository.INTAKE_COLLECTION).doc(record.id);
+    const cleanRecord = JSON.parse(JSON.stringify(record));
+
+    await this.db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(docRef);
+      if (!snapshot.exists) {
+        throw new Error(`NOT_FOUND: Intake record with ID ${record.id} not found`);
+      }
+      transaction.set(docRef, cleanRecord);
+    });
+
+    return record;
   }
 
   async getById(id: string): Promise<LibraryDocument | null> {

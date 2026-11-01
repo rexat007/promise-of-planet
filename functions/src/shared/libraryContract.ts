@@ -183,3 +183,56 @@ export interface LibraryClassification {
   searchQuery?: string;
 }
 
+/**
+ * Library Intake Inbox Status Model
+ * Internal editorial tracking for incoming reference candidates.
+ */
+export const LibraryIntakeStatus = {
+  PendingReview: 'PendingReview',     // قيد المراجعة الأولية
+  InPreparation: 'InPreparation',     // قيد الإعداد والتوثيق
+  Rejected: 'Rejected',               // مستبعد / غير مطابق
+} as const;
+
+export type LibraryIntakeStatus = typeof LibraryIntakeStatus[keyof typeof LibraryIntakeStatus];
+
+/**
+ * Library Intake Record (Durable Candidate Reference)
+ */
+export interface LibraryIntakeRecord {
+  id: string;
+  url: string;
+  normalizedUrl: string;
+  title: string;
+  organizationId?: string;
+  sourceId?: string;
+  language: 'ar' | 'en' | 'bilingual' | 'other';
+  notes?: string;
+  status: LibraryIntakeStatus;
+  submittedByAdminId: string;
+  submittedByAdminName: string;
+  reviewNotes?: string;
+  reviewedByAdminId?: string;
+  reviewedByAdminName?: string;
+  reviewedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Administrative Input DTOs for Intake
+ */
+export interface SubmitLibraryIntakeInput {
+  url: string;
+  title: string;
+  organizationId?: string;
+  sourceId?: string;
+  language?: 'ar' | 'en' | 'bilingual' | 'other';
+  notes?: string;
+}
+
+export interface UpdateLibraryIntakeStatusInput {
+  intakeId: string;
+  status: LibraryIntakeStatus;
+  reviewNotes?: string;
+}
+

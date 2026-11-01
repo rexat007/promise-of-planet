@@ -6,6 +6,11 @@ import type {
   LibraryOrganization,
   LibrarySource
 } from '../types/library';
+import type {
+  LibraryIntakeRecord,
+  LibraryIntakeStatus,
+  SubmitLibraryIntakeInput
+} from '../../functions/src/shared/libraryContract';
 import type { WorkflowState } from '../types/workflow';
 
 function getFunctionsInstance() {
@@ -121,5 +126,36 @@ export const LibraryAdminClient = {
     >(fns, 'manageLibraryDocuments');
     const res = await callable({ action: 'verifySource', sourceId, status });
     return res.data.source;
+  },
+
+  async listIntake(): Promise<LibraryIntakeRecord[]> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<{ action: string }, { intakeRecords?: LibraryIntakeRecord[]; intake?: LibraryIntakeRecord[] }>(fns, 'manageLibraryDocuments');
+    const res = await callable({ action: 'listIntake' });
+    return res.data?.intakeRecords ?? res.data?.intake ?? [];
+  },
+
+  async getIntakeById(id: string): Promise<LibraryIntakeRecord | null> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<{ action: string; id: string }, { intakeRecord: LibraryIntakeRecord }>(fns, 'manageLibraryDocuments');
+    const res = await callable({ action: 'getIntakeById', id });
+    return res.data?.intakeRecord ?? null;
+  },
+
+  async submitIntake(input: SubmitLibraryIntakeInput): Promise<LibraryIntakeRecord> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<{ action: string; input: SubmitLibraryIntakeInput }, { intakeRecord: LibraryIntakeRecord }>(fns, 'manageLibraryDocuments');
+    const res = await callable({ action: 'submitIntake', input });
+    return res.data.intakeRecord;
+  },
+
+  async updateIntakeStatus(intakeId: string, status: LibraryIntakeStatus, reviewNotes?: string): Promise<LibraryIntakeRecord> {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<
+      { action: string; intakeId: string; status: LibraryIntakeStatus; reviewNotes?: string },
+      { intakeRecord: LibraryIntakeRecord }
+    >(fns, 'manageLibraryDocuments');
+    const res = await callable({ action: 'updateIntakeStatus', intakeId, status, reviewNotes });
+    return res.data.intakeRecord;
   },
 };

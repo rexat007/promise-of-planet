@@ -67,6 +67,29 @@ export const manageLibraryDocuments = onCall(async (request) => {
           throw new HttpsError('permission-denied', 'Only rights reviewers or owners may verify sources');
         }
         return { source: await service.verifySource(data.sourceId, data.status, adminUser) };
+      case 'listIntake':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.View)) throw new HttpsError('permission-denied', 'Missing permission');
+        {
+          const intakeRecords = await service.listIntake();
+          return { intakeRecords, intake: intakeRecords };
+        }
+      case 'getIntakeById':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.View)) throw new HttpsError('permission-denied', 'Missing permission');
+        return { intakeRecord: await service.getIntakeById(data.id) };
+      case 'submitIntake':
+      case 'createIntake':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Create) &&
+            !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Edit)) {
+          throw new HttpsError('permission-denied', 'Missing permission to submit intake reference');
+        }
+        return { intakeRecord: await service.submitIntake(data.input, adminUser) };
+      case 'updateIntakeStatus':
+        if (!AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Review) &&
+            !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Approve) &&
+            !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.ManageRights)) {
+          throw new HttpsError('permission-denied', 'Only reviewers or rights managers may update intake status');
+        }
+        return { intakeRecord: await service.updateIntakeStatus(data.intakeId || data.id, data.status, data.reviewNotes, adminUser) };
       default:
         throw new HttpsError('invalid-argument', 'Invalid action');
     }
@@ -80,7 +103,7 @@ export const manageLibraryDocuments = onCall(async (request) => {
     if (error.message.startsWith('NOT_FOUND')) {
       throw new HttpsError('not-found', error.message);
     }
-    if (error.message.startsWith('DUPLICATE_DOCUMENT') || error.message.startsWith('DUPLICATE_ORGANIZATION') || error.message.startsWith('DUPLICATE_SOURCE')) {
+    if (error.message.startsWith('DUPLICATE_INTAKE') || error.message.startsWith('DUPLICATE_DOCUMENT') || error.message.startsWith('DUPLICATE_ORGANIZATION') || error.message.startsWith('DUPLICATE_SOURCE')) {
       throw new HttpsError('already-exists', error.message);
     }
     throw new HttpsError('internal', error.message);

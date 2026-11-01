@@ -5,9 +5,11 @@ import type {
   LibraryOrganization,
   LibrarySource,
   RegisterOrganizationInput,
-  RegisterSourceInput
+  RegisterSourceInput,
+  LibraryIntakeRecord,
+  SubmitLibraryIntakeInput
 } from '../shared/libraryContract';
-import { LibraryDocumentType, LibraryRightsStatus } from '../shared/libraryContract';
+import { LibraryDocumentType, LibraryRightsStatus, LibraryIntakeStatus } from '../shared/libraryContract';
 import { WorkflowState, WorkflowAction, type WorkflowTransitionRecord } from '../shared/workflowContract';
 import type { AdminUser } from '../types/admin';
 import { AdminPermission } from '../types/admin';
@@ -66,6 +68,7 @@ export class LibraryApplicationService {
   private repo: LibraryRepository;
   private inMemoryOrgs: Map<string, LibraryOrganization> = new Map();
   private inMemorySources: Map<string, LibrarySource> = new Map();
+  private inMemoryIntake: Map<string, LibraryIntakeRecord> = new Map();
 
   constructor(repo: LibraryRepository) {
     this.repo = repo;
@@ -566,4 +569,217 @@ export class LibraryApplicationService {
       }
     }
   }
+
+  // --- Intake Inbox Operations ---
+
+  async listIntake(): Promise<LibraryIntakeRecord[]> {
+    if (typeof (this.repo as any).listIntake === 'function') {
+      return (this.repo as any).listIntake();
+    }
+    const records = Array.from(this.inMemoryIntake.values());
+    return records.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  async getIntakeById(id: string): Promise<LibraryIntakeRecord | null> {
+    if (!id || typeof id !== 'string' || id.trim() === '') return null;
+    const cleanId = id.trim();
+    if (typeof (this.repo as any).getIntakeById === 'function') {
+      return (this.repo as any).getIntakeById(cleanId);
+    }
+    return this.inMemoryIntake.get(cleanId) || null;
+  }
+
+  async submitIntake(input: SubmitLibraryIntakeInput, actor: AdminUser): Promise<LibraryIntakeRecord> {
+    if (!actor.isActive) {
+      throw new Error('PERMISSION_DENIED: Inactive admin user');
+    }
+    const canSubmit = AdminAuthorizationService.hasPermission(actor, AdminPermission.Create) ||
+                      AdminAuthorizationService.hasPermission(actor, AdminPermission.Edit);
+    if (!canSubmit) {
+      throw new Error('PERMISSION_DENIED: Submitting intake references requires Create or Edit permission');
+    }
+
+    if (!input || typeof input !== 'object') {
+      throw new Error('VALIDATION_ERROR: Intake input object is required');
+    }
+    if (!input.title || typeof input.title !== 'string' || input.title.trim() === '') {
+      throw new Error('VALIDATION_ERROR: Document title is required for intake');
+    }
+
+    const { originalUrl, normalizedUrl } = normalizeIntakeUrl(input.url);
+
+    if (input.organizationId && input.organizationId.trim() !== '') {
+      const org = await this.getOrganizationById(input.organizationId.trim());
+      if (!org) {
+        throw new Error(`VALIDATION_ERROR: Referenced organization does not exist: ${input.organizationId}`);
+      }
+    }
+
+    if (input.sourceId && input.sourceId.trim() !== '') {
+      const src = await this.getSourceById(input.sourceId.trim());
+      if (!src) {
+        throw new Error(`VALIDATION_ERROR: Referenced source does not exist: ${input.sourceId}`);
+      }
+    }
+
+    const allowedLanguages = ['ar', 'en', 'bilingual', 'other'];
+    const language = input.language && allowedLanguages.includes(input.language) ? input.language : 'ar';
+
+    const now = new Date().toISOString();
+    const id = `intake-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+
+    const newRecord: LibraryIntakeRecord = {
+      id,
+      url: originalUrl,
+      normalizedUrl,
+      title: input.title.trim(),
+      organizationId: input.organizationId?.trim() || undefined,
+      sourceId: input.sourceId?.trim() || undefined,
+      language,
+      notes: input.notes?.trim() || undefined,
+      status: LibraryIntakeStatus.PendingReview,
+      submittedByAdminId: (actor as any).uid || actor.id,
+      submittedByAdminName: (actor as any).displayName || actor.name || actor.email,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    if (typeof (this.repo as any).createIntake === 'function') {
+      return (this.repo as any).createIntake(newRecord);
+    }
+
+    // In-memory duplicate check
+    for (const existing of this.inMemoryIntake.values()) {
+      if (existing.normalizedUrl === normalizedUrl) {
+        throw new Error(`DUPLICATE_INTAKE: Reference URL already exists in intake queue: ${normalizedUrl}`);
+      }
+    }
+
+    this.inMemoryIntake.set(id, newRecord);
+    return newRecord;
+  }
+
+  async updateIntakeStatus(
+    intakeId: string, 
+    status: LibraryIntakeStatus, 
+    reviewNotes: string | undefined, 
+    actor: AdminUser
+  ): Promise<LibraryIntakeRecord> {
+    if (!actor.isActive) {
+      throw new Error('PERMISSION_DENIED: Inactive admin user');
+    }
+    const canReview = AdminAuthorizationService.hasPermission(actor, AdminPermission.Review) ||
+                      AdminAuthorizationService.hasPermission(actor, AdminPermission.Approve) ||
+                      AdminAuthorizationService.hasPermission(actor, AdminPermission.ManageRights);
+    if (!canReview) {
+      throw new Error('PERMISSION_DENIED: Reviewing or changing intake status requires Review, Approve, or ManageRights permission');
+    }
+
+    const allowedStatuses: LibraryIntakeStatus[] = [
+      LibraryIntakeStatus.PendingReview,
+      LibraryIntakeStatus.InPreparation,
+      LibraryIntakeStatus.Rejected,
+    ];
+    if (!allowedStatuses.includes(status)) {
+      throw new Error(`INVALID_ARGUMENT: Invalid intake status: ${status}`);
+    }
+
+    const record = await this.getIntakeById(intakeId);
+    if (!record) {
+      throw new Error(`NOT_FOUND: Intake record with ID ${intakeId} not found`);
+    }
+
+    const now = new Date().toISOString();
+    const updated: LibraryIntakeRecord = {
+      ...record,
+      status,
+      reviewNotes: reviewNotes !== undefined && reviewNotes !== null ? reviewNotes.trim() : record.reviewNotes,
+      reviewedByAdminId: (actor as any).uid || actor.id,
+      reviewedByAdminName: (actor as any).displayName || actor.name || actor.email,
+      reviewedAt: now,
+      updatedAt: now,
+    };
+
+    if (typeof (this.repo as any).updateIntake === 'function') {
+      return (this.repo as any).updateIntake(updated);
+    }
+
+    this.inMemoryIntake.set(intakeId, updated);
+    return updated;
+  }
+}
+
+function isPrivateOrLocalHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().trim();
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') {
+    return true;
+  }
+  if (host === 'metadata.google.internal' || host === 'metadata.internal' || host === '169.254.169.254') {
+    return true;
+  }
+  if (host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.lan')) {
+    return true;
+  }
+  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const oct1 = parseInt(ipv4Match[1], 10);
+    const oct2 = parseInt(ipv4Match[2], 10);
+    if (oct1 === 10) return true;
+    if (oct1 === 127) return true;
+    if (oct1 === 169 && oct2 === 254) return true;
+    if (oct1 === 172 && oct2 >= 16 && oct2 <= 31) return true;
+    if (oct1 === 192 && oct2 === 168) return true;
+    if (oct1 === 0) return true;
+  }
+  return false;
+}
+
+function normalizeIntakeUrl(rawUrl: string): { originalUrl: string; normalizedUrl: string } {
+  if (!rawUrl || typeof rawUrl !== 'string' || rawUrl.trim() === '') {
+    throw new Error('VALIDATION_ERROR: Reference URL is required');
+  }
+  const trimmed = rawUrl.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error('VALIDATION_ERROR: Invalid reference URL format');
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error('VALIDATION_ERROR: Only secure HTTPS URLs are permitted for library intake references');
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (isPrivateOrLocalHost(hostname)) {
+    throw new Error('VALIDATION_ERROR: Reference URL cannot point to localhost, internal metadata, or private network addresses');
+  }
+
+  // Strip fragment / hash
+  parsed.hash = '';
+
+  // Filter out marketing tracking parameters
+  const trackingPrefixes = ['utm_', 'fbclid', 'gclid', 'msclkid', 'mc_cid', 'mc_eid'];
+  const paramsToKeep: [string, string][] = [];
+  parsed.searchParams.forEach((val, key) => {
+    const lowerKey = key.toLowerCase();
+    if (!trackingPrefixes.some(prefix => lowerKey.startsWith(prefix)) && lowerKey !== 'ref') {
+      paramsToKeep.push([key, val]);
+    }
+  });
+
+  // Re-build normalized query string sorted
+  paramsToKeep.sort((a, b) => a[0].localeCompare(b[0]));
+  parsed.search = '';
+  for (const [k, v] of paramsToKeep) {
+    parsed.searchParams.append(k, v);
+  }
+
+  // Normalize pathname: remove trailing slash if length > 1
+  if (parsed.pathname.length > 1 && parsed.pathname.endsWith('/')) {
+    parsed.pathname = parsed.pathname.slice(0, -1);
+  }
+
+  const normalizedUrl = parsed.toString().toLowerCase();
+  return { originalUrl: trimmed, normalizedUrl };
 }
