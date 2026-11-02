@@ -8,7 +8,13 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "run:once": "node dist/peia-worker/src/runSingleDownloadCycleCli.js",
-    "test:runtime": "npx tsx ../scripts/runPEIAWorkerRuntimeFoundationTests.cts"
+    "run:cycle": "npx tsx src/runUnifiedWorkerCycleCli.ts",
+    "run:download": "npx tsx src/runUnifiedWorkerCycleCli.ts download",
+    "run:process": "npx tsx src/runUnifiedWorkerCycleCli.ts process",
+    "run:submit": "npx tsx src/runUnifiedWorkerCycleCli.ts submit",
+    "run:full": "npx tsx src/runUnifiedWorkerCycleCli.ts full",
+    "test:runtime": "npx tsx ../scripts/runPEIAWorkerRuntimeFoundationTests.cts",
+    "test:cycle": "npx tsx ../scripts/runPEIAUnifiedWorkerCycleCliTests.ts"
   },
   "dependencies": {},
   "devDependencies": {
