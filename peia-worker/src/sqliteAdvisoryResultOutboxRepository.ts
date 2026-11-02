@@ -56,6 +56,7 @@ interface AdvisoryResultOutboxRow {
   recommendations_json?: string | null;
   uncertainties_json?: string | null;
   limitations_json?: string | null;
+  library_preparation_json?: string | null;
 }
 
 export class SqliteAdvisoryResultOutboxRepository
@@ -113,6 +114,9 @@ export class SqliteAdvisoryResultOutboxRepository
       if (!columnNames.has('limitations_json')) {
         this.db.exec('ALTER TABLE peia_advisory_result_outbox ADD COLUMN limitations_json TEXT;');
       }
+      if (!columnNames.has('library_preparation_json')) {
+        this.db.exec('ALTER TABLE peia_advisory_result_outbox ADD COLUMN library_preparation_json TEXT;');
+      }
     } catch {
       try {
         this.db.close();
@@ -139,21 +143,49 @@ export class SqliteAdvisoryResultOutboxRepository
       throw new SqliteAdvisoryResultOutboxRepositoryError('CORRUPT_STORED_RECORD');
     }
 
+    const hasLibraryPrepColumnValue =
+      row.library_preparation_json !== null && row.library_preparation_json !== undefined;
+
+    if (row.target_type === 'LibraryIntake' && !hasLibraryPrepColumnValue) {
+      throw new SqliteAdvisoryResultOutboxRepositoryError('CORRUPT_STORED_RECORD');
+    }
+
+    if (
+      hasLibraryPrepColumnValue &&
+      (typeof row.library_preparation_json !== 'string' ||
+        row.library_preparation_json.trim().length === 0)
+    ) {
+      throw new SqliteAdvisoryResultOutboxRepositoryError('CORRUPT_STORED_RECORD');
+    }
+
     let findings: unknown;
     let recommendations: unknown;
     let uncertainties: unknown;
     let limitations: unknown;
+    let parsedLibraryPrep: unknown = undefined;
 
     try {
       findings = JSON.parse(row.findings_json);
       recommendations = JSON.parse(row.recommendations_json);
       uncertainties = JSON.parse(row.uncertainties_json);
       limitations = JSON.parse(row.limitations_json);
+      if (hasLibraryPrepColumnValue) {
+        parsedLibraryPrep = JSON.parse(row.library_preparation_json as string);
+      }
     } catch {
       throw new SqliteAdvisoryResultOutboxRepositoryError('CORRUPT_STORED_RECORD');
     }
 
-    const candidate = {
+    if (
+      hasLibraryPrepColumnValue &&
+      (typeof parsedLibraryPrep !== 'object' ||
+        parsedLibraryPrep === null ||
+        Array.isArray(parsedLibraryPrep))
+    ) {
+      throw new SqliteAdvisoryResultOutboxRepositoryError('CORRUPT_STORED_RECORD');
+    }
+
+    const initialCandidate = {
       result: {
         schemaVersion: row.schema_version,
         task: {
@@ -173,12 +205,59 @@ export class SqliteAdvisoryResultOutboxRepository
         recommendations,
         uncertainties,
         limitations,
+        ...(hasLibraryPrepColumnValue ? { libraryPreparation: parsedLibraryPrep } : {}),
       },
       localState: row.local_state,
     };
 
     try {
-      return validateStoredAdvisoryResultRecord(candidate);
+      const validated = validateStoredAdvisoryResultRecord(initialCandidate);
+      if (validated.result.libraryPreparation === undefined) {
+        return validated;
+      }
+
+      const prep = validated.result.libraryPreparation;
+      const canonicalCandidate = {
+        result: {
+          schemaVersion: validated.result.schemaVersion,
+          task: {
+            taskId: validated.result.task.taskId,
+            taskType: validated.result.task.taskType,
+            target: {
+              targetType: validated.result.task.target.targetType,
+              targetId: validated.result.task.target.targetId,
+              sourceUpdatedAt: validated.result.task.target.sourceUpdatedAt,
+            },
+          },
+          humanReviewRequired: validated.result.humanReviewRequired,
+          assessment: {
+            summary: validated.result.assessment.summary,
+            findings: validated.result.assessment.findings,
+          },
+          recommendations: validated.result.recommendations,
+          uncertainties: validated.result.uncertainties,
+          limitations: validated.result.limitations,
+          libraryPreparation: {
+            inputBasis: prep.inputBasis,
+            suggestedTitleAr: prep.suggestedTitleAr,
+            suggestedTitleEn: prep.suggestedTitleEn,
+            suggestedIssuingOrganization: prep.suggestedIssuingOrganization,
+            suggestedDocumentType: prep.suggestedDocumentType,
+            suggestedEnvironmentalDomains: [...prep.suggestedEnvironmentalDomains],
+            suggestedTopicsAr: [...prep.suggestedTopicsAr],
+            suggestedTopicsEn: [...prep.suggestedTopicsEn],
+            suggestedSummaryAr: prep.suggestedSummaryAr,
+            suggestedSummaryEn: prep.suggestedSummaryEn,
+            provenanceObservationsAr: [...prep.provenanceObservationsAr],
+            provenanceObservationsEn: [...prep.provenanceObservationsEn],
+            uncertaintyNoticesAr: [...prep.uncertaintyNoticesAr],
+            uncertaintyNoticesEn: [...prep.uncertaintyNoticesEn],
+          },
+        },
+        localState: validated.localState,
+      };
+
+      return validateStoredAdvisoryResultRecord(canonicalCandidate);
     } catch {
       throw new SqliteAdvisoryResultOutboxRepositoryError('CORRUPT_STORED_RECORD');
     }
@@ -195,12 +274,19 @@ export class SqliteAdvisoryResultOutboxRepository
       throw new SqliteAdvisoryResultOutboxRepositoryError('DATABASE_WRITE_FAILED');
     }
 
+    if (
+      record.result.task.target.targetType === 'LibraryIntake' &&
+      record.result.libraryPreparation === undefined
+    ) {
+      throw new SqliteAdvisoryResultOutboxRepositoryError('DATABASE_WRITE_FAILED');
+    }
+
     const taskId = record.result.task.taskId;
 
     let existingRow: AdvisoryResultOutboxRow | undefined;
     try {
       const stmt = this.db.prepare(
-        'SELECT task_id, task_type, target_type, target_id, source_updated_at, assessment_summary, findings_json, local_state, schema_version, human_review_required, recommendations_json, uncertainties_json, limitations_json FROM peia_advisory_result_outbox WHERE task_id = ?'
+        'SELECT task_id, task_type, target_type, target_id, source_updated_at, assessment_summary, findings_json, local_state, schema_version, human_review_required, recommendations_json, uncertainties_json, limitations_json, library_preparation_json FROM peia_advisory_result_outbox WHERE task_id = ?'
       );
       existingRow = stmt.get(taskId) as AdvisoryResultOutboxRow | undefined;
     } catch {
@@ -221,12 +307,16 @@ export class SqliteAdvisoryResultOutboxRepository
     let recommendationsJson: string;
     let uncertaintiesJson: string;
     let limitationsJson: string;
+    let libraryPreparationJson: string | null = null;
 
     try {
       findingsJson = JSON.stringify(record.result.assessment.findings);
       recommendationsJson = JSON.stringify(record.result.recommendations);
       uncertaintiesJson = JSON.stringify(record.result.uncertainties);
       limitationsJson = JSON.stringify(record.result.limitations);
+      if (record.result.libraryPreparation !== undefined) {
+        libraryPreparationJson = JSON.stringify(record.result.libraryPreparation);
+      }
     } catch {
       throw new SqliteAdvisoryResultOutboxRepositoryError('DATABASE_WRITE_FAILED');
     }
@@ -246,8 +336,9 @@ export class SqliteAdvisoryResultOutboxRepository
           human_review_required,
           recommendations_json,
           uncertainties_json,
-          limitations_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          limitations_json,
+          library_preparation_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       insertStmt.run(
@@ -263,7 +354,8 @@ export class SqliteAdvisoryResultOutboxRepository
         record.result.humanReviewRequired ? 1 : 0,
         recommendationsJson,
         uncertaintiesJson,
-        limitationsJson
+        limitationsJson,
+        libraryPreparationJson
       );
     } catch {
       throw new SqliteAdvisoryResultOutboxRepositoryError('DATABASE_WRITE_FAILED');
@@ -284,7 +376,7 @@ export class SqliteAdvisoryResultOutboxRepository
     let row: AdvisoryResultOutboxRow | undefined;
     try {
       const stmt = this.db.prepare(
-        'SELECT task_id, task_type, target_type, target_id, source_updated_at, assessment_summary, findings_json, local_state, schema_version, human_review_required, recommendations_json, uncertainties_json, limitations_json FROM peia_advisory_result_outbox WHERE task_id = ?'
+        'SELECT task_id, task_type, target_type, target_id, source_updated_at, assessment_summary, findings_json, local_state, schema_version, human_review_required, recommendations_json, uncertainties_json, limitations_json, library_preparation_json FROM peia_advisory_result_outbox WHERE task_id = ?'
       );
       row = stmt.get(taskId) as AdvisoryResultOutboxRow | undefined;
     } catch {
@@ -306,7 +398,7 @@ export class SqliteAdvisoryResultOutboxRepository
     let rows: AdvisoryResultOutboxRow[];
     try {
       const stmt = this.db.prepare(
-        'SELECT task_id, task_type, target_type, target_id, source_updated_at, assessment_summary, findings_json, local_state, schema_version, human_review_required, recommendations_json, uncertainties_json, limitations_json FROM peia_advisory_result_outbox WHERE local_state = ? ORDER BY task_id ASC'
+        'SELECT task_id, task_type, target_type, target_id, source_updated_at, assessment_summary, findings_json, local_state, schema_version, human_review_required, recommendations_json, uncertainties_json, limitations_json, library_preparation_json FROM peia_advisory_result_outbox WHERE local_state = ? ORDER BY task_id ASC'
       );
       rows = stmt.all(LocalAdvisoryResultOutboxState.PendingUpload) as AdvisoryResultOutboxRow[];
     } catch {

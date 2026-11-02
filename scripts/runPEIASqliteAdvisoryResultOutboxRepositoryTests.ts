@@ -306,7 +306,7 @@ async function runSuite() {
     db.close();
     cleanupDb(dbPath);
 
-    assert(columns.length === 13, `Expected exactly 13 columns, got ${columns.length}`);
+    assert(columns.length === 14, `Expected exactly 14 columns, got ${columns.length}`);
 
     const expectedColumns = [
       'task_id',
@@ -322,6 +322,7 @@ async function runSuite() {
       'recommendations_json',
       'uncertainties_json',
       'limitations_json',
+      'library_preparation_json',
     ];
 
     const actualNames = columns.map((c) => c.name).sort();
@@ -346,6 +347,11 @@ async function runSuite() {
       assert(col.type === 'TEXT', `Column ${col.name} must have type TEXT, got ${col.type}`);
       assert(col.notnull === 1, `Column ${col.name} must have notnull === 1, got ${col.notnull}`);
     }
+
+    const libPrepCol = columns.find((c) => c.name === 'library_preparation_json')!;
+    assert(libPrepCol !== undefined, 'library_preparation_json column must exist');
+    assert(libPrepCol.type === 'TEXT', `library_preparation_json must have type TEXT, got ${libPrepCol.type}`);
+    assert(libPrepCol.notnull === 0, `library_preparation_json must be nullable (notnull === 0), got ${libPrepCol.notnull}`);
   });
 
   // 12. schema primary key is task_id
@@ -1395,9 +1401,529 @@ async function runSuite() {
     assert(passedTests === 47, `Expected 47 prior tests to have passed, got ${passedTests}`);
   });
 
+  // ==========================================
+  // SUBUNIT-2: LIBRARY PREPARATION SQLITE OUTBOX PERSISTENCE & MIGRATION TESTS (49 - 60)
+  // ==========================================
+
+  function makeCanonicalLibraryPreparation(
+    inputBasis: 'MetadataOnly' | 'SuppliedExcerptAndMetadata'
+  ) {
+    return {
+      inputBasis,
+      suggestedTitleAr: 'اللائحة التنفيذية لحماية البيئة البحرية ٢٠٢٦',
+      suggestedTitleEn: 'Executive Regulation for Marine Environmental Protection 2026',
+      suggestedIssuingOrganization: 'Ministry of Environment',
+      suggestedDocumentType: 'ExecutiveRegulation' as const,
+      suggestedEnvironmentalDomains: ['Marine Biodiversity', 'Coastal Water Quality'],
+      suggestedTopicsAr: ['التنوع البيولوجي البحري', 'جودة المياه الساحلية'],
+      suggestedTopicsEn: ['Marine Biodiversity', 'Coastal Water Quality'],
+      suggestedSummaryAr:
+        inputBasis === 'MetadataOnly'
+          ? null
+          : 'ملخص مستند إلى المقتطف المقدم يوضح ضوابط تصريف المياه في المناطق الساحلية.',
+      suggestedSummaryEn:
+        inputBasis === 'MetadataOnly'
+          ? null
+          : 'Excerpt-grounded summary detailing coastal zone discharge controls.',
+      provenanceObservationsAr: [
+        'البيانات مستمدة من بيانات الإدخال الوصفية ومعايير وكالة حماية البيئة.',
+      ],
+      provenanceObservationsEn: [
+        'Prepared from supplied intake metadata corroborated by EPA water quality standards.',
+      ],
+      uncertaintyNoticesAr: ['لم يتم الاطلاع على النص الكامل لملف PDF الخارجي.'],
+      uncertaintyNoticesEn: ['Full external PDF document text was not inspected.'],
+    };
+  }
+
+  function makeCanonicalLibraryIntakeResult(
+    taskId: string,
+    inputBasis: 'MetadataOnly' | 'SuppliedExcerptAndMetadata'
+  ): PEIAAdvisoryResult {
+    return {
+      schemaVersion: 1,
+      task: {
+        taskId,
+        taskType: AITaskType.CONTENT_REVIEW,
+        target: {
+          targetType: AIReviewTargetType.LibraryIntake,
+          targetId: `intake-${taskId}`,
+          sourceUpdatedAt: '2026-10-06T12:00:00.000Z',
+        },
+      },
+      humanReviewRequired: true,
+      assessment: {
+        summary: 'Prepared bibliographic proposal from supplied intake snapshot and EPA reference.',
+        findings: canonicalFindings,
+      },
+      recommendations: ['Verify official gazette issue number before canonical registration.'],
+      uncertainties: ['Full external PDF text was not read.'],
+      limitations: ['Bounded local context window.'],
+      libraryPreparation: makeCanonicalLibraryPreparation(inputBasis),
+    };
+  }
+
+  // 49. Clean database creation initializes 14-column schema with nullable library_preparation_json TEXT column
+  await test('49. Clean database creation initializes 14-column schema with nullable library_preparation_json TEXT column', () => {
+    const dbPath = getTempDbPath();
+    const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+    repo.close();
+
+    const db = new DatabaseSync(dbPath);
+    const columns = db.prepare('PRAGMA table_info(peia_advisory_result_outbox)').all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      pk: number;
+    }>;
+    db.close();
+    cleanupDb(dbPath);
+
+    assert(columns.length === 14, `Expected 14 columns on clean DB, got ${columns.length}`);
+    const libCol = columns.find((c) => c.name === 'library_preparation_json');
+    assert(libCol !== undefined, 'library_preparation_json must exist on clean DB');
+    assert(libCol!.type === 'TEXT', 'library_preparation_json type must be TEXT');
+    assert(libCol!.notnull === 0, 'library_preparation_json must be nullable');
+  });
+
+  // 50. Safe non-destructive migration from an actual legacy 13-column SQLite table containing News advisory records
+  await test('50. Safe non-destructive migration from an actual legacy 13-column SQLite table containing News advisory records', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      // Create actual legacy 13-column table and insert two News advisory records
+      const legacyDb = new DatabaseSync(dbPath);
+      legacyDb.exec(`
+        CREATE TABLE peia_advisory_result_outbox (
+          task_id TEXT PRIMARY KEY NOT NULL,
+          task_type TEXT NOT NULL,
+          target_type TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          source_updated_at TEXT NOT NULL,
+          assessment_summary TEXT NOT NULL,
+          findings_json TEXT NOT NULL,
+          local_state TEXT NOT NULL,
+          schema_version INTEGER,
+          human_review_required INTEGER,
+          recommendations_json TEXT,
+          uncertainties_json TEXT,
+          limitations_json TEXT
+        );
+      `);
+
+      const preMigrationCols = legacyDb.prepare('PRAGMA table_info(peia_advisory_result_outbox)').all() as Array<{ name: string }>;
+      assert(preMigrationCols.length === 13, 'Legacy table must start with exactly 13 columns');
+
+      const insertLegacy = legacyDb.prepare(`
+        INSERT INTO peia_advisory_result_outbox (
+          task_id, task_type, target_type, target_id, source_updated_at,
+          assessment_summary, findings_json, local_state, schema_version,
+          human_review_required, recommendations_json, uncertainties_json, limitations_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      insertLegacy.run(
+        'task-legacy-news-1',
+        'CONTENT_REVIEW',
+        'News',
+        'news-legacy-101',
+        '2026-09-20T00:00:00.000Z',
+        'Legacy News summary 1.',
+        JSON.stringify(canonicalFindings),
+        'PendingUpload',
+        1,
+        1,
+        JSON.stringify(['Legacy recommendation 1']),
+        JSON.stringify(['Legacy uncertainty 1']),
+        JSON.stringify(['Legacy limitation 1'])
+      );
+
+      insertLegacy.run(
+        'task-legacy-news-2',
+        'CONTENT_REVIEW',
+        'News',
+        'news-legacy-102',
+        '2026-09-21T00:00:00.000Z',
+        'Legacy News summary 2.',
+        JSON.stringify(canonicalFindings),
+        'PendingUpload',
+        1,
+        1,
+        JSON.stringify(['Legacy recommendation 2']),
+        JSON.stringify(['Legacy uncertainty 2']),
+        JSON.stringify(['Legacy limitation 2'])
+      );
+      legacyDb.close();
+
+      // Open with SqliteAdvisoryResultOutboxRepository to trigger migration
+      const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const pending = await repo.listPendingUpload();
+      assert(pending.length === 2, `Expected both legacy rows preserved, got ${pending.length}`);
+      assert(pending[0].result.task.taskId === 'task-legacy-news-1', 'Legacy row 1 taskId intact');
+      assert(pending[0].result.assessment.summary === 'Legacy News summary 1.', 'Legacy row 1 summary intact');
+      assert(!('libraryPreparation' in pending[0].result), 'Legacy row 1 must not have libraryPreparation property');
+      assert(pending[1].result.task.taskId === 'task-legacy-news-2', 'Legacy row 2 taskId intact');
+      assert(pending[1].result.assessment.summary === 'Legacy News summary 2.', 'Legacy row 2 summary intact');
+      assert(!('libraryPreparation' in pending[1].result), 'Legacy row 2 must not have libraryPreparation property');
+      repo.close();
+
+      const verifyDb = new DatabaseSync(dbPath);
+      const postMigrationCols = verifyDb.prepare('PRAGMA table_info(peia_advisory_result_outbox)').all() as Array<{ name: string }>;
+      assert(postMigrationCols.length === 14, 'Migrated table must have 14 columns');
+      assert(postMigrationCols.some((c) => c.name === 'library_preparation_json'), 'Migrated table includes library_preparation_json');
+      verifyDb.close();
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 51. Second initialization is idempotent and preserves existing News and LibraryIntake records
+  await test('51. Second initialization is idempotent and preserves existing News and LibraryIntake records', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      const repo1 = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const newsRec = createStoredAdvisoryResultRecord(canonicalValidResult);
+      const libRec = createStoredAdvisoryResultRecord(makeCanonicalLibraryIntakeResult('task-lib-51', 'MetadataOnly'));
+      await repo1.save(newsRec);
+      await repo1.save(libRec);
+      repo1.close();
+
+      // Second initialization on same database file
+      const repo2 = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const foundNews = await repo2.findByTaskId(canonicalValidResult.task.taskId);
+      const foundLib = await repo2.findByTaskId('task-lib-51');
+      repo2.close();
+
+      assert(foundNews !== null && isSameStoredAdvisoryResultRecord(newsRec, foundNews), 'News record preserved across re-init');
+      assert(foundLib !== null && isSameStoredAdvisoryResultRecord(libRec, foundLib), 'LibraryIntake record preserved across re-init');
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 52. Legacy News advisory round-trip stores NULL in library_preparation_json and reconstructs without libraryPreparation key
+  await test('52. Legacy News advisory round-trip stores NULL in library_preparation_json and reconstructs without libraryPreparation key', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const record = createStoredAdvisoryResultRecord(canonicalValidResult);
+      await repo.save(record);
+
+      const found = await repo.findByTaskId(canonicalValidResult.task.taskId);
+      repo.close();
+
+      assert(found !== null, 'News record found');
+      assert(found!.result.libraryPreparation === undefined, 'libraryPreparation is undefined');
+      assert(!('libraryPreparation' in found!.result), 'libraryPreparation key is absent on News result');
+
+      const db = new DatabaseSync(dbPath);
+      const rawRow = db
+        .prepare('SELECT library_preparation_json FROM peia_advisory_result_outbox WHERE task_id = ?')
+        .get(canonicalValidResult.task.taskId) as { library_preparation_json: string | null };
+      db.close();
+      assert(rawRow.library_preparation_json === null, 'SQLite column library_preparation_json must be NULL for News');
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 53. LibraryIntake MetadataOnly round-trip preserves all 14 canonical fields with both summaries null
+  await test('53. LibraryIntake MetadataOnly round-trip preserves all 14 canonical fields with both summaries null', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const libResult = makeCanonicalLibraryIntakeResult('task-lib-meta-53', 'MetadataOnly');
+      const record = createStoredAdvisoryResultRecord(libResult);
+      await repo.save(record);
+
+      const found = await repo.findByTaskId('task-lib-meta-53');
+      repo.close();
+
+      assert(found !== null, 'LibraryIntake MetadataOnly record found');
+      assert(isSameStoredAdvisoryResultRecord(record, found!), 'Reconstructed record matches saved record');
+      const prep = found!.result.libraryPreparation!;
+      assert(prep !== undefined, 'libraryPreparation present');
+
+      const expectedKeys = [
+        'inputBasis',
+        'suggestedTitleAr',
+        'suggestedTitleEn',
+        'suggestedIssuingOrganization',
+        'suggestedDocumentType',
+        'suggestedEnvironmentalDomains',
+        'suggestedTopicsAr',
+        'suggestedTopicsEn',
+        'suggestedSummaryAr',
+        'suggestedSummaryEn',
+        'provenanceObservationsAr',
+        'provenanceObservationsEn',
+        'uncertaintyNoticesAr',
+        'uncertaintyNoticesEn',
+      ];
+      assert(
+        JSON.stringify(Object.keys(prep)) === JSON.stringify(expectedKeys),
+        'Reconstructed libraryPreparation has exact 14 canonical keys in canonical order'
+      );
+      assert(prep.inputBasis === 'MetadataOnly', 'inputBasis is MetadataOnly');
+      assert(prep.suggestedSummaryAr === null, 'suggestedSummaryAr is null');
+      assert(prep.suggestedSummaryEn === null, 'suggestedSummaryEn is null');
+      assert(prep.suggestedDocumentType === 'ExecutiveRegulation', 'suggestedDocumentType preserved');
+      assert(prep.suggestedEnvironmentalDomains.length === 2, 'suggestedEnvironmentalDomains array preserved');
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 54. LibraryIntake SuppliedExcerptAndMetadata round-trip preserves all 14 canonical fields including bilingual summaries
+  await test('54. LibraryIntake SuppliedExcerptAndMetadata round-trip preserves all 14 canonical fields including bilingual summaries', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const libResult = makeCanonicalLibraryIntakeResult('task-lib-excerpt-54', 'SuppliedExcerptAndMetadata');
+      const record = createStoredAdvisoryResultRecord(libResult);
+      await repo.save(record);
+
+      const found = await repo.findByTaskId('task-lib-excerpt-54');
+      repo.close();
+
+      assert(found !== null, 'LibraryIntake SuppliedExcerptAndMetadata record found');
+      assert(isSameStoredAdvisoryResultRecord(record, found!), 'Reconstructed record matches saved record');
+      const prep = found!.result.libraryPreparation!;
+      assert(prep.inputBasis === 'SuppliedExcerptAndMetadata', 'inputBasis is SuppliedExcerptAndMetadata');
+      assert(
+        prep.suggestedSummaryAr ===
+          'ملخص مستند إلى المقتطف المقدم يوضح ضوابط تصريف المياه في المناطق الساحلية.',
+        'suggestedSummaryAr preserved verbatim'
+      );
+      assert(
+        prep.suggestedSummaryEn ===
+          'Excerpt-grounded summary detailing coastal zone discharge controls.',
+        'suggestedSummaryEn preserved verbatim'
+      );
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 55. listPendingUpload returns full News and LibraryIntake results with libraryPreparation intact
+  await test('55. listPendingUpload returns full News and LibraryIntake results with libraryPreparation intact', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const newsRec = createStoredAdvisoryResultRecord({
+        ...canonicalValidResult,
+        task: { ...canonicalValidResult.task, taskId: 'task-pending-01-news' },
+      });
+      const libMetaRec = createStoredAdvisoryResultRecord(
+        makeCanonicalLibraryIntakeResult('task-pending-02-lib-meta', 'MetadataOnly')
+      );
+      const libExcerptRec = createStoredAdvisoryResultRecord(
+        makeCanonicalLibraryIntakeResult('task-pending-03-lib-excerpt', 'SuppliedExcerptAndMetadata')
+      );
+
+      await repo.save(libExcerptRec);
+      await repo.save(newsRec);
+      await repo.save(libMetaRec);
+
+      const pending = await repo.listPendingUpload();
+      repo.close();
+
+      assert(pending.length === 3, 'All 3 pending records returned');
+      assert(!('libraryPreparation' in pending[0].result), 'First (News) has no libraryPreparation');
+      assert(pending[1].result.libraryPreparation?.inputBasis === 'MetadataOnly', 'Second has MetadataOnly libraryPreparation');
+      assert(pending[1].result.libraryPreparation?.suggestedSummaryAr === null, 'Second preserves null summary');
+      assert(
+        pending[2].result.libraryPreparation?.inputBasis === 'SuppliedExcerptAndMetadata',
+        'Third has SuppliedExcerptAndMetadata libraryPreparation'
+      );
+      assert(
+        typeof pending[2].result.libraryPreparation?.suggestedSummaryEn === 'string',
+        'Third preserves English summary'
+      );
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 56. Identical LibraryIntake replay is accepted idempotently
+  await test('56. Identical LibraryIntake replay is accepted idempotently', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const recordA = createStoredAdvisoryResultRecord(
+        makeCanonicalLibraryIntakeResult('task-lib-replay-56', 'SuppliedExcerptAndMetadata')
+      );
+      const recordB = createStoredAdvisoryResultRecord(
+        makeCanonicalLibraryIntakeResult('task-lib-replay-56', 'SuppliedExcerptAndMetadata')
+      );
+
+      await repo.save(recordA);
+      await repo.save(recordB);
+
+      const list = await repo.listPendingUpload();
+      repo.close();
+      assert(list.length === 1, 'Exactly 1 row stored after identical LibraryIntake replay');
+      assert(isSameStoredAdvisoryResultRecord(recordA, list[0]), 'Stored record remains identical');
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 57. Divergent libraryPreparation replay for same taskId fails with RESULT_CONFLICT and preserves original row
+  await test('57. Divergent libraryPreparation replay for same taskId fails with RESULT_CONFLICT and preserves original row', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const baseLibResult = makeCanonicalLibraryIntakeResult('task-lib-conflict-57', 'MetadataOnly');
+      const recordA = createStoredAdvisoryResultRecord(baseLibResult);
+
+      const divergentLibResult: PEIAAdvisoryResult = {
+        ...baseLibResult,
+        libraryPreparation: {
+          ...baseLibResult.libraryPreparation!,
+          suggestedDocumentType: 'Law',
+        },
+      };
+      const recordB = createStoredAdvisoryResultRecord(divergentLibResult);
+
+      await repo.save(recordA);
+      await assertRejectsRepoError(
+        () => repo.save(recordB),
+        'RESULT_CONFLICT',
+        'Conflicting local advisory result record.'
+      );
+
+      const found = await repo.findByTaskId('task-lib-conflict-57');
+      repo.close();
+      assert(
+        found?.result.libraryPreparation?.suggestedDocumentType === 'ExecutiveRegulation',
+        'Original libraryPreparation must remain untouched after conflict'
+      );
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 58. Invalid JSON, non-object JSON, missing/extra keys, or schema-incompatible library_preparation_json rejected with CORRUPT_STORED_RECORD
+  await test('58. Invalid JSON, non-object JSON, missing/extra keys, or schema-incompatible library_preparation_json rejected with CORRUPT_STORED_RECORD', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      repo.close();
+
+      const validPrep = makeCanonicalLibraryPreparation('MetadataOnly');
+      const extraKeyPrep = { ...validPrep, analysisBasis: 'MetadataOnly' };
+      const missingKeyPrep: Record<string, unknown> = { ...validPrep };
+      delete missingKeyPrep['uncertaintyNoticesEn'];
+      const badSummaryMetaPrep = { ...validPrep, suggestedSummaryEn: 'Non-null summary on MetadataOnly' };
+
+      const db = new DatabaseSync(dbPath);
+      const insertRaw = db.prepare(`
+        INSERT INTO peia_advisory_result_outbox (
+          task_id, task_type, target_type, target_id, source_updated_at,
+          assessment_summary, findings_json, local_state, schema_version,
+          human_review_required, recommendations_json, uncertainties_json,
+          limitations_json, library_preparation_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      const corruptCases: Array<{ taskId: string; targetType: string; libPrepJson: string | null }> = [
+        { taskId: 'corrupt-lib-1-syntax', targetType: 'LibraryIntake', libPrepJson: '{not-valid-json' },
+        { taskId: 'corrupt-lib-2-array', targetType: 'LibraryIntake', libPrepJson: '[]' },
+        { taskId: 'corrupt-lib-3-primitive', targetType: 'LibraryIntake', libPrepJson: '"string-value"' },
+        { taskId: 'corrupt-lib-4-empty', targetType: 'LibraryIntake', libPrepJson: '   ' },
+        { taskId: 'corrupt-lib-5-null-on-intake', targetType: 'LibraryIntake', libPrepJson: null },
+        { taskId: 'corrupt-lib-6-extra-key', targetType: 'LibraryIntake', libPrepJson: JSON.stringify(extraKeyPrep) },
+        { taskId: 'corrupt-lib-7-missing-key', targetType: 'LibraryIntake', libPrepJson: JSON.stringify(missingKeyPrep) },
+        { taskId: 'corrupt-lib-8-bad-summary', targetType: 'LibraryIntake', libPrepJson: JSON.stringify(badSummaryMetaPrep) },
+        { taskId: 'corrupt-lib-9-prep-on-news', targetType: 'News', libPrepJson: JSON.stringify(validPrep) },
+      ];
+
+      for (const c of corruptCases) {
+        insertRaw.run(
+          c.taskId,
+          'CONTENT_REVIEW',
+          c.targetType,
+          'target-1',
+          '2026-10-06T00:00:00.000Z',
+          'Summary.',
+          JSON.stringify(canonicalFindings),
+          'PendingUpload',
+          1,
+          1,
+          JSON.stringify([]),
+          JSON.stringify([]),
+          JSON.stringify([]),
+          c.libPrepJson
+        );
+      }
+      db.close();
+
+      const repo2 = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      for (const c of corruptCases) {
+        await assertRejectsRepoError(
+          () => repo2.findByTaskId(c.taskId),
+          'CORRUPT_STORED_RECORD',
+          'Stored advisory result record is invalid.'
+        );
+      }
+      await assertRejectsRepoError(
+        () => repo2.listPendingUpload(),
+        'CORRUPT_STORED_RECORD',
+        'Stored advisory result record is invalid.'
+      );
+      repo2.close();
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 59. save rejects LibraryIntake record missing libraryPreparation with DATABASE_WRITE_FAILED
+  await test('59. save rejects LibraryIntake record missing libraryPreparation with DATABASE_WRITE_FAILED', async () => {
+    const dbPath = getTempDbPath();
+    try {
+      const repo = new SqliteAdvisoryResultOutboxRepository(dbPath);
+      const libMissingPrep: StoredAdvisoryResultRecord = {
+        result: {
+          ...canonicalValidResult,
+          task: {
+            taskId: 'task-lib-missing-prep-59',
+            taskType: AITaskType.CONTENT_REVIEW,
+            target: {
+              targetType: AIReviewTargetType.LibraryIntake,
+              targetId: 'intake-59',
+              sourceUpdatedAt: '2026-10-06T00:00:00.000Z',
+            },
+          },
+        },
+        localState: LocalAdvisoryResultOutboxState.PendingUpload,
+      };
+
+      await assertRejectsRepoError(
+        () => repo.save(libMissingPrep),
+        'DATABASE_WRITE_FAILED',
+        'Unable to write local advisory outbox database.'
+      );
+      repo.close();
+    } finally {
+      cleanupDb(dbPath);
+    }
+  });
+
+  // 60. Production source contains no destructive schema operations (DROP, TRUNCATE, RENAME)
+  await test('60. Production source contains no destructive schema operations (DROP, TRUNCATE, RENAME)', () => {
+    const filePath = join(process.cwd(), 'peia-worker/src/sqliteAdvisoryResultOutboxRepository.ts');
+    const source = readFileSync(filePath, 'utf8');
+    const codeOnly = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '').toUpperCase();
+
+    const destructiveTokens = ['DROP TABLE', 'DROP COLUMN', 'TRUNCATE', 'RENAME TABLE', 'DELETE FROM'];
+    for (const token of destructiveTokens) {
+      assert(!codeOnly.includes(token), `Destructive SQL operation prohibited: ${token}`);
+    }
+  });
+
   // Final count gate
-  assert(totalTests === 48, `Expected exactly 48 tests, found ${totalTests}`);
-  assert(passedTests === 48, `Expected exactly 48 passed tests, found ${passedTests}`);
+  assert(totalTests === 60, `Expected exactly 60 tests, found ${totalTests}`);
+  assert(passedTests === 60, `Expected exactly 60 passed tests, found ${passedTests}`);
 
   console.log(`SUMMARY: ${passedTests} passed / ${totalTests} total / 0 failed`);
 }
