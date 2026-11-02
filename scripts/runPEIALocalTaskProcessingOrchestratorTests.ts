@@ -1822,7 +1822,587 @@ function createSuccessRunner(advisoryJson?: string): QwenProcessRunner {
     assert(!source.includes('.reject('), 'no reject methods');
   });
 
+  // ==================================================
+  // OFFLINE SNAPSHOT EXECUTION MATRIX (50-61)
+  // ==================================================
+
+  function createThrowingOfflineTransports(): MultiSourceTransports {
+    return Object.freeze({
+      EPA: async () => {
+        throw new Error('Network transport EPA must not be called in offline snapshot mode');
+      },
+      NOAA: async () => {
+        throw new Error('Network transport NOAA must not be called in offline snapshot mode');
+      },
+    });
+  }
+
+  function createSampleLibraryIntakeSnapshotTask(
+    taskId: string,
+    contentSnapshot: Record<string, unknown>,
+    targetId = 'intake-doc-501'
+  ): StoredPendingTaskRecord {
+    return Object.freeze({
+      taskId,
+      principalId: 'principal-1',
+      taskType: AITaskType.CONTENT_REVIEW,
+      target: Object.freeze({
+        targetType: AIReviewTargetType.LibraryIntake,
+        targetId,
+        sourceUpdatedAt: '2026-10-08T10:00:00.000Z',
+      }),
+      contentSnapshot: Object.freeze(contentSnapshot),
+      remoteCreatedAt: '2026-10-08T10:05:00.000Z',
+      remoteStatus: AITaskStatus.Pending,
+      localState: LocalPendingTaskState.Downloaded,
+    });
+  }
+
+  function createValidLibraryPrepPayload(
+    inputBasis: 'MetadataOnly' | 'SuppliedExcerptAndMetadata'
+  ) {
+    return {
+      inputBasis,
+      suggestedTitleAr: 'اللائحة التنفيذية لحماية البيئة البحرية والساحلية ٢٠٢٦',
+      suggestedTitleEn: 'Executive Regulation for Marine and Coastal Environmental Protection 2026',
+      suggestedIssuingOrganization: 'Ministry of Environment',
+      suggestedDocumentType: 'ExecutiveRegulation',
+      suggestedEnvironmentalDomains: ['Marine Protection', 'Water Quality'],
+      suggestedTopicsAr: ['حماية السواحل', 'جودة المياه'],
+      suggestedTopicsEn: ['Coastal Protection', 'Water Quality'],
+      suggestedSummaryAr:
+        inputBasis === 'MetadataOnly'
+          ? null
+          : 'ملخص مستند إلى المقتطف المقدم حول معايير تصريف المياه في المناطق الساحلية.',
+      suggestedSummaryEn:
+        inputBasis === 'MetadataOnly'
+          ? null
+          : 'Summary grounded in the supplied excerpt covering coastal discharge monitoring standards.',
+      provenanceObservationsAr: [
+        'البيانات مستمدة من لقطة الإدخال المقدمة غير المتحققة خارجياً.',
+      ],
+      provenanceObservationsEn: [
+        'Derived strictly from the supplied unverified intake snapshot metadata.',
+      ],
+      uncertaintyNoticesAr: ['لم يتم فحص النص الكامل لملف PDF أو أي رابط خارجي.'],
+      uncertaintyNoticesEn: ['Full PDF document and external URLs were not fetched or inspected.'],
+    };
+  }
+
+  function createLibraryIntakeSnapshotRunner(
+    inputBasis: 'MetadataOnly' | 'SuppliedExcerptAndMetadata',
+    targetId = 'intake-doc-501'
+  ): QwenProcessRunner {
+    return async () => ({
+      exitCode: 0,
+      stdout: `=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n${JSON.stringify({
+        status: 'READY',
+        summary: `Prepared LibraryIntake (${inputBasis}) advisory from supplied offline snapshot.`,
+        findings: [
+          {
+            claim: 'Supplied intake snapshot identifies marine and coastal environmental regulation.',
+            evidenceIds: [`SNAPSHOT::intake-${targetId}`],
+            severity: AIReviewSeverity.Info,
+          },
+        ],
+        recommendations: ['Human editor must verify issuing authority against official gazette.'],
+        uncertainties: ['Prepared offline from supplied snapshot without external retrieval.'],
+        libraryPreparation: createValidLibraryPrepPayload(inputBasis),
+      })}\n`,
+      stderr: '',
+      timedOut: false,
+    });
+  }
+
+  await test('50. LibraryIntake MetadataOnly snapshot task succeeds completely offline with retrievalTransports throwing if called', async () => {
+    const paths = getDbPaths('test_50');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    const task = createSampleLibraryIntakeSnapshotTask('task-50', {
+      allowSnapshotEvidence: true,
+      workingTitle: 'Executive Regulation for Marine and Coastal Environmental Protection 2026',
+      issuingOrganization: 'Ministry of Environment',
+      documentType: 'ExecutiveRegulation',
+      publicationYear: 2026,
+    });
+
+    const result = await processLocalTask(task, {
+      lifecycleRepository: lifeRepo,
+      nonAdvisoryOutcomeRepository: nonAdvRepo,
+      advisoryOutboxRepository: advRepo,
+      retrievalTransports: createThrowingOfflineTransports(),
+      analysisConfig: defaultConfig,
+      qwenRunner: createLibraryIntakeSnapshotRunner('MetadataOnly'),
+    });
+
+    assert(result.kind === 'ADVISORY_PENDING_UPLOAD', 'offline MetadataOnly snapshot succeeds');
+    assert(result.lifecycle.modelAttempts === 1, 'consumed 1 model attempt');
+
+    const storedOutbox = await advRepo.findByTaskId('task-50');
+    assert(storedOutbox !== null, 'advisory persisted in outbox');
+    assert(
+      storedOutbox?.result.libraryPreparation?.inputBasis === 'MetadataOnly',
+      'MetadataOnly inputBasis persisted'
+    );
+    assert(
+      storedOutbox?.result.libraryPreparation?.suggestedSummaryAr === null &&
+        storedOutbox?.result.libraryPreparation?.suggestedSummaryEn === null,
+      'MetadataOnly null summaries persisted'
+    );
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
+  await test('51. LibraryIntake SuppliedExcerptAndMetadata snapshot task succeeds completely offline and persists libraryPreparation into SqliteAdvisoryResultOutboxRepository', async () => {
+    const paths = getDbPaths('test_51');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    const task = createSampleLibraryIntakeSnapshotTask('task-51', {
+      allowSnapshotEvidence: true,
+      workingTitle: 'Executive Regulation for Marine and Coastal Environmental Protection 2026',
+      issuingOrganization: 'Ministry of Environment',
+      suppliedExcerpt:
+        'Article 4 establishes continuous coastal effluent monitoring requirements for industrial facilities.',
+    });
+
+    const result = await processLocalTask(task, {
+      lifecycleRepository: lifeRepo,
+      nonAdvisoryOutcomeRepository: nonAdvRepo,
+      advisoryOutboxRepository: advRepo,
+      retrievalTransports: createThrowingOfflineTransports(),
+      analysisConfig: defaultConfig,
+      qwenRunner: createLibraryIntakeSnapshotRunner('SuppliedExcerptAndMetadata'),
+    });
+
+    assert(result.kind === 'ADVISORY_PENDING_UPLOAD', 'offline SuppliedExcerptAndMetadata snapshot succeeds');
+    assert(result.lifecycle.modelAttempts === 1, 'modelAttempts === 1');
+
+    const storedOutbox = await advRepo.findByTaskId('task-51');
+    assert(storedOutbox !== null, 'advisory persisted in SqliteAdvisoryResultOutboxRepository');
+    const prep = storedOutbox?.result.libraryPreparation;
+    assert(prep !== undefined, 'libraryPreparation present in outbox');
+    assert(prep?.inputBasis === 'SuppliedExcerptAndMetadata', 'inputBasis is SuppliedExcerptAndMetadata');
+    assert(typeof prep?.suggestedSummaryAr === 'string' && prep.suggestedSummaryAr.length > 0, 'Arabic summary persisted');
+    assert(typeof prep?.suggestedSummaryEn === 'string' && prep.suggestedSummaryEn.length > 0, 'English summary persisted');
+    assert(prep?.suggestedDocumentType === 'ExecutiveRegulation', 'suggestedDocumentType persisted');
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
+  await test('52. LibraryIntake snapshot task without retrievalQuery succeeds when allowSnapshotEvidence === true', async () => {
+    const paths = getDbPaths('test_52');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    const task = createSampleLibraryIntakeSnapshotTask('task-52', {
+      allowSnapshotEvidence: true,
+      title: 'National Biodiversity Strategy 2026',
+    });
+    assert(!('retrievalQuery' in task.contentSnapshot), 'no retrievalQuery in snapshot');
+
+    const result = await processLocalTask(task, {
+      lifecycleRepository: lifeRepo,
+      nonAdvisoryOutcomeRepository: nonAdvRepo,
+      advisoryOutboxRepository: advRepo,
+      retrievalTransports: createThrowingOfflineTransports(),
+      analysisConfig: defaultConfig,
+      qwenRunner: createLibraryIntakeSnapshotRunner('MetadataOnly'),
+    });
+
+    assert(result.kind === 'ADVISORY_PENDING_UPLOAD', 'succeeds without retrievalQuery when allowSnapshotEvidence === true');
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
+  await test('53. LibraryIntake task without allowSnapshotEvidence === true still uses the existing retrieval path / fails closed if retrievalQuery is missing', async () => {
+    const paths = getDbPaths('test_53');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    const taskMissingFlag = createSampleLibraryIntakeSnapshotTask('task-53', {
+      workingTitle: 'National Biodiversity Strategy 2026',
+      issuingOrganization: 'Ministry of Environment',
+    });
+
+    const result = await processLocalTask(taskMissingFlag, {
+      lifecycleRepository: lifeRepo,
+      nonAdvisoryOutcomeRepository: nonAdvRepo,
+      advisoryOutboxRepository: advRepo,
+      retrievalTransports: createThrowingOfflineTransports(),
+      analysisConfig: defaultConfig,
+    });
+
+    assert(result.kind === 'NON_ADVISORY_PENDING_REPORT', 'fails closed via legacy retrieval adapter');
+    if (result.kind === 'NON_ADVISORY_PENDING_REPORT') {
+      assert(result.outcome.kind === 'INPUT_FAILURE', 'INPUT_FAILURE');
+      assert(result.outcome.reason === 'MISSING_RETRIEVAL_QUERY', 'MISSING_RETRIEVAL_QUERY');
+      assert(result.outcome.modelAttempts === 0, 'modelAttempts === 0');
+    }
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
+  await test('54. LibraryIntake snapshot task with empty/whitespace/untrimmed suppliedExcerpt fails closed as INPUT_FAILURE with modelAttempts === 0', async () => {
+    const invalidExcerpts = ['', '   ', '  untrimmed excerpt  '];
+
+    for (let i = 0; i < invalidExcerpts.length; i++) {
+      const paths = getDbPaths(`test_54_${i}`);
+      const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+      const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+      const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+      let qwenCalled = false;
+      const task = createSampleLibraryIntakeSnapshotTask(`task-54-${i}`, {
+        allowSnapshotEvidence: true,
+        workingTitle: 'Coastal Protection Regulation 2026',
+        suppliedExcerpt: invalidExcerpts[i],
+      });
+
+      const result = await processLocalTask(task, {
+        lifecycleRepository: lifeRepo,
+        nonAdvisoryOutcomeRepository: nonAdvRepo,
+        advisoryOutboxRepository: advRepo,
+        retrievalTransports: createThrowingOfflineTransports(),
+        analysisConfig: defaultConfig,
+        qwenRunner: async () => {
+          qwenCalled = true;
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+        },
+      });
+
+      assert(!qwenCalled, 'Qwen must not be called on malformed suppliedExcerpt');
+      assert(result.kind === 'NON_ADVISORY_PENDING_REPORT', 'fails closed as non-advisory');
+      if (result.kind === 'NON_ADVISORY_PENDING_REPORT') {
+        assert(result.outcome.kind === 'INPUT_FAILURE', 'INPUT_FAILURE');
+        assert(result.outcome.reason === 'INVALID_TASK_PAYLOAD', 'INVALID_TASK_PAYLOAD');
+        assert(result.outcome.modelAttempts === 0, 'modelAttempts === 0');
+      }
+
+      lifeRepo.close();
+      nonAdvRepo.close();
+      advRepo.close();
+    }
+  });
+
+  await test('55. LibraryIntake snapshot task with missing/empty source material fails closed / abstains before model attempt', async () => {
+    const paths = getDbPaths('test_55');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    let qwenCalled = false;
+    const taskMissingMaterial = createSampleLibraryIntakeSnapshotTask('task-55', {
+      allowSnapshotEvidence: true,
+      issuingOrganization: 'Ministry of Environment',
+    });
+
+    const result = await processLocalTask(taskMissingMaterial, {
+      lifecycleRepository: lifeRepo,
+      nonAdvisoryOutcomeRepository: nonAdvRepo,
+      advisoryOutboxRepository: advRepo,
+      retrievalTransports: createThrowingOfflineTransports(),
+      analysisConfig: defaultConfig,
+      qwenRunner: async () => {
+        qwenCalled = true;
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+      },
+    });
+
+    assert(!qwenCalled, 'Qwen must not be called when source material is missing');
+    assert(result.kind === 'NON_ADVISORY_PENDING_REPORT', 'fails closed before model attempt');
+    assert(result.lifecycle.modelAttempts === 0, 'lifecycle modelAttempts === 0');
+    if (result.kind === 'NON_ADVISORY_PENDING_REPORT') {
+      assert(result.outcome.kind === 'INPUT_FAILURE', 'INPUT_FAILURE');
+      assert(result.outcome.modelAttempts === 0, 'outcome modelAttempts === 0');
+    }
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
+  await test('56. News snapshot task with allowSnapshotEvidence === true and valid article text succeeds offline with zero retrieval calls', async () => {
+    const paths = getDbPaths('test_56');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    const newsSnapshotTask: StoredPendingTaskRecord = Object.freeze({
+      ...createSampleStoredTask('task-56'),
+      contentSnapshot: Object.freeze({
+        allowSnapshotEvidence: true,
+        title: 'Regional Watershed Monitoring Report Released',
+        body: 'Annual monitoring shows dissolved oxygen improvements across three coastal estuaries.',
+      }),
+    });
+
+    const newsSnapshotRunner: QwenProcessRunner = async () => ({
+      exitCode: 0,
+      stdout: `=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===\n${JSON.stringify({
+        status: 'READY',
+        summary: 'Reviewed News item against supplied content snapshot.',
+        findings: [
+          {
+            claim: 'Supplied article reports dissolved oxygen improvements across three coastal estuaries.',
+            evidenceIds: ['SNAPSHOT::news-news-01'],
+            severity: AIReviewSeverity.Info,
+          },
+        ],
+        recommendations: ['Verify monitoring station citations before publication.'],
+        uncertainties: ['Offline snapshot review only; external agency feeds were not queried.'],
+      })}\n`,
+      stderr: '',
+      timedOut: false,
+    });
+
+    const result = await processLocalTask(newsSnapshotTask, {
+      lifecycleRepository: lifeRepo,
+      nonAdvisoryOutcomeRepository: nonAdvRepo,
+      advisoryOutboxRepository: advRepo,
+      retrievalTransports: createThrowingOfflineTransports(),
+      analysisConfig: defaultConfig,
+      qwenRunner: newsSnapshotRunner,
+    });
+
+    assert(result.kind === 'ADVISORY_PENDING_UPLOAD', 'News snapshot task succeeds offline');
+    assert(result.lifecycle.modelAttempts === 1, 'modelAttempts === 1');
+
+    const storedOutbox = await advRepo.findByTaskId('task-56');
+    assert(storedOutbox !== null, 'News advisory stored in outbox');
+    assert(storedOutbox?.result.libraryPreparation === undefined, 'News advisory has no libraryPreparation');
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
+  await test('57. News task without allowSnapshotEvidence === true still executes the EPA/NOAA retrieval path unchanged', async () => {
+    const paths = getDbPaths('test_57');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    let epaCalled = false;
+    let noaaCalled = false;
+    const trackingTransports: MultiSourceTransports = Object.freeze({
+      EPA: async () => {
+        epaCalled = true;
+        return {
+          status: 200,
+          json: async () => ({
+            results: [
+              {
+                id: 'epa-item-1',
+                title: 'EPA Water Quality',
+                url: 'https://www.epa.gov/water',
+                excerpt: 'Clean water standards.',
+                publishedAt: '2026-01-01T00:00:00Z',
+              },
+            ],
+          }),
+        };
+      },
+      NOAA: async () => {
+        noaaCalled = true;
+        return { status: 200, json: async () => ({ results: [] }) };
+      },
+    });
+
+    const task = createSampleStoredTask('task-57', 'clean water standards');
+    const result = await processLocalTask(task, {
+      lifecycleRepository: lifeRepo,
+      nonAdvisoryOutcomeRepository: nonAdvRepo,
+      advisoryOutboxRepository: advRepo,
+      retrievalTransports: trackingTransports,
+      analysisConfig: defaultConfig,
+      qwenRunner: createSuccessRunner(),
+    });
+
+    assert(epaCalled && noaaCalled, 'EPA and NOAA retrieval transports must be called');
+    assert(result.kind === 'ADVISORY_PENDING_UPLOAD', 'News task succeeds via EPA/NOAA retrieval');
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
+  await test('58. News snapshot task with missing or untrimmed article text fails closed as INPUT_FAILURE with modelAttempts === 0', async () => {
+    const badSnapshots: Record<string, unknown>[] = [
+      { allowSnapshotEvidence: true, title: 'Headline Only Without Body' },
+      { allowSnapshotEvidence: true, title: 'Headline', body: '   ' },
+      { allowSnapshotEvidence: true, title: 'Headline', body: ' untrimmed article body ' },
+    ];
+
+    for (let i = 0; i < badSnapshots.length; i++) {
+      const paths = getDbPaths(`test_58_${i}`);
+      const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+      const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+      const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+      let qwenCalled = false;
+      const task: StoredPendingTaskRecord = Object.freeze({
+        ...createSampleStoredTask(`task-58-${i}`),
+        contentSnapshot: Object.freeze(badSnapshots[i]),
+      });
+
+      const result = await processLocalTask(task, {
+        lifecycleRepository: lifeRepo,
+        nonAdvisoryOutcomeRepository: nonAdvRepo,
+        advisoryOutboxRepository: advRepo,
+        retrievalTransports: createThrowingOfflineTransports(),
+        analysisConfig: defaultConfig,
+        qwenRunner: async () => {
+          qwenCalled = true;
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+        },
+      });
+
+      assert(!qwenCalled, 'Qwen must not be called on invalid News snapshot');
+      assert(result.kind === 'NON_ADVISORY_PENDING_REPORT', 'fails closed');
+      if (result.kind === 'NON_ADVISORY_PENDING_REPORT') {
+        assert(result.outcome.kind === 'INPUT_FAILURE', 'INPUT_FAILURE');
+        assert(result.outcome.reason === 'INVALID_TASK_PAYLOAD', 'INVALID_TASK_PAYLOAD');
+        assert(result.outcome.modelAttempts === 0, 'modelAttempts === 0');
+      }
+
+      lifeRepo.close();
+      nonAdvRepo.close();
+      advRepo.close();
+    }
+  });
+
+  await test('59. Oversized snapshot evidence exceeding maxContextChars abstains with INSUFFICIENT_EVIDENCE, modelAttempts === 0, and zero Qwen calls', async () => {
+    const paths = getDbPaths('test_59');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    let qwenCalled = false;
+    const task = createSampleLibraryIntakeSnapshotTask('task-59', {
+      allowSnapshotEvidence: true,
+      workingTitle: 'Executive Regulation for Marine and Coastal Environmental Protection 2026',
+      suppliedExcerpt: 'A'.repeat(600),
+    });
+
+    const result = await processLocalTask(task, {
+      lifecycleRepository: lifeRepo,
+      nonAdvisoryOutcomeRepository: nonAdvRepo,
+      advisoryOutboxRepository: advRepo,
+      retrievalTransports: createThrowingOfflineTransports(),
+      analysisConfig: { ...defaultConfig, maxContextChars: 100 },
+      qwenRunner: async () => {
+        qwenCalled = true;
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+      },
+    });
+
+    assert(!qwenCalled, 'Qwen must not be called when snapshot exceeds maxContextChars');
+    assert(result.kind === 'NON_ADVISORY_PENDING_REPORT', 'non-advisory abstention');
+    assert(result.lifecycle.modelAttempts === 0, 'lifecycle modelAttempts === 0');
+    if (result.kind === 'NON_ADVISORY_PENDING_REPORT') {
+      assert(result.outcome.kind === 'ABSTAINED', 'ABSTAINED');
+      assert(result.outcome.reason === 'INSUFFICIENT_EVIDENCE', 'INSUFFICIENT_EVIDENCE');
+      assert(result.outcome.modelAttempts === 0, 'outcome modelAttempts === 0');
+    }
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
+  await test('60. PROCESSING modelAttempts === 1 crash recovery works for a valid offline snapshot task without network calls', async () => {
+    const paths = getDbPaths('test_60');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    await lifeRepo.createInitialRecord('task-60');
+    await lifeRepo.recordModelAttempt('task-60'); // Simulate crash during attempt 1
+
+    const task = createSampleLibraryIntakeSnapshotTask('task-60', {
+      allowSnapshotEvidence: true,
+      workingTitle: 'Executive Regulation for Marine and Coastal Environmental Protection 2026',
+      issuingOrganization: 'Ministry of Environment',
+    });
+
+    const result = await processLocalTask(task, {
+      lifecycleRepository: lifeRepo,
+      nonAdvisoryOutcomeRepository: nonAdvRepo,
+      advisoryOutboxRepository: advRepo,
+      retrievalTransports: createThrowingOfflineTransports(),
+      analysisConfig: defaultConfig,
+      qwenRunner: createLibraryIntakeSnapshotRunner('MetadataOnly'),
+    });
+
+    assert(result.kind === 'ADVISORY_PENDING_UPLOAD', 'recovered snapshot task succeeds on attempt 2');
+    assert(result.lifecycle.modelAttempts === 2, 'modelAttempts === 2');
+
+    const storedOutbox = await advRepo.findByTaskId('task-60');
+    assert(storedOutbox !== null, 'advisory persisted in outbox after recovery');
+    assert(
+      storedOutbox?.result.libraryPreparation?.inputBasis === 'MetadataOnly',
+      'libraryPreparation preserved on recovery'
+    );
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
+  await test('61. PROCESSING modelAttempts === 1 crash recovery fails closed with RECOVERY_INCONSISTENCY if snapshot preflight no longer yields usable evidence', async () => {
+    const paths = getDbPaths('test_61');
+    const lifeRepo = new SqliteTaskProcessingLifecycleRepository(paths.lifecycle);
+    const nonAdvRepo = new SqliteNonAdvisoryOutcomeRepository(paths.nonAdvisory);
+    const advRepo = new SqliteAdvisoryResultOutboxRepository(paths.advisory);
+
+    await lifeRepo.createInitialRecord('task-61');
+    await lifeRepo.recordModelAttempt('task-61'); // PROCESSING attempts 1
+
+    const task = createSampleLibraryIntakeSnapshotTask('task-61', {
+      allowSnapshotEvidence: true,
+      workingTitle: 'Executive Regulation for Marine and Coastal Environmental Protection 2026',
+      suppliedExcerpt: 'B'.repeat(500),
+    });
+
+    let threwRecoveryInconsistency = false;
+    try {
+      await processLocalTask(task, {
+        lifecycleRepository: lifeRepo,
+        nonAdvisoryOutcomeRepository: nonAdvRepo,
+        advisoryOutboxRepository: advRepo,
+        retrievalTransports: createThrowingOfflineTransports(),
+        analysisConfig: { ...defaultConfig, maxContextChars: 50 }, // forces INSUFFICIENT_EVIDENCE during recovery preflight
+      });
+    } catch (err) {
+      threwRecoveryInconsistency = true;
+      assert(err instanceof LocalTaskProcessingOrchestratorError, 'orchestrator error');
+      assert(
+        (err as LocalTaskProcessingOrchestratorError).code === 'RECOVERY_INCONSISTENCY',
+        'RECOVERY_INCONSISTENCY code'
+      );
+    }
+    assert(threwRecoveryInconsistency, 'must fail closed with RECOVERY_INCONSISTENCY');
+
+    lifeRepo.close();
+    nonAdvRepo.close();
+    advRepo.close();
+  });
+
   cleanup();
 
-  console.log(`\nALL ORCHESTRATOR 49-SCENARIO TESTS COMPLETED: ${passedTests}/${totalTests} PASSED`);
+  console.log(`\nALL ORCHESTRATOR 61-SCENARIO TESTS COMPLETED: ${passedTests}/${totalTests} PASSED`);
 })();
