@@ -784,7 +784,7 @@ export class LibraryApplicationService {
     const linkedOrg = record.organizationId ? await this.getOrganizationById(record.organizationId) : null;
     const linkedSource = record.sourceId ? await this.getSourceById(record.sourceId) : null;
 
-    const modelId = 'gemini-2.5-flash';
+    const modelId = 'gemini-3.5-flash-lite';
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`;
     const fetchFn = options?.fetchImpl || globalThis.fetch;
     if (typeof fetchFn !== 'function') {
