@@ -1,8 +1,13 @@
 import {
+  AIReviewTargetType,
+  type PEIALibraryPreparationAdvisoryPayload,
+} from '../../src/types/aiReview';
+import {
   type AdvisoryResultTaskReference,
   type PEIAAdvisoryFinding,
   type PEIAAdvisoryResult,
   PEIA_ADVISORY_RESULT_SCHEMA_VERSION,
+  PEIAAdvisoryResultContractError,
   validatePEIAAdvisoryResult,
 } from './advisoryResultContract';
 import {
@@ -54,6 +59,13 @@ export type LocalAnalysisToAdvisoryPersistenceResult =
 export function convertAdvisoryReadyToPEIAAdvisoryResult(
   readyResult: AdvisoryReadyResult
 ): PEIAAdvisoryResult {
+  if (
+    readyResult.taskRef.target.targetType === AIReviewTargetType.LibraryIntake &&
+    readyResult.advisory.libraryPreparation === undefined
+  ) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
   const findings: PEIAAdvisoryFinding[] = readyResult.advisory.findings.map(
     (finding, index) => {
       const codeIndex = String(index + 1).padStart(3, '0');
@@ -67,6 +79,41 @@ export function convertAdvisoryReadyToPEIAAdvisoryResult(
       });
     }
   );
+
+  const rawPrep = readyResult.advisory.libraryPreparation;
+  const libraryPreparation: PEIALibraryPreparationAdvisoryPayload | undefined =
+    rawPrep !== undefined && typeof rawPrep === 'object' && rawPrep !== null
+      ? Object.freeze({
+          inputBasis: rawPrep.inputBasis,
+          suggestedTitleAr: rawPrep.suggestedTitleAr,
+          suggestedTitleEn: rawPrep.suggestedTitleEn,
+          suggestedIssuingOrganization: rawPrep.suggestedIssuingOrganization,
+          suggestedDocumentType: rawPrep.suggestedDocumentType,
+          suggestedEnvironmentalDomains: Array.isArray(rawPrep.suggestedEnvironmentalDomains)
+            ? Object.freeze([...rawPrep.suggestedEnvironmentalDomains])
+            : (rawPrep.suggestedEnvironmentalDomains as readonly string[]),
+          suggestedTopicsAr: Array.isArray(rawPrep.suggestedTopicsAr)
+            ? Object.freeze([...rawPrep.suggestedTopicsAr])
+            : (rawPrep.suggestedTopicsAr as readonly string[]),
+          suggestedTopicsEn: Array.isArray(rawPrep.suggestedTopicsEn)
+            ? Object.freeze([...rawPrep.suggestedTopicsEn])
+            : (rawPrep.suggestedTopicsEn as readonly string[]),
+          suggestedSummaryAr: rawPrep.suggestedSummaryAr,
+          suggestedSummaryEn: rawPrep.suggestedSummaryEn,
+          provenanceObservationsAr: Array.isArray(rawPrep.provenanceObservationsAr)
+            ? Object.freeze([...rawPrep.provenanceObservationsAr])
+            : (rawPrep.provenanceObservationsAr as readonly string[]),
+          provenanceObservationsEn: Array.isArray(rawPrep.provenanceObservationsEn)
+            ? Object.freeze([...rawPrep.provenanceObservationsEn])
+            : (rawPrep.provenanceObservationsEn as readonly string[]),
+          uncertaintyNoticesAr: Array.isArray(rawPrep.uncertaintyNoticesAr)
+            ? Object.freeze([...rawPrep.uncertaintyNoticesAr])
+            : (rawPrep.uncertaintyNoticesAr as readonly string[]),
+          uncertaintyNoticesEn: Array.isArray(rawPrep.uncertaintyNoticesEn)
+            ? Object.freeze([...rawPrep.uncertaintyNoticesEn])
+            : (rawPrep.uncertaintyNoticesEn as readonly string[]),
+        })
+      : undefined;
 
   const advisoryResult: PEIAAdvisoryResult = Object.freeze({
     schemaVersion: PEIA_ADVISORY_RESULT_SCHEMA_VERSION,
@@ -87,6 +134,7 @@ export function convertAdvisoryReadyToPEIAAdvisoryResult(
     recommendations: Object.freeze([...readyResult.advisory.recommendations]),
     uncertainties: Object.freeze([...readyResult.advisory.uncertainties]),
     limitations: Object.freeze([...readyResult.limitations]),
+    ...(libraryPreparation !== undefined ? { libraryPreparation } : {}),
   });
 
   return validatePEIAAdvisoryResult(advisoryResult);

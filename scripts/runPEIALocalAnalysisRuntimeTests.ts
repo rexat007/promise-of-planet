@@ -2022,6 +2022,490 @@ async function runAllTests() {
     assert(result.kind === 'ADVISORY_READY', 'Direct output produces ADVISORY_READY');
   });
 
+  // ==========================================
+  // LIBRARY INTAKE & MULTI-DOMAIN UNIFIED CYCLE TESTS (101 - 118)
+  // ==========================================
+
+  function makeSampleLibraryIntakeTask(customSnapshot?: Record<string, unknown>): AIReviewTask {
+    return Object.freeze({
+      taskId: 'task-lib-intake-201',
+      taskType: AITaskType.CONTENT_REVIEW,
+      status: AITaskStatus.Pending,
+      createdAt: '2026-10-06T00:00:00.000Z',
+      target: Object.freeze({
+        targetType: AIReviewTargetType.LibraryIntake,
+        targetId: 'intake-doc-901',
+        sourceUpdatedAt: '2026-10-06T10:00:00.000Z',
+      }),
+      contentSnapshot: Object.freeze(
+        customSnapshot ?? {
+          workingTitle: 'Clean Water Coastal Protection Regulation 2026',
+          issuingOrganization: 'Ministry of Environment',
+          sourceUrl: 'https://example.org/docs/coastal-2026.pdf',
+        }
+      ),
+    });
+  }
+
+  function makeSampleSnapshotItem(idSuffix = '1') {
+    const itemId = `intake-snapshot-${idSuffix}`;
+    return Object.freeze({
+      sourceId: 'SNAPSHOT' as const,
+      itemId,
+      authority: 'Unverified Task Content Snapshot (Supplied Intake Metadata/Excerpt)' as const,
+      title: 'Supplied LibraryIntake Task Content Snapshot',
+      excerpt: 'Working Title: Clean Water Coastal Protection Regulation 2026. Issuing Organization: Ministry of Environment.',
+      sourceUrl: 'peia://task-snapshot/intake-doc-901',
+      provenance: Object.freeze({
+        sourceId: 'SNAPSHOT' as const,
+        authority: 'Unverified Task Content Snapshot (Supplied Intake Metadata/Excerpt)' as const,
+        retrievedAt: '2026-10-06T10:00:00.000Z',
+        sourceUrl: 'peia://task-snapshot/intake-doc-901',
+        canonicalItemId: itemId,
+        publishedAt: null,
+      }),
+      originalSourceOrder: 0,
+      originalItemOrder: 0,
+    });
+  }
+
+  function makeValidCanonicalLibraryPrep(
+    basis: 'MetadataOnly' | 'SuppliedExcerptAndMetadata' = 'MetadataOnly'
+  ) {
+    return {
+      inputBasis: basis,
+      suggestedTitleAr: 'لائحة حماية السواحل والمياه النظيفة ٢٠٢٦',
+      suggestedTitleEn: 'Clean Water Coastal Protection Regulation 2026',
+      suggestedIssuingOrganization: 'Ministry of Environment',
+      suggestedDocumentType: 'ExecutiveRegulation',
+      suggestedEnvironmentalDomains: ['Water Quality', 'Coastal Management'],
+      suggestedTopicsAr: ['جودة المياه', 'حماية السواحل'],
+      suggestedTopicsEn: ['Water Quality', 'Coastal Protection'],
+      suggestedSummaryAr:
+        basis === 'MetadataOnly'
+          ? null
+          : 'ملخص مستند إلى المقتطف المقدم حول تنظيم تصريف المياه الساحلية.',
+      suggestedSummaryEn:
+        basis === 'MetadataOnly'
+          ? null
+          : 'Excerpt-grounded summary covering coastal water discharge regulation.',
+      provenanceObservationsAr: [
+        'البيانات مستمدة من البيانات الوصفية المقدمة في طلب الإدخال ومعايير وكالة حماية البيئة.',
+      ],
+      provenanceObservationsEn: [
+        'Prepared from supplied intake metadata and corroborated with EPA Clean Water Act reference.',
+      ],
+      uncertaintyNoticesAr: ['لم يتم فحص النص الكامل لملف PDF الخارجي.'],
+      uncertaintyNoticesEn: ['Full external PDF text was not fetched or inspected.'],
+    };
+  }
+
+  await test('101. News backward compatibility: News prompt and READY output without libraryPreparation remain unchanged, and News output with libraryPreparation is rejected', async () => {
+    const newsTask = makeSampleTask();
+    const epaItem = makeSampleEPAItem('1');
+    const context = assembleBoundedEvidenceContext([epaItem]);
+    const newsPrompt = buildModelPrompt(newsTask, context);
+
+    assert(!newsPrompt.includes('libraryPreparation'), 'News prompt must NOT mention libraryPreparation');
+    assert(!newsPrompt.includes('suggestedTitleAr'), 'News prompt must NOT mention suggestedTitleAr');
+
+    const newsWithLibPrep = JSON.stringify({
+      status: 'READY',
+      summary: 'News summary.',
+      findings: [{ claim: 'News claim.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+      libraryPreparation: makeValidCanonicalLibraryPrep('MetadataOnly'),
+    });
+
+    const runner = makeFakeRunner({ stdout: newsWithLibPrep });
+    const rejectedResult = await analyzeTaskLocally(
+      newsTask,
+      makeEvidenceResult([epaItem]),
+      defaultConfig,
+      runner
+    );
+    assert(rejectedResult.kind === 'ABSTAINED', 'News output with libraryPreparation must be rejected');
+    if (rejectedResult.kind === 'ABSTAINED') {
+      assert(rejectedResult.reason === 'INVALID_MODEL_OUTPUT', 'Reason is INVALID_MODEL_OUTPUT');
+      assert(rejectedResult.detail.includes('libraryPreparation'), 'Detail mentions disallowed libraryPreparation key');
+    }
+  });
+
+  await test('102. LibraryIntake prompt specifies exact canonical 14-field libraryPreparation schema and contains zero invented GATE-A field names', async () => {
+    const libTask = makeSampleLibraryIntakeTask();
+    const epaItem = makeSampleEPAItem('1');
+    const context = assembleBoundedEvidenceContext([epaItem]);
+    const libPrompt = buildModelPrompt(libTask, context);
+
+    const requiredCanonicalKeys = [
+      'inputBasis',
+      'suggestedTitleAr',
+      'suggestedTitleEn',
+      'suggestedIssuingOrganization',
+      'suggestedDocumentType',
+      'suggestedEnvironmentalDomains',
+      'suggestedTopicsAr',
+      'suggestedTopicsEn',
+      'suggestedSummaryAr',
+      'suggestedSummaryEn',
+      'provenanceObservationsAr',
+      'provenanceObservationsEn',
+      'uncertaintyNoticesAr',
+      'uncertaintyNoticesEn',
+    ];
+    for (const key of requiredCanonicalKeys) {
+      assert(libPrompt.includes(`"${key}"`), `LibraryIntake prompt must include canonical key "${key}"`);
+    }
+
+    const forbiddenInventedKeys = [
+      'analysisBasis',
+      '"suggestedTitle"',
+      'suggestedPublicationYear',
+      'suggestedDomains',
+      'suggestedKeywords',
+      'sourceObservations',
+    ];
+    for (const badKey of forbiddenInventedKeys) {
+      assert(!libPrompt.includes(badKey), `LibraryIntake prompt must NOT include invented key ${badKey}`);
+    }
+
+    const requiredDocTypes = [
+      'Law',
+      'ExecutiveRegulation',
+      'Decision',
+      'InstitutionalReport',
+      'PolicyPaper',
+      'ResearchStudy',
+      'InternationalAgreement',
+    ];
+    for (const dt of requiredDocTypes) {
+      assert(libPrompt.includes(dt), `LibraryIntake prompt must include canonical documentType ${dt}`);
+    }
+  });
+
+  await test('103. LibraryIntake MetadataOnly READY output with null summaries and SNAPSHOT + EPA evidence succeeds and preserves all 14 canonical fields', async () => {
+    const libTask = makeSampleLibraryIntakeTask();
+    const snapshotItem = makeSampleSnapshotItem('1');
+    const epaItem = makeSampleEPAItem('1');
+
+    const output = JSON.stringify({
+      status: 'READY',
+      summary: 'Prepared bibliographic metadata from supplied intake snapshot and EPA reference.',
+      findings: [
+        {
+          claim: 'Supplied intake record identifies coastal water regulation.',
+          evidenceIds: ['SNAPSHOT::intake-snapshot-1', 'EPA::epa-cwa-1'],
+        },
+      ],
+      recommendations: ['Verify official gazette publication date before canonical registration.'],
+      uncertainties: ['Only metadata was supplied; full PDF was not read.'],
+      libraryPreparation: makeValidCanonicalLibraryPrep('MetadataOnly'),
+    });
+
+    const runner = makeFakeRunner({ stdout: output });
+    const result = await analyzeTaskLocally(
+      libTask,
+      { kind: 'SELECTED_EVIDENCE', selectedItems: [snapshotItem, epaItem] },
+      defaultConfig,
+      runner
+    );
+
+    assert(result.kind === 'ADVISORY_READY', 'LibraryIntake MetadataOnly should return ADVISORY_READY');
+    if (result.kind === 'ADVISORY_READY') {
+      assert(result.advisory.libraryPreparation !== undefined, 'libraryPreparation must be present');
+      const prep = result.advisory.libraryPreparation!;
+      assert(Object.keys(prep).length === 14, 'libraryPreparation has exactly 14 keys');
+      assert(prep.inputBasis === 'MetadataOnly', 'inputBasis is MetadataOnly');
+      assert(prep.suggestedSummaryAr === null, 'suggestedSummaryAr is null');
+      assert(prep.suggestedSummaryEn === null, 'suggestedSummaryEn is null');
+      assert(prep.suggestedDocumentType === 'ExecutiveRegulation', 'suggestedDocumentType preserved');
+      assert(result.usedEvidenceIds.includes('SNAPSHOT::intake-snapshot-1'), 'SNAPSHOT evidence ID tracked');
+      assert(result.usedEvidenceIds.includes('EPA::epa-cwa-1'), 'EPA evidence ID tracked');
+    }
+  });
+
+  await test('104. LibraryIntake MetadataOnly rejects non-null suggestedSummaryAr or suggestedSummaryEn', async () => {
+    const libTask = makeSampleLibraryIntakeTask();
+    const epaItem = makeSampleEPAItem('1');
+    const badPrep = {
+      ...makeValidCanonicalLibraryPrep('MetadataOnly'),
+      suggestedSummaryEn: 'Hallucinated summary without excerpt.',
+    };
+    const output = JSON.stringify({
+      status: 'READY',
+      summary: 'Prepared bibliographic metadata from supplied intake metadata.',
+      findings: [{ claim: 'Finding 1', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+      libraryPreparation: badPrep,
+    });
+
+    const runner = makeFakeRunner({ stdout: output });
+    const result = await analyzeTaskLocally(
+      libTask,
+      makeEvidenceResult([epaItem]),
+      defaultConfig,
+      runner
+    );
+    assert(result.kind === 'ABSTAINED', 'MetadataOnly with non-null summary must fail closed');
+    if (result.kind === 'ABSTAINED') {
+      assert(result.reason === 'INVALID_MODEL_OUTPUT', 'Reason is INVALID_MODEL_OUTPUT');
+      assert(result.detail.includes('suggestedSummary'), 'Detail mentions suggestedSummary');
+    }
+  });
+
+  await test('105. LibraryIntake SuppliedExcerptAndMetadata accepts valid trimmed bilingual summaries and rejects null/empty/untrimmed summaries', async () => {
+    const libTaskWithExcerpt = makeSampleLibraryIntakeTask({
+      workingTitle: 'Clean Water Coastal Protection Regulation 2026',
+      suppliedExcerpt: 'Article 4 establishes effluent monitoring standards for coastal municipalities.',
+    });
+    const epaItem = makeSampleEPAItem('1');
+
+    const validOutput = JSON.stringify({
+      status: 'READY',
+      summary: 'Prepared bibliographic suggestions from supplied excerpt and metadata.',
+      findings: [{ claim: 'Excerpt specifies Article 4 effluent monitoring.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+      libraryPreparation: makeValidCanonicalLibraryPrep('SuppliedExcerptAndMetadata'),
+    });
+
+    const validResult = await analyzeTaskLocally(
+      libTaskWithExcerpt,
+      makeEvidenceResult([epaItem]),
+      defaultConfig,
+      makeFakeRunner({ stdout: validOutput })
+    );
+    assert(validResult.kind === 'ADVISORY_READY', 'SuppliedExcerptAndMetadata with valid summaries succeeds');
+    if (validResult.kind === 'ADVISORY_READY') {
+      assert(
+        validResult.advisory.libraryPreparation?.inputBasis === 'SuppliedExcerptAndMetadata',
+        'inputBasis is SuppliedExcerptAndMetadata'
+      );
+      assert(
+        typeof validResult.advisory.libraryPreparation?.suggestedSummaryAr === 'string',
+        'suggestedSummaryAr is string'
+      );
+      assert(
+        typeof validResult.advisory.libraryPreparation?.suggestedSummaryEn === 'string',
+        'suggestedSummaryEn is string'
+      );
+    }
+
+    // Reject null summary when SuppliedExcerptAndMetadata
+    const nullSummaryOutput = JSON.stringify({
+      status: 'READY',
+      summary: 'Prepared bibliographic suggestions from supplied excerpt and metadata.',
+      findings: [{ claim: 'Excerpt specifies Article 4.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+      libraryPreparation: {
+        ...makeValidCanonicalLibraryPrep('SuppliedExcerptAndMetadata'),
+        suggestedSummaryAr: null,
+      },
+    });
+    const nullResult = await analyzeTaskLocally(
+      libTaskWithExcerpt,
+      makeEvidenceResult([epaItem]),
+      defaultConfig,
+      makeFakeRunner({ stdout: nullSummaryOutput })
+    );
+    assert(nullResult.kind === 'ABSTAINED', 'Null summary on SuppliedExcerptAndMetadata rejected');
+  });
+
+  await test('106. LibraryIntake fails closed with INVALID_TASK_INPUT on empty, whitespace-only, non-string, or untrimmed suppliedExcerpt (never silently downgraded to MetadataOnly)', async () => {
+    const badExcerpts: unknown[] = ['', '   ', '  untrimmed excerpt  ', 123, { text: 'excerpt' }];
+    for (const badExcerpt of badExcerpts) {
+      const badTask = makeSampleLibraryIntakeTask({
+        workingTitle: 'Test Title',
+        suppliedExcerpt: badExcerpt,
+      });
+      let threwInvalidInput = false;
+      try {
+        validateTaskInput(badTask);
+      } catch (err) {
+        threwInvalidInput = true;
+        assert((err as LocalAnalysisError).code === 'INVALID_TASK_INPUT', 'Must throw INVALID_TASK_INPUT');
+      }
+      assert(threwInvalidInput, `Must fail closed on invalid suppliedExcerpt: ${JSON.stringify(badExcerpt)}`);
+    }
+  });
+
+  await test('107. LibraryIntake rejects inputBasis mismatch between task contentSnapshot and model libraryPreparation', async () => {
+    const metadataOnlyTask = makeSampleLibraryIntakeTask({
+      workingTitle: 'Metadata Only Intake',
+    });
+    const epaItem = makeSampleEPAItem('1');
+
+    // Model claims SuppliedExcerptAndMetadata when task has no suppliedExcerpt
+    const mismatchedOutput = JSON.stringify({
+      status: 'READY',
+      summary: 'Prepared from metadata.',
+      findings: [{ claim: 'Finding 1', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+      libraryPreparation: makeValidCanonicalLibraryPrep('SuppliedExcerptAndMetadata'),
+    });
+
+    const result = await analyzeTaskLocally(
+      metadataOnlyTask,
+      makeEvidenceResult([epaItem]),
+      defaultConfig,
+      makeFakeRunner({ stdout: mismatchedOutput })
+    );
+    assert(result.kind === 'ABSTAINED', 'Mismatched inputBasis must be rejected');
+    if (result.kind === 'ABSTAINED') {
+      assert(result.reason === 'INVALID_MODEL_OUTPUT', 'Reason is INVALID_MODEL_OUTPUT');
+      assert(result.detail.includes('inputBasis'), 'Detail mentions inputBasis mismatch');
+    }
+  });
+
+  await test('108. LibraryIntake READY output missing libraryPreparation is rejected', async () => {
+    const libTask = makeSampleLibraryIntakeTask();
+    const epaItem = makeSampleEPAItem('1');
+    const missingPrepOutput = JSON.stringify({
+      status: 'READY',
+      summary: 'Summary without libraryPreparation.',
+      findings: [{ claim: 'Claim 1', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    const result = await analyzeTaskLocally(
+      libTask,
+      makeEvidenceResult([epaItem]),
+      defaultConfig,
+      makeFakeRunner({ stdout: missingPrepOutput })
+    );
+    assert(result.kind === 'ABSTAINED', 'Missing libraryPreparation on LibraryIntake READY must be rejected');
+    if (result.kind === 'ABSTAINED') {
+      assert(result.reason === 'INVALID_MODEL_OUTPUT', 'Reason is INVALID_MODEL_OUTPUT');
+    }
+  });
+
+  await test('109. LibraryIntake rejects invented GATE-A field names, extra keys, missing keys, or invalid suggestedDocumentType', async () => {
+    const libTask = makeSampleLibraryIntakeTask();
+    const epaItem = makeSampleEPAItem('1');
+
+    // 1. Invented key analysisBasis
+    const withInventedKey = {
+      ...makeValidCanonicalLibraryPrep('MetadataOnly'),
+      analysisBasis: 'MetadataOnly',
+    };
+    const res1 = parseAndValidateRawModelOutput(
+      JSON.stringify({
+        status: 'READY',
+        summary: 'Valid summary.',
+        findings: [{ claim: 'Claim', evidenceIds: ['EPA::epa-cwa-1'] }],
+        recommendations: [],
+        uncertainties: [],
+        libraryPreparation: withInventedKey,
+      }),
+      new Set(['EPA::epa-cwa-1']),
+      { targetType: AIReviewTargetType.LibraryIntake, expectedInputBasis: 'MetadataOnly' }
+    );
+    assert(res1.kind === 'INVALID_OUTPUT', 'Extra invented key analysisBasis must be rejected');
+
+    // 2. Missing key uncertaintyNoticesEn
+    const missingKeyPrep: Record<string, unknown> = { ...makeValidCanonicalLibraryPrep('MetadataOnly') };
+    delete missingKeyPrep['uncertaintyNoticesEn'];
+    const res2 = parseAndValidateRawModelOutput(
+      JSON.stringify({
+        status: 'READY',
+        summary: 'Valid summary.',
+        findings: [{ claim: 'Claim', evidenceIds: ['EPA::epa-cwa-1'] }],
+        recommendations: [],
+        uncertainties: [],
+        libraryPreparation: missingKeyPrep,
+      }),
+      new Set(['EPA::epa-cwa-1']),
+      { targetType: AIReviewTargetType.LibraryIntake, expectedInputBasis: 'MetadataOnly' }
+    );
+    assert(res2.kind === 'INVALID_OUTPUT', 'Missing required canonical key must be rejected');
+
+    // 3. Invalid suggestedDocumentType
+    const badDocTypePrep = {
+      ...makeValidCanonicalLibraryPrep('MetadataOnly'),
+      suggestedDocumentType: 'Regulation', // non-canonical
+    };
+    const res3 = parseAndValidateRawModelOutput(
+      JSON.stringify({
+        status: 'READY',
+        summary: 'Valid summary.',
+        findings: [{ claim: 'Claim', evidenceIds: ['EPA::epa-cwa-1'] }],
+        recommendations: [],
+        uncertainties: [],
+        libraryPreparation: badDocTypePrep,
+      }),
+      new Set(['EPA::epa-cwa-1']),
+      { targetType: AIReviewTargetType.LibraryIntake, expectedInputBasis: 'MetadataOnly' }
+    );
+    assert(res3.kind === 'INVALID_OUTPUT', 'Non-canonical suggestedDocumentType must be rejected');
+  });
+
+  await test('110. LibraryIntake rejects unread full-document/PDF claims or labeling supplied metadata as an externally verified source', async () => {
+    const epaItem = makeSampleEPAItem('1');
+
+    // 1. Unread PDF claim in provenanceObservationsEn
+    const unreadClaimPrep = {
+      ...makeValidCanonicalLibraryPrep('MetadataOnly'),
+      provenanceObservationsEn: ['Verified from full PDF text on the ministry portal.'],
+    };
+    const res1 = parseAndValidateRawModelOutput(
+      JSON.stringify({
+        status: 'READY',
+        summary: 'Valid summary.',
+        findings: [{ claim: 'Claim', evidenceIds: ['EPA::epa-cwa-1'] }],
+        recommendations: [],
+        uncertainties: [],
+        libraryPreparation: unreadClaimPrep,
+      }),
+      new Set(['EPA::epa-cwa-1']),
+      { targetType: AIReviewTargetType.LibraryIntake, expectedInputBasis: 'MetadataOnly' }
+    );
+    assert(res1.kind === 'INVALID_OUTPUT', 'Unread full PDF claim must be rejected');
+
+    // 2. Labeling supplied metadata as externally verified source
+    const mislabeledPrep = {
+      ...makeValidCanonicalLibraryPrep('MetadataOnly'),
+      provenanceObservationsEn: ['Supplied metadata is an externally verified source.'],
+    };
+    const res2 = parseAndValidateRawModelOutput(
+      JSON.stringify({
+        status: 'READY',
+        summary: 'Valid summary.',
+        findings: [{ claim: 'Claim', evidenceIds: ['EPA::epa-cwa-1'] }],
+        recommendations: [],
+        uncertainties: [],
+        libraryPreparation: mislabeledPrep,
+      }),
+      new Set(['EPA::epa-cwa-1']),
+      { targetType: AIReviewTargetType.LibraryIntake, expectedInputBasis: 'MetadataOnly' }
+    );
+    assert(res2.kind === 'INVALID_OUTPUT', 'Labeling supplied metadata as externally verified must be rejected');
+  });
+
+  await test('111. assembleBoundedEvidenceContext accepts valid SNAPSHOT item and rejects SNAPSHOT item with forged EPA authority', async () => {
+    const validSnapshot = makeSampleSnapshotItem('1');
+    const assembled = assembleBoundedEvidenceContext([validSnapshot]);
+    assert(assembled.retainedItems.length === 1, 'Valid SNAPSHOT item retained');
+    assert(assembled.retainedEvidenceRefs.has('SNAPSHOT::intake-snapshot-1'), 'SNAPSHOT ref registered');
+
+    const forgedSnapshot = {
+      ...validSnapshot,
+      authority: EPA_AUTHORITY,
+    };
+    let threwInvalidInput = false;
+    try {
+      assembleBoundedEvidenceContext([forgedSnapshot as unknown as SelectedEvidenceItem]);
+    } catch (err) {
+      threwInvalidInput = true;
+      assert((err as LocalAnalysisError).code === 'INVALID_SNAPSHOT_EVIDENCE', 'Must throw INVALID_SNAPSHOT_EVIDENCE');
+    }
+    assert(threwInvalidInput, 'Forged SNAPSHOT authority must fail closed');
+  });
+
   console.log('------------------------------------------------------------');
   console.log(`LOCAL ANALYSIS RUNTIME TESTS: ${passedTests}/${totalTests} PASSED`);
   if (passedTests !== totalTests) {

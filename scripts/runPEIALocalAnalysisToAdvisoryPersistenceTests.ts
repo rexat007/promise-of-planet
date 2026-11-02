@@ -364,6 +364,211 @@ async function runAllBridgeTests() {
     assert(threw, 'Fails closed and re-throws when repository fails');
   });
 
+  // 15. News conversion backward-compatibility: libraryPreparation is absent on converted News PEIAAdvisoryResult
+  await test('15. News conversion backward-compatibility: libraryPreparation is absent on converted News PEIAAdvisoryResult', () => {
+    const advisory = convertAdvisoryReadyToPEIAAdvisoryResult(sampleReadyResult);
+    assert(advisory.libraryPreparation === undefined, 'libraryPreparation must be undefined for News');
+    assert(!('libraryPreparation' in advisory), 'libraryPreparation property must not exist on News result');
+  });
+
+  // 16. LibraryIntake MetadataOnly conversion preserves all 14 canonical libraryPreparation fields and validates via validatePEIAAdvisoryResult
+  await test('16. LibraryIntake MetadataOnly conversion preserves all 14 canonical libraryPreparation fields', async () => {
+    const libraryTaskRef: AdvisoryResultTaskReference = {
+      taskId: 'task-lib-bridge-101',
+      taskType: AITaskType.CONTENT_REVIEW,
+      target: {
+        targetType: AIReviewTargetType.LibraryIntake,
+        targetId: 'intake-item-101',
+        sourceUpdatedAt: '2026-10-06T12:00:00.000Z',
+      },
+    };
+
+    const libReadyMetadataOnly: AdvisoryReadyResult = {
+      kind: 'ADVISORY_READY',
+      taskRef: libraryTaskRef,
+      advisory: {
+        summary: 'Prepared bibliographic proposal from supplied metadata and EPA reference.',
+        findings: [
+          {
+            claim: 'Intake metadata aligns with Clean Water Act stormwater provisions.',
+            evidenceIds: ['SNAPSHOT::intake-snapshot-1', 'EPA::cwa-sec-402'],
+            severity: AIReviewSeverity.Info,
+          },
+        ],
+        recommendations: ['Confirm publication year against official gazette.'],
+        uncertainties: ['Full PDF document was not inspected.'],
+        libraryPreparation: {
+          inputBasis: 'MetadataOnly',
+          suggestedTitleAr: 'لائحة تصريف مياه الأمطار ٢٠٢٦',
+          suggestedTitleEn: 'Stormwater Discharge Regulation 2026',
+          suggestedIssuingOrganization: 'Ministry of Environment',
+          suggestedDocumentType: 'ExecutiveRegulation',
+          suggestedEnvironmentalDomains: ['Water Quality', 'Urban Runoff'],
+          suggestedTopicsAr: ['مياه الأمطار', 'حماية البيئة المائية'],
+          suggestedTopicsEn: ['Stormwater', 'Aquatic Protection'],
+          suggestedSummaryAr: null,
+          suggestedSummaryEn: null,
+          provenanceObservationsAr: ['مقترح مبني على البيانات الوصفية فقط مع إسناد من وكالة حماية البيئة.'],
+          provenanceObservationsEn: ['Prepared from supplied metadata only with EPA reference corroboration.'],
+          uncertaintyNoticesAr: ['لم يتم الاطلاع على النص الكامل للوثيقة.'],
+          uncertaintyNoticesEn: ['Full document text was not available for inspection.'],
+        },
+      },
+      usedEvidenceIds: ['SNAPSHOT::intake-snapshot-1', 'EPA::cwa-sec-402'],
+      limitations: ['Metadata-only preparation.'],
+      humanReviewRequired: true,
+      modelTrace: sampleModelTrace,
+    };
+
+    const converted = convertAdvisoryReadyToPEIAAdvisoryResult(libReadyMetadataOnly);
+    assert(converted.task.target.targetType === AIReviewTargetType.LibraryIntake, 'targetType is LibraryIntake');
+    assert(converted.libraryPreparation !== undefined, 'libraryPreparation present');
+    const prep = converted.libraryPreparation!;
+    assert(Object.keys(prep).length === 14, 'All 14 canonical keys preserved');
+    assert(prep.inputBasis === 'MetadataOnly', 'inputBasis preserved');
+    assert(prep.suggestedTitleAr === 'لائحة تصريف مياه الأمطار ٢٠٢٦', 'suggestedTitleAr preserved');
+    assert(prep.suggestedTitleEn === 'Stormwater Discharge Regulation 2026', 'suggestedTitleEn preserved');
+    assert(prep.suggestedIssuingOrganization === 'Ministry of Environment', 'suggestedIssuingOrganization preserved');
+    assert(prep.suggestedDocumentType === 'ExecutiveRegulation', 'suggestedDocumentType preserved');
+    assert(prep.suggestedEnvironmentalDomains.length === 2, 'suggestedEnvironmentalDomains preserved');
+    assert(prep.suggestedTopicsAr.length === 2, 'suggestedTopicsAr preserved');
+    assert(prep.suggestedTopicsEn.length === 2, 'suggestedTopicsEn preserved');
+    assert(prep.suggestedSummaryAr === null, 'suggestedSummaryAr null preserved');
+    assert(prep.suggestedSummaryEn === null, 'suggestedSummaryEn null preserved');
+    assert(prep.provenanceObservationsAr.length === 1, 'provenanceObservationsAr preserved');
+    assert(prep.provenanceObservationsEn.length === 1, 'provenanceObservationsEn preserved');
+    assert(prep.uncertaintyNoticesAr.length === 1, 'uncertaintyNoticesAr preserved');
+    assert(prep.uncertaintyNoticesEn.length === 1, 'uncertaintyNoticesEn preserved');
+
+    const repo = new MockOutboxRepository();
+    const persisted = await persistLocalAnalysisResult(libReadyMetadataOnly, repo);
+    assert(persisted.kind === 'PERSISTED_ADVISORY', 'Persists to outbox repository');
+    if (persisted.kind === 'PERSISTED_ADVISORY') {
+      assert(
+        persisted.storedRecord.result.libraryPreparation?.suggestedDocumentType === 'ExecutiveRegulation',
+        'Stored record preserves libraryPreparation'
+      );
+    }
+  });
+
+  // 17. LibraryIntake SuppliedExcerptAndMetadata conversion preserves all 14 canonical fields including bilingual summaries
+  await test('17. LibraryIntake SuppliedExcerptAndMetadata conversion preserves all 14 canonical fields including bilingual summaries', () => {
+    const libraryTaskRef: AdvisoryResultTaskReference = {
+      taskId: 'task-lib-bridge-102',
+      taskType: AITaskType.CONTENT_REVIEW,
+      target: {
+        targetType: AIReviewTargetType.LibraryIntake,
+        targetId: 'intake-item-102',
+        sourceUpdatedAt: '2026-10-06T12:00:00.000Z',
+      },
+    };
+
+    const libReadyExcerpt: AdvisoryReadyResult = {
+      kind: 'ADVISORY_READY',
+      taskRef: libraryTaskRef,
+      advisory: {
+        summary: 'Prepared bibliographic proposal from supplied excerpt and metadata.',
+        findings: [
+          {
+            claim: 'Supplied excerpt defines marine sanctuary boundaries.',
+            evidenceIds: ['NOAA::buoy-sst-01'],
+          },
+        ],
+        recommendations: ['Review coordinates in annex.'],
+        uncertainties: ['Annex tables were not included in excerpt.'],
+        libraryPreparation: {
+          inputBasis: 'SuppliedExcerptAndMetadata',
+          suggestedTitleAr: 'قرار إنشاء المحمية البحرية ٢٠٢٦',
+          suggestedTitleEn: 'Marine Sanctuary Establishment Decision 2026',
+          suggestedIssuingOrganization: 'National Marine Authority',
+          suggestedDocumentType: 'Decision',
+          suggestedEnvironmentalDomains: ['Marine Biodiversity'],
+          suggestedTopicsAr: ['المحميات البحرية'],
+          suggestedTopicsEn: ['Marine Sanctuaries'],
+          suggestedSummaryAr: 'ملخص مستند إلى المقتطف المقدم يحدد نطاق المحمية البحرية.',
+          suggestedSummaryEn: 'Excerpt-grounded summary defining the marine sanctuary scope.',
+          provenanceObservationsAr: ['مشتق من المقتطف المقدم وبيانات الإدارة الوطنية للمحيطات والغلاف الجوي.'],
+          provenanceObservationsEn: ['Derived from supplied excerpt and corroborated by NOAA reference.'],
+          uncertaintyNoticesAr: ['المقتطف لا يشمل الجداول الملحقة.'],
+          uncertaintyNoticesEn: ['Supplied excerpt excludes annex tables.'],
+        },
+      },
+      usedEvidenceIds: ['NOAA::buoy-sst-01'],
+      limitations: [],
+      humanReviewRequired: true,
+    };
+
+    const converted = convertAdvisoryReadyToPEIAAdvisoryResult(libReadyExcerpt);
+    assert(converted.libraryPreparation?.inputBasis === 'SuppliedExcerptAndMetadata', 'inputBasis preserved');
+    assert(
+      converted.libraryPreparation?.suggestedSummaryAr ===
+        'ملخص مستند إلى المقتطف المقدم يحدد نطاق المحمية البحرية.',
+      'suggestedSummaryAr preserved'
+    );
+    assert(
+      converted.libraryPreparation?.suggestedSummaryEn ===
+        'Excerpt-grounded summary defining the marine sanctuary scope.',
+      'suggestedSummaryEn preserved'
+    );
+  });
+
+  // 18. Conversion fails closed when LibraryIntake is missing libraryPreparation or when News includes libraryPreparation
+  await test('18. Conversion fails closed when LibraryIntake is missing libraryPreparation or when News includes libraryPreparation', () => {
+    const libraryTaskRef: AdvisoryResultTaskReference = {
+      taskId: 'task-lib-bridge-103',
+      taskType: AITaskType.CONTENT_REVIEW,
+      target: {
+        targetType: AIReviewTargetType.LibraryIntake,
+        targetId: 'intake-item-103',
+        sourceUpdatedAt: '2026-10-06T12:00:00.000Z',
+      },
+    };
+
+    const libMissingPrep: AdvisoryReadyResult = {
+      ...sampleReadyResult,
+      taskRef: libraryTaskRef,
+    };
+
+    let threwMissing = false;
+    try {
+      convertAdvisoryReadyToPEIAAdvisoryResult(libMissingPrep);
+    } catch {
+      threwMissing = true;
+    }
+    assert(threwMissing, 'LibraryIntake without libraryPreparation must fail closed');
+
+    const newsWithPrep: AdvisoryReadyResult = {
+      ...sampleReadyResult,
+      advisory: {
+        ...sampleReadyResult.advisory,
+        libraryPreparation: {
+          inputBasis: 'MetadataOnly',
+          suggestedTitleAr: 'عنوان',
+          suggestedTitleEn: 'Title',
+          suggestedIssuingOrganization: 'Org',
+          suggestedDocumentType: 'Law',
+          suggestedEnvironmentalDomains: ['Water'],
+          suggestedTopicsAr: ['موضوع'],
+          suggestedTopicsEn: ['Topic'],
+          suggestedSummaryAr: null,
+          suggestedSummaryEn: null,
+          provenanceObservationsAr: ['ملاحظة'],
+          provenanceObservationsEn: ['Observation'],
+          uncertaintyNoticesAr: ['تنبيه'],
+          uncertaintyNoticesEn: ['Notice'],
+        },
+      },
+    };
+
+    let threwNewsWithPrep = false;
+    try {
+      convertAdvisoryReadyToPEIAAdvisoryResult(newsWithPrep);
+    } catch {
+      threwNewsWithPrep = true;
+    }
+    assert(threwNewsWithPrep, 'News with libraryPreparation must fail closed');
+  });
+
   console.log('------------------------------------------------------------');
   console.log(`BRIDGE TESTS: ${passedTests}/${totalTests} PASSED`);
 }
