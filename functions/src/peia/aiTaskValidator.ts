@@ -98,6 +98,7 @@ export function validateAIReviewTask(input: unknown): AIReviewTask {
   if (
     targetType !== AIReviewTargetType.News &&
     targetType !== AIReviewTargetType.LibraryDocument &&
+    targetType !== AIReviewTargetType.LibraryIntake &&
     targetType !== AIReviewTargetType.TrainingCourse &&
     targetType !== AIReviewTargetType.CitizenSubmission
   ) {

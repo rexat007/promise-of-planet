@@ -139,6 +139,153 @@ assertPasses('15. Valid Completed passes', p15);
 const p16 = createValidPayload({ status: 'Failed' });
 assertPasses('16. Valid Failed passes', p16);
 
+// 17. Valid LibraryIntake CONTENT_REVIEW task passes
+const p17 = createValidPayload({
+  taskId: 'peia-task-intake-001',
+  target: {
+    targetType: 'LibraryIntake',
+    targetId: 'intake-123',
+    sourceUpdatedAt: '2026-10-01T12:00:00Z',
+  },
+  contentSnapshot: {
+    allowSnapshotEvidence: true,
+    inputBasis: 'SuppliedExcerptAndMetadata',
+    title: 'UNEP Global Methane Assessment',
+    suppliedExcerpt: 'Methane emissions reductions are critical for near-term warming.',
+  },
+});
+assertPasses('17. Valid LibraryIntake CONTENT_REVIEW task passes', p17);
+
+// 18. Existing other canonical target types pass (LibraryDocument, TrainingCourse, CitizenSubmission)
+assertPasses(
+  '18a. Valid LibraryDocument targetType passes',
+  createValidPayload({
+    target: {
+      targetType: 'LibraryDocument',
+      targetId: 'lib-doc-001',
+      sourceUpdatedAt: '2026-10-01T12:00:00Z',
+    },
+  })
+);
+assertPasses(
+  '18b. Valid TrainingCourse targetType passes',
+  createValidPayload({
+    target: {
+      targetType: 'TrainingCourse',
+      targetId: 'course-001',
+      sourceUpdatedAt: '2026-10-01T12:00:00Z',
+    },
+  })
+);
+assertPasses(
+  '18c. Valid CitizenSubmission targetType passes',
+  createValidPayload({
+    target: {
+      targetType: 'CitizenSubmission',
+      targetId: 'sub-001',
+      sourceUpdatedAt: '2026-10-01T12:00:00Z',
+    },
+  })
+);
+
+// 19. Unknown target keys are rejected
+assertFails(
+  '19. Unknown key inside target object fails',
+  createValidPayload({
+    target: {
+      targetType: 'LibraryIntake',
+      targetId: 'intake-123',
+      sourceUpdatedAt: '2026-10-01T12:00:00Z',
+      extraTargetKey: 'not-allowed',
+    },
+  }),
+  'INVALID_TASK_TARGET'
+);
+
+// 20. Invented task types (FactCheck, PrePublicationReview) are rejected
+assertFails(
+  '20a. Invented taskType FactCheck fails',
+  createValidPayload({ taskType: 'FactCheck' }),
+  'INVALID_TASK_TYPE'
+);
+assertFails(
+  '20b. Invented taskType PrePublicationReview fails',
+  createValidPayload({ taskType: 'PrePublicationReview' }),
+  'INVALID_TASK_TYPE'
+);
+
+// 21. Invented task states (Abstained, Cancelled) are rejected
+assertFails(
+  '21a. Invented status Abstained fails',
+  createValidPayload({ status: 'Abstained' }),
+  'INVALID_TASK_STATUS'
+);
+assertFails(
+  '21b. Invented status Cancelled fails',
+  createValidPayload({ status: 'Cancelled' }),
+  'INVALID_TASK_STATUS'
+);
+
+// 22. LibraryIntake cannot bypass existing task identity and payload validation
+assertFails(
+  '22a. LibraryIntake with empty taskId fails',
+  createValidPayload({
+    taskId: '   ',
+    target: {
+      targetType: 'LibraryIntake',
+      targetId: 'intake-123',
+      sourceUpdatedAt: '2026-10-01T12:00:00Z',
+    },
+  }),
+  'INVALID_TASK_ID'
+);
+assertFails(
+  '22b. LibraryIntake with empty targetId fails',
+  createValidPayload({
+    target: {
+      targetType: 'LibraryIntake',
+      targetId: '   ',
+      sourceUpdatedAt: '2026-10-01T12:00:00Z',
+    },
+  }),
+  'INVALID_TASK_TARGET'
+);
+assertFails(
+  '22c. LibraryIntake with empty sourceUpdatedAt fails',
+  createValidPayload({
+    target: {
+      targetType: 'LibraryIntake',
+      targetId: 'intake-123',
+      sourceUpdatedAt: '   ',
+    },
+  }),
+  'INVALID_TASK_TARGET'
+);
+assertFails(
+  '22d. LibraryIntake with non-object contentSnapshot fails',
+  createValidPayload({
+    target: {
+      targetType: 'LibraryIntake',
+      targetId: 'intake-123',
+      sourceUpdatedAt: '2026-10-01T12:00:00Z',
+    },
+    contentSnapshot: 'invalid-snapshot',
+  }),
+  'INVALID_CONTENT_SNAPSHOT'
+);
+assertFails(
+  '22e. LibraryIntake with prohibited field fails',
+  createValidPayload({
+    target: {
+      targetType: 'LibraryIntake',
+      targetId: 'intake-123',
+      sourceUpdatedAt: '2026-10-01T12:00:00Z',
+    },
+    autoPublish: true,
+  }),
+  'PROHIBITED_TASK_FIELD'
+);
+
 // Final Execution report
 console.log('====================================================');
 console.log('RUNNING PEIA-16A SERVER VALIDATOR BOUNDARY TESTS');
