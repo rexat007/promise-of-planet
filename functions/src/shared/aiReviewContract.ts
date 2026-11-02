@@ -14,11 +14,50 @@
 export const AIReviewTargetType = {
   News: 'News',
   LibraryDocument: 'LibraryDocument',
+  LibraryIntake: 'LibraryIntake',
   TrainingCourse: 'TrainingCourse',
   CitizenSubmission: 'CitizenSubmission',
 } as const;
 
 export type AIReviewTargetType = typeof AIReviewTargetType[keyof typeof AIReviewTargetType];
+
+export const PEIALibraryPreparationInputBasis = {
+  MetadataOnly: 'MetadataOnly',
+  SuppliedExcerptAndMetadata: 'SuppliedExcerptAndMetadata',
+} as const;
+
+export type PEIALibraryPreparationInputBasis =
+  typeof PEIALibraryPreparationInputBasis[keyof typeof PEIALibraryPreparationInputBasis];
+
+export const PEIALibrarySuggestedDocumentType = {
+  Law: 'Law',
+  ExecutiveRegulation: 'ExecutiveRegulation',
+  Decision: 'Decision',
+  InstitutionalReport: 'InstitutionalReport',
+  PolicyPaper: 'PolicyPaper',
+  ResearchStudy: 'ResearchStudy',
+  InternationalAgreement: 'InternationalAgreement',
+} as const;
+
+export type PEIALibrarySuggestedDocumentType =
+  typeof PEIALibrarySuggestedDocumentType[keyof typeof PEIALibrarySuggestedDocumentType];
+
+export interface PEIALibraryPreparationAdvisoryPayload {
+  readonly inputBasis: PEIALibraryPreparationInputBasis;
+  readonly suggestedTitleAr: string;
+  readonly suggestedTitleEn: string;
+  readonly suggestedIssuingOrganization: string;
+  readonly suggestedDocumentType: PEIALibrarySuggestedDocumentType;
+  readonly suggestedEnvironmentalDomains: readonly string[];
+  readonly suggestedTopicsAr: readonly string[];
+  readonly suggestedTopicsEn: readonly string[];
+  readonly suggestedSummaryAr: string | null;
+  readonly suggestedSummaryEn: string | null;
+  readonly provenanceObservationsAr: readonly string[];
+  readonly provenanceObservationsEn: readonly string[];
+  readonly uncertaintyNoticesAr: readonly string[];
+  readonly uncertaintyNoticesEn: readonly string[];
+}
 
 /**
  * Minimal Target Identity required to bind a review to a canonical content record.

@@ -11,6 +11,7 @@ import {
   validateAdvisoryResultIntakeRequest,
 } from './advisoryResultIntakeContract';
 import { validateAIReviewTask } from './aiTaskValidator';
+import { type PEIALibraryPreparationAdvisoryPayload } from '../shared/aiReviewContract';
 
 export type AdvisoryResultPersistenceErrorCode =
   | 'INVALID_EXISTING_RECORD'
@@ -53,6 +54,46 @@ export class AdvisoryResultPersistenceError extends Error {
 export interface AdvisoryResultPersistenceResult {
   readonly taskId: string;
   readonly disposition: AdvisoryResultPersistenceDisposition;
+}
+
+function isStringArrayEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isLibraryPreparationEqual(
+  a: PEIALibraryPreparationAdvisoryPayload | undefined,
+  b: PEIALibraryPreparationAdvisoryPayload | undefined
+): boolean {
+  if (a === undefined && b === undefined) {
+    return true;
+  }
+  if (a === undefined || b === undefined) {
+    return false;
+  }
+  return (
+    a.inputBasis === b.inputBasis &&
+    a.suggestedTitleAr === b.suggestedTitleAr &&
+    a.suggestedTitleEn === b.suggestedTitleEn &&
+    a.suggestedIssuingOrganization === b.suggestedIssuingOrganization &&
+    a.suggestedDocumentType === b.suggestedDocumentType &&
+    a.suggestedSummaryAr === b.suggestedSummaryAr &&
+    a.suggestedSummaryEn === b.suggestedSummaryEn &&
+    isStringArrayEqual(a.suggestedEnvironmentalDomains, b.suggestedEnvironmentalDomains) &&
+    isStringArrayEqual(a.suggestedTopicsAr, b.suggestedTopicsAr) &&
+    isStringArrayEqual(a.suggestedTopicsEn, b.suggestedTopicsEn) &&
+    isStringArrayEqual(a.provenanceObservationsAr, b.provenanceObservationsAr) &&
+    isStringArrayEqual(a.provenanceObservationsEn, b.provenanceObservationsEn) &&
+    isStringArrayEqual(a.uncertaintyNoticesAr, b.uncertaintyNoticesAr) &&
+    isStringArrayEqual(a.uncertaintyNoticesEn, b.uncertaintyNoticesEn)
+  );
 }
 
 export function isAdvisoryResultEqual(
@@ -107,31 +148,20 @@ export function isAdvisoryResultEqual(
     }
   }
 
-  if (a.recommendations.length !== b.recommendations.length) {
+  if (!isStringArrayEqual(a.recommendations, b.recommendations)) {
     return false;
-  }
-  for (let i = 0; i < a.recommendations.length; i++) {
-    if (a.recommendations[i] !== b.recommendations[i]) {
-      return false;
-    }
   }
 
-  if (a.uncertainties.length !== b.uncertainties.length) {
+  if (!isStringArrayEqual(a.uncertainties, b.uncertainties)) {
     return false;
-  }
-  for (let i = 0; i < a.uncertainties.length; i++) {
-    if (a.uncertainties[i] !== b.uncertainties[i]) {
-      return false;
-    }
   }
 
-  if (a.limitations.length !== b.limitations.length) {
+  if (!isStringArrayEqual(a.limitations, b.limitations)) {
     return false;
   }
-  for (let i = 0; i < a.limitations.length; i++) {
-    if (a.limitations[i] !== b.limitations[i]) {
-      return false;
-    }
+
+  if (!isLibraryPreparationEqual(a.libraryPreparation, b.libraryPreparation)) {
+    return false;
   }
 
   return true;

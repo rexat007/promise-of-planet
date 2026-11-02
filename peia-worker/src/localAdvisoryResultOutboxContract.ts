@@ -87,6 +87,46 @@ export function validateStoredAdvisoryResultRecord(
   return input as StoredAdvisoryResultRecord;
 }
 
+function isStringArrayEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isLibraryPreparationEqual(
+  a: PEIAAdvisoryResult['libraryPreparation'],
+  b: PEIAAdvisoryResult['libraryPreparation']
+): boolean {
+  if (a === undefined && b === undefined) {
+    return true;
+  }
+  if (a === undefined || b === undefined) {
+    return false;
+  }
+  return (
+    a.inputBasis === b.inputBasis &&
+    a.suggestedTitleAr === b.suggestedTitleAr &&
+    a.suggestedTitleEn === b.suggestedTitleEn &&
+    a.suggestedIssuingOrganization === b.suggestedIssuingOrganization &&
+    a.suggestedDocumentType === b.suggestedDocumentType &&
+    a.suggestedSummaryAr === b.suggestedSummaryAr &&
+    a.suggestedSummaryEn === b.suggestedSummaryEn &&
+    isStringArrayEqual(a.suggestedEnvironmentalDomains, b.suggestedEnvironmentalDomains) &&
+    isStringArrayEqual(a.suggestedTopicsAr, b.suggestedTopicsAr) &&
+    isStringArrayEqual(a.suggestedTopicsEn, b.suggestedTopicsEn) &&
+    isStringArrayEqual(a.provenanceObservationsAr, b.provenanceObservationsAr) &&
+    isStringArrayEqual(a.provenanceObservationsEn, b.provenanceObservationsEn) &&
+    isStringArrayEqual(a.uncertaintyNoticesAr, b.uncertaintyNoticesAr) &&
+    isStringArrayEqual(a.uncertaintyNoticesEn, b.uncertaintyNoticesEn)
+  );
+}
+
 export function isSameStoredAdvisoryResultRecord(
   a: StoredAdvisoryResultRecord,
   b: StoredAdvisoryResultRecord
@@ -153,31 +193,20 @@ export function isSameStoredAdvisoryResultRecord(
     }
   }
 
-  if (a.result.recommendations.length !== b.result.recommendations.length) {
+  if (!isStringArrayEqual(a.result.recommendations, b.result.recommendations)) {
     return false;
-  }
-  for (let i = 0; i < a.result.recommendations.length; i++) {
-    if (a.result.recommendations[i] !== b.result.recommendations[i]) {
-      return false;
-    }
   }
 
-  if (a.result.uncertainties.length !== b.result.uncertainties.length) {
+  if (!isStringArrayEqual(a.result.uncertainties, b.result.uncertainties)) {
     return false;
-  }
-  for (let i = 0; i < a.result.uncertainties.length; i++) {
-    if (a.result.uncertainties[i] !== b.result.uncertainties[i]) {
-      return false;
-    }
   }
 
-  if (a.result.limitations.length !== b.result.limitations.length) {
+  if (!isStringArrayEqual(a.result.limitations, b.result.limitations)) {
     return false;
   }
-  for (let i = 0; i < a.result.limitations.length; i++) {
-    if (a.result.limitations[i] !== b.result.limitations[i]) {
-      return false;
-    }
+
+  if (!isLibraryPreparationEqual(a.result.libraryPreparation, b.result.libraryPreparation)) {
+    return false;
   }
 
   return true;

@@ -1,5 +1,15 @@
+import {
+  AIReviewTargetType as CanonicalAIReviewTargetType,
+  type AIReviewTargetType as CanonicalAIReviewTargetTypeUnion,
+} from '../../functions/src/shared/aiReviewContract';
+
+export const AIReviewTargetType = CanonicalAIReviewTargetType;
+export type AIReviewTargetType = CanonicalAIReviewTargetTypeUnion | string;
+
 export {
-  AIReviewTargetType,
+  PEIALibraryPreparationInputBasis,
+  PEIALibrarySuggestedDocumentType,
+  type PEIALibraryPreparationAdvisoryPayload,
   type ReviewTargetIdentity,
   AIReviewCategory,
   AIReviewSeverity,

@@ -4,6 +4,9 @@ import {
 import {
   AIReviewTargetType,
   AIReviewSeverity,
+  PEIALibraryPreparationInputBasis,
+  PEIALibrarySuggestedDocumentType,
+  type PEIALibraryPreparationAdvisoryPayload,
   type ReviewTargetIdentity,
 } from '../../src/types/aiReview';
 
@@ -33,6 +36,7 @@ export interface PEIAAdvisoryResult {
   readonly recommendations: readonly string[];
   readonly uncertainties: readonly string[];
   readonly limitations: readonly string[];
+  readonly libraryPreparation?: PEIALibraryPreparationAdvisoryPayload;
 }
 
 export type PEIAAdvisoryResultContractErrorCode =
@@ -55,6 +59,27 @@ export class PEIAAdvisoryResultContractError extends Error {
 const VALID_CODE_REGEX = /^[A-Z][A-Z0-9_]*$/;
 const ALLOWED_TARGET_TYPES = new Set<string>(Object.values(AIReviewTargetType));
 const ALLOWED_SEVERITIES = new Set<string>(Object.values(AIReviewSeverity));
+const ALLOWED_INPUT_BASES = new Set<string>(Object.values(PEIALibraryPreparationInputBasis));
+const ALLOWED_LIBRARY_DOC_TYPES = new Set<string>(Object.values(PEIALibrarySuggestedDocumentType));
+const UNREAD_CONTENT_CLAIM_REGEX =
+  /\b(full\s+(?:document|pdf|text)\s+(?:was\s+)?(?:read|analyzed|inspected)|according\s+to\s+page\s+\d+|article\s+\d+\s+states\s+that)\b|تمت?\s+قراءة\s+(?:كامل\s+)?(?:الوثيقة|النص\s+الكامل|ملف\s*PDF)/i;
+
+const LIBRARY_PREPARATION_KEYS = [
+  'inputBasis',
+  'suggestedTitleAr',
+  'suggestedTitleEn',
+  'suggestedIssuingOrganization',
+  'suggestedDocumentType',
+  'suggestedEnvironmentalDomains',
+  'suggestedTopicsAr',
+  'suggestedTopicsEn',
+  'suggestedSummaryAr',
+  'suggestedSummaryEn',
+  'provenanceObservationsAr',
+  'provenanceObservationsEn',
+  'uncertaintyNoticesAr',
+  'uncertaintyNoticesEn',
+] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -83,21 +108,126 @@ function isStringArray(value: unknown): value is readonly string[] {
   return value.every((item) => isNonEmptyTrimmedString(item));
 }
 
+function isNonEmptyStringArray(value: unknown): value is readonly string[] {
+  return isStringArray(value) && value.length > 0;
+}
+
+function validateLibraryPreparation(
+  libraryPreparation: unknown,
+  targetType: string,
+  assessmentSummary: string
+): void {
+  if (targetType !== AIReviewTargetType.LibraryIntake) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  if (!isPlainObject(libraryPreparation)) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  if (!hasExactKeys(libraryPreparation, LIBRARY_PREPARATION_KEYS)) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  const {
+    inputBasis,
+    suggestedTitleAr,
+    suggestedTitleEn,
+    suggestedIssuingOrganization,
+    suggestedDocumentType,
+    suggestedEnvironmentalDomains,
+    suggestedTopicsAr,
+    suggestedTopicsEn,
+    suggestedSummaryAr,
+    suggestedSummaryEn,
+    provenanceObservationsAr,
+    provenanceObservationsEn,
+    uncertaintyNoticesAr,
+    uncertaintyNoticesEn,
+  } = libraryPreparation;
+
+  if (typeof inputBasis !== 'string' || !ALLOWED_INPUT_BASES.has(inputBasis)) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  if (
+    !isNonEmptyTrimmedString(suggestedTitleAr) ||
+    !isNonEmptyTrimmedString(suggestedTitleEn) ||
+    !isNonEmptyTrimmedString(suggestedIssuingOrganization)
+  ) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  if (
+    typeof suggestedDocumentType !== 'string' ||
+    !ALLOWED_LIBRARY_DOC_TYPES.has(suggestedDocumentType)
+  ) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  if (
+    !isNonEmptyStringArray(suggestedEnvironmentalDomains) ||
+    !isNonEmptyStringArray(suggestedTopicsAr) ||
+    !isNonEmptyStringArray(suggestedTopicsEn) ||
+    !isNonEmptyStringArray(provenanceObservationsAr) ||
+    !isNonEmptyStringArray(provenanceObservationsEn) ||
+    !isNonEmptyStringArray(uncertaintyNoticesAr) ||
+    !isNonEmptyStringArray(uncertaintyNoticesEn)
+  ) {
+    throw new PEIAAdvisoryResultContractError();
+  }
+
+  if (inputBasis === PEIALibraryPreparationInputBasis.MetadataOnly) {
+    if (suggestedSummaryAr !== null || suggestedSummaryEn !== null) {
+      throw new PEIAAdvisoryResultContractError();
+    }
+    if (UNREAD_CONTENT_CLAIM_REGEX.test(assessmentSummary)) {
+      throw new PEIAAdvisoryResultContractError();
+    }
+  } else {
+    if (
+      !isNonEmptyTrimmedString(suggestedSummaryAr) ||
+      !isNonEmptyTrimmedString(suggestedSummaryEn)
+    ) {
+      throw new PEIAAdvisoryResultContractError();
+    }
+  }
+}
+
 export function validatePEIAAdvisoryResult(input: unknown): PEIAAdvisoryResult {
   if (!isPlainObject(input)) {
     throw new PEIAAdvisoryResultContractError();
   }
 
+  const hasLibraryPreparation = Object.prototype.hasOwnProperty.call(
+    input,
+    'libraryPreparation'
+  );
+
   if (
-    !hasExactKeys(input, [
-      'schemaVersion',
-      'task',
-      'humanReviewRequired',
-      'assessment',
-      'recommendations',
-      'uncertainties',
-      'limitations',
-    ])
+    !hasExactKeys(
+      input,
+      hasLibraryPreparation
+        ? [
+            'schemaVersion',
+            'task',
+            'humanReviewRequired',
+            'assessment',
+            'recommendations',
+            'uncertainties',
+            'limitations',
+            'libraryPreparation',
+          ]
+        : [
+            'schemaVersion',
+            'task',
+            'humanReviewRequired',
+            'assessment',
+            'recommendations',
+            'uncertainties',
+            'limitations',
+          ]
+    )
   ) {
     throw new PEIAAdvisoryResultContractError();
   }
@@ -245,5 +375,14 @@ export function validatePEIAAdvisoryResult(input: unknown): PEIAAdvisoryResult {
     throw new PEIAAdvisoryResultContractError();
   }
 
+  if (hasLibraryPreparation) {
+    validateLibraryPreparation(
+      input.libraryPreparation,
+      task.target.targetType,
+      assessment.summary
+    );
+  }
+
   return input as PEIAAdvisoryResult;
 }
+
