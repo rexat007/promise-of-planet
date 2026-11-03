@@ -35,9 +35,30 @@ import { PublicNewsRepository } from './publicNewsRepository';
 import type { AdminRepository } from '../admin/adminRepository';
 import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
-import { AdminPermission, AdminRole } from '../types/admin';
+import {
+  AdminDomain,
+  AdminPermission,
+  AdminRole,
+  hasDomainResponsibility,
+} from '../types/admin';
 import type { AdminUser } from '../types/admin';
 import type { CommunityRepository } from '../community/communityRepository';
+import type { NewsItemBackend } from './newsRepository';
+import { AIReviewTargetType } from '../shared/aiReviewContract';
+import { AITaskStatus, type AIReviewTask } from '../types/aiTask';
+import type { AdvisoryResultIntakeResult } from '../peia/advisoryResultIntakeContract';
+import type { CanonicalNonAdvisoryOutcome } from '../peia/nonAdvisoryOutcomeIntakeContract';
+import {
+  FirestorePeiaTaskQueueService,
+  PeiaTaskQueueError,
+  derivePeiaTaskId,
+  type AuthoritativeNewsSnapshotInput,
+  type PeiaTaskEnqueueDisposition,
+  type PeiaTaskQueueDocumentSnapshot,
+  type PeiaTaskQueueFirestoreDatabase,
+  type PeiaTaskQueueTransaction,
+  type ReconciledPeiaTaskStatusResult,
+} from '../peia/firestorePeiaTaskQueueService';
 
 export const MAX_GET_EDITORIAL_IMAGE_RIGHTS_ASSET_IDS = 20 as const;
 export const GET_EDITORIAL_IMAGE_RIGHTS_CONCURRENCY = 5 as const;
@@ -614,13 +635,421 @@ const EDITORIAL_IMAGE_RIGHTS_ACTIONS: ReadonlySet<string> = new Set([
   'transitionImageRights',
 ]);
 
+const NEWS_PEIA_REVIEW_ACTIONS: ReadonlySet<string> = new Set([
+  'requestPeiaReview',
+  'getPeiaReviewStatus',
+]);
+
+const REQUEST_PEIA_REVIEW_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  'action',
+  'id',
+  'expectedUpdatedAt',
+]);
+
+const GET_PEIA_REVIEW_STATUS_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  'action',
+  'id',
+  'taskId',
+]);
+
+const SINGLE_LINE_CONTROL_CHAR_REGEX = /[\x00-\x1F\x7F]/;
+
+export interface SanitizedNewsPeiaReviewStatusDto {
+  readonly status: 'NotRequested' | AITaskStatus;
+  readonly taskId: string;
+  readonly targetType: typeof AIReviewTargetType.News;
+  readonly targetId: string;
+  readonly currentSourceUpdatedAt: string;
+  readonly taskSourceUpdatedAt: string | null;
+  readonly isStale: boolean;
+  readonly task: AIReviewTask | null;
+  readonly advisoryResult: AdvisoryResultIntakeResult | null;
+  readonly nonAdvisoryOutcome: CanonicalNonAdvisoryOutcome | null;
+}
+
+export interface RequestNewsPeiaReviewResponseDto {
+  readonly disposition: PeiaTaskEnqueueDisposition;
+  readonly documentId: string;
+  readonly taskId: string;
+  readonly task: AIReviewTask;
+  readonly status: 'NotRequested' | AITaskStatus;
+  readonly isStale: boolean;
+  readonly advisoryResult: AdvisoryResultIntakeResult | null;
+  readonly nonAdvisoryOutcome: CanonicalNonAdvisoryOutcome | null;
+  readonly reviewStatus: SanitizedNewsPeiaReviewStatusDto;
+}
+
+export function createProductionPeiaTaskQueueDatabase(): PeiaTaskQueueFirestoreDatabase {
+  return {
+    collection(collectionName: string) {
+      const db = getFirestore() as unknown as PeiaTaskQueueFirestoreDatabase;
+      return db.collection(collectionName);
+    },
+    runTransaction<T>(
+      updateFunction: (transaction: PeiaTaskQueueTransaction) => Promise<T>
+    ): Promise<T> {
+      const db = getFirestore() as unknown as PeiaTaskQueueFirestoreDatabase;
+      return db.runTransaction(updateFunction);
+    },
+  };
+}
+
+async function authenticateHumanAdminForPeiaAction(
+  requestContext: AdminRequestContext,
+  requiredPermissions: readonly AdminPermission[],
+  adminRepo: AdminRepository
+): Promise<AdminUser> {
+  if (
+    !requestContext ||
+    !requestContext.auth ||
+    typeof requestContext.auth.uid !== 'string' ||
+    requestContext.auth.uid.trim() === '' ||
+    requestContext.auth.uid !== requestContext.auth.uid.trim()
+  ) {
+    throw new HttpsError(
+      'unauthenticated',
+      'UNAUTHENTICATED: Request missing valid Firebase Authentication token'
+    );
+  }
+
+  if (hasAutomatedOrAiTokenClaim(requestContext.auth.token)) {
+    throw new HttpsError(
+      'permission-denied',
+      'AI_ACTION_FORBIDDEN: Automated AI accounts are forbidden from performing News PEIA review actions'
+    );
+  }
+
+  const uid = requestContext.auth.uid.trim();
+  let admin: AdminUser | null = null;
+  try {
+    admin = await adminRepo.getAdminByUid(uid);
+  } catch (_err) {
+    throw new HttpsError(
+      'internal',
+      'ADMIN_LOOKUP_FAILED: Failed to verify admin identity'
+    );
+  }
+
+  if (!admin) {
+    throw new HttpsError(
+      'permission-denied',
+      'ADMIN_NOT_REGISTERED: User identity is not registered as a canonical AdminUser'
+    );
+  }
+
+  if (!admin.isActive) {
+    throw new HttpsError(
+      'permission-denied',
+      'ADMIN_INACTIVE: AdminUser account is inactive'
+    );
+  }
+
+  if (admin.role === AdminRole.AIAssistant) {
+    throw new HttpsError(
+      'permission-denied',
+      'AI_ACTION_FORBIDDEN: Automated AI accounts are forbidden from performing News PEIA review actions'
+    );
+  }
+
+  if (!hasDomainResponsibility(admin.role, AdminDomain.News)) {
+    throw new HttpsError(
+      'permission-denied',
+      'PERMISSION_DENIED: AdminUser lacks News domain responsibility'
+    );
+  }
+
+  for (const requiredPermission of requiredPermissions) {
+    if (!AdminAuthorizationService.hasPermission(admin, requiredPermission)) {
+      throw new HttpsError(
+        'permission-denied',
+        `PERMISSION_DENIED: AdminUser lacks required ${requiredPermission} permission`
+      );
+    }
+  }
+
+  return admin;
+}
+
+function assertStrictAllowedCallerKeys(
+  rawData: unknown,
+  allowedKeys: ReadonlySet<string>,
+  actionName: string
+): Record<string, unknown> {
+  if (typeof rawData !== 'object' || rawData === null || Array.isArray(rawData)) {
+    throw new HttpsError(
+      'invalid-argument',
+      `INVALID_ARGUMENT: Request payload for ${actionName} must be a plain object`
+    );
+  }
+  const proto = Object.getPrototypeOf(rawData);
+  if (proto !== Object.prototype && proto !== null) {
+    throw new HttpsError(
+      'invalid-argument',
+      `INVALID_ARGUMENT: Request payload for ${actionName} must be a plain object`
+    );
+  }
+
+  const record = rawData as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!allowedKeys.has(key)) {
+      throw new HttpsError(
+        'invalid-argument',
+        `UNTRUSTED_OR_UNKNOWN_INPUT_FIELD: Field '${key}' is not allowed in ${actionName}`
+      );
+    }
+  }
+  return record;
+}
+
+function validateStrictSingleLineId(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string') {
+    throw new HttpsError(
+      'invalid-argument',
+      `INVALID_ARGUMENT: ${fieldName} must be a non-empty trimmed string`
+    );
+  }
+  const trimmed = value.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed !== value ||
+    SINGLE_LINE_CONTROL_CHAR_REGEX.test(trimmed)
+  ) {
+    throw new HttpsError(
+      'invalid-argument',
+      `INVALID_ARGUMENT: ${fieldName} must be a non-empty trimmed single-line string`
+    );
+  }
+  return trimmed;
+}
+
+function validateStrictIsoTimestamp(value: unknown, fieldName: string): string {
+  const trimmed = validateStrictSingleLineId(value, fieldName);
+  if (Number.isNaN(Date.parse(trimmed))) {
+    throw new HttpsError(
+      'invalid-argument',
+      `INVALID_ARGUMENT: ${fieldName} must be a valid ISO-8601 timestamp`
+    );
+  }
+  return trimmed;
+}
+
+export function extractAuthoritativeNewsSnapshotInput(
+  item: NewsItemBackend
+): AuthoritativeNewsSnapshotInput {
+  if (!item || typeof item !== 'object') {
+    throw new HttpsError('not-found', 'NOT_FOUND: News item not found');
+  }
+
+  const title =
+    typeof item.titleAr === 'string' && item.titleAr.trim().length > 0
+      ? item.titleAr.trim()
+      : typeof item.titleEn === 'string'
+        ? item.titleEn.trim()
+        : '';
+
+  const body =
+    typeof item.bodyAr === 'string' && item.bodyAr.trim().length > 0
+      ? item.bodyAr
+      : typeof item.bodyEn === 'string'
+        ? item.bodyEn
+        : '';
+
+  const summary =
+    typeof item.summaryAr === 'string' && item.summaryAr.trim().length > 0
+      ? item.summaryAr
+      : typeof item.summaryEn === 'string' && item.summaryEn.trim().length > 0
+        ? item.summaryEn
+        : undefined;
+
+  return Object.freeze({
+    targetId: item.id,
+    sourceUpdatedAt: item.updatedAt,
+    title,
+    body,
+    ...(summary !== undefined ? { summary } : {}),
+  });
+}
+
+function isAuthoritativeNewsSnapshotInputEqual(
+  a: AuthoritativeNewsSnapshotInput,
+  b: AuthoritativeNewsSnapshotInput
+): boolean {
+  return (
+    a.targetId === b.targetId &&
+    a.sourceUpdatedAt === b.sourceUpdatedAt &&
+    a.title === b.title &&
+    a.body === b.body &&
+    a.summary === b.summary
+  );
+}
+
+function createSourceVersionGuardedPeiaDatabase(
+  baseDb: PeiaTaskQueueFirestoreDatabase,
+  newsService: NewsApplicationService,
+  expectedNewsId: string,
+  expectedUpdatedAt: string,
+  expectedSnapshotInput: AuthoritativeNewsSnapshotInput
+): PeiaTaskQueueFirestoreDatabase {
+  return {
+    collection(collectionName: string) {
+      return baseDb.collection(collectionName);
+    },
+    runTransaction<T>(
+      updateFunction: (transaction: PeiaTaskQueueTransaction) => Promise<T>
+    ): Promise<T> {
+      return baseDb.runTransaction(async (transaction) => {
+        // 1. Place news/{id} in the Firestore transaction read set strictly before any write
+        const newsDocRef = baseDb.collection('news').doc(expectedNewsId);
+        const txNewsSnap: PeiaTaskQueueDocumentSnapshot =
+          await transaction.get(newsDocRef);
+
+        if (txNewsSnap && txNewsSnap.exists) {
+          const txNewsData = txNewsSnap.data() as NewsItemBackend | undefined;
+          if (!txNewsData || typeof txNewsData !== 'object') {
+            throw new HttpsError(
+              'not-found',
+              `NOT_FOUND: News item ${expectedNewsId} not found during transactional verification`
+            );
+          }
+          if (txNewsData.updatedAt !== expectedUpdatedAt) {
+            throw new HttpsError(
+              'failed-precondition',
+              `STALE_SOURCE_VERSION: News item ${expectedNewsId} updatedAt changed concurrently (expected ${expectedUpdatedAt}, actual ${String(txNewsData.updatedAt)})`
+            );
+          }
+          const txSnapshotInput = extractAuthoritativeNewsSnapshotInput({
+            ...txNewsData,
+            id: txNewsData.id || expectedNewsId,
+          });
+          if (
+            !isAuthoritativeNewsSnapshotInputEqual(
+              txSnapshotInput,
+              expectedSnapshotInput
+            )
+          ) {
+            throw new HttpsError(
+              'failed-precondition',
+              `STALE_SOURCE_VERSION: News item ${expectedNewsId} content changed concurrently prior to task enqueue`
+            );
+          }
+        }
+
+        // 2. Also re-verify authoritative News record via newsService before any write
+        const latestServiceItem = await newsService.getById(expectedNewsId);
+        if (!latestServiceItem) {
+          throw new HttpsError(
+            'not-found',
+            `NOT_FOUND: News item ${expectedNewsId} not found`
+          );
+        }
+        if (latestServiceItem.updatedAt !== expectedUpdatedAt) {
+          throw new HttpsError(
+            'failed-precondition',
+            `STALE_SOURCE_VERSION: News item ${expectedNewsId} updatedAt changed concurrently (expected ${expectedUpdatedAt}, actual ${latestServiceItem.updatedAt})`
+          );
+        }
+        const latestSnapshotInput =
+          extractAuthoritativeNewsSnapshotInput(latestServiceItem);
+        if (
+          !isAuthoritativeNewsSnapshotInputEqual(
+            latestSnapshotInput,
+            expectedSnapshotInput
+          )
+        ) {
+          throw new HttpsError(
+            'failed-precondition',
+            `STALE_SOURCE_VERSION: News item ${expectedNewsId} content changed concurrently prior to task enqueue`
+          );
+        }
+
+        // 3. Proceed with canonical PeiaTaskQueueService transactional reads and task creation
+        return updateFunction(transaction);
+      });
+    },
+  };
+}
+
+function toSanitizedNewsPeiaReviewStatusDto(
+  reconciled: ReconciledPeiaTaskStatusResult,
+  currentSourceUpdatedAt: string
+): SanitizedNewsPeiaReviewStatusDto {
+  if (reconciled.status === 'NotRequested') {
+    return Object.freeze({
+      status: 'NotRequested' as const,
+      taskId: reconciled.taskId,
+      targetType: AIReviewTargetType.News,
+      targetId: reconciled.targetId,
+      currentSourceUpdatedAt,
+      taskSourceUpdatedAt: null,
+      isStale: false,
+      task: null,
+      advisoryResult: null,
+      nonAdvisoryOutcome: null,
+    });
+  }
+
+  return Object.freeze({
+    status: reconciled.status,
+    taskId: reconciled.taskId,
+    targetType: AIReviewTargetType.News,
+    targetId: reconciled.task.target.targetId,
+    currentSourceUpdatedAt,
+    taskSourceUpdatedAt: reconciled.task.target.sourceUpdatedAt,
+    isStale: reconciled.isStale,
+    task: reconciled.task,
+    advisoryResult:
+      reconciled.status === AITaskStatus.Completed
+        ? reconciled.advisoryResult
+        : null,
+    nonAdvisoryOutcome:
+      reconciled.status === AITaskStatus.Failed
+        ? reconciled.nonAdvisoryOutcome
+        : null,
+  });
+}
+
+function mapPeiaTaskQueueErrorToHttpsError(err: unknown): HttpsError {
+  if (err instanceof HttpsError) {
+    return err;
+  }
+
+  if (err instanceof PeiaTaskQueueError) {
+    const code = err.code;
+    const message = `${code}: ${err.message}`;
+    switch (code) {
+      case 'UNTRUSTED_OR_UNKNOWN_INPUT_FIELD':
+      case 'INVALID_TARGET_IDENTITY':
+      case 'INVALID_SNAPSHOT_INPUT':
+      case 'SNAPSHOT_OVERSIZED':
+        return new HttpsError('invalid-argument', message);
+      case 'TASK_PAYLOAD_CONFLICT':
+        return new HttpsError('already-exists', message);
+      case 'RECONCILIATION_INTEGRITY_ERROR':
+      case 'INVALID_EXISTING_TASK_RECORD':
+      case 'TASK_QUERY_CARDINALITY_INVALID':
+        return new HttpsError('failed-precondition', message);
+      case 'TRANSACTION_REQUIRED':
+      case 'INVALID_CLOCK_TIMESTAMP':
+      default:
+        return new HttpsError('internal', message);
+    }
+  }
+
+  return new HttpsError(
+    'internal',
+    'PEIA_OPERATION_FAILED: News PEIA task queue operation failed.'
+  );
+}
+
 export async function executeManageNewsRequest(
   requestContext: AdminRequestContext,
   adminRepo: AdminRepository = new FirestoreAdminRepository(),
   newsService: NewsApplicationService = createProductionNewsApplicationService(),
   rightsService?: EditorialImageRightsReviewService,
   assetRepo?: EditorialImageAssetRepository,
-  communityRepo?: CommunityRepository
+  communityRepo?: CommunityRepository,
+  peiaQueueDatabase?: PeiaTaskQueueFirestoreDatabase,
+  peiaQueueServiceOptions?: { readonly clock?: () => string }
 ): Promise<any> {
   const data =
     requestContext &&
@@ -632,6 +1061,172 @@ export async function executeManageNewsRequest(
 
   if (!action || typeof action !== 'string') {
     throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: Action parameter is required');
+  }
+
+  if (NEWS_PEIA_REVIEW_ACTIONS.has(action)) {
+    try {
+      const effectivePeiaDb =
+        peiaQueueDatabase ?? createProductionPeiaTaskQueueDatabase();
+
+      if (action === 'requestPeiaReview') {
+        await authenticateHumanAdminForPeiaAction(
+          requestContext,
+          [AdminPermission.Edit, AdminPermission.Review],
+          adminRepo
+        );
+
+        const validatedPayload = assertStrictAllowedCallerKeys(
+          requestContext.data,
+          REQUEST_PEIA_REVIEW_ALLOWED_KEYS,
+          'requestPeiaReview'
+        );
+        const newsId = validateStrictSingleLineId(validatedPayload.id, 'id');
+        const expectedUpdatedAt = validateStrictIsoTimestamp(
+          validatedPayload.expectedUpdatedAt,
+          'expectedUpdatedAt'
+        );
+
+        const item = await newsService.getById(newsId);
+        if (!item) {
+          throw new HttpsError(
+            'not-found',
+            `NOT_FOUND: News item ${newsId} not found`
+          );
+        }
+
+        if (item.updatedAt !== expectedUpdatedAt) {
+          throw new HttpsError(
+            'failed-precondition',
+            `STALE_SOURCE_VERSION: News item ${newsId} updatedAt (${item.updatedAt}) does not match expectedUpdatedAt (${expectedUpdatedAt})`
+          );
+        }
+
+        const snapshotInput = extractAuthoritativeNewsSnapshotInput(item);
+        const guardedDb = createSourceVersionGuardedPeiaDatabase(
+          effectivePeiaDb,
+          newsService,
+          newsId,
+          expectedUpdatedAt,
+          snapshotInput
+        );
+        const guardedQueueService = new FirestorePeiaTaskQueueService(
+          guardedDb,
+          peiaQueueServiceOptions
+        );
+
+        const enqueueResult =
+          await guardedQueueService.enqueueNewsTask(snapshotInput);
+
+        const latestItemAfterEnqueue = await newsService.getById(newsId);
+        const currentUpdatedAt = latestItemAfterEnqueue
+          ? latestItemAfterEnqueue.updatedAt
+          : item.updatedAt;
+
+        const readQueueService = new FirestorePeiaTaskQueueService(
+          effectivePeiaDb,
+          peiaQueueServiceOptions
+        );
+        const reconciled = await readQueueService.reconcileTaskStatus({
+          taskId: enqueueResult.task.taskId,
+          targetType: AIReviewTargetType.News,
+          targetId: newsId,
+          currentSourceUpdatedAt: currentUpdatedAt,
+        });
+
+        const reviewStatus = toSanitizedNewsPeiaReviewStatusDto(
+          reconciled,
+          currentUpdatedAt
+        );
+
+        const response: RequestNewsPeiaReviewResponseDto = Object.freeze({
+          disposition: enqueueResult.disposition,
+          documentId: enqueueResult.documentId,
+          taskId: enqueueResult.task.taskId,
+          task: enqueueResult.task,
+          status: reviewStatus.status,
+          isStale: reviewStatus.isStale,
+          advisoryResult: reviewStatus.advisoryResult,
+          nonAdvisoryOutcome: reviewStatus.nonAdvisoryOutcome,
+          reviewStatus,
+        });
+
+        return response;
+      }
+
+      if (action === 'getPeiaReviewStatus') {
+        await authenticateHumanAdminForPeiaAction(
+          requestContext,
+          [AdminPermission.View, AdminPermission.Review],
+          adminRepo
+        );
+
+        const validatedPayload = assertStrictAllowedCallerKeys(
+          requestContext.data,
+          GET_PEIA_REVIEW_STATUS_ALLOWED_KEYS,
+          'getPeiaReviewStatus'
+        );
+        const newsId = validateStrictSingleLineId(validatedPayload.id, 'id');
+
+        const hasExplicitTaskId =
+          Object.prototype.hasOwnProperty.call(validatedPayload, 'taskId') &&
+          validatedPayload.taskId !== undefined;
+        const explicitTaskId = hasExplicitTaskId
+          ? validateStrictSingleLineId(validatedPayload.taskId, 'taskId')
+          : undefined;
+
+        const item = await newsService.getById(newsId);
+        if (!item) {
+          throw new HttpsError(
+            'not-found',
+            `NOT_FOUND: News item ${newsId} not found`
+          );
+        }
+
+        const currentVersionTaskId = derivePeiaTaskId({
+          targetType: AIReviewTargetType.News,
+          targetId: item.id,
+          sourceUpdatedAt: item.updatedAt,
+        });
+        const resolvedTaskId = explicitTaskId ?? currentVersionTaskId;
+
+        const readQueueService = new FirestorePeiaTaskQueueService(
+          effectivePeiaDb,
+          peiaQueueServiceOptions
+        );
+        const reconciled = await readQueueService.reconcileTaskStatus({
+          taskId: resolvedTaskId,
+          targetType: AIReviewTargetType.News,
+          targetId: item.id,
+          currentSourceUpdatedAt: item.updatedAt,
+        });
+
+        // Cross-item / foreign taskId isolation: an explicit taskId that differs from
+        // the current version's deterministic taskId MUST correspond to a stored task
+        // for this exact News item; if no such task exists, fail closed.
+        if (
+          explicitTaskId !== undefined &&
+          explicitTaskId !== currentVersionTaskId &&
+          reconciled.status === 'NotRequested'
+        ) {
+          throw new HttpsError(
+            'failed-precondition',
+            `CROSS_ITEM_OR_UNKNOWN_TASK_ID: Task '${explicitTaskId}' does not exist for News item '${item.id}'`
+          );
+        }
+
+        const reviewStatus = toSanitizedNewsPeiaReviewStatusDto(
+          reconciled,
+          item.updatedAt
+        );
+
+        return Object.freeze({
+          ...reviewStatus,
+          reviewStatus,
+        });
+      }
+    } catch (err: unknown) {
+      throw mapPeiaTaskQueueErrorToHttpsError(err);
+    }
   }
 
   if (EDITORIAL_IMAGE_RIGHTS_ACTIONS.has(action)) {
