@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { 
   BookOpen, 
@@ -21,9 +21,14 @@ import {
   X
 } from 'lucide-react';
 import type { AdminUser } from '../../types/admin';
+import {
+  AdminDomain,
+  AdminPermission,
+  AdminRole,
+  hasDomainResponsibility,
+} from '../../types/admin';
 import { WorkflowState } from '../../types/workflow';
 import { AdminAccessService } from '../../services/adminAccess';
-import { AdminPermission } from '../../types/admin';
 import { 
   LibraryDocumentType, 
   LibraryRightsStatus 
@@ -35,29 +40,466 @@ import type {
 } from '../../types/library';
 import { 
   LibraryIntakeStatus,
-  LibraryIntakeAIInputBasis,
   type LibraryIntakeRecord 
 } from '../../../functions/src/shared/libraryContract';
 import { LibraryDocumentEditorModal } from './LibraryDocumentEditorModal';
-import { LibraryAdminClient } from '../../services/libraryAdminClient';
+import {
+  LibraryAdminClient,
+  AITaskStatus,
+  PEIALibraryPreparationInputBasis,
+  type SanitizedLibraryIntakePeiaPreparationStatusDto,
+  type GetLibraryIntakePeiaPreparationStatusResponseDto,
+  type RequestLibraryIntakePeiaPreparationResponseDto,
+  type PeiaTaskEnqueueDisposition,
+} from '../../services/libraryAdminClient';
 
-interface AdminLibraryManagementProps {
-  currentUser: AdminUser;
+const LIBRARY_INTAKE_PEIA_REQUIRED_ANY_PERMISSIONS: readonly AdminPermission[] = Object.freeze([
+  AdminPermission.Create,
+  AdminPermission.Edit,
+  AdminPermission.Review,
+  AdminPermission.Approve,
+  AdminPermission.ManageRights,
+]);
+
+/**
+ * Canonical role & permission check for Library Intake PEIA preparation actions.
+ * Matches server-side `requireLibraryEditorialCurationAccess` in `libraryAdminHandlers.ts`:
+ * - Active human admin (`isActive === true` and `role !== AdminRole.AIAssistant`)
+ * - Library domain responsibility (`Owner`, `LibraryCurator`) or narrow `RightsReviewer` exception
+ * - At least one of `Create`, `Edit`, `Review`, `Approve`, `ManageRights`
+ */
+export function canAccessLibraryIntakePeiaPreparation(
+  user: AdminUser | null | undefined
+): boolean {
+  if (!user || user.isActive !== true) {
+    return false;
+  }
+  if (user.role === AdminRole.AIAssistant) {
+    return false;
+  }
+  const hasLibraryDomainAccess =
+    hasDomainResponsibility(user.role, AdminDomain.Library) ||
+    user.role === AdminRole.RightsReviewer;
+  if (!hasLibraryDomainAccess) {
+    return false;
+  }
+  return LIBRARY_INTAKE_PEIA_REQUIRED_ANY_PERMISSIONS.some((perm) =>
+    AdminAccessService.hasPermission(user, perm)
+  );
 }
 
-export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementProps) {
-  const { i18n } = useTranslation();
-  const isAr = i18n.language === 'ar';
+/**
+ * Checks whether the current user can request a new PEIA preparation task for a specific intake record.
+ * Rejected intake records are not eligible for PEIA task queueing.
+ */
+export function canRequestLibraryIntakePeiaForRecord(
+  user: AdminUser | null | undefined,
+  record: Pick<LibraryIntakeRecord, 'status'> | null | undefined
+): boolean {
+  if (!canAccessLibraryIntakePeiaPreparation(user)) {
+    return false;
+  }
+  if (!record || record.status === LibraryIntakeStatus.Rejected) {
+    return false;
+  }
+  return true;
+}
 
-  const [documents, setDocuments] = useState<LibraryDocument[]>([]);
-  const [organizations, setOrganizations] = useState<LibraryOrganization[]>([]);
-  const [sources, setSources] = useState<LibrarySource[]>([]);
-  const [intakeRecords, setIntakeRecords] = useState<LibraryIntakeRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+export interface LibraryIntakePeiaVersionMismatchNotice {
+  readonly previousUpdatedAt: string;
+  readonly refreshedUpdatedAt: string;
+}
+
+export interface LibraryIntakePeiaModalSnapshot {
+  readonly activeIntake: LibraryIntakeRecord | null;
+  readonly peiaStatus: SanitizedLibraryIntakePeiaPreparationStatusDto | null;
+  readonly loadingStatus: boolean;
+  readonly requestingPrep: boolean;
+  readonly peiaError: string | null;
+  readonly lastEnqueueDisposition: PeiaTaskEnqueueDisposition | null;
+  readonly versionMismatchNotice: LibraryIntakePeiaVersionMismatchNotice | null;
+  readonly sessionToken: number;
+}
+
+export function createInitialLibraryIntakePeiaModalSnapshot(
+  sessionToken = 0
+): LibraryIntakePeiaModalSnapshot {
+  return {
+    activeIntake: null,
+    peiaStatus: null,
+    loadingStatus: false,
+    requestingPrep: false,
+    peiaError: null,
+    lastEnqueueDisposition: null,
+    versionMismatchNotice: null,
+    sessionToken,
+  };
+}
+
+export interface LibraryIntakePeiaClientDeps {
+  readonly getIntakeById: (id: string) => Promise<LibraryIntakeRecord | null>;
+  readonly getIntakePeiaPreparationStatus: (
+    intakeId: string,
+    taskId?: string
+  ) => Promise<GetLibraryIntakePeiaPreparationStatusResponseDto>;
+  readonly requestIntakePeiaPreparation: (
+    intakeId: string,
+    expectedUpdatedAt: string
+  ) => Promise<RequestLibraryIntakePeiaPreparationResponseDto>;
+  readonly onIntakeRecordRefreshed?: (record: LibraryIntakeRecord) => void;
+}
+
+/**
+ * Deterministic state & async workflow controller for the Library Intake PEIA Preparation modal.
+ * Enforces:
+ * - Status-only read on modal open (never enqueues or calls Gemini on open)
+ * - Session-token isolation against late responses when switching records or closing the modal
+ * - Duplicate-click prevention while `requestingPrep` is in flight
+ * - Authoritative `getIntakeById` check before `requestIntakePeiaPreparation`
+ * - Fail-closed version-mismatch pause when `refreshedRecord.updatedAt !== displayedRecord.updatedAt`
+ * - Preservation of server errors without automatic retry or editorial status mutation
+ */
+export class LibraryIntakePeiaPreparationController {
+  private currentUser: AdminUser;
+  private deps: LibraryIntakePeiaClientDeps;
+  private state: LibraryIntakePeiaModalSnapshot;
+  private listeners: Set<(snapshot: LibraryIntakePeiaModalSnapshot) => void> = new Set();
+
+  constructor(
+    currentUser: AdminUser,
+    deps?: Partial<LibraryIntakePeiaClientDeps>,
+    initialState?: Partial<LibraryIntakePeiaModalSnapshot>
+  ) {
+    this.currentUser = currentUser;
+    this.deps = {
+      getIntakeById: deps?.getIntakeById ?? ((id) => LibraryAdminClient.getIntakeById(id)),
+      getIntakePeiaPreparationStatus:
+        deps?.getIntakePeiaPreparationStatus ??
+        ((intakeId, taskId) => LibraryAdminClient.getIntakePeiaPreparationStatus(intakeId, taskId)),
+      requestIntakePeiaPreparation:
+        deps?.requestIntakePeiaPreparation ??
+        ((intakeId, expectedUpdatedAt) =>
+          LibraryAdminClient.requestIntakePeiaPreparation(intakeId, expectedUpdatedAt)),
+      onIntakeRecordRefreshed: deps?.onIntakeRecordRefreshed,
+    };
+    this.state = {
+      ...createInitialLibraryIntakePeiaModalSnapshot(initialState?.sessionToken ?? 0),
+      ...initialState,
+    };
+  }
+
+  public getSnapshot(): LibraryIntakePeiaModalSnapshot {
+    return this.state;
+  }
+
+  public setCurrentUser(user: AdminUser): void {
+    this.currentUser = user;
+  }
+
+  public subscribe(listener: (snapshot: LibraryIntakePeiaModalSnapshot) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private setState(patch: Partial<LibraryIntakePeiaModalSnapshot>): void {
+    this.state = {
+      ...this.state,
+      ...patch,
+    };
+    for (const listener of this.listeners) {
+      listener(this.state);
+    }
+  }
+
+  public async openModal(intake: LibraryIntakeRecord): Promise<void> {
+    if (!canAccessLibraryIntakePeiaPreparation(this.currentUser)) {
+      return;
+    }
+
+    const nextToken = this.state.sessionToken + 1;
+    const targetIntakeId = intake.id;
+
+    this.setState({
+      activeIntake: intake,
+      peiaStatus: null,
+      loadingStatus: true,
+      requestingPrep: false,
+      peiaError: null,
+      lastEnqueueDisposition: null,
+      versionMismatchNotice: null,
+      sessionToken: nextToken,
+    });
+
+    try {
+      const res = await this.deps.getIntakePeiaPreparationStatus(targetIntakeId);
+      if (
+        this.state.sessionToken !== nextToken ||
+        !this.state.activeIntake ||
+        this.state.activeIntake.id !== targetIntakeId
+      ) {
+        return;
+      }
+      this.setState({
+        peiaStatus: res.preparationStatus,
+        loadingStatus: false,
+        peiaError: null,
+      });
+    } catch (err: any) {
+      if (
+        this.state.sessionToken !== nextToken ||
+        !this.state.activeIntake ||
+        this.state.activeIntake.id !== targetIntakeId
+      ) {
+        return;
+      }
+      this.setState({
+        peiaStatus: null,
+        loadingStatus: false,
+        peiaError:
+          err?.message ||
+          'PEIA_STATUS_FETCH_FAILED: Failed to load PEIA preparation status.',
+      });
+    }
+  }
+
+  public closeModal(): void {
+    const nextToken = this.state.sessionToken + 1;
+    this.setState(createInitialLibraryIntakePeiaModalSnapshot(nextToken));
+  }
+
+  public async refreshStatus(explicitTaskId?: string): Promise<void> {
+    if (!this.state.activeIntake || this.state.loadingStatus || this.state.requestingPrep) {
+      return;
+    }
+    if (!canAccessLibraryIntakePeiaPreparation(this.currentUser)) {
+      this.setState({
+        peiaError:
+          'PERMISSION_DENIED: Current admin role is not authorized to read Library Intake PEIA preparation status.',
+      });
+      return;
+    }
+
+    const activeToken = this.state.sessionToken;
+    const targetIntakeId = this.state.activeIntake.id;
+
+    this.setState({
+      loadingStatus: true,
+      peiaError: null,
+    });
+
+    try {
+      const res = await this.deps.getIntakePeiaPreparationStatus(targetIntakeId, explicitTaskId);
+      if (
+        this.state.sessionToken !== activeToken ||
+        !this.state.activeIntake ||
+        this.state.activeIntake.id !== targetIntakeId
+      ) {
+        return;
+      }
+      this.setState({
+        peiaStatus: res.preparationStatus,
+        loadingStatus: false,
+        peiaError: null,
+      });
+    } catch (err: any) {
+      if (
+        this.state.sessionToken !== activeToken ||
+        !this.state.activeIntake ||
+        this.state.activeIntake.id !== targetIntakeId
+      ) {
+        return;
+      }
+      this.setState({
+        loadingStatus: false,
+        peiaError:
+          err?.message ||
+          'PEIA_STATUS_FETCH_FAILED: Failed to refresh PEIA preparation status.',
+      });
+    }
+  }
+
+  public async requestPreparation(): Promise<void> {
+    if (!this.state.activeIntake || this.state.requestingPrep) {
+      return;
+    }
+
+    if (!canAccessLibraryIntakePeiaPreparation(this.currentUser)) {
+      this.setState({
+        peiaError:
+          'PERMISSION_DENIED: Current admin role is not authorized to request Library Intake PEIA preparation.',
+      });
+      return;
+    }
+
+    if (this.state.activeIntake.status === LibraryIntakeStatus.Rejected) {
+      this.setState({
+        peiaError:
+          'REJECTED_INTAKE_NOT_ELIGIBLE: Rejected intake records cannot be queued for PEIA preparation.',
+      });
+      return;
+    }
+
+    const activeToken = this.state.sessionToken;
+    const displayedRecord = this.state.activeIntake;
+    const targetIntakeId = displayedRecord.id;
+    const displayedUpdatedAt = displayedRecord.updatedAt;
+
+    this.setState({
+      requestingPrep: true,
+      peiaError: null,
+      lastEnqueueDisposition: null,
+      versionMismatchNotice: null,
+    });
+
+    try {
+      const refreshedRecord = await this.deps.getIntakeById(targetIntakeId);
+      if (
+        this.state.sessionToken !== activeToken ||
+        !this.state.activeIntake ||
+        this.state.activeIntake.id !== targetIntakeId
+      ) {
+        return;
+      }
+
+      if (!refreshedRecord) {
+        this.setState({
+          requestingPrep: false,
+          peiaError: `NOT_FOUND: Library intake record '${targetIntakeId}' no longer exists.`,
+        });
+        return;
+      }
+
+      this.deps.onIntakeRecordRefreshed?.(refreshedRecord);
+
+      if (refreshedRecord.status === LibraryIntakeStatus.Rejected) {
+        this.setState({
+          activeIntake: refreshedRecord,
+          requestingPrep: false,
+          peiaError:
+            'REJECTED_INTAKE_NOT_ELIGIBLE: Intake record status is Rejected and cannot be queued for PEIA preparation.',
+        });
+        return;
+      }
+
+      if (refreshedRecord.updatedAt !== displayedUpdatedAt) {
+        this.setState({
+          activeIntake: refreshedRecord,
+          requestingPrep: false,
+          loadingStatus: true,
+          versionMismatchNotice: {
+            previousUpdatedAt: displayedUpdatedAt,
+            refreshedUpdatedAt: refreshedRecord.updatedAt,
+          },
+        });
+
+        try {
+          const latestStatusRes = await this.deps.getIntakePeiaPreparationStatus(targetIntakeId);
+          if (
+            this.state.sessionToken !== activeToken ||
+            !this.state.activeIntake ||
+            this.state.activeIntake.id !== targetIntakeId
+          ) {
+            return;
+          }
+          this.setState({
+            peiaStatus: latestStatusRes.preparationStatus,
+            loadingStatus: false,
+          });
+        } catch (statusErr: any) {
+          if (
+            this.state.sessionToken !== activeToken ||
+            !this.state.activeIntake ||
+            this.state.activeIntake.id !== targetIntakeId
+          ) {
+            return;
+          }
+          this.setState({
+            peiaStatus: null,
+            loadingStatus: false,
+            peiaError:
+              statusErr?.message ||
+              'PEIA_STATUS_FETCH_FAILED: Failed to load PEIA status for refreshed intake version.',
+          });
+        }
+        return;
+      }
+
+      const enqueueRes = await this.deps.requestIntakePeiaPreparation(
+        refreshedRecord.id,
+        refreshedRecord.updatedAt
+      );
+
+      if (
+        this.state.sessionToken !== activeToken ||
+        !this.state.activeIntake ||
+        this.state.activeIntake.id !== targetIntakeId
+      ) {
+        return;
+      }
+
+      this.setState({
+        activeIntake: refreshedRecord,
+        peiaStatus: enqueueRes.preparationStatus,
+        lastEnqueueDisposition: enqueueRes.disposition,
+        requestingPrep: false,
+        peiaError: null,
+        versionMismatchNotice: null,
+      });
+    } catch (err: any) {
+      if (
+        this.state.sessionToken !== activeToken ||
+        !this.state.activeIntake ||
+        this.state.activeIntake.id !== targetIntakeId
+      ) {
+        return;
+      }
+      this.setState({
+        requestingPrep: false,
+        peiaError:
+          err?.message ||
+          'PEIA_REQUEST_FAILED: Failed to request PEIA preparation.',
+      });
+    }
+  }
+}
+
+export interface AdminLibraryManagementProps {
+  currentUser: AdminUser;
+  initialTab?: 'documents' | 'organizations' | 'sources' | 'intake';
+  initialIntakeRecords?: LibraryIntakeRecord[];
+  initialOrganizations?: LibraryOrganization[];
+  initialSources?: LibrarySource[];
+  initialDocuments?: LibraryDocument[];
+  initialLoading?: boolean;
+  initialPeiaModalState?: Partial<LibraryIntakePeiaModalSnapshot>;
+  languageOverride?: 'ar' | 'en';
+}
+
+export function AdminLibraryManagement({
+  currentUser,
+  initialTab = 'documents',
+  initialIntakeRecords = [],
+  initialOrganizations = [],
+  initialSources = [],
+  initialDocuments = [],
+  initialLoading = true,
+  initialPeiaModalState,
+  languageOverride,
+}: AdminLibraryManagementProps) {
+  const { i18n } = useTranslation();
+  const isAr = (languageOverride ?? i18n.language) === 'ar';
+
+  const [documents, setDocuments] = useState<LibraryDocument[]>(initialDocuments);
+  const [organizations, setOrganizations] = useState<LibraryOrganization[]>(initialOrganizations);
+  const [sources, setSources] = useState<LibrarySource[]>(initialSources);
+  const [intakeRecords, setIntakeRecords] = useState<LibraryIntakeRecord[]>(initialIntakeRecords);
+  const [loading, setLoading] = useState(initialLoading);
   const [error, setError] = useState<string | null>(null);
 
   // Tab View State: 'documents' | 'organizations' | 'sources' | 'intake'
-  const [activeTab, setActiveTab] = useState<'documents' | 'organizations' | 'sources' | 'intake'>('documents');
+  const [activeTab, setActiveTab] = useState<'documents' | 'organizations' | 'sources' | 'intake'>(initialTab);
 
   // Filter States for Documents
   const [searchQuery, setSearchQuery] = useState('');
@@ -114,11 +556,43 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
   const [submittingReview, setSubmittingReview] = useState(false);
   const [reviewModalError, setReviewModalError] = useState<string | null>(null);
 
-  // Modal State for Human-Triggered AI Preparation Assistant
-  const [aiPrepIntake, setAiPrepIntake] = useState<LibraryIntakeRecord | null>(null);
-  const [aiPrepExcerpt, setAiPrepExcerpt] = useState('');
-  const [generatingAiPrep, setGeneratingAiPrep] = useState(false);
-  const [aiPrepError, setAiPrepError] = useState<string | null>(null);
+  // Reused Modal State for Canonical PEIA Intake Preparation Assistant
+  const [peiaModalState, setPeiaModalState] = useState<LibraryIntakePeiaModalSnapshot>(() => ({
+    ...createInitialLibraryIntakePeiaModalSnapshot(initialPeiaModalState?.sessionToken ?? 0),
+    ...initialPeiaModalState,
+  }));
+
+  const peiaControllerRef = useRef<LibraryIntakePeiaPreparationController | null>(null);
+  if (!peiaControllerRef.current) {
+    peiaControllerRef.current = new LibraryIntakePeiaPreparationController(
+      currentUser,
+      {
+        onIntakeRecordRefreshed: (refreshedRecord) => {
+          setIntakeRecords((prev) =>
+            prev.map((item) => (item.id === refreshedRecord.id ? refreshedRecord : item))
+          );
+        },
+      },
+      initialPeiaModalState
+    );
+  }
+  peiaControllerRef.current.setCurrentUser(currentUser);
+
+  useEffect(() => {
+    const controller = peiaControllerRef.current;
+    if (!controller) return;
+    return controller.subscribe((snapshot) => {
+      setPeiaModalState(snapshot);
+    });
+  }, []);
+
+  const aiPrepIntake = peiaModalState.activeIntake;
+  const peiaStatus = peiaModalState.peiaStatus;
+  const loadingPeiaStatus = peiaModalState.loadingStatus;
+  const requestingPeiaPrep = peiaModalState.requestingPrep;
+  const aiPrepError = peiaModalState.peiaError;
+  const lastPeiaDisposition = peiaModalState.lastEnqueueDisposition;
+  const peiaVersionMismatchNotice = peiaModalState.versionMismatchNotice;
 
   // Registry Action Feedback State
   const [submittingRegistry, setSubmittingRegistry] = useState(false);
@@ -133,7 +607,7 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
   const canRegisterRegistry = canCreate || canManageRights;
   const canSubmitIntake = canCreate || canEdit;
   const canReviewIntake = canReview || canApprove || canManageRights;
-  const canPrepareAiIntake = canCreate || canEdit || canReview || canApprove || canManageRights;
+  const canPrepareAiIntake = canAccessLibraryIntakePeiaPreparation(currentUser);
 
   const loadAllData = useCallback(async () => {
     setLoading(true);
@@ -535,23 +1009,20 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
     }
   };
 
-  const handleGenerateAiSuggestions = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!aiPrepIntake) return;
-    setGeneratingAiPrep(true);
-    setAiPrepError(null);
-    try {
-      const updatedRecord = await LibraryAdminClient.generateIntakeAISuggestions(
-        aiPrepIntake.id,
-        aiPrepExcerpt.trim() || undefined
-      );
-      setAiPrepIntake(updatedRecord);
-      await loadAllData();
-    } catch (err: any) {
-      setAiPrepError(err.message || (isAr ? 'تعذر توليد مقترحات الذكاء الاصطناعي' : 'Failed to generate AI preparation suggestions'));
-    } finally {
-      setGeneratingAiPrep(false);
-    }
+  const handleOpenPeiaPreparationModal = async (intake: LibraryIntakeRecord) => {
+    await peiaControllerRef.current?.openModal(intake);
+  };
+
+  const handleClosePeiaPreparationModal = () => {
+    peiaControllerRef.current?.closeModal();
+  };
+
+  const handleRefreshPeiaPreparationStatus = async () => {
+    await peiaControllerRef.current?.refreshStatus();
+  };
+
+  const handleRequestPeiaPreparation = async () => {
+    await peiaControllerRef.current?.requestPreparation();
   };
 
   const getIntakeStatusBadge = (status: LibraryIntakeStatus) => {
@@ -1456,57 +1927,207 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
                 </p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-right rtl:text-right ltr:text-left border-collapse">
-                  <thead>
-                    <tr className="bg-gray-50 dark:bg-gray-800/80 border-b border-gray-200 dark:border-gray-800 text-[11px] font-extrabold text-gray-500 uppercase tracking-wider">
-                      <th className="p-3.5 sm:p-4">{isAr ? 'عنوان المرجع والرابط المؤمن' : 'Reference Title & HTTPS URL'}</th>
-                      <th className="p-3.5 sm:p-4">{isAr ? 'الجهة / المصدر المرتبط' : 'Linked Organization / Source'}</th>
-                      <th className="p-3.5 sm:p-4">{isAr ? 'اللغة والملاحظات' : 'Language & Notes'}</th>
-                      <th className="p-3.5 sm:p-4">{isAr ? 'حالة المراجعة' : 'Intake Status'}</th>
-                      <th className="p-3.5 sm:p-4">{isAr ? 'تتبع الإيداع والتدقيق' : 'Submission & Review Audit'}</th>
-                      {(canReviewIntake || canPrepareAiIntake) && (
-                        <th className="p-3.5 sm:p-4 text-center">{isAr ? 'إجراءات التحضير والمراجعة' : 'Preparation & Review Actions'}</th>
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200 dark:divide-gray-800 text-xs sm:text-sm">
-                    {filteredIntakeRecords.map((rec) => (
-                      <tr key={rec.id} className="hover:bg-gray-50/80 dark:hover:bg-gray-800/40 transition-colors">
-                        <td className="p-3.5 sm:p-4 max-w-xs">
-                          <div className="font-extrabold text-gray-900 dark:text-gray-100">{rec.title}</div>
-                          <a
-                            href={rec.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400 hover:underline font-bold text-xs mt-1 break-all"
-                          >
-                            <ExternalLink className="h-3 w-3 shrink-0" />
-                            <span className="truncate max-w-[240px]">{rec.normalizedUrl}</span>
-                          </a>
-                          <div className="text-[10px] text-gray-400 font-mono mt-0.5">{rec.id}</div>
-                        </td>
+              <div>
+                {/* Desktop Table View (>= lg) */}
+                <div className="hidden lg:block overflow-x-auto" data-testid="intake-desktop-table">
+                  <table className="w-full text-right rtl:text-right ltr:text-left border-collapse">
+                    <thead>
+                      <tr className="bg-gray-50 dark:bg-gray-800/80 border-b border-gray-200 dark:border-gray-800 text-[11px] font-extrabold text-gray-500 uppercase tracking-wider">
+                        <th className="p-3.5 sm:p-4">{isAr ? 'عنوان المرجع والرابط المؤمن' : 'Reference Title & HTTPS URL'}</th>
+                        <th className="p-3.5 sm:p-4">{isAr ? 'الجهة / المصدر المرتبط' : 'Linked Organization / Source'}</th>
+                        <th className="p-3.5 sm:p-4">{isAr ? 'اللغة والملاحظات' : 'Language & Notes'}</th>
+                        <th className="p-3.5 sm:p-4">{isAr ? 'حالة المراجعة' : 'Intake Status'}</th>
+                        <th className="p-3.5 sm:p-4">{isAr ? 'تتبع الإيداع والتدقيق' : 'Submission & Review Audit'}</th>
+                        {(canReviewIntake || canPrepareAiIntake) && (
+                          <th className="p-3.5 sm:p-4 text-center">{isAr ? 'إجراءات التحضير والمراجعة' : 'Preparation & Review Actions'}</th>
+                        )}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 dark:divide-gray-800 text-xs sm:text-sm">
+                      {filteredIntakeRecords.map((rec) => (
+                        <tr key={rec.id} className="hover:bg-gray-50/80 dark:hover:bg-gray-800/40 transition-colors">
+                          <td className="p-3.5 sm:p-4 max-w-xs">
+                            <div className="font-extrabold text-gray-900 dark:text-gray-100">{rec.title}</div>
+                            <a
+                              href={rec.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400 hover:underline font-bold text-xs mt-1 break-all"
+                            >
+                              <ExternalLink className="h-3 w-3 shrink-0" />
+                              <span className="truncate max-w-[240px]">{rec.normalizedUrl}</span>
+                            </a>
+                            <div className="text-[10px] text-gray-400 font-mono mt-0.5">{rec.id}</div>
+                          </td>
 
-                        <td className="p-3.5 sm:p-4">
-                          <div className="space-y-1 text-xs">
-                            {rec.organizationId ? (
-                              <div className="font-bold text-gray-800 dark:text-gray-200 flex items-center gap-1">
-                                <Building2 className="h-3.5 w-3.5 text-blue-600 shrink-0" />
-                                <span>{getOrganizationName(rec.organizationId)}</span>
-                              </div>
-                            ) : (
-                              <span className="text-gray-400 italic block">{isAr ? 'بدون مؤسسة مرتبطة' : 'No organization'}</span>
+                          <td className="p-3.5 sm:p-4">
+                            <div className="space-y-1 text-xs">
+                              {rec.organizationId ? (
+                                <div className="font-bold text-gray-800 dark:text-gray-200 flex items-center gap-1">
+                                  <Building2 className="h-3.5 w-3.5 text-blue-600 shrink-0" />
+                                  <span>{getOrganizationName(rec.organizationId)}</span>
+                                </div>
+                              ) : (
+                                <span className="text-gray-400 italic block">{isAr ? 'بدون مؤسسة مرتبطة' : 'No organization'}</span>
+                              )}
+                              {rec.sourceId && (
+                                <div className="text-gray-600 dark:text-gray-400 flex items-center gap-1 text-[11px]">
+                                  <Database className="h-3 w-3 text-teal-600 shrink-0" />
+                                  <span>{getSourceName(rec.sourceId)}</span>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+
+                          <td className="p-3.5 sm:p-4 max-w-xs">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold text-[11px] uppercase">
+                                {rec.language}
+                              </span>
+                              {rec.aiSuggestion && (
+                                <span className="px-2 py-0.5 rounded-md bg-purple-100 dark:bg-purple-950/70 text-purple-800 dark:text-purple-300 border border-purple-300 dark:border-purple-800 font-extrabold text-[10px] inline-flex items-center gap-1">
+                                  <Sparkles className="h-2.5 w-2.5" />
+                                  <span>{isAr ? 'مقترحات آلية (غير موثقة)' : 'AI Suggestions (Unverified)'}</span>
+                                </span>
+                              )}
+                            </div>
+                            {rec.notes && (
+                              <p className="text-xs text-gray-600 dark:text-gray-400 mt-1.5 line-clamp-2">
+                                {rec.notes}
+                              </p>
                             )}
-                            {rec.sourceId && (
-                              <div className="text-gray-600 dark:text-gray-400 flex items-center gap-1 text-[11px]">
-                                <Database className="h-3 w-3 text-teal-600 shrink-0" />
-                                <span>{getSourceName(rec.sourceId)}</span>
+                            {rec.reviewNotes && (
+                              <div className="mt-1.5 p-2 rounded-lg bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-800/60 text-[11px] text-amber-900 dark:text-amber-300">
+                                <span className="font-extrabold">{isAr ? 'ملاحظة المراجع: ' : 'Review Note: '}</span>
+                                {rec.reviewNotes}
                               </div>
                             )}
+                          </td>
+
+                          <td className="p-3.5 sm:p-4 whitespace-nowrap">
+                            {getIntakeStatusBadge(rec.status)}
+                          </td>
+
+                          <td className="p-3.5 sm:p-4 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap space-y-1">
+                            <div>
+                              <span className="font-bold text-gray-700 dark:text-gray-300">{isAr ? 'أودع بواسطة: ' : 'Submitted by: '}</span>
+                              <span>{rec.submittedByAdminName}</span>
+                            </div>
+                            <div className="text-[11px] text-gray-400">
+                              {new Date(rec.createdAt).toLocaleDateString(isAr ? 'ar-EG' : 'en-US')}
+                            </div>
+                            {rec.reviewedByAdminName && (
+                              <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-semibold">
+                                {isAr ? `تحديث: ${rec.reviewedByAdminName}` : `Reviewed: ${rec.reviewedByAdminName}`}
+                              </div>
+                            )}
+                          </td>
+
+                          {(canReviewIntake || canPrepareAiIntake) && (
+                            <td className="p-3.5 sm:p-4 whitespace-nowrap text-center">
+                              <div className="flex flex-col sm:flex-row items-center justify-center gap-1.5">
+                                {canPrepareAiIntake && (
+                                  <button
+                                    type="button"
+                                    data-testid={`intake-peia-prep-action-${rec.id}`}
+                                    onClick={() => {
+                                      void handleOpenPeiaPreparationModal(rec);
+                                    }}
+                                    className="px-3 py-1.5 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-800 dark:bg-purple-950/80 dark:text-purple-300 text-xs font-extrabold transition-all border border-purple-200 dark:border-purple-800 cursor-pointer inline-flex items-center gap-1"
+                                  >
+                                    <Sparkles className="h-3.5 w-3.5" />
+                                    <span>{isAr ? 'تحضير ومراجعة PEIA الاسترشادية' : 'PEIA Preparation Assistant'}</span>
+                                  </button>
+                                )}
+                                {canReviewIntake && (
+                                  <button
+                                    type="button"
+                                    data-testid={`intake-human-review-action-${rec.id}`}
+                                    onClick={() => {
+                                      setReviewingIntake(rec);
+                                      setReviewTargetStatus(rec.status);
+                                      setReviewEditorialNotes(rec.reviewNotes || '');
+                                      setReviewModalError(null);
+                                    }}
+                                    className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 text-xs font-extrabold transition-all border border-indigo-200 dark:border-indigo-800 cursor-pointer inline-flex items-center gap-1"
+                                  >
+                                    <Edit3 className="h-3.5 w-3.5" />
+                                    <span>{isAr ? 'تحديث الحالة' : 'Review Status'}</span>
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Mobile / Narrow Viewport Card View (< lg) */}
+                <div className="block lg:hidden divide-y divide-gray-200 dark:divide-gray-800" data-testid="intake-mobile-cards">
+                  {filteredIntakeRecords.map((rec) => (
+                    <div
+                      key={rec.id}
+                      data-testid={`intake-mobile-card-${rec.id}`}
+                      className="p-4 space-y-3.5 bg-white dark:bg-gray-900 transition-colors"
+                    >
+                      {/* Header: Title and Status Badge */}
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <h4 className="font-extrabold text-sm text-gray-900 dark:text-gray-100 break-words">
+                            {rec.title}
+                          </h4>
+                          <div className="text-[10px] text-gray-400 font-mono mt-0.5">
+                            {rec.id}
                           </div>
-                        </td>
+                        </div>
+                        <div className="shrink-0 self-start">
+                          {getIntakeStatusBadge(rec.status)}
+                        </div>
+                      </div>
 
-                        <td className="p-3.5 sm:p-4 max-w-xs">
+                      {/* Reference URL */}
+                      <div>
+                        <a
+                          href={rec.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 hover:underline font-bold text-xs break-all"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                          <span>{rec.normalizedUrl}</span>
+                        </a>
+                      </div>
+
+                      {/* Metadata Grid: Organization, Source, Language, Legacy AI */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs pt-1">
+                        {/* Linked Organization & Source */}
+                        <div className="space-y-1">
+                          <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">
+                            {isAr ? 'الجهة / المصدر' : 'Organization / Source'}
+                          </div>
+                          {rec.organizationId ? (
+                            <div className="font-bold text-gray-800 dark:text-gray-200 flex items-center gap-1.5 break-words">
+                              <Building2 className="h-3.5 w-3.5 text-blue-600 shrink-0" />
+                              <span>{getOrganizationName(rec.organizationId)}</span>
+                            </div>
+                          ) : (
+                            <span className="text-gray-400 italic block">{isAr ? 'بدون مؤسسة مرتبطة' : 'No organization'}</span>
+                          )}
+                          {rec.sourceId && (
+                            <div className="text-gray-600 dark:text-gray-400 flex items-center gap-1.5 text-[11px] break-words">
+                              <Database className="h-3 w-3 text-teal-600 shrink-0" />
+                              <span>{getSourceName(rec.sourceId)}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Language & Badges */}
+                        <div className="space-y-1">
+                          <div className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">
+                            {isAr ? 'اللغة والسمات' : 'Language & Traits'}
+                          </div>
                           <div className="flex flex-wrap items-center gap-1.5">
                             <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold text-[11px] uppercase">
                               {rec.language}
@@ -1518,75 +2139,78 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
                               </span>
                             )}
                           </div>
-                          {rec.notes && (
-                            <p className="text-xs text-gray-600 dark:text-gray-400 mt-1.5 line-clamp-2">
-                              {rec.notes}
-                            </p>
-                          )}
-                          {rec.reviewNotes && (
-                            <div className="mt-1.5 p-2 rounded-lg bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-800/60 text-[11px] text-amber-900 dark:text-amber-300">
-                              <span className="font-extrabold">{isAr ? 'ملاحظة المراجع: ' : 'Review Note: '}</span>
-                              {rec.reviewNotes}
-                            </div>
-                          )}
-                        </td>
+                        </div>
+                      </div>
 
-                        <td className="p-3.5 sm:p-4 whitespace-nowrap">
-                          {getIntakeStatusBadge(rec.status)}
-                        </td>
+                      {/* Editorial & Review Notes */}
+                      {rec.notes && (
+                        <div className="text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800/40 p-2.5 rounded-xl border border-gray-100 dark:border-gray-800">
+                          <span className="font-bold text-gray-700 dark:text-gray-300 block mb-0.5">
+                            {isAr ? 'ملاحظات الإيداع:' : 'Submission Notes:'}
+                          </span>
+                          <p className="break-words">{rec.notes}</p>
+                        </div>
+                      )}
 
-                        <td className="p-3.5 sm:p-4 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap space-y-1">
-                          <div>
-                            <span className="font-bold text-gray-700 dark:text-gray-300">{isAr ? 'أودع بواسطة: ' : 'Submitted by: '}</span>
-                            <span>{rec.submittedByAdminName}</span>
+                      {rec.reviewNotes && (
+                        <div className="p-2.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-800/60 text-xs text-amber-900 dark:text-amber-300">
+                          <span className="font-extrabold block mb-0.5">{isAr ? 'ملاحظة المراجع: ' : 'Review Note: '}</span>
+                          <p className="break-words">{rec.reviewNotes}</p>
+                        </div>
+                      )}
+
+                      {/* Submission & Review Audit Footer */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-gray-100 dark:border-gray-800 text-[11px] text-gray-500 dark:text-gray-400">
+                        <div>
+                          <span className="font-bold text-gray-700 dark:text-gray-300">{isAr ? 'أودع بواسطة: ' : 'Submitted by: '}</span>
+                          <span>{rec.submittedByAdminName}</span>
+                          <span className="mx-1.5 text-gray-300 dark:text-gray-700">•</span>
+                          <span>{new Date(rec.createdAt).toLocaleDateString(isAr ? 'ar-EG' : 'en-US')}</span>
+                        </div>
+                        {rec.reviewedByAdminName && (
+                          <div className="text-emerald-700 dark:text-emerald-400 font-semibold">
+                            {isAr ? `تحديث: ${rec.reviewedByAdminName}` : `Reviewed: ${rec.reviewedByAdminName}`}
                           </div>
-                          <div className="text-[11px] text-gray-400">
-                            {new Date(rec.createdAt).toLocaleDateString(isAr ? 'ar-EG' : 'en-US')}
-                          </div>
-                          {rec.reviewedByAdminName && (
-                            <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-semibold">
-                              {isAr ? `تحديث: ${rec.reviewedByAdminName}` : `Reviewed: ${rec.reviewedByAdminName}`}
-                            </div>
-                          )}
-                        </td>
-
-                        {(canReviewIntake || canPrepareAiIntake) && (
-                          <td className="p-3.5 sm:p-4 whitespace-nowrap text-center">
-                            <div className="flex flex-col sm:flex-row items-center justify-center gap-1.5">
-                              {canPrepareAiIntake && (
-                                <button
-                                  onClick={() => {
-                                    setAiPrepIntake(rec);
-                                    setAiPrepExcerpt(rec.suppliedExcerpt || '');
-                                    setAiPrepError(null);
-                                  }}
-                                  className="px-3 py-1.5 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-800 dark:bg-purple-950/80 dark:text-purple-300 text-xs font-extrabold transition-all border border-purple-200 dark:border-purple-800 cursor-pointer inline-flex items-center gap-1"
-                                >
-                                  <Sparkles className="h-3.5 w-3.5" />
-                                  <span>{isAr ? 'إعداد مقترحات الذكاء الاصطناعي' : 'Generate AI Preparation Suggestions'}</span>
-                                </button>
-                              )}
-                              {canReviewIntake && (
-                                <button
-                                  onClick={() => {
-                                    setReviewingIntake(rec);
-                                    setReviewTargetStatus(rec.status);
-                                    setReviewEditorialNotes(rec.reviewNotes || '');
-                                    setReviewModalError(null);
-                                  }}
-                                  className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 text-xs font-extrabold transition-all border border-indigo-200 dark:border-indigo-800 cursor-pointer inline-flex items-center gap-1"
-                                >
-                                  <Edit3 className="h-3.5 w-3.5" />
-                                  <span>{isAr ? 'تحديث الحالة' : 'Review Status'}</span>
-                                </button>
-                              )}
-                            </div>
-                          </td>
                         )}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                      </div>
+
+                      {/* Actions: PEIA Preparation & Human Review */}
+                      {(canReviewIntake || canPrepareAiIntake) && (
+                        <div className="pt-2 flex flex-col sm:flex-row gap-2">
+                          {canPrepareAiIntake && (
+                            <button
+                              type="button"
+                              data-testid={`intake-peia-prep-action-mobile-${rec.id}`}
+                              onClick={() => {
+                                void handleOpenPeiaPreparationModal(rec);
+                              }}
+                              className="w-full sm:w-auto flex-1 justify-center px-3.5 py-2 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-800 dark:bg-purple-950/80 dark:text-purple-300 text-xs font-extrabold transition-all border border-purple-200 dark:border-purple-800 cursor-pointer inline-flex items-center gap-1.5"
+                            >
+                              <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                              <span>{isAr ? 'تحضير ومراجعة PEIA الاسترشادية' : 'PEIA Preparation Assistant'}</span>
+                            </button>
+                          )}
+                          {canReviewIntake && (
+                            <button
+                              type="button"
+                              data-testid={`intake-human-review-action-mobile-${rec.id}`}
+                              onClick={() => {
+                                setReviewingIntake(rec);
+                                setReviewTargetStatus(rec.status);
+                                setReviewEditorialNotes(rec.reviewNotes || '');
+                                setReviewModalError(null);
+                              }}
+                              className="w-full sm:w-auto px-3.5 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 text-xs font-extrabold transition-all border border-indigo-200 dark:border-indigo-800 cursor-pointer inline-flex items-center justify-center gap-1.5"
+                            >
+                              <Edit3 className="h-3.5 w-3.5 shrink-0" />
+                              <span>{isAr ? 'تحديث الحالة' : 'Review Status'}</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -2134,36 +2758,41 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
         </div>
       )}
 
-      {/* ================= HUMAN-TRIGGERED AI PREPARATION ASSISTANT MODAL ================= */}
+      {/* ================= HUMAN-TRIGGERED PEIA PREPARATION ASSISTANT MODAL ================= */}
       {aiPrepIntake && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center border-b border-gray-100 dark:border-gray-800 pb-3">
-              <div className="flex items-center gap-2">
-                <Sparkles className="h-5 w-5 text-purple-600" />
-                <div>
+        <div
+          data-testid="peia-preparation-modal"
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto"
+        >
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl max-w-3xl w-full p-4 sm:p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto text-right rtl:text-right ltr:text-left">
+            <div className="flex justify-between items-center border-b border-gray-100 dark:border-gray-800 pb-3 gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Sparkles className="h-5 w-5 text-purple-600 shrink-0" />
+                <div className="min-w-0">
                   <h3 className="font-extrabold text-sm sm:text-base text-gray-900 dark:text-gray-100">
                     {isAr
-                      ? 'مساعد الإعداد التحريري بالذكاء الاصطناعي (مراجعة بشرية إلزامية)'
-                      : 'Human-Reviewed AI Preparation Assistant'}
+                      ? 'مساعد التحضير الاسترشادي الموحد (PEIA — مراجعة بشرية إلزامية)'
+                      : 'PEIA Unified Intake Preparation Assistant (Mandatory Human Review)'}
                   </h3>
                   <p className="text-[11px] text-gray-500 dark:text-gray-400">
                     {isAr
-                      ? 'توليد مقترحات استرشادية غير موثقة لسجل الاستقبال دون أي ترقية أو نشر تلقائي.'
-                      : 'Generates unverified advisory recommendations for an intake record without automatic promotion or publication.'}
+                      ? 'مخرجات تحضيرية استرشادية غير موثقة لسجل الاستقبال عبر طابور مهام PEIA الموحد دون أي اعتماد أو ترقية أو نشر تلقائي.'
+                      : 'Unverified advisory preparation output via the canonical PEIA task queue without automatic approval, promotion, or publication.'}
                   </p>
                 </div>
               </div>
               <button
-                onClick={() => setAiPrepIntake(null)}
-                className="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 cursor-pointer"
+                type="button"
+                data-testid="peia-modal-close-btn"
+                onClick={handleClosePeiaPreparationModal}
+                className="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 cursor-pointer shrink-0"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            {/* Canonical Intake Summary Box */}
-            <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-800 text-xs space-y-1.5">
+            {/* Canonical Intake Summary & Stored Input Basis Box */}
+            <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-800 text-xs space-y-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-extrabold text-gray-900 dark:text-gray-100">{aiPrepIntake.title}</span>
                 {getIntakeStatusBadge(aiPrepIntake.status)}
@@ -2171,232 +2800,623 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
               <div className="text-emerald-700 dark:text-emerald-400 break-all font-mono text-[11px]">
                 {aiPrepIntake.normalizedUrl}
               </div>
+              <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-gray-500 dark:text-gray-400">
+                <span>ID: {aiPrepIntake.id}</span>
+                <span data-testid="peia-intake-version-timestamp">
+                  {isAr ? `نسخة السجل (updatedAt): ${aiPrepIntake.updatedAt}` : `Record Version (updatedAt): ${aiPrepIntake.updatedAt}`}
+                </span>
+              </div>
               {aiPrepIntake.notes && (
                 <p className="text-gray-600 dark:text-gray-400 text-[11px]">
                   <span className="font-bold">{isAr ? 'ملاحظات الإيداع: ' : 'Intake Notes: '}</span>
                   {aiPrepIntake.notes}
                 </p>
               )}
+
+              {/* Read-Only Canonical Stored Excerpt / Input Basis Explanation */}
+              <div className="pt-2 border-t border-gray-200 dark:border-gray-700/70 space-y-1.5">
+                {typeof aiPrepIntake.suppliedExcerpt === 'string' &&
+                aiPrepIntake.suppliedExcerpt.trim().length > 0 ? (
+                  <div data-testid="peia-canonical-stored-excerpt" className="space-y-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-extrabold text-gray-800 dark:text-gray-200 text-[11px]">
+                        {isAr
+                          ? 'المقتطف النصي المحفوظ في سجل الاستقبال (للقراءة فقط — مصدر لقطة PEIA)'
+                          : 'Canonical Stored Intake Excerpt (Read-Only — PEIA Snapshot Source)'}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md bg-purple-100 dark:bg-purple-950/70 text-purple-800 dark:text-purple-300 font-mono font-bold text-[10px]">
+                        {PEIALibraryPreparationInputBasis.SuppliedExcerptAndMetadata}
+                      </span>
+                    </div>
+                    <p className="p-2.5 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-[11px] leading-relaxed whitespace-pre-wrap">
+                      {aiPrepIntake.suppliedExcerpt.trim()}
+                    </p>
+                  </div>
+                ) : (
+                  <div
+                    data-testid="peia-metadata-only-basis-notice"
+                    className="p-2.5 rounded-lg bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70 text-amber-900 dark:text-amber-200 text-[11px] space-y-1"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-extrabold">
+                        {isAr
+                          ? 'أساس الإدخال القياسي: بيانات وصفية فقط (MetadataOnly)'
+                          : 'Canonical Input Basis: MetadataOnly'}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/70 text-amber-900 dark:text-amber-200 font-mono font-bold text-[10px]">
+                        {PEIALibraryPreparationInputBasis.MetadataOnly}
+                      </span>
+                    </div>
+                    <p className="leading-relaxed">
+                      {isAr
+                        ? 'لا يوجد مقتطف نصي محفوظ في سجل الاستقبال؛ سيعمل تحضير PEIA بوضع البيانات الوصفية فقط (MetadataOnly) ولن يصطنع ملخصاً لوثيقة خارجية لم يُقرأ نصها.'
+                        : 'No stored excerpt exists on this intake record; PEIA preparation runs in MetadataOnly mode and will NOT fabricate a summary of an unread external document.'}
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
 
+            {/* PEIA Controls & Action Bar */}
+            <div className="p-3.5 rounded-xl border border-purple-200/80 dark:border-purple-900/60 bg-purple-50/30 dark:bg-purple-950/15 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="space-y-0.5">
+                <div className="font-extrabold text-gray-900 dark:text-gray-100">
+                  {isAr ? 'إدارة مهمة التحضير الاسترشادي (PEIA)' : 'PEIA Preparation Task Controls'}
+                </div>
+                <p className="text-[11px] text-gray-600 dark:text-gray-400">
+                  {isAr
+                    ? 'يتم بناء لقطة المهمة على الخادم حصراً من بيانات السجل المحفوظة والتحقق من نسخة السجل (expectedUpdatedAt).'
+                    : 'The task snapshot is built exclusively on the server from canonical stored intake data with strict expectedUpdatedAt version verification.'}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  data-testid="peia-refresh-status-btn"
+                  disabled={loadingPeiaStatus || requestingPeiaPrep}
+                  onClick={() => {
+                    void handleRefreshPeiaPreparationStatus();
+                  }}
+                  className="px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${loadingPeiaStatus ? 'animate-spin' : ''}`} />
+                  <span>{isAr ? 'تحديث حالة المهمة' : 'Refresh Status'}</span>
+                </button>
+
+                {canPrepareAiIntake && (
+                  <button
+                    type="button"
+                    data-testid="peia-request-prep-btn"
+                    disabled={
+                      requestingPeiaPrep ||
+                      aiPrepIntake.status === LibraryIntakeStatus.Rejected
+                    }
+                    onClick={() => {
+                      void handleRequestPeiaPreparation();
+                    }}
+                    className="px-4 py-2 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-extrabold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {requestingPeiaPrep ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Sparkles className="h-3.5 w-3.5" />
+                    )}
+                    <span>
+                      {peiaVersionMismatchNotice
+                        ? isAr
+                          ? 'تأكيد طلب تحضير PEIA للنسخة المحدثة'
+                          : 'Confirm PEIA Request for Updated Version'
+                        : peiaStatus?.isStale
+                          ? isAr
+                            ? 'طلب مهمة تحضير PEIA للنسخة الحالية'
+                            : 'Request Fresh PEIA Preparation'
+                          : isAr
+                            ? 'طلب تحضير استرشادي عبر PEIA'
+                            : 'Request PEIA Preparation'}
+                    </span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Rejected Record Notice */}
+            {aiPrepIntake.status === LibraryIntakeStatus.Rejected && (
+              <div
+                data-testid="peia-rejected-intake-notice"
+                className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 text-xs font-bold"
+              >
+                {isAr
+                  ? 'هذا السجل بحالة مستبعد (Rejected)؛ لا يمكن إدراج السجلات المستبعدة في طابور مهام التحضير الاسترشادي PEIA.'
+                  : 'This intake record is Rejected; rejected intake records cannot be queued for PEIA preparation.'}
+              </div>
+            )}
+
+            {/* Version Mismatch Notice (when getIntakeById detected a newer updatedAt) */}
+            {peiaVersionMismatchNotice && (
+              <div
+                data-testid="peia-version-mismatch-notice"
+                className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs space-y-1"
+              >
+                <div className="font-extrabold flex items-center gap-1.5">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                  <span>
+                    {isAr
+                      ? 'تم تحديث سجل الاستقبال أثناء فتح النافذة — تم إيقاف الإرسال التلقائي'
+                      : 'Intake Record Changed While Modal Was Open — Request Paused for Confirmation'}
+                  </span>
+                </div>
+                <p className="text-[11px] leading-relaxed">
+                  {isAr
+                    ? `تغيرت نسخة السجل من (${peiaVersionMismatchNotice.previousUpdatedAt}) إلى (${peiaVersionMismatchNotice.refreshedUpdatedAt}). تم تحميل أحدث بيانات السجل؛ يرجى مراجعتها ثم الضغط على زر التأكيد لإرسال طلب PEIA للنسخة المحدثة.`
+                    : `The intake record version changed from (${peiaVersionMismatchNotice.previousUpdatedAt}) to (${peiaVersionMismatchNotice.refreshedUpdatedAt}). The latest record has been loaded; please review and click confirm to queue PEIA preparation for the updated version.`}
+                </p>
+              </div>
+            )}
+
+            {/* Error Banner */}
             {aiPrepError && (
-              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-bold">
+              <div
+                data-testid="peia-error-banner"
+                className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-bold"
+              >
                 {aiPrepError}
               </div>
             )}
 
-            {/* Trigger Form with Optional Excerpt */}
-            <form onSubmit={handleGenerateAiSuggestions} className="space-y-3 text-xs border border-purple-200/70 dark:border-purple-900/60 rounded-xl p-4 bg-purple-50/30 dark:bg-purple-950/15">
-              <div>
-                <label className="block font-bold mb-1 text-gray-800 dark:text-gray-200">
+            {/* Enqueue Disposition Feedback Banner */}
+            {lastPeiaDisposition === 'CREATED' && (
+              <div
+                data-testid="peia-disposition-created"
+                className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 text-xs font-bold flex items-center gap-2"
+              >
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                <span>
                   {isAr
-                    ? 'مقتطف نصي أو مستخلص من الوثيقة (اختياري — بحد أقصى 12,000 حرف)'
-                    : 'Admin-Supplied Document Excerpt / Abstract (Optional — Max 12,000 chars)'}
-                </label>
-                <textarea
-                  rows={3}
-                  maxLength={12000}
-                  value={aiPrepExcerpt}
-                  onChange={(e) => setAiPrepExcerpt(e.target.value)}
-                  placeholder={
-                    isAr
-                      ? 'ألصق هنا ديباجة القانون أو مستخلص التقرير في حال رغبتك بتوليد ملخص تحريري مقترح. في حال ترك هذا الحقل فارغاً سيعمل المساعد بوضع (البيانات الوصفية فقط MetadataOnly) ولن يولّد ملخصاً لوثيقة لم يُقرأ نصها.'
-                      : 'Paste an official abstract or legal preamble here if you want bilingual summary suggestions. If left blank, the assistant runs in MetadataOnly mode and will NOT fabricate a summary of an unread document.'
-                  }
-                  className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none"
-                />
-                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
-                  {aiPrepExcerpt.trim().length > 0
-                    ? isAr
-                      ? `أساس الإدخال الحالي: مقتطف نصي + بيانات وصفية (SuppliedExcerptAndMetadata — ${aiPrepExcerpt.trim().length} حرف)`
-                      : `Current Input Basis: SuppliedExcerptAndMetadata (${aiPrepExcerpt.trim().length} chars)`
-                    : isAr
-                      ? 'أساس الإدخال الحالي: بيانات وصفية فقط (MetadataOnly — بدون قراءة نص الوثيقة الخارجي أو توليد ملخص)'
-                      : 'Current Input Basis: MetadataOnly (no external document body read; summary generation disabled)'}
+                    ? 'تم إنشاء وإدراج مهمة تحضير PEIA جديدة بنجاح لهذه النسخة من سجل الاستقبال (Disposition: CREATED).'
+                    : 'A new PEIA preparation task was successfully queued for this intake record version (Disposition: CREATED).'}
+                </span>
+              </div>
+            )}
+
+            {lastPeiaDisposition === 'ALREADY_EXISTS' && (
+              <div
+                data-testid="peia-disposition-already-exists"
+                className="p-3 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-300 text-xs font-bold flex items-center gap-2"
+              >
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                <span>
+                  {isAr
+                    ? 'توجد مهمة تحضير PEIA مطابقة ومسجلة مسبقاً لهذه النسخة من سجل الاستقبال (Disposition: ALREADY_EXISTS).'
+                    : 'An identical PEIA preparation task already exists for this intake record version (Disposition: ALREADY_EXISTS).'}
+                </span>
+              </div>
+            )}
+
+            {/* Stale Historical Task Warning Banner */}
+            {peiaStatus && peiaStatus.isStale && (
+              <div
+                data-testid="peia-stale-warning-banner"
+                className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-400 dark:border-amber-700 text-amber-900 dark:text-amber-200 text-xs space-y-1"
+              >
+                <div className="font-extrabold flex items-center gap-1.5">
+                  <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                  <span>
+                    {isAr
+                      ? 'تنبيه: نتائج مهمة PEIA المعروضة تعود لنسخة سابقة من سجل الاستقبال (Stale Result)'
+                      : 'Stale PEIA Task Warning: Displayed Task Belongs to an Older Intake Version'}
+                  </span>
+                </div>
+                <p className="text-[11px] leading-relaxed">
+                  {isAr
+                    ? `نسخة المهمة المسجلة (${peiaStatus.taskSourceUpdatedAt ?? 'N/A'}) أقدم من النسخة الحالية للسجل (${peiaStatus.currentSourceUpdatedAt}). تبقى المخرجات التاريخية أدناه متاحة للتدقيق، ويمكنك طلب مهمة تحضير جديدة للنسخة الحالية.`
+                    : `Task target version (${peiaStatus.taskSourceUpdatedAt ?? 'N/A'}) is older than the current intake record version (${peiaStatus.currentSourceUpdatedAt}). Historical findings remain visible below for audit context, and you may request a fresh PEIA task for the current version.`}
                 </p>
               </div>
+            )}
 
-              <div className="flex justify-end gap-2">
-                <button
-                  type="submit"
-                  disabled={generatingAiPrep}
-                  className="px-4 py-2 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-extrabold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                >
-                  {generatingAiPrep ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                  <span>
-                    {isAr ? 'إعداد مقترحات الذكاء الاصطناعي' : 'Generate AI Preparation Suggestions'}
-                  </span>
-                </button>
+            {/* Loading Status Indicator */}
+            {loadingPeiaStatus && !peiaStatus && (
+              <div
+                data-testid="peia-status-loading"
+                className="p-6 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30 flex items-center justify-center gap-2 text-xs font-bold text-gray-600 dark:text-gray-300"
+              >
+                <Loader2 className="h-4 w-4 animate-spin text-purple-600" />
+                <span>
+                  {isAr
+                    ? 'جاري جلب حالة التحضير الاسترشادي (PEIA)...'
+                    : 'Loading PEIA preparation status...'}
+                </span>
               </div>
-            </form>
+            )}
 
-            {/* Persisted AI Suggestion Display */}
-            {aiPrepIntake.aiSuggestion && (
-              <div className="space-y-4 pt-2">
-                {/* Mandatory Unverified Machine-Generated Warning Banner */}
-                <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs space-y-1">
-                  <div className="font-extrabold flex items-center gap-1.5">
-                    <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
-                    <span>
+            {/* Canonical PEIA Status Section */}
+            {peiaStatus && (
+              <div className="space-y-4">
+                {/* STATE A: NotRequested */}
+                {peiaStatus.status === 'NotRequested' && (
+                  <div
+                    data-testid="peia-status-not-requested"
+                    className="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/70 dark:bg-gray-800/40 text-xs space-y-1.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-extrabold text-gray-900 dark:text-gray-100">
+                        {isAr
+                          ? 'حالة التحضير الاسترشادي (PEIA): لم يتم طلب مهمة بعد (NotRequested)'
+                          : 'PEIA Preparation Status: NotRequested'}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 font-mono font-bold text-[10px]">
+                        NotRequested
+                      </span>
+                    </div>
+                    <p className="text-gray-600 dark:text-gray-400 text-[11px]">
                       {isAr
-                        ? 'مقترحات آلية غير موثقة — تتطلب مراجعة واعتماداً بشرياً'
-                        : 'Unverified Machine-Generated Recommendations — Requires Human Review'}
+                        ? 'لم يتم إدراج مهمة تحضير PEIA لهذا السجل بعد. يمكنك طلب تحضير استرشادي باستخدام الزر أعلاه في حال لم يكن السجل مستبعداً.'
+                        : 'No PEIA preparation task has been requested for this intake record yet. Authorized curators can request preparation above unless the record is Rejected.'}
+                    </p>
+                  </div>
+                )}
+
+                {/* STATE B: Pending */}
+                {peiaStatus.status === AITaskStatus.Pending && (
+                  <div
+                    data-testid="peia-status-pending"
+                    className="p-4 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/30 text-xs space-y-2"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-extrabold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                        <Clock className="h-4 w-4 text-amber-600 shrink-0" />
+                        <span>
+                          {isAr
+                            ? 'حالة مهمة PEIA: قيد الانتظار والمعالجة (Pending)'
+                            : 'PEIA Task Status: Pending'}
+                        </span>
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-amber-200 dark:bg-amber-900 text-amber-900 dark:text-amber-200 font-mono font-bold text-[10px]">
+                        {AITaskStatus.Pending}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-[11px] font-mono text-amber-900 dark:text-amber-200">
+                      <div>Task ID: {peiaStatus.taskId}</div>
+                      <div>
+                        Target Version: {peiaStatus.taskSourceUpdatedAt ?? peiaStatus.task?.target.sourceUpdatedAt ?? 'N/A'}
+                      </div>
+                      <div>Requested At: {peiaStatus.task?.createdAt ?? 'N/A'}</div>
+                    </div>
+                    {peiaStatus.inputBasis && (
+                      <div className="text-[11px] font-mono text-amber-800 dark:text-amber-300">
+                        Input Basis: {peiaStatus.inputBasis}
+                      </div>
+                    )}
+                    <p className="text-[11px] text-amber-800 dark:text-amber-300">
+                      {isAr
+                        ? 'المهمة مدرجة في طابور PEIA الموحد؛ يمكنك استخدام زر "تحديث حالة المهمة" للتحقق من اكتمالها يدوياً.'
+                        : 'The task is queued in the canonical PEIA task queue; use the manual "Refresh Status" button to check for completion.'}
+                    </p>
+                  </div>
+                )}
+
+                {/* STATE C: Completed */}
+                {peiaStatus.status === AITaskStatus.Completed && peiaStatus.libraryPreparation && (
+                  <div data-testid="peia-status-completed" className="space-y-4">
+                    {/* Mandatory Human-Review / Advisory-Only Warning */}
+                    <div
+                      data-testid="peia-advisory-only-warning"
+                      className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs space-y-1"
+                    >
+                      <div className="font-extrabold flex items-center justify-between gap-2 flex-wrap">
+                        <span className="flex items-center gap-1.5">
+                          <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                          <span>
+                            {isAr
+                              ? 'مخرجات PEIA استرشادية غير موثقة — تتطلب مراجعة واعتماداً بشرياً'
+                              : 'Unverified PEIA Advisory Output — Requires Human Editorial Verification'}
+                          </span>
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 font-mono text-[10px] font-bold">
+                          {AITaskStatus.Completed}
+                        </span>
+                      </div>
+                      <p className="text-[11px] leading-relaxed">
+                        {isAr
+                          ? 'هذه المقترحات استرشادية فقط ولا تقوم بالموافقة أو الرفض أو الترقية أو النشر التلقائي لأي سجل استقبال أو وثيقة في المكتبة.'
+                          : 'This PEIA output is strictly advisory and does NOT automatically approve, reject, promote, or publish any intake record or library document.'}
+                      </p>
+                      <div className="flex flex-wrap gap-3 pt-1 text-[10px] font-mono text-amber-800 dark:text-amber-300">
+                        <span>Task ID: {peiaStatus.taskId}</span>
+                        <span>Input Basis: {peiaStatus.libraryPreparation.inputBasis}</span>
+                        <span>Target Version: {peiaStatus.taskSourceUpdatedAt ?? 'N/A'}</span>
+                        {peiaStatus.task?.createdAt && (
+                          <span>Requested At: {peiaStatus.task.createdAt}</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Suggested Bibliographic & Classification Fields */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                      <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                        <span className="text-[10px] font-bold text-gray-500 uppercase">
+                          {isAr ? 'العنوان المقترح (عربي)' : 'Suggested Title (Arabic)'}
+                        </span>
+                        <p className="font-extrabold text-gray-900 dark:text-gray-100 select-all">
+                          {peiaStatus.libraryPreparation.suggestedTitleAr}
+                        </p>
+                      </div>
+
+                      <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                        <span className="text-[10px] font-bold text-gray-500 uppercase">
+                          {isAr ? 'العنوان المقترح (إنجليزي)' : 'Suggested Title (English)'}
+                        </span>
+                        <p className="font-extrabold text-gray-900 dark:text-gray-100 select-all">
+                          {peiaStatus.libraryPreparation.suggestedTitleEn}
+                        </p>
+                      </div>
+
+                      <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                        <span className="text-[10px] font-bold text-gray-500 uppercase">
+                          {isAr ? 'الجهة المصدرة المقترحة' : 'Suggested Issuing Organization'}
+                        </span>
+                        <p className="font-bold text-gray-800 dark:text-gray-200 select-all">
+                          {peiaStatus.libraryPreparation.suggestedIssuingOrganization}
+                        </p>
+                      </div>
+
+                      <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                        <span className="text-[10px] font-bold text-gray-500 uppercase">
+                          {isAr ? 'نوع الوثيقة المقترح' : 'Suggested Document Type'}
+                        </span>
+                        <p className="font-extrabold text-emerald-700 dark:text-emerald-400">
+                          {peiaStatus.libraryPreparation.suggestedDocumentType}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Domains & Topics */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                      <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
+                        <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                          {isAr ? 'المجالات البيئية المقترحة' : 'Suggested Environmental Domains'}
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {peiaStatus.libraryPreparation.suggestedEnvironmentalDomains.map((dom, idx) => (
+                            <span
+                              key={idx}
+                              className="px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 font-bold text-[11px]"
+                            >
+                              {dom}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
+                        <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                          {isAr ? 'الكلمات المفتاحية (عربي)' : 'Suggested Topics (Arabic)'}
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {peiaStatus.libraryPreparation.suggestedTopicsAr.map((t, idx) => (
+                            <span
+                              key={idx}
+                              className="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-950/70 text-blue-800 dark:text-blue-300 font-bold text-[11px]"
+                            >
+                              {t}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
+                        <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                          {isAr ? 'الكلمات المفتاحية (إنجليزي)' : 'Suggested Topics (English)'}
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {peiaStatus.libraryPreparation.suggestedTopicsEn.map((t, idx) => (
+                            <span
+                              key={idx}
+                              className="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-950/70 text-indigo-800 dark:text-indigo-300 font-bold text-[11px]"
+                            >
+                              {t}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Conditional Bilingual Summaries vs MetadataOnly Truthfulness Notice */}
+                    {peiaStatus.libraryPreparation.inputBasis ===
+                      PEIALibraryPreparationInputBasis.SuppliedExcerptAndMetadata &&
+                    (peiaStatus.libraryPreparation.suggestedSummaryAr !== null ||
+                      peiaStatus.libraryPreparation.suggestedSummaryEn !== null) ? (
+                      <div
+                        data-testid="peia-completed-summaries"
+                        className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs"
+                      >
+                        <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                          <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                            {isAr ? 'الملخص المقترح من المقتطف (عربي)' : 'Suggested Excerpt Summary (Arabic)'}
+                          </span>
+                          <p className="text-gray-800 dark:text-gray-200 leading-relaxed select-all">
+                            {peiaStatus.libraryPreparation.suggestedSummaryAr}
+                          </p>
+                        </div>
+                        <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                          <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                            {isAr ? 'الملخص المقترح من المقتطف (إنجليزي)' : 'Suggested Excerpt Summary (English)'}
+                          </span>
+                          <p className="text-gray-800 dark:text-gray-200 leading-relaxed select-all">
+                            {peiaStatus.libraryPreparation.suggestedSummaryEn}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        data-testid="peia-completed-metadata-only-summary-notice"
+                        className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-100/70 dark:bg-gray-800/50 text-xs text-gray-700 dark:text-gray-300"
+                      >
+                        <span className="font-extrabold">
+                          {isAr ? 'ملاحظة النزاهة التحريرية للملخص (MetadataOnly): ' : 'MetadataOnly Summary Truthfulness Notice: '}
+                        </span>
+                        {isAr
+                          ? 'قيم الملخص المقترح (suggestedSummaryAr / suggestedSummaryEn) فارغة (null) لأن أساس الإدخال هو البيانات الوصفية فقط (MetadataOnly) ولم يتم قراءة نص الوثيقة الخارجي.'
+                          : 'Both suggestedSummaryAr and suggestedSummaryEn are null because inputBasis is MetadataOnly and the unread external document body was not fabricated.'}
+                      </div>
+                    )}
+
+                    {/* Bilingual Provenance Observations & Uncertainty Notices */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                      <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-2">
+                        <span className="text-[10px] font-bold text-gray-500 uppercase block">
+                          {isAr
+                            ? 'ملاحظات المصدر والأصل المرجعي (عربي / إنجليزي)'
+                            : 'Provenance & Source Observations (AR / EN)'}
+                        </span>
+                        <ul className="list-disc list-inside space-y-1 text-gray-700 dark:text-gray-300">
+                          {peiaStatus.libraryPreparation.provenanceObservationsAr.map((obs, idx) => (
+                            <li key={`prov-ar-${idx}`}>{obs}</li>
+                          ))}
+                        </ul>
+                        <ul className="list-disc list-inside space-y-1 text-gray-600 dark:text-gray-400 border-t border-gray-200/70 dark:border-gray-700/70 pt-1.5">
+                          {peiaStatus.libraryPreparation.provenanceObservationsEn.map((obs, idx) => (
+                            <li key={`prov-en-${idx}`}>{obs}</li>
+                          ))}
+                        </ul>
+                      </div>
+
+                      <div className="p-3 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/40 dark:bg-amber-950/20 space-y-2">
+                        <span className="text-[10px] font-bold text-amber-800 dark:text-amber-300 uppercase block">
+                          {isAr
+                            ? 'تنبيهات عدم اليقين والتحقق البشري (عربي / إنجليزي)'
+                            : 'Uncertainty & Verification Notices (AR / EN)'}
+                        </span>
+                        <ul className="list-disc list-inside space-y-1 text-amber-900 dark:text-amber-200">
+                          {peiaStatus.libraryPreparation.uncertaintyNoticesAr.map((notice, idx) => (
+                            <li key={`unc-ar-${idx}`}>{notice}</li>
+                          ))}
+                        </ul>
+                        <ul className="list-disc list-inside space-y-1 text-amber-800 dark:text-amber-300 border-t border-amber-200/70 dark:border-amber-800/60 pt-1.5">
+                          {peiaStatus.libraryPreparation.uncertaintyNoticesEn.map((notice, idx) => (
+                            <li key={`unc-en-${idx}`}>{notice}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* STATE D: Failed */}
+                {peiaStatus.status === AITaskStatus.Failed && (
+                  <div
+                    data-testid="peia-status-failed"
+                    className="p-4 rounded-xl border border-rose-300 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-950/30 text-xs space-y-2"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-extrabold text-rose-900 dark:text-rose-200 flex items-center gap-1.5">
+                        <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0" />
+                        <span>
+                          {isAr
+                            ? 'تعذر إكمال مهمة التحضير الاسترشادي (PEIA Task Failed — غير مكتملة)'
+                            : 'PEIA Preparation Task Failed (Non-Advisory Outcome)'}
+                        </span>
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-rose-200 dark:bg-rose-900 text-rose-900 dark:text-rose-200 font-mono font-bold text-[10px]">
+                        {AITaskStatus.Failed}
+                      </span>
+                    </div>
+
+                    {peiaStatus.nonAdvisoryOutcome ? (
+                      <div className="space-y-1.5 text-rose-900 dark:text-rose-200">
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-[11px] font-mono">
+                          <div>Outcome Kind: {peiaStatus.nonAdvisoryOutcome.kind}</div>
+                          <div>Reason Code: {peiaStatus.nonAdvisoryOutcome.reason}</div>
+                          <div>Failed At: {peiaStatus.nonAdvisoryOutcome.createdAt}</div>
+                          <div>Model Attempts: {peiaStatus.nonAdvisoryOutcome.modelAttempts}</div>
+                        </div>
+                        {peiaStatus.nonAdvisoryOutcome.detail && (
+                          <p className="text-[11px] text-rose-800 dark:text-rose-300 font-mono">
+                            {peiaStatus.nonAdvisoryOutcome.detail}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-rose-800 dark:text-rose-300">
+                        {isAr
+                          ? 'فشلت المهمة دون إنتاج مخرجات استرشادية.'
+                          : 'The task failed without producing advisory output.'}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Read-Only Historical / Legacy Gemini Suggestion Compatibility Section */}
+            {aiPrepIntake.aiSuggestion && (
+              <div
+                data-testid="legacy-gemini-suggestion-readonly"
+                className="space-y-3 pt-4 border-t-2 border-dashed border-gray-200 dark:border-gray-800"
+              >
+                <div className="p-3.5 rounded-xl bg-gray-100 dark:bg-gray-800/80 border border-gray-300 dark:border-gray-700 text-gray-800 dark:text-gray-200 text-xs space-y-1">
+                  <div className="font-extrabold flex flex-wrap items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5">
+                      <FileText className="h-4 w-4 text-gray-600 dark:text-gray-400 shrink-0" />
+                      <span>
+                        {isAr
+                          ? 'سجل تاريخي للقراءة فقط — مقترحات تحضير سابقة (Legacy Gemini AI Suggestion)'
+                          : 'Read-Only Historical Record — Legacy Gemini AI Suggestion'}
+                      </span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 font-mono text-[10px] font-bold">
+                      READ-ONLY LEGACY
                     </span>
                   </div>
-                  <p className="text-[11px] leading-relaxed">
+                  <p className="text-[11px] text-gray-600 dark:text-gray-400 leading-relaxed">
                     {isAr
-                      ? aiPrepIntake.aiSuggestion.verificationWarningAr
-                      : aiPrepIntake.aiSuggestion.verificationWarningEn}
+                      ? 'يُعرض هذا القسم لأغراض الأرشفة والتدقيق فقط للحفاظ على المقترحات السابقة المخزنة في السجل، بينما يتم التحضير القياسي الحالي حصرياً عبر نظام PEIA أعلاه.'
+                      : 'This section is preserved strictly as a read-only historical record of earlier stored suggestions. Canonical preparation is now performed exclusively via PEIA above.'}
                   </p>
-                  <div className="flex flex-wrap gap-3 pt-1 text-[10px] font-mono text-amber-800 dark:text-amber-300">
-                    <span>Model: {aiPrepIntake.aiSuggestion.modelId}</span>
+                  <div className="flex flex-wrap gap-3 pt-1 text-[10px] font-mono text-gray-600 dark:text-gray-400">
+                    <span>Legacy Model: {aiPrepIntake.aiSuggestion.modelId}</span>
                     <span>Basis: {aiPrepIntake.aiSuggestion.inputBasis}</span>
                     <span>By: {aiPrepIntake.aiSuggestion.generatedByAdminName}</span>
-                    <span>At: {new Date(aiPrepIntake.aiSuggestion.generatedAt).toLocaleString(isAr ? 'ar-EG' : 'en-US')}</span>
+                    <span>At: {aiPrepIntake.aiSuggestion.generatedAt}</span>
                   </div>
                 </div>
 
-                {/* Suggested Bibliographic & Classification Fields */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs opacity-90">
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/40 dark:bg-gray-800/30 space-y-1">
                     <span className="text-[10px] font-bold text-gray-500 uppercase">
-                      {isAr ? 'العنوان المقترح (عربي)' : 'Suggested Title (Arabic)'}
+                      {isAr ? 'العنوان التاريخي المقترح (عربي)' : 'Legacy Suggested Title (Arabic)'}
                     </span>
-                    <p className="font-extrabold text-gray-900 dark:text-gray-100 select-all">
+                    <p className="font-bold text-gray-800 dark:text-gray-200">
                       {aiPrepIntake.aiSuggestion.suggestedTitleAr}
                     </p>
                   </div>
 
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/40 dark:bg-gray-800/30 space-y-1">
                     <span className="text-[10px] font-bold text-gray-500 uppercase">
-                      {isAr ? 'العنوان المقترح (إنجليزي)' : 'Suggested Title (English)'}
+                      {isAr ? 'العنوان التاريخي المقترح (إنجليزي)' : 'Legacy Suggested Title (English)'}
                     </span>
-                    <p className="font-extrabold text-gray-900 dark:text-gray-100 select-all">
+                    <p className="font-bold text-gray-800 dark:text-gray-200">
                       {aiPrepIntake.aiSuggestion.suggestedTitleEn}
                     </p>
                   </div>
 
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/40 dark:bg-gray-800/30 space-y-1">
                     <span className="text-[10px] font-bold text-gray-500 uppercase">
-                      {isAr ? 'الجهة المصدرة المقترحة' : 'Suggested Issuing Organization'}
+                      {isAr ? 'الجهة المصدرة التاريخية المقترحة' : 'Legacy Suggested Issuing Organization'}
                     </span>
-                    <p className="font-bold text-gray-800 dark:text-gray-200 select-all">
+                    <p className="font-bold text-gray-700 dark:text-gray-300">
                       {aiPrepIntake.aiSuggestion.suggestedIssuingOrganization}
                     </p>
                   </div>
 
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
+                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/40 dark:bg-gray-800/30 space-y-1">
                     <span className="text-[10px] font-bold text-gray-500 uppercase">
-                      {isAr ? 'نوع الوثيقة المقترح' : 'Suggested Document Type'}
+                      {isAr ? 'نوع الوثيقة التاريخي المقترح' : 'Legacy Suggested Document Type'}
                     </span>
-                    <p className="font-extrabold text-emerald-700 dark:text-emerald-400">
+                    <p className="font-bold text-gray-700 dark:text-gray-300">
                       {aiPrepIntake.aiSuggestion.suggestedDocumentType}
                     </p>
-                  </div>
-                </div>
-
-                {/* Domains & Topics */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
-                    <span className="text-[10px] font-bold text-gray-500 uppercase block">
-                      {isAr ? 'المجالات البيئية المقترحة' : 'Suggested Environmental Domains'}
-                    </span>
-                    <div className="flex flex-wrap gap-1">
-                      {aiPrepIntake.aiSuggestion.suggestedEnvironmentalDomains.map((dom, idx) => (
-                        <span key={idx} className="px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 font-bold text-[11px]">
-                          {dom}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
-                    <span className="text-[10px] font-bold text-gray-500 uppercase block">
-                      {isAr ? 'الكلمات المفتاحية (عربي)' : 'Suggested Topics (Arabic)'}
-                    </span>
-                    <div className="flex flex-wrap gap-1">
-                      {aiPrepIntake.aiSuggestion.suggestedTopicsAr.map((t, idx) => (
-                        <span key={idx} className="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-950/70 text-blue-800 dark:text-blue-300 font-bold text-[11px]">
-                          {t}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
-                    <span className="text-[10px] font-bold text-gray-500 uppercase block">
-                      {isAr ? 'الكلمات المفتاحية (إنجليزي)' : 'Suggested Topics (English)'}
-                    </span>
-                    <div className="flex flex-wrap gap-1">
-                      {aiPrepIntake.aiSuggestion.suggestedTopicsEn.map((t, idx) => (
-                        <span key={idx} className="px-2 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-950/70 text-indigo-800 dark:text-indigo-300 font-bold text-[11px]">
-                          {t}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Conditional Bilingual Summaries vs Metadata-Only Truthfulness Notice */}
-                {aiPrepIntake.aiSuggestion.inputBasis === LibraryIntakeAIInputBasis.SuppliedExcerptAndMetadata &&
-                (aiPrepIntake.aiSuggestion.suggestedSummaryAr || aiPrepIntake.aiSuggestion.suggestedSummaryEn) ? (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                    <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
-                      <span className="text-[10px] font-bold text-gray-500 uppercase block">
-                        {isAr ? 'الملخص المقترح من المقتطف (عربي)' : 'Suggested Excerpt Summary (Arabic)'}
-                      </span>
-                      <p className="text-gray-800 dark:text-gray-200 leading-relaxed select-all">
-                        {aiPrepIntake.aiSuggestion.suggestedSummaryAr}
-                      </p>
-                    </div>
-                    <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1">
-                      <span className="text-[10px] font-bold text-gray-500 uppercase block">
-                        {isAr ? 'الملخص المقترح من المقتطف (إنجليزي)' : 'Suggested Excerpt Summary (English)'}
-                      </span>
-                      <p className="text-gray-800 dark:text-gray-200 leading-relaxed select-all">
-                        {aiPrepIntake.aiSuggestion.suggestedSummaryEn}
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-100/70 dark:bg-gray-800/50 text-xs text-gray-600 dark:text-gray-400">
-                    <span className="font-extrabold">
-                      {isAr ? 'ملاحظة النزاهة التحريرية للملخص: ' : 'Summary Truthfulness Notice: '}
-                    </span>
-                    {isAr
-                      ? 'لم يتم توليد ملخص عربي أو إنجليزي لأن الإدخال اعتمد على البيانات الوصفية فقط (MetadataOnly) دون تزويد مقتطف نصي من الوثيقة.'
-                      : 'No Arabic/English document summary was generated because inputBasis is MetadataOnly and the remote document body/PDF was not read.'}
-                  </div>
-                )}
-
-                {/* Provenance Observations & Uncertainty Notices */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-800/40 space-y-1.5">
-                    <span className="text-[10px] font-bold text-gray-500 uppercase block">
-                      {isAr ? 'ملاحظات المصدر والأصل المرجعي' : 'Provenance & Source Observations'}
-                    </span>
-                    <ul className="list-disc list-inside space-y-1 text-gray-700 dark:text-gray-300">
-                      {(isAr
-                        ? aiPrepIntake.aiSuggestion.provenanceObservationsAr
-                        : aiPrepIntake.aiSuggestion.provenanceObservationsEn
-                      ).map((obs, idx) => (
-                        <li key={idx}>{obs}</li>
-                      ))}
-                    </ul>
-                  </div>
-
-                  <div className="p-3 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/40 dark:bg-amber-950/20 space-y-1.5">
-                    <span className="text-[10px] font-bold text-amber-800 dark:text-amber-300 uppercase block">
-                      {isAr ? 'تنبيهات عدم اليقين والتحقق البشري' : 'Uncertainty & Verification Notices'}
-                    </span>
-                    <ul className="list-disc list-inside space-y-1 text-amber-900 dark:text-amber-200">
-                      {(isAr
-                        ? aiPrepIntake.aiSuggestion.uncertaintyNoticesAr
-                        : aiPrepIntake.aiSuggestion.uncertaintyNoticesEn
-                      ).map((notice, idx) => (
-                        <li key={idx}>{notice}</li>
-                      ))}
-                    </ul>
                   </div>
                 </div>
               </div>
@@ -2405,7 +3425,7 @@ export function AdminLibraryManagement({ currentUser }: AdminLibraryManagementPr
             <div className="pt-3 border-t border-gray-100 dark:border-gray-800 flex justify-end">
               <button
                 type="button"
-                onClick={() => setAiPrepIntake(null)}
+                onClick={handleClosePeiaPreparationModal}
                 className="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold text-xs cursor-pointer"
               >
                 {isAr ? 'إغلاق نافذة التحضير' : 'Close Preparation Assistant'}
