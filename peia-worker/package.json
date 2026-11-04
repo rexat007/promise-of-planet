@@ -14,7 +14,7 @@
     "run:submit": "npx tsx src/runUnifiedWorkerCycleCli.ts submit",
     "run:full": "npx tsx src/runUnifiedWorkerCycleCli.ts full",
     "test:runtime": "npx tsx ../scripts/runPEIAWorkerRuntimeFoundationTests.cts",
-    "test:cycle": "npx tsx ../scripts/runPEIAUnifiedWorkerCycleCliTests.ts"
+    "test:cycle": "npx tsx ../scripts/runPEIAUnifiedWorkerCycleCliTests.cts"
   },
   "dependencies": {},
   "devDependencies": {
