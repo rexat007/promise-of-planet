@@ -446,13 +446,13 @@ export function buildModelPrompt(
       `3. Use ONLY the supplied evidence items below. Do NOT use outside world knowledge or unverified assumptions.\n` +
       `4. Every factual finding in your assessment must cite at least one valid evidence reference from the allowed list.\n` +
       `5. Allowed evidence references: [${allowedRefsList}]. Citing any other reference is strictly prohibited.\n` +
-      `6. If the provided evidence is contradictory, insufficient, or absent to support a grounded finding, you must set "status": "ABSTAIN".\n` +
+      `6. Allowed values for "status" are "READY" (when grounded findings exist) or "ABSTAIN" (if evidence is contradictory, insufficient, or absent to support a grounded finding, you must set "status": "ABSTAIN").\n` +
       `7. Output MUST be valid, raw JSON with no markdown wrapping or conversational prose.\n`;
 
     const schemaExample =
       `REQUIRED JSON OUTPUT SCHEMA:\n` +
       `{\n` +
-      `  "status": "READY" | "ABSTAIN",\n` +
+      `  "status": "READY",\n` +
       `  "summary": "High-level audit assessment summary",\n` +
       `  "findings": [\n` +
       `    {\n` +
@@ -484,8 +484,8 @@ export function buildModelPrompt(
   const inputBasis = determineLibraryIntakeInputBasis(task);
   const summaryBasisInstruction =
     inputBasis === PEIALibraryPreparationInputBasis.MetadataOnly
-      ? `10. Because inputBasis is "MetadataOnly", "suggestedSummaryAr" MUST be null and "suggestedSummaryEn" MUST be null.\n`
-      : `10. Because inputBasis is "SuppliedExcerptAndMetadata", "suggestedSummaryAr" and "suggestedSummaryEn" MUST be non-empty trimmed strings grounded strictly in the supplied excerpt.\n`;
+      ? `11. Because inputBasis is "MetadataOnly", "suggestedSummaryAr" MUST be null and "suggestedSummaryEn" MUST be null.\n`
+      : `11. Because inputBasis is "SuppliedExcerptAndMetadata", "suggestedSummaryAr" and "suggestedSummaryEn" MUST be non-empty trimmed strings grounded strictly in the supplied excerpt.\n`;
 
   const summaryArSchemaValue =
     inputBasis === PEIALibraryPreparationInputBasis.MetadataOnly
@@ -504,16 +504,17 @@ export function buildModelPrompt(
     `3. Use ONLY the supplied evidence items below. Do NOT use outside world knowledge or unverified assumptions.\n` +
     `4. Every factual finding in your assessment must cite at least one valid evidence reference from the allowed list.\n` +
     `5. Allowed evidence references: [${allowedRefsList}]. Citing any other reference is strictly prohibited.\n` +
-    `6. If the provided evidence is contradictory, insufficient, or absent to support a grounded finding, you must set "status": "ABSTAIN".\n` +
+    `6. Allowed values for "status" are "READY" (when grounded findings exist) or "ABSTAIN" (if evidence is contradictory, insufficient, or absent to support a grounded finding, you must set "status": "ABSTAIN").\n` +
     `7. Output MUST be valid, raw JSON with no markdown wrapping or conversational prose.\n` +
     `8. For LibraryIntake tasks with "status": "READY", you MUST include "libraryPreparation" with the exact 14 canonical keys shown below and "inputBasis": "${inputBasis}".\n` +
-    `9. Never imply that the complete PDF, full document text, or external URL was read or inspected. Never label supplied metadata or supplied excerpt as an externally verified source.\n` +
+    `9. Allowed values for "suggestedDocumentType": "Law", "ExecutiveRegulation", "Decision", "InstitutionalReport", "PolicyPaper", "ResearchStudy", "InternationalAgreement".\n` +
+    `10. Never imply that the complete PDF, full document text, or external URL was read or inspected. Never label supplied metadata or supplied excerpt as an externally verified source.\n` +
     summaryBasisInstruction;
 
   const schemaExample =
     `REQUIRED JSON OUTPUT SCHEMA:\n` +
     `{\n` +
-    `  "status": "READY" | "ABSTAIN",\n` +
+    `  "status": "READY",\n` +
     `  "summary": "High-level audit assessment summary",\n` +
     `  "findings": [\n` +
     `    {\n` +
@@ -528,7 +529,7 @@ export function buildModelPrompt(
     `    "suggestedTitleAr": "Non-empty trimmed Arabic title suggestion",\n` +
     `    "suggestedTitleEn": "Non-empty trimmed English title suggestion",\n` +
     `    "suggestedIssuingOrganization": "Non-empty trimmed issuing organization suggestion",\n` +
-    `    "suggestedDocumentType": "Law" | "ExecutiveRegulation" | "Decision" | "InstitutionalReport" | "PolicyPaper" | "ResearchStudy" | "InternationalAgreement",\n` +
+    `    "suggestedDocumentType": "ExecutiveRegulation",\n` +
     `    "suggestedEnvironmentalDomains": ["Non-empty trimmed environmental domain"],\n` +
     `    "suggestedTopicsAr": ["Non-empty trimmed Arabic topic"],\n` +
     `    "suggestedTopicsEn": ["Non-empty trimmed English topic"],\n` +

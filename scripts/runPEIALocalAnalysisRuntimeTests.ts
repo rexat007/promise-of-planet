@@ -2506,6 +2506,89 @@ async function runAllTests() {
     assert(threwInvalidInput, 'Forged SNAPSHOT authority must fail closed');
   });
 
+  function extractSchemaJsonFromPrompt(prompt: string): string {
+    const startMarker = 'REQUIRED JSON OUTPUT SCHEMA:\n';
+    const endMarker = '\n=== TASK TO AUDIT ===';
+    const startIdx = prompt.indexOf(startMarker);
+    assert(startIdx !== -1, 'Prompt must contain REQUIRED JSON OUTPUT SCHEMA header');
+    const jsonStart = startIdx + startMarker.length;
+    const endIdx = prompt.indexOf(endMarker, jsonStart);
+    assert(endIdx !== -1, 'Prompt must contain === TASK TO AUDIT === boundary after schema example');
+    return prompt.slice(jsonStart, endIdx).trim();
+  }
+
+  await test('112. News buildModelPrompt JSON example is syntactically valid JSON parseable by JSON.parse and contains zero union syntax |', async () => {
+    const newsTask = makeSampleTask();
+    const epaItem = makeSampleEPAItem('1');
+    const context = assembleBoundedEvidenceContext([epaItem]);
+    const newsPrompt = buildModelPrompt(newsTask, context);
+
+    const schemaJsonStr = extractSchemaJsonFromPrompt(newsPrompt);
+    assert(!schemaJsonStr.includes('|'), 'News JSON schema example must not contain union pipe | syntax');
+    assert(!newsPrompt.includes('"READY" | "ABSTAIN"'), 'News prompt must not contain "READY" | "ABSTAIN"');
+
+    const parsed = JSON.parse(schemaJsonStr);
+    assert(parsed.status === 'READY', 'Parsed schema example status is READY');
+    assert(typeof parsed.summary === 'string', 'Parsed schema example summary is string');
+    assert(Array.isArray(parsed.findings), 'Parsed schema example findings is array');
+    assert(Array.isArray(parsed.recommendations), 'Parsed schema example recommendations is array');
+    assert(Array.isArray(parsed.uncertainties), 'Parsed schema example uncertainties is array');
+
+    assert(
+      newsPrompt.includes('Allowed values for "status" are "READY"'),
+      'News prompt text instructions must specify allowed values for status'
+    );
+  });
+
+  await test('113. LibraryIntake MetadataOnly buildModelPrompt JSON example is syntactically valid JSON with null summaries and zero union syntax |', async () => {
+    const libTaskMeta = makeSampleLibraryIntakeTask();
+    const epaItem = makeSampleEPAItem('1');
+    const context = assembleBoundedEvidenceContext([epaItem]);
+    const libPrompt = buildModelPrompt(libTaskMeta, context);
+
+    const schemaJsonStr = extractSchemaJsonFromPrompt(libPrompt);
+    assert(!schemaJsonStr.includes('|'), 'LibraryIntake JSON schema example must not contain union pipe | syntax');
+    assert(!libPrompt.includes('"READY" | "ABSTAIN"'), 'LibraryIntake prompt must not contain "READY" | "ABSTAIN"');
+    assert(!schemaJsonStr.includes('"Law" |'), 'LibraryIntake JSON schema example must not contain documentType union pipe syntax');
+
+    const parsed = JSON.parse(schemaJsonStr);
+    assert(parsed.status === 'READY', 'Parsed schema example status is READY');
+    assert(parsed.libraryPreparation !== undefined, 'libraryPreparation is present in schema example');
+    const prep = parsed.libraryPreparation;
+    assert(Object.keys(prep).length === 14, 'libraryPreparation must contain exactly 14 canonical keys');
+    assert(prep.inputBasis === 'MetadataOnly', 'inputBasis is MetadataOnly');
+    assert(prep.suggestedSummaryAr === null, 'suggestedSummaryAr is null in MetadataOnly example');
+    assert(prep.suggestedSummaryEn === null, 'suggestedSummaryEn is null in MetadataOnly example');
+    assert(prep.suggestedDocumentType === 'ExecutiveRegulation', 'suggestedDocumentType is a concrete valid type string');
+
+    assert(
+      libPrompt.includes('Allowed values for "suggestedDocumentType": "Law", "ExecutiveRegulation"'),
+      'LibraryIntake text instructions must document allowed values for suggestedDocumentType'
+    );
+  });
+
+  await test('114. LibraryIntake SuppliedExcerptAndMetadata buildModelPrompt JSON example is syntactically valid JSON with string summaries and zero union syntax |', async () => {
+    const libTaskExcerpt = makeSampleLibraryIntakeTask({
+      workingTitle: 'Coastal Water Quality Regulation',
+      suppliedExcerpt: 'Article 2 governs coastal discharge monitoring.',
+    });
+    const epaItem = makeSampleEPAItem('1');
+    const context = assembleBoundedEvidenceContext([epaItem]);
+    const libPrompt = buildModelPrompt(libTaskExcerpt, context);
+
+    const schemaJsonStr = extractSchemaJsonFromPrompt(libPrompt);
+    assert(!schemaJsonStr.includes('|'), 'LibraryIntake SuppliedExcerptAndMetadata schema example must not contain pipe | syntax');
+
+    const parsed = JSON.parse(schemaJsonStr);
+    assert(parsed.status === 'READY', 'Parsed schema example status is READY');
+    const prep = parsed.libraryPreparation;
+    assert(Object.keys(prep).length === 14, 'libraryPreparation must contain exactly 14 canonical keys');
+    assert(prep.inputBasis === 'SuppliedExcerptAndMetadata', 'inputBasis is SuppliedExcerptAndMetadata');
+    assert(typeof prep.suggestedSummaryAr === 'string', 'suggestedSummaryAr is string in SuppliedExcerptAndMetadata example');
+    assert(typeof prep.suggestedSummaryEn === 'string', 'suggestedSummaryEn is string in SuppliedExcerptAndMetadata example');
+    assert(prep.suggestedDocumentType === 'ExecutiveRegulation', 'suggestedDocumentType is valid concrete type');
+  });
+
   console.log('------------------------------------------------------------');
   console.log(`LOCAL ANALYSIS RUNTIME TESTS: ${passedTests}/${totalTests} PASSED`);
   if (passedTests !== totalTests) {
