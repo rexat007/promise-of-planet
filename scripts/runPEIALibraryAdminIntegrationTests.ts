@@ -33,7 +33,11 @@ import {
 } from '../functions/src/peia/firestorePeiaTaskQueueService';
 import { PEIA_PENDING_TASK_COLLECTION } from '../functions/src/peia/firestorePendingTaskSource';
 import { FirestoreAdvisoryResultRepository } from '../functions/src/peia/firestoreAdvisoryResultRepository';
-import { FirestoreNonAdvisoryOutcomeRepository } from '../functions/src/peia/firestoreNonAdvisoryOutcomeRepository';
+import {
+  FirestoreNonAdvisoryOutcomeRepository,
+  PEIA_NON_ADVISORY_OUTCOME_COLLECTION,
+  deriveNonAdvisoryOutcomeDocumentId,
+} from '../functions/src/peia/firestoreNonAdvisoryOutcomeRepository';
 import { PEIAMachineCapability } from '../functions/src/peia/machineAuthorizationBoundary';
 
 class FallbackHttpsError extends Error {
@@ -2738,6 +2742,172 @@ async function main(): Promise<void> {
         rightsDoc.document.rightsStatus ===
           LibraryRightsStatus.OpenPubliclyAvailable,
         'Expected OpenPubliclyAvailable rights status'
+      );
+    }
+  );
+
+  // 23. Completed + ABSTAINED Library intake PEIA preparation status reconciliation and idempotent replay.
+  await runTest(
+    '23. Completed + ABSTAINED Library intake PEIA preparation returns structured DTO with advisoryResult === null, libraryPreparation === null, and valid nonAdvisoryOutcome without throwing failed-precondition',
+    async () => {
+      const h = createHarness();
+      await h.libraryRepo.createOrganization(createSampleOrganization());
+      await h.libraryRepo.createSource(createSampleSource());
+
+      const intake = createSampleIntakeRecord({
+        id: 'intake-abstained-23',
+        updatedAt: '2026-06-15T15:00:00.000Z',
+      });
+      await h.libraryRepo.createIntake(intake);
+
+      const enqueued = await h.invoke(
+        { uid: 'curator-1' },
+        {
+          action: 'requestIntakePeiaPreparation',
+          intakeId: intake.id,
+          expectedUpdatedAt: intake.updatedAt,
+        }
+      );
+
+      const nonAdvisoryRepo = new FirestoreNonAdvisoryOutcomeRepository(h.db as any);
+      await nonAdvisoryRepo.saveWithTaskConvergence({
+        taskId: enqueued.taskId,
+        reconciledTask: enqueued.task,
+        principal: {
+          principalId: 'worker-01',
+          isActive: true,
+          capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+        },
+        nonAdvisoryOutcome: {
+          taskId: enqueued.taskId,
+          kind: 'ABSTAINED',
+          reason: 'INVALID_MODEL_OUTPUT',
+          modelAttempts: 2,
+          createdAt: '2026-06-15T15:05:00.000Z',
+          detail: 'Local model output failed schema validation; abstaining safely.',
+        },
+        convergedStatus: AITaskStatus.Completed,
+        convergedAt: '2026-06-15T15:05:02.000Z',
+      });
+
+      const status = await h.invoke(
+        { uid: 'curator-1' },
+        {
+          action: 'getIntakePeiaPreparationStatus',
+          intakeId: intake.id,
+        }
+      );
+      assert(
+        status.status === AITaskStatus.Completed,
+        'Expected Completed status for ABSTAINED LibraryIntake task'
+      );
+      assert(status.isStale === false, 'Expected isStale === false');
+      assert(
+        status.inputBasis === PEIALibraryPreparationInputBasis.MetadataOnly,
+        'Expected MetadataOnly inputBasis'
+      );
+      assert(status.advisoryResult === null, 'Expected advisoryResult === null on ABSTAINED');
+      assert(
+        status.libraryPreparation === null,
+        'Expected libraryPreparation === null on ABSTAINED'
+      );
+      assert(
+        status.nonAdvisoryOutcome?.kind === 'ABSTAINED',
+        'Expected nonAdvisoryOutcome.kind === ABSTAINED'
+      );
+      assert(
+        status.nonAdvisoryOutcome?.reason === 'INVALID_MODEL_OUTPUT',
+        'Expected nonAdvisoryOutcome.reason === INVALID_MODEL_OUTPUT'
+      );
+
+      // Idempotent requestIntakePeiaPreparation replay on Completed + ABSTAINED returns ALREADY_EXISTS with structured DTO
+      const replay = await h.invoke(
+        { uid: 'curator-1' },
+        {
+          action: 'requestIntakePeiaPreparation',
+          intakeId: intake.id,
+          expectedUpdatedAt: intake.updatedAt,
+        }
+      );
+      assert(
+        replay.disposition === 'ALREADY_EXISTS',
+        'Expected ALREADY_EXISTS disposition on replay'
+      );
+      assert(
+        replay.status === AITaskStatus.Completed,
+        'Expected Completed status on replay'
+      );
+      assert(replay.advisoryResult === null, 'Expected advisoryResult === null on replay');
+      assert(
+        replay.libraryPreparation === null,
+        'Expected libraryPreparation === null on replay'
+      );
+      assert(
+        replay.nonAdvisoryOutcome?.kind === 'ABSTAINED',
+        'Expected nonAdvisoryOutcome.kind === ABSTAINED on replay'
+      );
+
+      // Invalid Completed + MODEL_FAILURE on LibraryIntake fails closed with failed-precondition (RECONCILIATION_INTEGRITY_ERROR)
+      const invalidIntake = createSampleIntakeRecord({
+        id: 'intake-invalid-completed-23b',
+        url: 'https://wedocs.unep.org/bitstream/handle/20.500.11822/red-sea-invalid-23b.pdf',
+        normalizedUrl: 'https://wedocs.unep.org/bitstream/handle/20.500.11822/red-sea-invalid-23b.pdf',
+        updatedAt: '2026-06-15T15:10:00.000Z',
+      });
+      await h.libraryRepo.createIntake(invalidIntake);
+
+      const enqueuedInvalid = await h.invoke(
+        { uid: 'curator-1' },
+        {
+          action: 'requestIntakePeiaPreparation',
+          intakeId: invalidIntake.id,
+          expectedUpdatedAt: invalidIntake.updatedAt,
+        }
+      );
+      h.db.seedDocument(
+        PEIA_PENDING_TASK_COLLECTION,
+        derivePeiaTaskDocumentId(enqueuedInvalid.taskId),
+        {
+          ...enqueuedInvalid.task,
+          status: AITaskStatus.Completed,
+        }
+      );
+      h.db.seedDocument(
+        PEIA_NON_ADVISORY_OUTCOME_COLLECTION,
+        deriveNonAdvisoryOutcomeDocumentId(enqueuedInvalid.taskId),
+        {
+          taskId: enqueuedInvalid.taskId,
+          reconciledTask: enqueuedInvalid.task,
+          principal: {
+            principalId: 'worker-01',
+            isActive: true,
+            capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+          },
+          nonAdvisoryOutcome: {
+            taskId: enqueuedInvalid.taskId,
+            kind: 'MODEL_FAILURE',
+            reason: 'NON_ZERO_EXIT',
+            modelAttempts: 2,
+            exitCode: 1,
+            createdAt: '2026-06-15T15:12:00.000Z',
+          },
+          convergedStatus: AITaskStatus.Failed,
+          convergedAt: '2026-06-15T15:12:01.000Z',
+        }
+      );
+
+      await assertRejectsWithHttpsError(
+        () =>
+          h.invoke(
+            { uid: 'curator-1' },
+            {
+              action: 'getIntakePeiaPreparationStatus',
+              intakeId: invalidIntake.id,
+            }
+          ),
+        'failed-precondition',
+        'RECONCILIATION_INTEGRITY_ERROR',
+        'Completed LibraryIntake task with MODEL_FAILURE artifact'
       );
     }
   );

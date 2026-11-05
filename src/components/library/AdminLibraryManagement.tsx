@@ -3303,6 +3303,55 @@ export function AdminLibraryManagement({
                   </div>
                 )}
 
+                {/* STATE C2: Completed + ABSTAINED */}
+                {peiaStatus.status === AITaskStatus.Completed &&
+                  !peiaStatus.libraryPreparation &&
+                  peiaStatus.nonAdvisoryOutcome?.kind === 'ABSTAINED' && (
+                    <div
+                      data-testid="peia-status-completed-abstained"
+                      className="p-4 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/30 text-xs space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-extrabold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                          <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                          <span>
+                            {isAr
+                              ? 'اكتملت معالجة المهمة دون إنتاج مقترحات استشارية — امتناع PEIA'
+                              : 'PEIA Processing Completed — No Advisory Produced (Abstained)'}
+                          </span>
+                        </span>
+                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 font-mono font-bold text-[10px]">
+                          {AITaskStatus.Completed}
+                        </span>
+                      </div>
+
+                      <p className="text-[11px] leading-relaxed text-amber-800 dark:text-amber-300">
+                        {isAr
+                          ? 'اكتملت معالجة المهمة في نظام PEIA دون إصدار مقترحات فهرسة استشارية (امتناع استرشادي). لا يُعد هذا الامتناع فشلاً للمهمة ولا يقوم بالموافقة أو الرفض أو الترقية التلقائية لأي سجل استقبال.'
+                          : 'PEIA task processing completed without producing advisory cataloging suggestions (abstained outcome). This is not a task failure and does not automatically approve, reject, or promote any intake record.'}
+                      </p>
+
+                      <div className="space-y-1.5 text-amber-900 dark:text-amber-200 pt-1">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-mono">
+                          <div>Task ID: {peiaStatus.taskId}</div>
+                          <div>Outcome Kind: {peiaStatus.nonAdvisoryOutcome.kind}</div>
+                          <div>Reason Code: {peiaStatus.nonAdvisoryOutcome.reason}</div>
+                          <div>Completed At: {peiaStatus.nonAdvisoryOutcome.createdAt}</div>
+                          <div>Model Attempts: {peiaStatus.nonAdvisoryOutcome.modelAttempts}</div>
+                          <div>Target Version: {peiaStatus.taskSourceUpdatedAt ?? 'N/A'}</div>
+                        </div>
+                        {peiaStatus.nonAdvisoryOutcome.detail && (
+                          <p
+                            data-testid="peia-abstained-detail"
+                            className="text-[11px] text-amber-800 dark:text-amber-300 font-mono break-words"
+                          >
+                            {peiaStatus.nonAdvisoryOutcome.detail}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                 {/* STATE D: Failed */}
                 {peiaStatus.status === AITaskStatus.Failed && (
                   <div

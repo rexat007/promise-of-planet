@@ -184,15 +184,29 @@ export type ReconciledPeiaTaskStatusResult =
     }
   | {
       readonly status: typeof AITaskStatus.Completed;
+      readonly completionKind: 'ADVISORY';
       readonly taskId: string;
       readonly task: AIReviewTask;
       readonly advisoryResult: AdvisoryResultIntakeResult;
+      readonly nonAdvisoryOutcome: null;
+      readonly isStale: boolean;
+    }
+  | {
+      readonly status: typeof AITaskStatus.Completed;
+      readonly completionKind: 'ABSTAINED';
+      readonly taskId: string;
+      readonly task: AIReviewTask;
+      readonly advisoryResult: null;
+      readonly nonAdvisoryOutcome: CanonicalNonAdvisoryOutcome & {
+        readonly kind: 'ABSTAINED';
+      };
       readonly isStale: boolean;
     }
   | {
       readonly status: typeof AITaskStatus.Failed;
       readonly taskId: string;
       readonly task: AIReviewTask;
+      readonly advisoryResult: null;
       readonly nonAdvisoryOutcome: CanonicalNonAdvisoryOutcome;
       readonly isStale: boolean;
     };
@@ -1144,49 +1158,98 @@ export class FirestorePeiaTaskQueueService {
       }
 
       if (task.status === AITaskStatus.Completed) {
-        if (!advisorySnap.exists) {
+        if (!advisorySnap.exists && !nonAdvisorySnap.exists) {
           throw new PeiaTaskQueueError(
             'RECONCILIATION_INTEGRITY_ERROR',
-            `Task "${taskId}" is marked Completed, but the corresponding advisory result artifact is missing.`
+            `Task "${taskId}" is marked Completed, but neither an advisory result nor an abstained non-advisory outcome artifact exists.`
           );
         }
 
-        let validatedAdvisoryRecord;
+        if (advisorySnap.exists) {
+          let validatedAdvisoryRecord;
+          try {
+            validatedAdvisoryRecord = validateExistingAdvisoryRecord(
+              task.taskId,
+              advisorySnap.data()
+            );
+          } catch {
+            throw new PeiaTaskQueueError(
+              'RECONCILIATION_INTEGRITY_ERROR',
+              `Stored advisory result for Completed task "${taskId}" failed validation.`
+            );
+          }
+
+          if (
+            !isTaskReferenceEqual(task, validatedAdvisoryRecord.reconciledTask) ||
+            !isTaskReferenceEqual(task, validatedAdvisoryRecord.advisoryResult.task)
+          ) {
+            throw new PeiaTaskQueueError(
+              'RECONCILIATION_INTEGRITY_ERROR',
+              `Stored advisory result reference does not match authoritative task "${taskId}".`
+            );
+          }
+
+          if (task.target.targetType === AIReviewTargetType.LibraryIntake) {
+            const prep = validatedAdvisoryRecord.advisoryResult.libraryPreparation;
+            const expectedBasis = task.contentSnapshot['inputBasis'];
+            if (!prep || (expectedBasis !== undefined && prep.inputBasis !== expectedBasis)) {
+              throw new PeiaTaskQueueError(
+                'RECONCILIATION_INTEGRITY_ERROR',
+                `LibraryIntake advisory result inputBasis does not match authoritative task snapshot.`
+              );
+            }
+          }
+
+          return Object.freeze({
+            status: AITaskStatus.Completed,
+            completionKind: 'ADVISORY' as const,
+            taskId: task.taskId,
+            task,
+            advisoryResult: validatedAdvisoryRecord.advisoryResult,
+            nonAdvisoryOutcome: null,
+            isStale,
+          });
+        }
+
+        let validatedNonAdvisoryRecord;
         try {
-          validatedAdvisoryRecord = validateExistingAdvisoryRecord(task.taskId, advisorySnap.data());
+          validatedNonAdvisoryRecord = validateExistingNonAdvisoryRecord(
+            task.taskId,
+            nonAdvisorySnap.data()
+          );
         } catch {
           throw new PeiaTaskQueueError(
             'RECONCILIATION_INTEGRITY_ERROR',
-            `Stored advisory result for Completed task "${taskId}" failed validation.`
+            `Stored non-advisory outcome for Completed task "${taskId}" failed validation.`
           );
         }
 
+        const expectedCompletedStatus = computeConvergedTaskStatus(
+          validatedNonAdvisoryRecord.nonAdvisoryOutcome.kind
+        );
         if (
-          !isTaskReferenceEqual(task, validatedAdvisoryRecord.reconciledTask) ||
-          !isTaskReferenceEqual(task, validatedAdvisoryRecord.advisoryResult.task)
+          validatedNonAdvisoryRecord.nonAdvisoryOutcome.kind !== 'ABSTAINED' ||
+          expectedCompletedStatus !== AITaskStatus.Completed ||
+          validatedNonAdvisoryRecord.convergedStatus !== AITaskStatus.Completed ||
+          validatedNonAdvisoryRecord.taskId !== task.taskId ||
+          validatedNonAdvisoryRecord.nonAdvisoryOutcome.taskId !== task.taskId ||
+          !isTaskReferenceEqual(task, validatedNonAdvisoryRecord.reconciledTask)
         ) {
           throw new PeiaTaskQueueError(
             'RECONCILIATION_INTEGRITY_ERROR',
-            `Stored advisory result reference does not match authoritative task "${taskId}".`
+            `Stored non-advisory outcome is not coherent with Completed task "${taskId}".`
           );
-        }
-
-        if (task.target.targetType === AIReviewTargetType.LibraryIntake) {
-          const prep = validatedAdvisoryRecord.advisoryResult.libraryPreparation;
-          const expectedBasis = task.contentSnapshot['inputBasis'];
-          if (!prep || (expectedBasis !== undefined && prep.inputBasis !== expectedBasis)) {
-            throw new PeiaTaskQueueError(
-              'RECONCILIATION_INTEGRITY_ERROR',
-              `LibraryIntake advisory result inputBasis does not match authoritative task snapshot.`
-            );
-          }
         }
 
         return Object.freeze({
           status: AITaskStatus.Completed,
+          completionKind: 'ABSTAINED' as const,
           taskId: task.taskId,
           task,
-          advisoryResult: validatedAdvisoryRecord.advisoryResult,
+          advisoryResult: null,
+          nonAdvisoryOutcome: validatedNonAdvisoryRecord.nonAdvisoryOutcome as CanonicalNonAdvisoryOutcome & {
+            readonly kind: 'ABSTAINED';
+          },
           isStale,
         });
       }
@@ -1230,6 +1293,7 @@ export class FirestorePeiaTaskQueueService {
           status: AITaskStatus.Failed,
           taskId: task.taskId,
           task,
+          advisoryResult: null,
           nonAdvisoryOutcome: validatedNonAdvisoryRecord.nonAdvisoryOutcome,
           isStale,
         });

@@ -1002,6 +1002,7 @@ function toSanitizedNewsPeiaReviewStatusDto(
         ? reconciled.advisoryResult
         : null,
     nonAdvisoryOutcome:
+      reconciled.status === AITaskStatus.Completed ||
       reconciled.status === AITaskStatus.Failed
         ? reconciled.nonAdvisoryOutcome
         : null,

@@ -1105,4 +1105,201 @@ describe('AdminLibraryManagement — PEIA Unified Library Intake UI Integration 
       expect(html).toContain(`data-testid="intake-peia-prep-action-mobile-${record.id}"`);
     }
   });
+
+  it('26. Displays Completed + ABSTAINED in English and Arabic with task ID, outcome kind, reason, timestamp, model attempts, and optional detail without fabricated advisory findings or Failed label', () => {
+    const record = buildIntakeRecord();
+    const task = buildPeiaTask(record, AITaskStatus.Completed);
+    const abstainedDto: SanitizedLibraryIntakePeiaPreparationStatusDto = {
+      status: AITaskStatus.Completed,
+      taskId: task.taskId,
+      targetType: AIReviewTargetType.LibraryIntake,
+      targetId: record.id,
+      intakeId: record.id,
+      currentSourceUpdatedAt: record.updatedAt,
+      taskSourceUpdatedAt: record.updatedAt,
+      isStale: false,
+      inputBasis: PEIALibraryPreparationInputBasis.SuppliedExcerptAndMetadata,
+      task,
+      advisoryResult: null,
+      libraryPreparation: null,
+      nonAdvisoryOutcome: {
+        taskId: task.taskId,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 2,
+        createdAt: '2026-04-10T09:37:00.000Z',
+        detail: 'Local model output did not conform to canonical preparation schema.',
+      },
+    };
+
+    const htmlEn = renderIntakeViewMarkup({
+      currentUser: curatorUser,
+      intakeRecords: [record],
+      modalState: {
+        activeIntake: record,
+        peiaStatus: abstainedDto,
+      },
+      language: 'en',
+    });
+
+    expect(htmlEn).toContain('data-testid="peia-status-completed-abstained"');
+    expect(htmlEn).toContain('PEIA Processing Completed — No Advisory Produced (Abstained)');
+    expect(htmlEn).toContain(`Task ID: ${task.taskId}`);
+    expect(htmlEn).toContain('Outcome Kind: ABSTAINED');
+    expect(htmlEn).toContain('Reason Code: INVALID_MODEL_OUTPUT');
+    expect(htmlEn).toContain('Completed At: 2026-04-10T09:37:00.000Z');
+    expect(htmlEn).toContain('Model Attempts: 2');
+    expect(htmlEn).toContain('data-testid="peia-abstained-detail"');
+    expect(htmlEn).toContain('Local model output did not conform to canonical preparation schema.');
+    expect(htmlEn).not.toContain('data-testid="peia-status-completed"');
+    expect(htmlEn).not.toContain('data-testid="peia-completed-summaries"');
+    expect(htmlEn).not.toContain('data-testid="peia-status-failed"');
+
+    const htmlAr = renderIntakeViewMarkup({
+      currentUser: curatorUser,
+      intakeRecords: [record],
+      modalState: {
+        activeIntake: record,
+        peiaStatus: abstainedDto,
+      },
+      language: 'ar',
+    });
+
+    expect(htmlAr).toContain('data-testid="peia-status-completed-abstained"');
+    expect(htmlAr).toContain('اكتملت معالجة المهمة دون إنتاج مقترحات استشارية — امتناع PEIA');
+    expect(htmlAr).toContain(`Task ID: ${task.taskId}`);
+    expect(htmlAr).toContain('Outcome Kind: ABSTAINED');
+    expect(htmlAr).toContain('Reason Code: INVALID_MODEL_OUTPUT');
+    expect(htmlAr).toContain('Completed At: 2026-04-10T09:37:00.000Z');
+    expect(htmlAr).toContain('Model Attempts: 2');
+    expect(htmlAr).toContain('Local model output did not conform to canonical preparation schema.');
+    expect(htmlAr).not.toContain('data-testid="peia-status-completed"');
+    expect(htmlAr).not.toContain('data-testid="peia-status-failed"');
+  });
+
+  it('27. Preserves stale warning, legacy Gemini read-only section, refresh action, desktop/mobile compatibility, and RBAC under Completed + ABSTAINED', () => {
+    const record = buildIntakeRecord({
+      updatedAt: '2026-04-10T16:00:00.000Z',
+      aiSuggestion: {
+        modelId: 'gemini-2.5-flash',
+        generatedAt: '2026-03-15T10:00:00.000Z',
+        generatedByAdminId: 'admin-legacy',
+        generatedByAdminName: 'Legacy Curator',
+        inputBasis: LibraryIntakeAIInputBasis.MetadataOnly,
+        suggestedTitleAr: 'عنوان قديم محفوظ من جيميني',
+        suggestedTitleEn: 'Legacy Stored Gemini Title',
+        suggestedIssuingOrganization: 'Legacy Ministry',
+        suggestedDocumentType: LibraryDocumentType.Report,
+        suggestedEnvironmentalDomains: ['Biodiversity'],
+        suggestedTopicsAr: ['التنوع الحيوي'],
+        suggestedTopicsEn: ['Biodiversity'],
+        provenanceObservationsAr: ['ملاحظة سابقة'],
+        provenanceObservationsEn: ['Legacy provenance observation'],
+        uncertaintyNoticesAr: ['تنبيه سابق'],
+        uncertaintyNoticesEn: ['Legacy uncertainty notice'],
+        verificationWarningAr: 'تحذير قديم',
+        verificationWarningEn: 'Legacy warning',
+      },
+    });
+    const staleTaskVersion = '2026-04-10T09:30:00.000Z';
+    const task = buildPeiaTask(
+      { ...record, updatedAt: staleTaskVersion },
+      AITaskStatus.Completed
+    );
+    const abstainedStaleDto: SanitizedLibraryIntakePeiaPreparationStatusDto = {
+      status: AITaskStatus.Completed,
+      taskId: task.taskId,
+      targetType: AIReviewTargetType.LibraryIntake,
+      targetId: record.id,
+      intakeId: record.id,
+      currentSourceUpdatedAt: record.updatedAt,
+      taskSourceUpdatedAt: staleTaskVersion,
+      isStale: true,
+      inputBasis: PEIALibraryPreparationInputBasis.SuppliedExcerptAndMetadata,
+      task,
+      advisoryResult: null,
+      libraryPreparation: null,
+      nonAdvisoryOutcome: {
+        taskId: task.taskId,
+        kind: 'ABSTAINED',
+        reason: 'NO_EVIDENCE',
+        modelAttempts: 0,
+        createdAt: '2026-04-10T09:38:00.000Z',
+      },
+    };
+
+    const htmlEn = renderIntakeViewMarkup({
+      currentUser: curatorUser,
+      intakeRecords: [record],
+      modalState: {
+        activeIntake: record,
+        peiaStatus: abstainedStaleDto,
+      },
+      language: 'en',
+    });
+
+    expect(htmlEn).toContain('data-testid="peia-stale-warning-banner"');
+    expect(htmlEn).toContain('data-testid="peia-status-completed-abstained"');
+    expect(htmlEn).toContain('Reason Code: NO_EVIDENCE');
+    expect(htmlEn).toContain('Model Attempts: 0');
+    expect(htmlEn).not.toContain('data-testid="peia-abstained-detail"');
+    expect(htmlEn).toContain('data-testid="legacy-gemini-suggestion-readonly"');
+    expect(htmlEn).toContain('data-testid="peia-refresh-status-btn"');
+    expect(htmlEn).toContain('Request Fresh PEIA Preparation');
+    expect(htmlEn).toContain('data-testid="intake-desktop-table"');
+    expect(htmlEn).toContain('data-testid="intake-mobile-cards"');
+  });
+
+  it('28. Controller transitions cleanly from Pending to Completed + ABSTAINED on refreshStatus without mutating intake status', async () => {
+    const record = buildIntakeRecord();
+    const pendingRes = buildStatusResponse(record, AITaskStatus.Pending);
+    const completedTask = buildPeiaTask(record, AITaskStatus.Completed);
+    const abstainedDto: SanitizedLibraryIntakePeiaPreparationStatusDto = {
+      status: AITaskStatus.Completed,
+      taskId: completedTask.taskId,
+      targetType: AIReviewTargetType.LibraryIntake,
+      targetId: record.id,
+      intakeId: record.id,
+      currentSourceUpdatedAt: record.updatedAt,
+      taskSourceUpdatedAt: record.updatedAt,
+      isStale: false,
+      inputBasis: PEIALibraryPreparationInputBasis.SuppliedExcerptAndMetadata,
+      task: completedTask,
+      advisoryResult: null,
+      libraryPreparation: null,
+      nonAdvisoryOutcome: {
+        taskId: completedTask.taskId,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 2,
+        createdAt: '2026-04-10T09:37:00.000Z',
+      },
+    };
+    const abstainedRes: GetLibraryIntakePeiaPreparationStatusResponseDto = {
+      ...abstainedDto,
+      preparationStatus: abstainedDto,
+      reviewStatus: abstainedDto,
+    };
+
+    const getStatusSpy = vi
+      .fn()
+      .mockResolvedValueOnce(pendingRes)
+      .mockResolvedValueOnce(abstainedRes);
+
+    const controller = new LibraryIntakePeiaPreparationController(curatorUser, {
+      getIntakePeiaPreparationStatus: getStatusSpy,
+    });
+
+    await controller.openModal(record);
+    expect(controller.getSnapshot().peiaStatus?.status).toBe(AITaskStatus.Pending);
+
+    await controller.refreshStatus();
+    expect(getStatusSpy).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot().peiaStatus?.status).toBe(AITaskStatus.Completed);
+    expect(controller.getSnapshot().peiaStatus?.advisoryResult).toBeNull();
+    expect(controller.getSnapshot().peiaStatus?.libraryPreparation).toBeNull();
+    expect(controller.getSnapshot().peiaStatus?.nonAdvisoryOutcome?.kind).toBe('ABSTAINED');
+    expect(controller.getSnapshot().peiaError).toBeNull();
+    expect(controller.getSnapshot().activeIntake?.status).toBe(LibraryIntakeStatus.PendingReview);
+  });
 });

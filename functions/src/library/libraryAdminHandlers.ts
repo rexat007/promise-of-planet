@@ -736,10 +736,12 @@ function toSanitizedLibraryIntakePeiaPreparationStatusDto(
       ? reconciled.advisoryResult
       : null;
   const libraryPreparation =
-    reconciled.status === AITaskStatus.Completed
+    reconciled.status === AITaskStatus.Completed &&
+    reconciled.advisoryResult !== null
       ? reconciled.advisoryResult.libraryPreparation ?? null
       : null;
   const nonAdvisoryOutcome =
+    reconciled.status === AITaskStatus.Completed ||
     reconciled.status === AITaskStatus.Failed
       ? reconciled.nonAdvisoryOutcome
       : null;

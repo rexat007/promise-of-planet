@@ -22,6 +22,8 @@ import {
 } from '../functions/src/peia/firestoreAdvisoryResultRepository';
 import {
   FirestoreNonAdvisoryOutcomeRepository,
+  PEIA_NON_ADVISORY_OUTCOME_COLLECTION,
+  deriveNonAdvisoryOutcomeDocumentId,
 } from '../functions/src/peia/firestoreNonAdvisoryOutcomeRepository';
 import { PEIAMachineCapability } from '../functions/src/peia/machineAuthorizationBoundary';
 
@@ -1385,6 +1387,142 @@ async function main(): Promise<void> {
         `${PEIA_PENDING_TASK_COLLECTION}/${derivePeiaTaskDocumentId(okRes.taskId)}`
       ),
       'Expected transactional write to peiaReviewTasks'
+    );
+  });
+
+  // 13. Completed + ABSTAINED News PEIA review status reconciliation and idempotent requestPeiaReview replay.
+  await runTest('13. Completed + ABSTAINED News PEIA review returns structured DTO with advisoryResult === null and nonAdvisoryOutcome, and fails closed on invalid Completed artifacts', async () => {
+    const h = createHarness();
+    const article = createSampleNewsItem({
+      id: 'news-abstained-13',
+      updatedAt: '2026-05-10T14:00:00.000Z',
+    });
+    await h.newsRepo.save(article);
+
+    const enqueued = await h.invoke(
+      { uid: 'editor-1' },
+      {
+        action: 'requestPeiaReview',
+        id: article.id,
+        expectedUpdatedAt: article.updatedAt,
+      }
+    );
+
+    const nonAdvisoryRepo = new FirestoreNonAdvisoryOutcomeRepository(h.db as any);
+    await nonAdvisoryRepo.saveWithTaskConvergence({
+      taskId: enqueued.taskId,
+      reconciledTask: enqueued.task,
+      principal: {
+        principalId: 'worker-01',
+        isActive: true,
+        capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+      },
+      nonAdvisoryOutcome: {
+        taskId: enqueued.taskId,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 2,
+        createdAt: '2026-05-10T14:05:00.000Z',
+        detail: 'Local model output failed schema validation; abstaining safely.',
+      },
+      convergedStatus: AITaskStatus.Completed,
+      convergedAt: '2026-05-10T14:05:02.000Z',
+    });
+
+    const abstainedStatus = await h.invoke(
+      { uid: 'editor-1' },
+      {
+        action: 'getPeiaReviewStatus',
+        id: article.id,
+      }
+    );
+    assert(abstainedStatus.status === AITaskStatus.Completed, 'Expected Completed status for ABSTAINED');
+    assert(abstainedStatus.isStale === false, 'Expected isStale === false');
+    assert(abstainedStatus.advisoryResult === null, 'Expected advisoryResult === null for ABSTAINED');
+    assert(
+      abstainedStatus.nonAdvisoryOutcome?.kind === 'ABSTAINED',
+      'Expected nonAdvisoryOutcome.kind === ABSTAINED'
+    );
+    assert(
+      abstainedStatus.nonAdvisoryOutcome?.reason === 'INVALID_MODEL_OUTPUT',
+      'Expected nonAdvisoryOutcome.reason === INVALID_MODEL_OUTPUT'
+    );
+
+    // Idempotent requestPeiaReview replay on Completed + ABSTAINED returns ALREADY_EXISTS with the same reconciled DTO
+    const replayRes = await h.invoke(
+      { uid: 'editor-1' },
+      {
+        action: 'requestPeiaReview',
+        id: article.id,
+        expectedUpdatedAt: article.updatedAt,
+      }
+    );
+    assert(replayRes.disposition === 'ALREADY_EXISTS', 'Expected ALREADY_EXISTS on replay');
+    assert(replayRes.status === AITaskStatus.Completed, 'Expected Completed status on replay');
+    assert(replayRes.advisoryResult === null, 'Expected advisoryResult === null on replay');
+    assert(
+      replayRes.nonAdvisoryOutcome?.kind === 'ABSTAINED',
+      'Expected nonAdvisoryOutcome.kind === ABSTAINED on replay'
+    );
+
+    // Invalid Completed + MODEL_FAILURE fails closed with failed-precondition (RECONCILIATION_INTEGRITY_ERROR)
+    const invalidArticle = createSampleNewsItem({
+      id: 'news-invalid-completed-13b',
+      updatedAt: '2026-05-10T14:10:00.000Z',
+    });
+    await h.newsRepo.save(invalidArticle);
+
+    const enqueuedInvalid = await h.invoke(
+      { uid: 'editor-1' },
+      {
+        action: 'requestPeiaReview',
+        id: invalidArticle.id,
+        expectedUpdatedAt: invalidArticle.updatedAt,
+      }
+    );
+    h.db.seedDocument(
+      PEIA_PENDING_TASK_COLLECTION,
+      derivePeiaTaskDocumentId(enqueuedInvalid.taskId),
+      {
+        ...enqueuedInvalid.task,
+        status: AITaskStatus.Completed,
+      }
+    );
+    h.db.seedDocument(
+      PEIA_NON_ADVISORY_OUTCOME_COLLECTION,
+      deriveNonAdvisoryOutcomeDocumentId(enqueuedInvalid.taskId),
+      {
+        taskId: enqueuedInvalid.taskId,
+        reconciledTask: enqueuedInvalid.task,
+        principal: {
+          principalId: 'worker-01',
+          isActive: true,
+          capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+        },
+        nonAdvisoryOutcome: {
+          taskId: enqueuedInvalid.taskId,
+          kind: 'MODEL_FAILURE',
+          reason: 'TIMEOUT',
+          modelAttempts: 2,
+          createdAt: '2026-05-10T14:12:00.000Z',
+        },
+        convergedStatus: AITaskStatus.Failed,
+        convergedAt: '2026-05-10T14:12:01.000Z',
+      }
+    );
+
+    await assertRejectsWithHttpsError(
+      () =>
+        h.invoke(
+          { uid: 'editor-1' },
+          {
+            action: 'getPeiaReviewStatus',
+            id: invalidArticle.id,
+          }
+        ),
+      'failed-precondition',
+      'RECONCILIATION_INTEGRITY_ERROR',
+      'Completed News task with MODEL_FAILURE artifact'
     );
   });
 

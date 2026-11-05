@@ -417,6 +417,113 @@ function validateAdvisoryResultEnvelope(
   return rawAdvisory as unknown as AdvisoryResultIntakeResult;
 }
 
+const VALID_ABSTAINED_REASONS: ReadonlySet<string> = new Set([
+  'NO_EVIDENCE',
+  'INSUFFICIENT_EVIDENCE',
+  'INVALID_MODEL_OUTPUT',
+  'UNGROUNDED_MODEL_OUTPUT',
+]);
+
+function hasExactKeys(
+  obj: Record<string, unknown>,
+  expectedKeys: readonly string[]
+): boolean {
+  const actualKeys = Object.keys(obj);
+  if (actualKeys.length !== expectedKeys.length) {
+    return false;
+  }
+  return expectedKeys.every((key) =>
+    Object.prototype.hasOwnProperty.call(obj, key)
+  );
+}
+
+function validateAbstainedOutcomeEnvelope(
+  rawOutcome: unknown,
+  expectedTaskId: string
+): CanonicalNonAdvisoryOutcome {
+  if (!isPlainObject(rawOutcome)) {
+    throw new Error(
+      'INVALID_PEIA_RESPONSE: Completed non-advisory PEIA response must include a valid nonAdvisoryOutcome object.'
+    );
+  }
+  if (rawOutcome.taskId !== expectedTaskId) {
+    throw new Error(
+      `INVALID_PEIA_RESPONSE: nonAdvisoryOutcome.taskId (${String(rawOutcome.taskId)}) does not match taskId (${expectedTaskId}).`
+    );
+  }
+  if (rawOutcome.kind !== 'ABSTAINED') {
+    throw new Error(
+      `INVALID_PEIA_RESPONSE: Completed non-advisory PEIA response requires nonAdvisoryOutcome.kind === 'ABSTAINED', got '${String(rawOutcome.kind)}'.`
+    );
+  }
+  if (
+    rawOutcome.exitCode !== undefined ||
+    'exitCode' in rawOutcome ||
+    rawOutcome.sourceFailures !== undefined ||
+    'sourceFailures' in rawOutcome
+  ) {
+    throw new Error(
+      'INVALID_PEIA_RESPONSE: ABSTAINED nonAdvisoryOutcome cannot include exitCode or sourceFailures.'
+    );
+  }
+  if (rawOutcome.detail !== undefined && !isNonEmptyTrimmedString(rawOutcome.detail)) {
+    throw new Error(
+      'INVALID_PEIA_RESPONSE: nonAdvisoryOutcome.detail must be a non-empty trimmed string without control characters when present.'
+    );
+  }
+  const expectedKeys =
+    rawOutcome.detail !== undefined
+      ? (['taskId', 'kind', 'reason', 'modelAttempts', 'createdAt', 'detail'] as const)
+      : (['taskId', 'kind', 'reason', 'modelAttempts', 'createdAt'] as const);
+  if (!hasExactKeys(rawOutcome, expectedKeys)) {
+    throw new Error(
+      'INVALID_PEIA_RESPONSE: ABSTAINED nonAdvisoryOutcome contains unexpected or missing fields.'
+    );
+  }
+  if (
+    typeof rawOutcome.reason !== 'string' ||
+    !VALID_ABSTAINED_REASONS.has(rawOutcome.reason)
+  ) {
+    throw new Error(
+      `INVALID_PEIA_RESPONSE: Invalid ABSTAINED reason '${String(rawOutcome.reason)}'.`
+    );
+  }
+  if (
+    typeof rawOutcome.modelAttempts !== 'number' ||
+    !Number.isInteger(rawOutcome.modelAttempts)
+  ) {
+    throw new Error(
+      'INVALID_PEIA_RESPONSE: nonAdvisoryOutcome.modelAttempts must be an integer.'
+    );
+  }
+  if (
+    rawOutcome.reason === 'NO_EVIDENCE' ||
+    rawOutcome.reason === 'INSUFFICIENT_EVIDENCE'
+  ) {
+    if (rawOutcome.modelAttempts !== 0) {
+      throw new Error(
+        `INVALID_PEIA_RESPONSE: ABSTAINED reason '${rawOutcome.reason}' requires modelAttempts === 0, got ${String(rawOutcome.modelAttempts)}.`
+      );
+    }
+  } else {
+    if (rawOutcome.modelAttempts !== 1 && rawOutcome.modelAttempts !== 2) {
+      throw new Error(
+        `INVALID_PEIA_RESPONSE: ABSTAINED reason '${rawOutcome.reason}' requires modelAttempts of 1 or 2, got ${String(rawOutcome.modelAttempts)}.`
+      );
+    }
+  }
+  if (
+    !isValidIsoTimestampString(rawOutcome.createdAt) ||
+    new Date(rawOutcome.createdAt).toISOString() !== rawOutcome.createdAt
+  ) {
+    throw new Error(
+      'INVALID_PEIA_RESPONSE: nonAdvisoryOutcome.createdAt must be a canonical ISO-8601 timestamp.'
+    );
+  }
+
+  return rawOutcome as unknown as CanonicalNonAdvisoryOutcome;
+}
+
 function validateNonAdvisoryOutcomeEnvelope(
   rawOutcome: unknown,
   expectedTaskId: string
@@ -437,6 +544,11 @@ function validateNonAdvisoryOutcomeEnvelope(
   ) {
     throw new Error(
       `INVALID_PEIA_RESPONSE: Invalid nonAdvisoryOutcome.kind '${String(rawOutcome.kind)}'.`
+    );
+  }
+  if (rawOutcome.kind === 'ABSTAINED') {
+    throw new Error(
+      "INVALID_PEIA_RESPONSE: Failed status cannot have nonAdvisoryOutcome.kind 'ABSTAINED'."
     );
   }
   if (!isNonEmptyTrimmedString(rawOutcome.reason)) {
@@ -602,10 +714,33 @@ function validateStatusDtoShape(
 
   if (status === AITaskStatus.Completed) {
     if (raw.nonAdvisoryOutcome !== null) {
-      throw new Error(
-        'INVALID_PEIA_RESPONSE: Completed status must have null nonAdvisoryOutcome.'
+      if (raw.advisoryResult !== null || raw.libraryPreparation !== null) {
+        throw new Error(
+          'INVALID_PEIA_RESPONSE: Completed status cannot include both advisory and non-advisory artifacts.'
+        );
+      }
+      const validatedAbstainedOutcome = validateAbstainedOutcomeEnvelope(
+        raw.nonAdvisoryOutcome,
+        raw.taskId
       );
+
+      return Object.freeze({
+        status: AITaskStatus.Completed,
+        taskId: raw.taskId,
+        targetType: AIReviewTargetType.LibraryIntake,
+        targetId: expectedIntakeId,
+        intakeId: expectedIntakeId,
+        currentSourceUpdatedAt: raw.currentSourceUpdatedAt,
+        taskSourceUpdatedAt: raw.taskSourceUpdatedAt,
+        isStale: raw.isStale,
+        inputBasis: raw.inputBasis,
+        task: validatedTask,
+        advisoryResult: null,
+        libraryPreparation: null,
+        nonAdvisoryOutcome: validatedAbstainedOutcome,
+      });
     }
+
     const validatedAdvisoryResult = validateAdvisoryResultEnvelope(
       raw.advisoryResult,
       raw.taskId,
@@ -617,6 +752,17 @@ function validateStatusDtoShape(
       raw.libraryPreparation,
       raw.inputBasis
     );
+
+    const prepConsistent = CANONICAL_LIBRARY_PREPARATION_KEYS.every(
+      (key) =>
+        JSON.stringify(validatedAdvisoryResult.libraryPreparation?.[key]) ===
+        JSON.stringify(validatedLibraryPreparation[key])
+    );
+    if (!prepConsistent) {
+      throw new Error(
+        'INVALID_PEIA_RESPONSE: Top-level libraryPreparation does not match advisoryResult.libraryPreparation.'
+      );
+    }
 
     return Object.freeze({
       status: AITaskStatus.Completed,

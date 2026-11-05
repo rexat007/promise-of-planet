@@ -1257,9 +1257,13 @@ async function main() {
       targetId: 'intake-1101',
       currentSourceUpdatedAt: '2026-11-01T16:50:00.000Z',
     });
-    if (completedStatus.status !== AITaskStatus.Completed) {
-      throw new Error(`Expected Completed status, got ${completedStatus.status}`);
+    if (
+      completedStatus.status !== AITaskStatus.Completed ||
+      completedStatus.completionKind !== 'ADVISORY'
+    ) {
+      throw new Error(`Expected Completed ADVISORY status, got ${completedStatus.status}`);
     }
+    assert(completedStatus.nonAdvisoryOutcome === null, 'Expected nonAdvisoryOutcome === null on ADVISORY Completed');
     assert(
       completedStatus.advisoryResult.libraryPreparation?.suggestedTitleEn === 'Biodiversity Baseline 2026',
       'Expected libraryPreparation payload on Completed reconciliation'
@@ -1301,6 +1305,7 @@ async function main() {
     if (failedStatus.status !== AITaskStatus.Failed) {
       throw new Error(`Expected Failed status, got ${failedStatus.status}`);
     }
+    assert(failedStatus.advisoryResult === null, 'Expected advisoryResult === null on Failed');
     assert(failedStatus.nonAdvisoryOutcome.reason === 'NON_ZERO_EXIT', 'Expected NON_ZERO_EXIT');
   });
 
@@ -1555,6 +1560,317 @@ async function main() {
         db.accessedCollections.includes(PEIA_ADVISORY_RESULT_COLLECTION) &&
         db.accessedCollections.includes(PEIA_NON_ADVISORY_OUTCOME_COLLECTION),
       'Expected all 3 canonical PEIA collections to be checked during enqueue + reconciliation'
+    );
+  });
+
+  // 17. Completed + ABSTAINED reconciliation for News and LibraryIntake
+  await runTest('17. Completed task with valid ABSTAINED non-advisory outcome reconciles cleanly for News and LibraryIntake', async () => {
+    const db = new InMemoryTransactionalFirestore();
+    const service = new FirestorePeiaTaskQueueService(db, {
+      clock: () => '2026-11-01T21:30:00.000Z',
+    });
+    const nonAdvisoryRepo = new FirestoreNonAdvisoryOutcomeRepository(db as any);
+
+    // (a) LibraryIntake Completed + ABSTAINED (INVALID_MODEL_OUTPUT)
+    const intakeEnqueued = await service.enqueueLibraryIntakeTask({
+      targetId: 'intake-1701',
+      sourceUpdatedAt: '2026-11-01T21:20:00.000Z',
+      inputBasis: PEIALibraryPreparationInputBasis.MetadataOnly,
+      title: 'Historical Abstained Library Intake',
+      issuingOrganization: 'UNEP',
+      language: 'en',
+    });
+
+    await nonAdvisoryRepo.saveWithTaskConvergence({
+      taskId: intakeEnqueued.task.taskId,
+      reconciledTask: intakeEnqueued.task,
+      principal: {
+        principalId: 'worker-01',
+        isActive: true,
+        capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+      },
+      nonAdvisoryOutcome: {
+        taskId: intakeEnqueued.task.taskId,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 2,
+        createdAt: '2026-11-01T21:31:00.000Z',
+        detail: 'Local model output failed schema validation; abstaining safely.',
+      },
+      convergedStatus: AITaskStatus.Completed,
+      convergedAt: '2026-11-01T21:31:02.000Z',
+    });
+
+    const reconciledIntake = await service.reconcileTaskStatus({
+      taskId: intakeEnqueued.task.taskId,
+      targetType: AIReviewTargetType.LibraryIntake,
+      targetId: 'intake-1701',
+      currentSourceUpdatedAt: '2026-11-01T21:20:00.000Z',
+    });
+
+    if (
+      reconciledIntake.status !== AITaskStatus.Completed ||
+      reconciledIntake.completionKind !== 'ABSTAINED'
+    ) {
+      throw new Error(`Expected Completed ABSTAINED, got ${reconciledIntake.status}`);
+    }
+    assert(reconciledIntake.advisoryResult === null, 'Expected advisoryResult === null on ABSTAINED');
+    assert(
+      reconciledIntake.nonAdvisoryOutcome.kind === 'ABSTAINED',
+      'Expected nonAdvisoryOutcome.kind === ABSTAINED'
+    );
+    assert(
+      reconciledIntake.nonAdvisoryOutcome.reason === 'INVALID_MODEL_OUTPUT',
+      'Expected nonAdvisoryOutcome.reason === INVALID_MODEL_OUTPUT'
+    );
+    assert(reconciledIntake.isStale === false, 'Expected non-stale when sourceUpdatedAt matches');
+
+    const staleReconciledIntake = await service.reconcileTaskStatus({
+      taskId: intakeEnqueued.task.taskId,
+      targetType: AIReviewTargetType.LibraryIntake,
+      targetId: 'intake-1701',
+      currentSourceUpdatedAt: '2026-11-01T22:00:00.000Z',
+    });
+    assert(staleReconciledIntake.isStale === true, 'Expected isStale === true when sourceUpdatedAt advances');
+
+    // (b) News Completed + ABSTAINED
+    const newsEnqueued = await service.enqueueNewsTask({
+      targetId: 'news-1702',
+      sourceUpdatedAt: '2026-11-01T21:25:00.000Z',
+      title: 'Abstained News Item',
+      body: 'Short news body for abstention reconciliation.',
+    });
+
+    await nonAdvisoryRepo.saveWithTaskConvergence({
+      taskId: newsEnqueued.task.taskId,
+      reconciledTask: newsEnqueued.task,
+      principal: {
+        principalId: 'worker-01',
+        isActive: true,
+        capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+      },
+      nonAdvisoryOutcome: {
+        taskId: newsEnqueued.task.taskId,
+        kind: 'ABSTAINED',
+        reason: 'INSUFFICIENT_EVIDENCE',
+        modelAttempts: 0,
+        createdAt: '2026-11-01T21:32:00.000Z',
+      },
+      convergedStatus: AITaskStatus.Completed,
+      convergedAt: '2026-11-01T21:32:01.000Z',
+    });
+
+    const reconciledNews = await service.reconcileTaskStatus({
+      taskId: newsEnqueued.task.taskId,
+      targetType: AIReviewTargetType.News,
+      targetId: 'news-1702',
+      currentSourceUpdatedAt: '2026-11-01T21:25:00.000Z',
+    });
+
+    if (
+      reconciledNews.status !== AITaskStatus.Completed ||
+      reconciledNews.completionKind !== 'ABSTAINED'
+    ) {
+      throw new Error(`Expected Completed ABSTAINED for News, got ${reconciledNews.status}`);
+    }
+    assert(reconciledNews.advisoryResult === null, 'Expected advisoryResult === null for News ABSTAINED');
+    assert(
+      reconciledNews.nonAdvisoryOutcome.reason === 'INSUFFICIENT_EVIDENCE',
+      'Expected INSUFFICIENT_EVIDENCE reason'
+    );
+  });
+
+  // 18. Invalid Completed/Failed/Pending abstention & non-advisory combinations fail closed
+  await runTest('18. Invalid Completed, Failed, and Pending abstention combinations fail closed with RECONCILIATION_INTEGRITY_ERROR', async () => {
+    const db = new InMemoryTransactionalFirestore();
+    const service = new FirestorePeiaTaskQueueService(db, {
+      clock: () => '2026-11-01T22:00:00.000Z',
+    });
+
+    // (a) Completed task paired with MODEL_FAILURE non-advisory artifact
+    const taskModelFailureOnCompleted = await service.enqueueNewsTask({
+      targetId: 'news-1801',
+      sourceUpdatedAt: '2026-11-01T21:50:00.000Z',
+      title: 'Tampered Completed Model Failure',
+      body: 'Body text.',
+    });
+    db.seedDocument(PEIA_PENDING_TASK_COLLECTION, taskModelFailureOnCompleted.documentId, {
+      ...taskModelFailureOnCompleted.task,
+      status: AITaskStatus.Completed,
+    });
+    db.seedDocument(
+      PEIA_NON_ADVISORY_OUTCOME_COLLECTION,
+      deriveNonAdvisoryOutcomeDocumentId(taskModelFailureOnCompleted.task.taskId),
+      {
+        taskId: taskModelFailureOnCompleted.task.taskId,
+        reconciledTask: taskModelFailureOnCompleted.task,
+        principal: {
+          principalId: 'worker-01',
+          isActive: true,
+          capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+        },
+        nonAdvisoryOutcome: {
+          taskId: taskModelFailureOnCompleted.task.taskId,
+          kind: 'MODEL_FAILURE',
+          reason: 'TIMEOUT',
+          modelAttempts: 2,
+          createdAt: '2026-11-01T22:01:00.000Z',
+        },
+        convergedStatus: AITaskStatus.Failed,
+        convergedAt: '2026-11-01T22:01:01.000Z',
+      }
+    );
+
+    await assertRejectsWithQueueCode(
+      () =>
+        service.reconcileTaskStatus({
+          taskId: taskModelFailureOnCompleted.task.taskId,
+          targetType: AIReviewTargetType.News,
+          targetId: 'news-1801',
+          currentSourceUpdatedAt: '2026-11-01T21:50:00.000Z',
+        }),
+      'RECONCILIATION_INTEGRITY_ERROR',
+      'Completed task paired with MODEL_FAILURE non-advisory outcome'
+    );
+
+    // (b) Completed + ABSTAINED with tampered reconciledTask reference
+    const taskTamperedRef = await service.enqueueLibraryIntakeTask({
+      targetId: 'intake-1802',
+      sourceUpdatedAt: '2026-11-01T21:50:00.000Z',
+      inputBasis: PEIALibraryPreparationInputBasis.MetadataOnly,
+      title: 'Tampered Reference Intake',
+    });
+    db.seedDocument(PEIA_PENDING_TASK_COLLECTION, taskTamperedRef.documentId, {
+      ...taskTamperedRef.task,
+      status: AITaskStatus.Completed,
+    });
+    db.seedDocument(
+      PEIA_NON_ADVISORY_OUTCOME_COLLECTION,
+      deriveNonAdvisoryOutcomeDocumentId(taskTamperedRef.task.taskId),
+      {
+        taskId: taskTamperedRef.task.taskId,
+        reconciledTask: {
+          ...taskTamperedRef.task,
+          target: {
+            ...taskTamperedRef.task.target,
+            sourceUpdatedAt: '2026-11-01T19:00:00.000Z',
+          },
+        },
+        principal: {
+          principalId: 'worker-01',
+          isActive: true,
+          capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+        },
+        nonAdvisoryOutcome: {
+          taskId: taskTamperedRef.task.taskId,
+          kind: 'ABSTAINED',
+          reason: 'INVALID_MODEL_OUTPUT',
+          modelAttempts: 2,
+          createdAt: '2026-11-01T22:02:00.000Z',
+        },
+        convergedStatus: AITaskStatus.Completed,
+        convergedAt: '2026-11-01T22:02:01.000Z',
+      }
+    );
+
+    await assertRejectsWithQueueCode(
+      () =>
+        service.reconcileTaskStatus({
+          taskId: taskTamperedRef.task.taskId,
+          targetType: AIReviewTargetType.LibraryIntake,
+          targetId: 'intake-1802',
+          currentSourceUpdatedAt: '2026-11-01T21:50:00.000Z',
+        }),
+      'RECONCILIATION_INTEGRITY_ERROR',
+      'Completed + ABSTAINED with mismatched reconciledTask.target.sourceUpdatedAt'
+    );
+
+    // (c) Failed task paired with ABSTAINED non-advisory outcome
+    const taskFailedWithAbstained = await service.enqueueNewsTask({
+      targetId: 'news-1803',
+      sourceUpdatedAt: '2026-11-01T21:50:00.000Z',
+      title: 'Failed Task With Abstained Artifact',
+      body: 'Body text.',
+    });
+    db.seedDocument(PEIA_PENDING_TASK_COLLECTION, taskFailedWithAbstained.documentId, {
+      ...taskFailedWithAbstained.task,
+      status: AITaskStatus.Failed,
+    });
+    db.seedDocument(
+      PEIA_NON_ADVISORY_OUTCOME_COLLECTION,
+      deriveNonAdvisoryOutcomeDocumentId(taskFailedWithAbstained.task.taskId),
+      {
+        taskId: taskFailedWithAbstained.task.taskId,
+        reconciledTask: taskFailedWithAbstained.task,
+        principal: {
+          principalId: 'worker-01',
+          isActive: true,
+          capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+        },
+        nonAdvisoryOutcome: {
+          taskId: taskFailedWithAbstained.task.taskId,
+          kind: 'ABSTAINED',
+          reason: 'INVALID_MODEL_OUTPUT',
+          modelAttempts: 2,
+          createdAt: '2026-11-01T22:03:00.000Z',
+        },
+        convergedStatus: AITaskStatus.Completed,
+        convergedAt: '2026-11-01T22:03:01.000Z',
+      }
+    );
+
+    await assertRejectsWithQueueCode(
+      () =>
+        service.reconcileTaskStatus({
+          taskId: taskFailedWithAbstained.task.taskId,
+          targetType: AIReviewTargetType.News,
+          targetId: 'news-1803',
+          currentSourceUpdatedAt: '2026-11-01T21:50:00.000Z',
+        }),
+      'RECONCILIATION_INTEGRITY_ERROR',
+      'Failed task paired with ABSTAINED non-advisory outcome'
+    );
+
+    // (d) Pending task with pre-existing ABSTAINED non-advisory outcome
+    const taskPendingWithAbstained = await service.enqueueNewsTask({
+      targetId: 'news-1804',
+      sourceUpdatedAt: '2026-11-01T21:50:00.000Z',
+      title: 'Pending Task With Abstained Artifact',
+      body: 'Body text.',
+    });
+    db.seedDocument(
+      PEIA_NON_ADVISORY_OUTCOME_COLLECTION,
+      deriveNonAdvisoryOutcomeDocumentId(taskPendingWithAbstained.task.taskId),
+      {
+        taskId: taskPendingWithAbstained.task.taskId,
+        reconciledTask: taskPendingWithAbstained.task,
+        principal: {
+          principalId: 'worker-01',
+          isActive: true,
+          capabilities: [PEIAMachineCapability.SUBMIT_TASK_PROCESSING_OUTCOME],
+        },
+        nonAdvisoryOutcome: {
+          taskId: taskPendingWithAbstained.task.taskId,
+          kind: 'ABSTAINED',
+          reason: 'INVALID_MODEL_OUTPUT',
+          modelAttempts: 2,
+          createdAt: '2026-11-01T22:04:00.000Z',
+        },
+        convergedStatus: AITaskStatus.Completed,
+        convergedAt: '2026-11-01T22:04:01.000Z',
+      }
+    );
+
+    await assertRejectsWithQueueCode(
+      () =>
+        service.reconcileTaskStatus({
+          taskId: taskPendingWithAbstained.task.taskId,
+          targetType: AIReviewTargetType.News,
+          targetId: 'news-1804',
+          currentSourceUpdatedAt: '2026-11-01T21:50:00.000Z',
+        }),
+      'RECONCILIATION_INTEGRITY_ERROR',
+      'Pending task paired with ABSTAINED non-advisory outcome'
     );
   });
 

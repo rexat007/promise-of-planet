@@ -944,4 +944,292 @@ describe('PEIA-UNIFIED-ADMIN / SUBUNIT-3A / CONTRACT-REPAIR-01 — LibraryAdminC
       comment: 'Ready for review',
     });
   });
+
+  it('18. Completed + ABSTAINED: accepts valid canonical ABSTAINED outcomes (including INVALID_MODEL_OUTPUT, UNGROUNDED_MODEL_OUTPUT, NO_EVIDENCE, INSUFFICIENT_EVIDENCE) with null advisoryResult and null libraryPreparation', async () => {
+    const completedTask = createSampleTask({
+      status: AITaskStatus.Completed,
+      contentSnapshot: {
+        allowSnapshotEvidence: true,
+        inputBasis: PEIALibraryPreparationInputBasis.MetadataOnly,
+        title: 'تقرير حالة البيئة الساحلية والبحرية في السودان 2026',
+      },
+    });
+
+    const abstainedCases: CanonicalNonAdvisoryOutcome[] = [
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 2,
+        createdAt: '2026-10-30T09:26:00.000Z',
+        detail: 'Model output failed strict schema validation after retry.',
+      },
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'UNGROUNDED_MODEL_OUTPUT',
+        modelAttempts: 1,
+        createdAt: '2026-10-30T09:27:00.000Z',
+      },
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'NO_EVIDENCE',
+        modelAttempts: 0,
+        createdAt: '2026-10-30T09:28:00.000Z',
+      },
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'INSUFFICIENT_EVIDENCE',
+        modelAttempts: 0,
+        createdAt: '2026-10-30T09:29:00.000Z',
+        detail: 'Insufficient grounded evidence for preparation.',
+      },
+    ];
+
+    for (const outcome of abstainedCases) {
+      const dto = createSampleStatusResponseDto({
+        status: AITaskStatus.Completed,
+        inputBasis: PEIALibraryPreparationInputBasis.MetadataOnly,
+        task: completedTask,
+        advisoryResult: null,
+        libraryPreparation: null,
+        nonAdvisoryOutcome: outcome,
+      });
+      mockCallableInvoke.mockResolvedValueOnce({ data: dto });
+
+      const response = await LibraryAdminClient.getIntakePeiaPreparationStatus(
+        SAMPLE_INTAKE_ID
+      );
+
+      expect(response.status).toBe(AITaskStatus.Completed);
+      expect(response.advisoryResult).toBeNull();
+      expect(response.libraryPreparation).toBeNull();
+      expect(response.nonAdvisoryOutcome).toEqual(outcome);
+      expect(response.preparationStatus.nonAdvisoryOutcome).toEqual(outcome);
+      expect(response.reviewStatus.nonAdvisoryOutcome).toEqual(outcome);
+    }
+
+    // Also verify requestIntakePeiaPreparation ALREADY_EXISTS with Completed + ABSTAINED
+    const alreadyExistsAbstainedDto = createSampleRequestResponseDto(
+      {
+        status: AITaskStatus.Completed,
+        inputBasis: PEIALibraryPreparationInputBasis.MetadataOnly,
+        task: completedTask,
+        advisoryResult: null,
+        libraryPreparation: null,
+        nonAdvisoryOutcome: abstainedCases[0],
+      },
+      { disposition: 'ALREADY_EXISTS' }
+    );
+    mockCallableInvoke.mockResolvedValueOnce({ data: alreadyExistsAbstainedDto });
+
+    const reqRes = await LibraryAdminClient.requestIntakePeiaPreparation(
+      SAMPLE_INTAKE_ID,
+      SAMPLE_UPDATED_AT
+    );
+    expect(reqRes.disposition).toBe('ALREADY_EXISTS');
+    expect(reqRes.status).toBe(AITaskStatus.Completed);
+    expect(reqRes.advisoryResult).toBeNull();
+    expect(reqRes.libraryPreparation).toBeNull();
+    expect(reqRes.nonAdvisoryOutcome).toEqual(abstainedCases[0]);
+  });
+
+  it('19. Completed missing, simultaneous, or mismatched artifacts fail closed', async () => {
+    const completedTask = createSampleTask({ status: AITaskStatus.Completed });
+    const validPrep = createSampleLibraryPreparation();
+    const validAdvisory = createSampleAdvisoryResult(validPrep);
+    const validAbstained: CanonicalNonAdvisoryOutcome = {
+      taskId: SAMPLE_TASK_ID,
+      kind: 'ABSTAINED',
+      reason: 'INVALID_MODEL_OUTPUT',
+      modelAttempts: 2,
+      createdAt: '2026-10-30T09:26:00.000Z',
+    };
+
+    // 1. Missing all artifacts under Completed
+    const missingAllDto = createSampleStatusResponseDto({
+      status: AITaskStatus.Completed,
+      task: completedTask,
+      advisoryResult: null,
+      libraryPreparation: null,
+      nonAdvisoryOutcome: null,
+    });
+
+    // 2. Simultaneous advisoryResult + nonAdvisoryOutcome
+    const simultaneousBothDto = createSampleStatusResponseDto({
+      status: AITaskStatus.Completed,
+      task: completedTask,
+      advisoryResult: validAdvisory,
+      libraryPreparation: validPrep,
+      nonAdvisoryOutcome: validAbstained,
+    });
+
+    // 3. Simultaneous libraryPreparation + nonAdvisoryOutcome
+    const simultaneousPrepAndOutcomeDto = createSampleStatusResponseDto({
+      status: AITaskStatus.Completed,
+      task: completedTask,
+      advisoryResult: null,
+      libraryPreparation: validPrep,
+      nonAdvisoryOutcome: validAbstained,
+    });
+
+    // 4. Mismatched top-level libraryPreparation vs advisoryResult.libraryPreparation
+    const mismatchedTopPrepDto = createSampleStatusResponseDto({
+      status: AITaskStatus.Completed,
+      task: completedTask,
+      advisoryResult: validAdvisory,
+      libraryPreparation: createSampleLibraryPreparation({
+        suggestedTitleEn: 'Different Mismatched Top-Level Title',
+      }),
+      nonAdvisoryOutcome: null,
+    });
+
+    // 5. Completed with non-ABSTAINED outcome kind (MODEL_FAILURE)
+    const completedModelFailureDto = createSampleStatusResponseDto({
+      status: AITaskStatus.Completed,
+      task: completedTask,
+      advisoryResult: null,
+      libraryPreparation: null,
+      nonAdvisoryOutcome: {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'MODEL_FAILURE',
+        reason: 'TIMEOUT',
+        modelAttempts: 2,
+        createdAt: '2026-10-30T09:26:00.000Z',
+      },
+    });
+
+    for (const badDto of [
+      missingAllDto,
+      simultaneousBothDto,
+      simultaneousPrepAndOutcomeDto,
+      mismatchedTopPrepDto,
+      completedModelFailureDto,
+    ]) {
+      mockCallableInvoke.mockResolvedValueOnce({ data: badDto });
+      await expect(
+        LibraryAdminClient.getIntakePeiaPreparationStatus(SAMPLE_INTAKE_ID)
+      ).rejects.toThrow(/INVALID_PEIA_RESPONSE/);
+    }
+  });
+
+  it('20. Invalid ABSTAINED reasons, attempt counts, and forbidden/extra fields fail closed', async () => {
+    const completedTask = createSampleTask({ status: AITaskStatus.Completed });
+
+    const invalidAbstainedOutcomes: unknown[] = [
+      // Invalid reason for ABSTAINED
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'TIMEOUT',
+        modelAttempts: 1,
+        createdAt: '2026-10-30T09:26:00.000Z',
+      },
+      // NO_EVIDENCE with non-zero modelAttempts
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'NO_EVIDENCE',
+        modelAttempts: 1,
+        createdAt: '2026-10-30T09:26:00.000Z',
+      },
+      // INSUFFICIENT_EVIDENCE with non-zero modelAttempts
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'INSUFFICIENT_EVIDENCE',
+        modelAttempts: 2,
+        createdAt: '2026-10-30T09:26:00.000Z',
+      },
+      // INVALID_MODEL_OUTPUT with 0 modelAttempts
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 0,
+        createdAt: '2026-10-30T09:26:00.000Z',
+      },
+      // INVALID_MODEL_OUTPUT with 3 modelAttempts
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 3,
+        createdAt: '2026-10-30T09:26:00.000Z',
+      },
+      // Forbidden exitCode field on ABSTAINED
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 1,
+        createdAt: '2026-10-30T09:26:00.000Z',
+        exitCode: 1,
+      },
+      // Forbidden extra unknown field on ABSTAINED
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 1,
+        createdAt: '2026-10-30T09:26:00.000Z',
+        extraField: 'not-allowed',
+      },
+      // Mismatched taskId on ABSTAINED
+      {
+        taskId: 'peia-task-other-mismatched',
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 1,
+        createdAt: '2026-10-30T09:26:00.000Z',
+      },
+      // Untrimmed detail on ABSTAINED
+      {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 1,
+        createdAt: '2026-10-30T09:26:00.000Z',
+        detail: ' untrimmed detail ',
+      },
+    ];
+
+    for (const badOutcome of invalidAbstainedOutcomes) {
+      const dto = createSampleStatusResponseDto({
+        status: AITaskStatus.Completed,
+        task: completedTask,
+        advisoryResult: null,
+        libraryPreparation: null,
+        nonAdvisoryOutcome: badOutcome as CanonicalNonAdvisoryOutcome,
+      });
+      mockCallableInvoke.mockResolvedValueOnce({ data: dto });
+      await expect(
+        LibraryAdminClient.getIntakePeiaPreparationStatus(SAMPLE_INTAKE_ID)
+      ).rejects.toThrow(/INVALID_PEIA_RESPONSE/);
+    }
+  });
+
+  it('21. Failed + ABSTAINED rejection: rejects ABSTAINED outcome under Failed status', async () => {
+    const failedTask = createSampleTask({ status: AITaskStatus.Failed });
+    const failedWithAbstainedDto = createSampleStatusResponseDto({
+      status: AITaskStatus.Failed,
+      task: failedTask,
+      advisoryResult: null,
+      libraryPreparation: null,
+      nonAdvisoryOutcome: {
+        taskId: SAMPLE_TASK_ID,
+        kind: 'ABSTAINED',
+        reason: 'INVALID_MODEL_OUTPUT',
+        modelAttempts: 2,
+        createdAt: '2026-10-30T09:26:00.000Z',
+      },
+    });
+
+    mockCallableInvoke.mockResolvedValueOnce({ data: failedWithAbstainedDto });
+    await expect(
+      LibraryAdminClient.getIntakePeiaPreparationStatus(SAMPLE_INTAKE_ID)
+    ).rejects.toThrow(/Failed status cannot have nonAdvisoryOutcome\.kind 'ABSTAINED'/);
+  });
 });
