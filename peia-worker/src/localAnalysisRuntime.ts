@@ -1153,6 +1153,9 @@ export function parseAndValidateRawModelOutput(
 export const PROMPT_AUDIT_RESPONSE_HEADER = '=== YOUR AUDIT RESPONSE (RAW JSON ONLY) ===';
 export const REASONING_START_MARKER = '[Start thinking]';
 export const REASONING_END_MARKER = '[End thinking]';
+export const LLAMA_CLI_PROMPT_ECHO_MAX_BYTES = 500;
+export const LLAMA_CLI_PROMPT_ECHO_PREFIX = '> ';
+export const LLAMA_CLI_PROMPT_ECHO_TRUNCATED_SUFFIX = ' ... (truncated)';
 
 export const LLAMA_CLI_TRAILER_MARKERS: readonly string[] = Object.freeze([
   '\nllama_perf_sampler_print:',
@@ -1209,8 +1212,16 @@ function isRecognizedLlamaCliStartupPreambleLine(rawLine: string): boolean {
   return sawNonEmptySegment;
 }
 
-function stripRecognizedLlamaCliStartupPreamble(text: string): string {
+interface StartupPreambleStripResult {
+  readonly remainingText: string;
+  readonly sawRecognizedStartupPreamble: boolean;
+}
+
+function stripRecognizedLlamaCliStartupPreambleWithStatus(
+  text: string
+): StartupPreambleStripResult {
   let offset = 0;
+  let sawRecognizedStartupPreamble = false;
   while (offset < text.length) {
     const newlineIdx = text.indexOf('\n', offset);
     const rawLine =
@@ -1222,13 +1233,96 @@ function stripRecognizedLlamaCliStartupPreamble(text: string): string {
     }
 
     if (isRecognizedLlamaCliStartupPreambleLine(rawLine)) {
+      sawRecognizedStartupPreamble = true;
       offset = newlineIdx === -1 ? text.length : newlineIdx + 1;
       continue;
     }
 
     break;
   }
-  return text.slice(offset);
+  return {
+    remainingText: text.slice(offset),
+    sawRecognizedStartupPreamble,
+  };
+}
+
+function buildExpectedLlamaCliPromptEchoBody(
+  expectedPrompt: string
+):
+  | { readonly valid: true; readonly echoBody: string }
+  | { readonly valid: false; readonly errorDetail: string } {
+  if (typeof expectedPrompt !== 'string' || expectedPrompt.length === 0) {
+    return {
+      valid: false,
+      errorDetail: 'Expected prompt for echo matching must be a non-empty string.',
+    };
+  }
+
+  const promptUtf8Bytes = Buffer.from(expectedPrompt, 'utf8');
+  if (promptUtf8Bytes.toString('utf8') !== expectedPrompt) {
+    return {
+      valid: false,
+      errorDetail:
+        'Expected prompt contains ill-formed UTF-16 code units and cannot be deterministically encoded to UTF-8.',
+    };
+  }
+
+  if (promptUtf8Bytes.length > LLAMA_CLI_PROMPT_ECHO_MAX_BYTES) {
+    const boundaryByte = promptUtf8Bytes[LLAMA_CLI_PROMPT_ECHO_MAX_BYTES];
+    if ((boundaryByte & 0b11000000) === 0b10000000) {
+      return {
+        valid: false,
+        errorDetail:
+          'Expected prompt 500-byte UTF-8 truncation falls inside a multi-byte Unicode character; refusing lossy or speculative echo matching.',
+      };
+    }
+
+    const prefixBytes = promptUtf8Bytes.subarray(0, LLAMA_CLI_PROMPT_ECHO_MAX_BYTES);
+    const decodedPrefix = prefixBytes.toString('utf8');
+    if (!Buffer.from(decodedPrefix, 'utf8').equals(prefixBytes)) {
+      return {
+        valid: false,
+        errorDetail:
+          'Expected prompt 500-byte UTF-8 prefix did not round-trip losslessly; refusing speculative echo matching.',
+      };
+    }
+
+    return {
+      valid: true,
+      echoBody: `${LLAMA_CLI_PROMPT_ECHO_PREFIX}${decodedPrefix}${LLAMA_CLI_PROMPT_ECHO_TRUNCATED_SUFFIX}`,
+    };
+  }
+
+  return {
+    valid: true,
+    echoBody: `${LLAMA_CLI_PROMPT_ECHO_PREFIX}${expectedPrompt}`,
+  };
+}
+
+function matchExactLlamaCliPromptEchoAtBoundary(
+  text: string,
+  expectedEchoBody: string
+): number | null {
+  const expectedLines = expectedEchoBody.split('\n');
+  let cursor = 0;
+
+  for (let i = 0; i < expectedLines.length; i++) {
+    const expectedLine = expectedLines[i];
+    if (!text.startsWith(expectedLine, cursor)) {
+      return null;
+    }
+    cursor += expectedLine.length;
+
+    if (text.startsWith('\r\n', cursor)) {
+      cursor += 2;
+    } else if (text.startsWith('\n', cursor)) {
+      cursor += 1;
+    } else {
+      return null;
+    }
+  }
+
+  return cursor;
 }
 
 function validateSingleJsonObjectPayloadBoundary(
@@ -1300,7 +1394,8 @@ function validateSingleJsonObjectPayloadBoundary(
 }
 
 export function extractAssistantResponseFromLlamaTranscript(
-  rawStdout: string
+  rawStdout: string,
+  expectedPrompt?: string
 ): LlamaTranscriptExtractionResult {
   if (typeof rawStdout !== 'string' || rawStdout.trim().length === 0) {
     return {
@@ -1310,30 +1405,107 @@ export function extractAssistantResponseFromLlamaTranscript(
     };
   }
 
-  let text = rawStdout;
+  let expectedEchoSpec:
+    | { readonly valid: true; readonly echoBody: string }
+    | { readonly valid: false; readonly errorDetail: string }
+    | undefined = undefined;
 
-  // 1. Separate from echoed prompt / banner if prompt header is present;
-  //    otherwise strip only explicitly recognized llama-cli startup preamble lines at the start.
-  const firstHeaderIdx = text.indexOf(PROMPT_AUDIT_RESPONSE_HEADER);
-  if (firstHeaderIdx !== -1) {
-    const secondHeaderIdx = text.indexOf(
-      PROMPT_AUDIT_RESPONSE_HEADER,
-      firstHeaderIdx + PROMPT_AUDIT_RESPONSE_HEADER.length
-    );
-    if (secondHeaderIdx !== -1) {
+  if (expectedPrompt !== undefined) {
+    expectedEchoSpec = buildExpectedLlamaCliPromptEchoBody(expectedPrompt);
+    if (!expectedEchoSpec.valid) {
       return {
         success: false,
         content: '',
-        errorDetail: 'Ambiguous multiple prompt response headers in model transcript.',
+        errorDetail: expectedEchoSpec.errorDetail,
       };
     }
-    text = text.slice(firstHeaderIdx + PROMPT_AUDIT_RESPONSE_HEADER.length);
-    text = text.replace(
-      /^\r?\n\/no_think\r?\nReturn the required raw JSON immediately without reasoning prose\.\r?\n/,
-      '\n'
+  }
+
+  let text = rawStdout;
+
+  // 1. Strip recognized llama-cli startup preamble lines and check the startup-to-assistant boundary.
+  const preambleStrip = stripRecognizedLlamaCliStartupPreambleWithStatus(text);
+
+  if (preambleStrip.remainingText.startsWith('>')) {
+    if (!preambleStrip.sawRecognizedStartupPreamble) {
+      return {
+        success: false,
+        content: '',
+        errorDetail:
+          'Prompt echo in model transcript is not preceded by a recognized llama-cli startup banner.',
+      };
+    }
+
+    if (expectedEchoSpec === undefined) {
+      return {
+        success: false,
+        content: '',
+        errorDetail:
+          'Unrecognized or untrusted prompt echo in model transcript without trusted expected prompt.',
+      };
+    }
+
+    const echoEndOffset = matchExactLlamaCliPromptEchoAtBoundary(
+      preambleStrip.remainingText,
+      expectedEchoSpec.echoBody
     );
+    if (echoEndOffset === null) {
+      return {
+        success: false,
+        content: '',
+        errorDetail:
+          'Prompt echo in model transcript does not match the trusted expected prompt.',
+      };
+    }
+
+    text = preambleStrip.remainingText.slice(echoEndOffset);
+
+    if (text.trimStart().startsWith('>')) {
+      return {
+        success: false,
+        content: '',
+        errorDetail: 'Duplicate or ambiguous prompt echo detected in model transcript.',
+      };
+    }
+
+    if (text.includes(PROMPT_AUDIT_RESPONSE_HEADER)) {
+      return {
+        success: false,
+        content: '',
+        errorDetail:
+          'Ambiguous model transcript: prompt response header detected after echoed prompt.',
+      };
+    }
   } else {
-    text = stripRecognizedLlamaCliStartupPreamble(text);
+    const firstHeaderIdx = text.indexOf(PROMPT_AUDIT_RESPONSE_HEADER);
+    if (firstHeaderIdx !== -1) {
+      const secondHeaderIdx = text.indexOf(
+        PROMPT_AUDIT_RESPONSE_HEADER,
+        firstHeaderIdx + PROMPT_AUDIT_RESPONSE_HEADER.length
+      );
+      if (secondHeaderIdx !== -1) {
+        return {
+          success: false,
+          content: '',
+          errorDetail: 'Ambiguous multiple prompt response headers in model transcript.',
+        };
+      }
+      if (/^>/m.test(preambleStrip.remainingText.slice(0, firstHeaderIdx))) {
+        return {
+          success: false,
+          content: '',
+          errorDetail:
+            'Malformed or displaced prompt echo precedes prompt response header in model transcript.',
+        };
+      }
+      text = text.slice(firstHeaderIdx + PROMPT_AUDIT_RESPONSE_HEADER.length);
+      text = text.replace(
+        /^\r?\n\/no_think\r?\nReturn the required raw JSON immediately without reasoning prose\.\r?\n/,
+        '\n'
+      );
+    } else {
+      text = preambleStrip.remainingText;
+    }
   }
 
   // 2. Separate verified reasoning block ([Start thinking]...[End thinking]) if present
@@ -1659,7 +1831,10 @@ export async function analyzeTaskLocally(
     });
   }
 
-  const extraction = extractAssistantResponseFromLlamaTranscript(processResult.stdout);
+  const extraction = extractAssistantResponseFromLlamaTranscript(
+    processResult.stdout,
+    prompt
+  );
   if (!extraction.success) {
     return Object.freeze({
       kind: 'ABSTAINED' as const,

@@ -3142,6 +3142,774 @@ async function runAllTests() {
     }
   });
 
+  // ==========================================
+  // PEIA-TRANSCRIPT-03: EXACT LLAMA-CLI PROMPT ECHO ISOLATION (125 - 138)
+  // ==========================================
+
+  const buildLlamaCli11118StartupBanner = (lineEnding: '\r\n' | '\n' = '\r\n'): string => {
+    const lines: string[] = [
+      'Loading model...',
+      '',
+      '▄▄ ▄▄',
+      '██ ██',
+      '██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄',
+      '██ ██ ▄█▀██ ██ ██ ██ ▄█▀██   ██     ██ ██ ██ ██',
+      '██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ▄ ▀█████ ████▀ ████▀',
+      '                                    ██    ██',
+      '                                    ▀▀    ▀▀',
+      '',
+      'build      : 11118 (e092a34d)',
+      'model      : C:\\PEIA\\models\\Qwen3-4B-Q4_K_M.gguf',
+      'ftype      : Q4_K - Medium',
+      'modalities : text',
+      '',
+      'available commands:',
+      '  /exit or Ctrl+C     stop or exit',
+      '  /regen              regenerate the last response',
+      '  /clear              clear the chat history',
+      '  /read <file>        add a text file',
+      '  /glob <pattern>     add text files using globbing pattern',
+      '',
+    ];
+    return lines.join(lineEnding) + lineEnding;
+  };
+
+  const formatUpstreamLlamaCliConsoleEcho = (
+    promptText: string,
+    lineEnding: '\r\n' | '\n' = '\r\n'
+  ): string => {
+    const utf8Buf = Buffer.from(promptText, 'utf8');
+    if (utf8Buf.length > 500) {
+      const prefix500 = utf8Buf.subarray(0, 500).toString('utf8');
+      const normalizedPrefix =
+        lineEnding === '\r\n' ? prefix500.replace(/\n/g, '\r\n') : prefix500;
+      return `${lineEnding}> ${normalizedPrefix} ... (truncated)${lineEnding}`;
+    }
+    const normalizedFull =
+      lineEnding === '\r\n' ? promptText.replace(/\n/g, '\r\n') : promptText;
+    return `${lineEnding}> ${normalizedFull}${lineEnding}`;
+  };
+
+  await test('125. [PEIA-TRANSCRIPT-03 #1] Full llama-cli 11118 startup banner + exact truncated 500-byte prompt echo + valid News JSON (reproduces pre-fix failure without expectedPrompt and passes with expectedPrompt)', async () => {
+    const newsTask = validateTaskInput(
+      makeSampleTask({
+        titleAr: 'تقرير رصد الهيدرولوجيا في حوض النيل الأزرق',
+        titleEn: 'Blue Nile Basin Hydrological Monitoring Report',
+        bodyEn: 'Stormwater runoff and coastal SST anomalies were evaluated.',
+      })
+    );
+    const epaItem = makeSampleEPAItem('1');
+    const noaaItem = makeSampleNOAAItem('1');
+    const contextAssembly = assembleBoundedEvidenceContext([epaItem, noaaItem]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+
+    const validNewsJson = JSON.stringify(
+      {
+        status: 'READY',
+        summary: 'Blue Nile hydrological assessment grounded in EPA and NOAA monitoring evidence.',
+        findings: [
+          {
+            claim: 'Stormwater runoff monitoring aligns with Clean Water Act section 402-1.',
+            evidenceIds: ['EPA::epa-cwa-1'],
+            severity: 'Info',
+          },
+          {
+            claim: 'Coastal buoy network recorded sea surface temperature anomaly 1.',
+            evidenceIds: ['NOAA::noaa-buoy-1'],
+            severity: 'Warning',
+          },
+        ],
+        recommendations: ['Cite the official station gauge timestamp in paragraph two.'],
+        uncertainties: ['Seasonal downstream discharge projections remain preliminary.'],
+      },
+      null,
+      2
+    );
+
+    const crlfTranscript =
+      buildLlamaCli11118StartupBanner('\r\n') +
+      formatUpstreamLlamaCliConsoleEcho(exactPrompt, '\r\n') +
+      `\r\n${validNewsJson}\r\n`;
+
+    // Pre-fix 1-arg behavior (no trusted expectedPrompt supplied) must fail closed on > echo
+    const unverifiedExtraction = extractAssistantResponseFromLlamaTranscript(crlfTranscript);
+    assert(
+      unverifiedExtraction.success === false,
+      'Without trusted expectedPrompt, > prompt echo must fail closed'
+    );
+
+    // Post-fix 2-arg behavior with exact trusted prompt succeeds (CRLF and LF)
+    const crlfExtraction = extractAssistantResponseFromLlamaTranscript(crlfTranscript, exactPrompt);
+    assert(crlfExtraction.success === true, 'CRLF 11118 banner + exact 500-byte echo must succeed');
+    assert(crlfExtraction.content === validNewsJson, 'Extracted News JSON matches byte-for-byte');
+
+    const lfTranscript =
+      buildLlamaCli11118StartupBanner('\n') +
+      formatUpstreamLlamaCliConsoleEcho(exactPrompt, '\n') +
+      `\n${validNewsJson}\n`;
+    const lfExtraction = extractAssistantResponseFromLlamaTranscript(lfTranscript, exactPrompt);
+    assert(lfExtraction.success === true, 'LF 11118 banner + exact 500-byte echo must succeed');
+    assert(lfExtraction.content === validNewsJson, 'LF extracted News JSON matches byte-for-byte');
+  });
+
+  await test('126. [PEIA-TRANSCRIPT-03 #2] Full banner + exact truncated prompt echo + valid JSON + known CLI trailer', async () => {
+    const newsTask = validateTaskInput(makeSampleTask());
+    const contextAssembly = assembleBoundedEvidenceContext([makeSampleEPAItem('1')]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+
+    const validJson = JSON.stringify(
+      {
+        status: 'READY',
+        summary: 'Verified against EPA coastal records.',
+        findings: [{ claim: 'Aligned with CWA section 402-1.', evidenceIds: ['EPA::epa-cwa-1'] }],
+        recommendations: [],
+        uncertainties: [],
+      },
+      null,
+      2
+    );
+
+    const transcript =
+      buildLlamaCli11118StartupBanner('\r\n') +
+      formatUpstreamLlamaCliConsoleEcho(exactPrompt, '\r\n') +
+      `\r\n${validJson}\r\n\r\n` +
+      '[ Prompt: 164.2 t/s | Generation: 31.8 t/s ]\r\n' +
+      'llama_perf_context_print:        load time =    1240.12 ms\r\n' +
+      'Exiting...\r\n';
+
+    const extraction = extractAssistantResponseFromLlamaTranscript(transcript, exactPrompt);
+    assert(extraction.success === true, 'Banner + exact echo + JSON + trailer must succeed');
+    assert(extraction.content === validJson, 'Extracted JSON matches verbatim');
+    assert(!extraction.content.includes('... (truncated)'), 'Echo truncation marker removed');
+    assert(!extraction.content.includes('Exiting...'), 'CLI trailer removed');
+  });
+
+  await test('127. [PEIA-TRANSCRIPT-03 #3] Full banner + exact echo + valid reasoning block + valid JSON', async () => {
+    const newsTask = validateTaskInput(makeSampleTask());
+    const contextAssembly = assembleBoundedEvidenceContext([makeSampleEPAItem('1')]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Verified with reasoning block after exact prompt echo.',
+      findings: [{ claim: 'Discharge aligned with EPA::epa-cwa-1.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    const transcript =
+      buildLlamaCli11118StartupBanner('\r\n') +
+      formatUpstreamLlamaCliConsoleEcho(exactPrompt, '\r\n') +
+      '\r\n[Start thinking]\r\n' +
+      'Verifying EPA::epa-cwa-1 reference against article claims.\r\n' +
+      '[End thinking]\r\n' +
+      `${validJson}\r\n` +
+      'Exiting...\r\n';
+
+    const extraction = extractAssistantResponseFromLlamaTranscript(transcript, exactPrompt);
+    assert(extraction.success === true, 'Banner + exact echo + reasoning block + JSON must succeed');
+    assert(extraction.content === validJson, 'Extracted JSON matches verbatim');
+  });
+
+  await test('128. [PEIA-TRANSCRIPT-03 #4] Existing complete response-header path remains valid', async () => {
+    const newsTask = validateTaskInput(makeSampleTask());
+    const contextAssembly = assembleBoundedEvidenceContext([makeSampleEPAItem('1')]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Complete response header path preserved.',
+      findings: [{ claim: 'Grounded claim.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    const fullHeaderTranscript =
+      'Loading model...\r\n' +
+      `${exactPrompt}\r\n` +
+      `${validJson}\r\n` +
+      'Exiting...\r\n';
+
+    const extWithoutPrompt = extractAssistantResponseFromLlamaTranscript(fullHeaderTranscript);
+    assert(extWithoutPrompt.success === true, 'Legacy response-header path without expectedPrompt succeeds');
+    assert(extWithoutPrompt.content === validJson, 'Extracted JSON matches');
+
+    const extWithPrompt = extractAssistantResponseFromLlamaTranscript(fullHeaderTranscript, exactPrompt);
+    assert(extWithPrompt.success === true, 'Legacy response-header path with expectedPrompt succeeds');
+    assert(extWithPrompt.content === validJson, 'Extracted JSON matches');
+  });
+
+  await test('129. [PEIA-TRANSCRIPT-03 #5] Non-truncated exact prompt echo is recognized when applicable (<= 500 UTF-8 bytes) and unexpected truncation is rejected', async () => {
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Short prompt non-truncated echo verified.',
+      findings: [{ claim: 'Grounded claim.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    const shortPrompt =
+      'You are the PEIA Local Content Auditor.\n' +
+      'CRITICAL OPERATIONAL RULES:\n' +
+      '1. Advisory only.\n' +
+      'Return raw JSON.';
+    assert(Buffer.from(shortPrompt, 'utf8').length <= 500, 'shortPrompt must be <= 500 UTF-8 bytes');
+
+    const validNonTruncatedTranscript =
+      buildLlamaCli11118StartupBanner('\r\n') +
+      formatUpstreamLlamaCliConsoleEcho(shortPrompt, '\r\n') +
+      `\r\n${validJson}\r\n`;
+
+    const validExt = extractAssistantResponseFromLlamaTranscript(
+      validNonTruncatedTranscript,
+      shortPrompt
+    );
+    assert(validExt.success === true, 'Exact non-truncated prompt echo (<= 500 bytes) must succeed');
+    assert(validExt.content === validJson, 'Extracted JSON matches');
+
+    // Exact 500-byte boundary prompt (not > 500 bytes, so upstream llama-cli does NOT append ... (truncated))
+    const exact500BytePrompt = 'A'.repeat(500);
+    assert(Buffer.from(exact500BytePrompt, 'utf8').length === 500, 'Prompt is exactly 500 bytes');
+    const exact500Transcript =
+      buildLlamaCli11118StartupBanner('\n') +
+      `\n> ${exact500BytePrompt}\n${validJson}\n`;
+    const exact500Ext = extractAssistantResponseFromLlamaTranscript(
+      exact500Transcript,
+      exact500BytePrompt
+    );
+    assert(exact500Ext.success === true, 'Exact 500-byte prompt without truncation suffix must succeed');
+
+    // Unexpectedly truncated echo for <= 500-byte prompt must fail closed
+    const unexpectedlyTruncatedTranscript =
+      buildLlamaCli11118StartupBanner('\r\n') +
+      `\r\n> ${shortPrompt.replace(/\n/g, '\r\n')} ... (truncated)\r\n${validJson}\r\n`;
+    const unexpectedTruncExt = extractAssistantResponseFromLlamaTranscript(
+      unexpectedlyTruncatedTranscript,
+      shortPrompt
+    );
+    assert(
+      unexpectedTruncExt.success === false,
+      'Unexpectedly truncated echo for <= 500-byte prompt must fail closed'
+    );
+  });
+
+  await test('130. [PEIA-TRANSCRIPT-03 #6] A prompt echo differing by one character or byte is rejected', async () => {
+    const newsTask = validateTaskInput(makeSampleTask());
+    const epaItem = makeSampleEPAItem('1');
+    const contextAssembly = assembleBoundedEvidenceContext([epaItem]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Valid JSON.',
+      findings: [{ claim: 'Grounded claim.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    const exactPrefix500 = Buffer.from(exactPrompt, 'utf8').subarray(0, 500).toString('utf8');
+
+    // 1. Flip first character of prompt echo ('Y' -> 'X')
+    const mutatedFirstChar = 'X' + exactPrefix500.slice(1);
+    // 2. Flip middle character of prompt echo
+    const mutatedMidChar =
+      exactPrefix500.slice(0, 220) +
+      (exactPrefix500[220] === 'A' ? 'B' : 'A') +
+      exactPrefix500.slice(221);
+    // 3. Flip 500th byte ('f' -> 'g')
+    const mutatedLastByte = exactPrefix500.slice(0, 499) + (exactPrefix500[499] === 'f' ? 'g' : 'f');
+    // 4. Truncated at 499 bytes instead of 500 bytes
+    const truncatedAt499 = exactPrefix500.slice(0, 499);
+    // 5. Truncated at 501 bytes instead of 500 bytes
+    const truncatedAt501 = Buffer.from(exactPrompt, 'utf8').subarray(0, 501).toString('utf8');
+
+    for (const badPrefix of [
+      mutatedFirstChar,
+      mutatedMidChar,
+      mutatedLastByte,
+      truncatedAt499,
+      truncatedAt501,
+    ]) {
+      const badTranscript =
+        buildLlamaCli11118StartupBanner('\r\n') +
+        `\r\n> ${badPrefix.replace(/\n/g, '\r\n')} ... (truncated)\r\n\r\n${validJson}\r\n`;
+
+      const ext = extractAssistantResponseFromLlamaTranscript(badTranscript, exactPrompt);
+      assert(ext.success === false, 'Prompt echo differing by 1 char/byte must fail closed');
+      assert(ext.content === '', 'Rejected echo must return empty content');
+
+      const runtimeRes = await analyzeTaskLocally(
+        newsTask,
+        makeEvidenceResult([epaItem]),
+        defaultConfig,
+        makeFakeRunner({ exitCode: 0, stdout: badTranscript })
+      );
+      assert(
+        runtimeRes.kind === 'ABSTAINED' && runtimeRes.reason === 'INVALID_MODEL_OUTPUT',
+        'analyzeTaskLocally must fail closed to ABSTAINED (INVALID_MODEL_OUTPUT) on 1-byte echo mismatch'
+      );
+    }
+  });
+
+  await test('131. [PEIA-TRANSCRIPT-03 #7] An unknown or malformed >-prefixed segment is rejected', async () => {
+    const newsTask = validateTaskInput(makeSampleTask());
+    const epaItem = makeSampleEPAItem('1');
+    const contextAssembly = assembleBoundedEvidenceContext([epaItem]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+    const exactPrefix500 = Buffer.from(exactPrompt, 'utf8').subarray(0, 500).toString('utf8');
+
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Valid JSON.',
+      findings: [{ claim: 'Grounded claim.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    const malformedEchoTranscripts = [
+      // Unknown single-line > segment
+      `${buildLlamaCli11118StartupBanner('\r\n')}> Arbitrary user prompt echo ... (truncated)\r\n${validJson}\r\n`,
+      // Missing ' ... (truncated)' suffix on > 500-byte prompt
+      `${buildLlamaCli11118StartupBanner('\r\n')}> ${exactPrefix500.replace(/\n/g, '\r\n')}\r\n${validJson}\r\n`,
+      // Missing space after '>'
+      `${buildLlamaCli11118StartupBanner('\r\n')}>${exactPrefix500.replace(/\n/g, '\r\n')} ... (truncated)\r\n${validJson}\r\n`,
+      // JSON on the same line as '... (truncated)' without newline
+      `${buildLlamaCli11118StartupBanner('\r\n')}> ${exactPrefix500.replace(/\n/g, '\r\n')} ... (truncated)${validJson}\r\n`,
+      // Only first line of the multi-line prompt echoed
+      `${buildLlamaCli11118StartupBanner('\r\n')}> You are the PEIA Local Content Auditor. ... (truncated)\r\n${validJson}\r\n`,
+      // Exact echo WITHOUT a preceding recognized startup banner
+      `> ${exactPrefix500.replace(/\n/g, '\r\n')} ... (truncated)\r\n${validJson}\r\n`,
+    ];
+
+    for (const badTranscript of malformedEchoTranscripts) {
+      const ext = extractAssistantResponseFromLlamaTranscript(badTranscript, exactPrompt);
+      assert(ext.success === false, 'Unknown or malformed >-prefixed segment must fail closed');
+      assert(ext.content === '', 'Rejected extraction must return empty content');
+    }
+  });
+
+  await test('132. [PEIA-TRANSCRIPT-03 #8] Duplicate or ambiguous echoes are rejected', async () => {
+    const newsTask = validateTaskInput(makeSampleTask());
+    const epaItem = makeSampleEPAItem('1');
+    const contextAssembly = assembleBoundedEvidenceContext([epaItem]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Valid JSON.',
+      findings: [{ claim: 'Grounded claim.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    const singleEcho = formatUpstreamLlamaCliConsoleEcho(exactPrompt, '\r\n');
+
+    const duplicateEchoTranscripts = [
+      // Two identical exact prompt echoes back-to-back
+      `${buildLlamaCli11118StartupBanner('\r\n')}${singleEcho}${singleEcho}\r\n${validJson}\r\n`,
+      // Exact prompt echo followed by another > line
+      `${buildLlamaCli11118StartupBanner('\r\n')}${singleEcho}> Second prompt echo\r\n${validJson}\r\n`,
+      // Exact prompt echo followed by PROMPT_AUDIT_RESPONSE_HEADER
+      `${buildLlamaCli11118StartupBanner('\r\n')}${singleEcho}${PROMPT_AUDIT_RESPONSE_HEADER}\r\n${validJson}\r\n`,
+    ];
+
+    for (const badTranscript of duplicateEchoTranscripts) {
+      const ext = extractAssistantResponseFromLlamaTranscript(badTranscript, exactPrompt);
+      assert(ext.success === false, 'Duplicate or ambiguous prompt echoes must fail closed');
+      assert(ext.content === '', 'Rejected duplicate echo must return empty content');
+    }
+  });
+
+  await test('133. [PEIA-TRANSCRIPT-03 #9] Untrusted prose after echo and before JSON (or before thinking block) is rejected', async () => {
+    const newsTask = validateTaskInput(makeSampleTask());
+    const epaItem = makeSampleEPAItem('1');
+    const contextAssembly = assembleBoundedEvidenceContext([epaItem]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+    const singleEcho = formatUpstreamLlamaCliConsoleEcho(exactPrompt, '\r\n');
+
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Valid JSON.',
+      findings: [{ claim: 'Grounded claim.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    const proseAfterEchoTranscripts = [
+      `${buildLlamaCli11118StartupBanner('\r\n')}${singleEcho}Here is the requested JSON response:\r\n${validJson}\r\n`,
+      `${buildLlamaCli11118StartupBanner('\r\n')}${singleEcho}Untrusted preamble before thinking\r\n[Start thinking]\r\nThought\r\n[End thinking]\r\n${validJson}\r\n`,
+      `${buildLlamaCli11118StartupBanner('\r\n')}Untrusted line before echo\r\n${singleEcho}${validJson}\r\n`,
+    ];
+
+    for (const badTranscript of proseAfterEchoTranscripts) {
+      const ext = extractAssistantResponseFromLlamaTranscript(badTranscript, exactPrompt);
+      assert(ext.success === false, 'Untrusted prose around echo must fail closed and never scan for {');
+      assert(ext.content === '', 'Rejected extraction must return empty content');
+    }
+  });
+
+  await test('134. [PEIA-TRANSCRIPT-03 #10] Multiple JSON objects and malformed JSON after banner + exact echo remain rejected', async () => {
+    const newsTask = validateTaskInput(makeSampleTask());
+    const epaItem = makeSampleEPAItem('1');
+    const contextAssembly = assembleBoundedEvidenceContext([epaItem]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+    const bannerAndEcho =
+      buildLlamaCli11118StartupBanner('\r\n') +
+      formatUpstreamLlamaCliConsoleEcho(exactPrompt, '\r\n');
+
+    const validJson1 = JSON.stringify({
+      status: 'READY',
+      summary: 'First JSON.',
+      findings: [{ claim: 'Grounded claim.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+    const validJson2 = JSON.stringify({
+      status: 'ABSTAIN',
+      abstainReason: 'INSUFFICIENT_EVIDENCE',
+      summary: 'Second JSON.',
+    });
+
+    const multiJsonTranscript = `${bannerAndEcho}\r\n${validJson1}\r\n${validJson2}\r\n`;
+    const multiExt = extractAssistantResponseFromLlamaTranscript(multiJsonTranscript, exactPrompt);
+    assert(multiExt.success === false, 'Multiple JSON objects after exact echo must fail closed');
+
+    const malformedJsonTranscript = `${bannerAndEcho}\r\n{\r\n  "status": "READY",\r\n  "summary": "unterminated\r\n`;
+    const malformedRes = await analyzeTaskLocally(
+      newsTask,
+      makeEvidenceResult([epaItem]),
+      defaultConfig,
+      makeFakeRunner({ exitCode: 0, stdout: malformedJsonTranscript })
+    );
+    assert(
+      malformedRes.kind === 'ABSTAINED' && malformedRes.reason === 'INVALID_MODEL_OUTPUT',
+      'Malformed JSON after exact echo must fail closed to ABSTAINED (INVALID_MODEL_OUTPUT)'
+    );
+  });
+
+  await test('135. [PEIA-TRANSCRIPT-03 #11] UTF-8 byte-boundary behavior is tested explicitly (500 UTF-8 bytes vs 500 JS chars, and fail-closed on split multi-byte code point at byte 500)', async () => {
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'UTF-8 byte-boundary verification succeeded.',
+      findings: [{ claim: 'Grounded claim.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    // 11a. Multi-byte UTF-8 characters (2-byte Arabic + 3-byte Euro + 4-byte globe) within first 500 bytes,
+    // landing cleanly on an ASCII boundary at byte 500.
+    const multiByteHeader = 'تقرير بيئي شامل — €100 — 🌍\n'; // > 25 UTF-8 bytes, fewer JS chars
+    const headerBytes = Buffer.from(multiByteHeader, 'utf8').length;
+    assert(
+      headerBytes > multiByteHeader.length,
+      'multiByteHeader must have more UTF-8 bytes than JS UTF-16 code units'
+    );
+    const asciiFillerTo500 = 'X'.repeat(500 - headerBytes);
+    const tailAfter500 = '\nAdditional prompt instructions after byte 500.';
+    const cleanMultiBytePrompt = `${multiByteHeader}${asciiFillerTo500}${tailAfter500}`;
+
+    const cleanPromptBuf = Buffer.from(cleanMultiBytePrompt, 'utf8');
+    assert(cleanPromptBuf.length > 500, 'cleanMultiBytePrompt must exceed 500 UTF-8 bytes');
+    assert(
+      (cleanPromptBuf[500] & 0b11000000) !== 0b10000000,
+      'Byte 500 must be a clean UTF-8 code-point boundary'
+    );
+
+    // True 500-UTF-8-byte echo must succeed
+    const true500ByteEchoTranscript =
+      buildLlamaCli11118StartupBanner('\r\n') +
+      formatUpstreamLlamaCliConsoleEcho(cleanMultiBytePrompt, '\r\n') +
+      `\r\n${validJson}\r\n`;
+    const cleanUtf8Ext = extractAssistantResponseFromLlamaTranscript(
+      true500ByteEchoTranscript,
+      cleanMultiBytePrompt
+    );
+    assert(
+      cleanUtf8Ext.success === true,
+      'Echo truncated at exact 500 UTF-8 bytes with multi-byte chars must succeed'
+    );
+    assert(cleanUtf8Ext.content === validJson, 'Extracted JSON matches');
+
+    // Buggy 500-JS-character slice (cleanMultiBytePrompt.slice(0, 500)) has > 500 UTF-8 bytes and must be rejected
+    const jsChar500Slice = cleanMultiBytePrompt.slice(0, 500);
+    assert(
+      Buffer.from(jsChar500Slice, 'utf8').length > 500,
+      'JS .slice(0, 500) must exceed 500 UTF-8 bytes when multi-byte chars are present'
+    );
+    const wrongJsCharEchoTranscript =
+      buildLlamaCli11118StartupBanner('\r\n') +
+      `\r\n> ${jsChar500Slice.replace(/\n/g, '\r\n')} ... (truncated)\r\n\r\n${validJson}\r\n`;
+    const wrongJsCharExt = extractAssistantResponseFromLlamaTranscript(
+      wrongJsCharEchoTranscript,
+      cleanMultiBytePrompt
+    );
+    assert(
+      wrongJsCharExt.success === false,
+      'Echo truncated at 500 JS characters instead of 500 UTF-8 bytes must be rejected'
+    );
+
+    // 11b. Multi-byte UTF-8 characters split right across byte 500 (2-byte Arabic 'ش', 3-byte '€', 4-byte '🌍')
+    // must fail closed deterministically rather than performing lossy \uFFFD or speculative matching.
+    const split2BytePrompt = 'A'.repeat(499) + 'ش' + 'tail after split 2-byte char';
+    const split3BytePrompt = 'A'.repeat(498) + '€' + 'tail after split 3-byte char';
+    const split4BytePrompt = 'A'.repeat(497) + '🌍' + 'tail after split 4-byte char';
+
+    for (const unsafePrompt of [split2BytePrompt, split3BytePrompt, split4BytePrompt]) {
+      const unsafeBuf = Buffer.from(unsafePrompt, 'utf8');
+      assert(
+        (unsafeBuf[500] & 0b11000000) === 0b10000000,
+        'Byte 500 in unsafePrompt must be a UTF-8 continuation byte (split character)'
+      );
+      const lossyDecodedPrefix = unsafeBuf.subarray(0, 500).toString('utf8');
+      const lossyTranscript =
+        buildLlamaCli11118StartupBanner('\r\n') +
+        `\r\n> ${lossyDecodedPrefix} ... (truncated)\r\n\r\n${validJson}\r\n`;
+
+      const unsafeExt = extractAssistantResponseFromLlamaTranscript(lossyTranscript, unsafePrompt);
+      assert(
+        unsafeExt.success === false,
+        'Prompt with split UTF-8 code point at byte 500 must fail closed without lossy matching'
+      );
+      assert(
+        unsafeExt.errorDetail?.includes('500-byte UTF-8 truncation falls inside a multi-byte Unicode character'),
+        'Error detail must report unsafe multi-byte UTF-8 boundary at byte 500'
+      );
+    }
+  });
+
+  await test('136. [PEIA-TRANSCRIPT-03 #12] Full analyzeTaskLocally execution with a fake runner emitting real-shaped 11118 banner + exact 500-byte echo from supplied -p prompt produces ADVISORY_READY', async () => {
+    const newsTask = makeSampleTask({
+      titleAr: 'تقرير رصد جودة المياه الساحلية والنيل الأزرق',
+      titleEn: 'Blue Nile and Coastal Water Quality Assessment',
+      bodyEn: 'Municipal storm sewer discharges and coastal buoy anomalies were evaluated.',
+    });
+    const epaItem = makeSampleEPAItem('1');
+    const noaaItem = makeSampleNOAAItem('1');
+
+    const validNewsJson = JSON.stringify(
+      {
+        status: 'READY',
+        summary: 'News draft is grounded in EPA storm sewer and NOAA buoy monitoring records.',
+        findings: [
+          {
+            claim: 'Municipal storm sewer discharge monitoring aligns with CWA section 402-1.',
+            evidenceIds: ['EPA::epa-cwa-1'],
+            severity: 'Info',
+          },
+          {
+            claim: 'Coastal buoy network recorded sea surface temperature anomaly 1.',
+            evidenceIds: ['NOAA::noaa-buoy-1'],
+            severity: 'Warning',
+          },
+        ],
+        recommendations: ['Include specific buoy station identifier in paragraph two.'],
+        uncertainties: ['Long-term seasonal baseline remains preliminary.'],
+      },
+      null,
+      2
+    );
+
+    const expectedBuiltPrompt = buildModelPrompt(
+      validateTaskInput(newsTask),
+      assembleBoundedEvidenceContext([epaItem, noaaItem])
+    );
+
+    const runner: QwenProcessRunner = async (req) => {
+      const pIdx = req.args.indexOf('-p');
+      assert(pIdx !== -1 && pIdx + 1 < req.args.length, 'Runner must receive -p prompt argument');
+      const suppliedPrompt = req.args[pIdx + 1];
+      assert(
+        suppliedPrompt === expectedBuiltPrompt,
+        'Runner -p argument must equal buildModelPrompt output'
+      );
+
+      const stdout =
+        buildLlamaCli11118StartupBanner('\r\n') +
+        formatUpstreamLlamaCliConsoleEcho(suppliedPrompt, '\r\n') +
+        `\r\n${validNewsJson}\r\n\r\n` +
+        '[ Prompt: 164.2 t/s | Generation: 31.8 t/s ]\r\n' +
+        'Exiting...\r\n';
+
+      return {
+        exitCode: 0,
+        stdout,
+        stderr: '',
+        timedOut: false,
+      };
+    };
+
+    const result = await analyzeTaskLocally(
+      newsTask,
+      makeEvidenceResult([epaItem, noaaItem]),
+      defaultConfig,
+      runner
+    );
+
+    assert(
+      result.kind === 'ADVISORY_READY',
+      'analyzeTaskLocally must return ADVISORY_READY for real-shaped 11118 banner + exact 500-byte prompt echo + valid News JSON'
+    );
+    if (result.kind === 'ADVISORY_READY') {
+      assert(result.humanReviewRequired === true, 'humanReviewRequired must be true');
+      assert(result.advisory.findings.length === 2, 'Both grounded findings preserved');
+      assert(result.usedEvidenceIds.includes('EPA::epa-cwa-1'), 'EPA evidence ID recorded');
+      assert(result.usedEvidenceIds.includes('NOAA::noaa-buoy-1'), 'NOAA evidence ID recorded');
+      assert(result.advisory.libraryPreparation === undefined, 'News advisory has no libraryPreparation');
+    }
+  });
+
+  await test('137. [PEIA-TRANSCRIPT-03 #13] Existing LibraryIntake contracts (MetadataOnly and SuppliedExcerptAndMetadata) remain unchanged with 11118 banner + exact prompt echo', async () => {
+    const snapshotItem = makeSampleSnapshotItem('1');
+    const epaItem = makeSampleEPAItem('1');
+
+    // 1. MetadataOnly
+    const metaTask = makeSampleLibraryIntakeTask();
+    const validMetaJson = JSON.stringify(
+      {
+        status: 'READY',
+        summary: 'Prepared bibliographic metadata from supplied intake snapshot and EPA reference.',
+        findings: [
+          {
+            claim: 'Supplied intake record identifies coastal water regulation.',
+            evidenceIds: ['SNAPSHOT::intake-snapshot-1', 'EPA::epa-cwa-1'],
+          },
+        ],
+        recommendations: ['Verify official gazette publication date before canonical registration.'],
+        uncertainties: ['Only metadata was supplied; full PDF was not read.'],
+        libraryPreparation: makeValidCanonicalLibraryPrep('MetadataOnly'),
+      },
+      null,
+      2
+    );
+
+    const metaRunner: QwenProcessRunner = async (req) => {
+      const suppliedPrompt = req.args[req.args.indexOf('-p') + 1];
+      return {
+        exitCode: 0,
+        stdout:
+          buildLlamaCli11118StartupBanner('\r\n') +
+          formatUpstreamLlamaCliConsoleEcho(suppliedPrompt, '\r\n') +
+          `\r\n${validMetaJson}\r\nExiting...\r\n`,
+        stderr: '',
+        timedOut: false,
+      };
+    };
+
+    const metaResult = await analyzeTaskLocally(
+      metaTask,
+      { kind: 'SELECTED_EVIDENCE', selectedItems: [snapshotItem, epaItem] },
+      defaultConfig,
+      metaRunner
+    );
+    assert(metaResult.kind === 'ADVISORY_READY', 'LibraryIntake MetadataOnly with echo produces ADVISORY_READY');
+    if (metaResult.kind === 'ADVISORY_READY') {
+      assert(metaResult.advisory.libraryPreparation?.inputBasis === 'MetadataOnly', 'MetadataOnly basis');
+      assert(metaResult.advisory.libraryPreparation?.suggestedSummaryAr === null, 'Null Ar summary');
+      assert(metaResult.advisory.libraryPreparation?.suggestedSummaryEn === null, 'Null En summary');
+    }
+
+    // 2. SuppliedExcerptAndMetadata
+    const excerptTask = makeSampleLibraryIntakeTask({
+      workingTitle: 'Clean Water Coastal Protection Regulation 2026',
+      suppliedExcerpt: 'Article 4 establishes effluent monitoring standards for coastal municipalities.',
+    });
+    const validExcerptJson = JSON.stringify(
+      {
+        status: 'READY',
+        summary: 'Prepared bibliographic suggestions from supplied excerpt and metadata.',
+        findings: [
+          {
+            claim: 'Excerpt specifies Article 4 effluent monitoring.',
+            evidenceIds: ['SNAPSHOT::intake-snapshot-1', 'EPA::epa-cwa-1'],
+          },
+        ],
+        recommendations: [],
+        uncertainties: [],
+        libraryPreparation: makeValidCanonicalLibraryPrep('SuppliedExcerptAndMetadata'),
+      },
+      null,
+      2
+    );
+
+    const excerptRunner: QwenProcessRunner = async (req) => {
+      const suppliedPrompt = req.args[req.args.indexOf('-p') + 1];
+      return {
+        exitCode: 0,
+        stdout:
+          buildLlamaCli11118StartupBanner('\r\n') +
+          formatUpstreamLlamaCliConsoleEcho(suppliedPrompt, '\r\n') +
+          `\r\n${validExcerptJson}\r\nExiting...\r\n`,
+        stderr: '',
+        timedOut: false,
+      };
+    };
+
+    const excerptResult = await analyzeTaskLocally(
+      excerptTask,
+      { kind: 'SELECTED_EVIDENCE', selectedItems: [snapshotItem, epaItem] },
+      defaultConfig,
+      excerptRunner
+    );
+    assert(
+      excerptResult.kind === 'ADVISORY_READY',
+      'LibraryIntake SuppliedExcerptAndMetadata with echo produces ADVISORY_READY'
+    );
+    if (excerptResult.kind === 'ADVISORY_READY') {
+      assert(
+        excerptResult.advisory.libraryPreparation?.inputBasis === 'SuppliedExcerptAndMetadata',
+        'SuppliedExcerptAndMetadata basis'
+      );
+      assert(
+        typeof excerptResult.advisory.libraryPreparation?.suggestedSummaryAr === 'string' &&
+          typeof excerptResult.advisory.libraryPreparation?.suggestedSummaryEn === 'string',
+        'Non-null bilingual summaries preserved'
+      );
+    }
+  });
+
+  await test('138. [PEIA-TRANSCRIPT-03 #14] The model response itself is never altered by echo removal (including JSON containing > and ... (truncated) literals)', async () => {
+    const newsTask = validateTaskInput(makeSampleTask());
+    const contextAssembly = assembleBoundedEvidenceContext([makeSampleEPAItem('1')]);
+    const exactPrompt = buildModelPrompt(newsTask, contextAssembly);
+
+    const formattedModelResponse =
+      '{\n' +
+      '  "status": "READY",\n' +
+      '  "summary": "Observed concentration > 50 mg/L in sampleexcerpt ... (truncated) — نص عربي للتأكد من عدم التغيير.",\n' +
+      '  "findings": [\n' +
+      '    {\n' +
+      '      "claim": "> Threshold comparison: turbidity > baseline ... (truncated) per EPA::epa-cwa-1.",\n' +
+      '      "evidenceIds": [\n' +
+      '        "EPA::epa-cwa-1"\n' +
+      '      ],\n' +
+      '      "severity": "Warning"\n' +
+      '    }\n' +
+      '  ],\n' +
+      '  "recommendations": [\n' +
+      '    "Verify whether upstream log line > 500 bytes ... (truncated) affected station metadata."\n' +
+      '  ],\n' +
+      '  "uncertainties": []\n' +
+      '}';
+
+    const transcript =
+      buildLlamaCli11118StartupBanner('\r\n') +
+      formatUpstreamLlamaCliConsoleEcho(exactPrompt, '\r\n') +
+      `\r\n${formattedModelResponse}\r\n` +
+      '[ Prompt: 164.2 t/s | Generation: 31.8 t/s ]\r\n' +
+      'Exiting...\r\n';
+
+    const extraction = extractAssistantResponseFromLlamaTranscript(transcript, exactPrompt);
+    assert(extraction.success === true, 'Extraction must succeed');
+    assert(
+      extraction.content === formattedModelResponse,
+      'Model JSON response must be preserved byte-for-byte without any alteration'
+    );
+    assert(
+      Buffer.from(extraction.content, 'utf8').equals(Buffer.from(formattedModelResponse, 'utf8')),
+      'UTF-8 byte buffers of extracted content and original model response must be identical'
+    );
+  });
+
   console.log('------------------------------------------------------------');
   console.log(`LOCAL ANALYSIS RUNTIME TESTS: ${passedTests}/${totalTests} PASSED`);
   if (passedTests !== totalTests) {
