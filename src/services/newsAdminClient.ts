@@ -29,6 +29,70 @@ import {
 } from '../types/admin';
 import { AuditAction } from '../types/audit';
 import { validateRichNewsDocumentByVersion } from './richNewsDocumentContract';
+import {
+  AIReviewTargetType,
+  AIReviewSeverity,
+  type ReviewTargetIdentity,
+} from '../types/aiReview';
+import {
+  AITaskStatus,
+  AITaskType,
+  type AIReviewTask,
+} from '../types/aiTask';
+import {
+  type AdvisoryResultIntakeResult,
+  type AdvisoryResultIntakeFinding,
+} from '../../functions/src/peia/advisoryResultIntakeContract';
+import {
+  NonAdvisoryOutcomeKindValues,
+  type CanonicalNonAdvisoryOutcome,
+  type NonAdvisoryOutcomeKind,
+} from '../../functions/src/peia/nonAdvisoryOutcomeIntakeContract';
+
+export {
+  AIReviewTargetType,
+  AIReviewSeverity,
+  AITaskStatus,
+  AITaskType,
+  NonAdvisoryOutcomeKindValues,
+  type AIReviewTask,
+  type ReviewTargetIdentity,
+  type AdvisoryResultIntakeResult,
+  type AdvisoryResultIntakeFinding,
+  type CanonicalNonAdvisoryOutcome,
+  type NonAdvisoryOutcomeKind,
+};
+
+export type PeiaTaskEnqueueDisposition = 'CREATED' | 'ALREADY_EXISTS';
+
+export interface SanitizedNewsPeiaReviewStatusDto {
+  readonly status: 'NotRequested' | AITaskStatus;
+  readonly taskId: string;
+  readonly targetType: typeof AIReviewTargetType.News;
+  readonly targetId: string;
+  readonly currentSourceUpdatedAt: string;
+  readonly taskSourceUpdatedAt: string | null;
+  readonly isStale: boolean;
+  readonly task: AIReviewTask | null;
+  readonly advisoryResult: AdvisoryResultIntakeResult | null;
+  readonly nonAdvisoryOutcome: CanonicalNonAdvisoryOutcome | null;
+}
+
+export interface GetNewsPeiaReviewStatusResponseDto extends SanitizedNewsPeiaReviewStatusDto {
+  readonly reviewStatus: SanitizedNewsPeiaReviewStatusDto;
+}
+
+export interface RequestNewsPeiaReviewResponseDto {
+  readonly disposition: PeiaTaskEnqueueDisposition;
+  readonly documentId: string;
+  readonly taskId: string;
+  readonly task: AIReviewTask;
+  readonly status: 'NotRequested' | AITaskStatus;
+  readonly isStale: boolean;
+  readonly advisoryResult: AdvisoryResultIntakeResult | null;
+  readonly nonAdvisoryOutcome: CanonicalNonAdvisoryOutcome | null;
+  readonly reviewStatus: SanitizedNewsPeiaReviewStatusDto;
+}
 
 export const MAX_GET_EDITORIAL_IMAGE_RIGHTS_ASSET_IDS = 20 as const;
 export const EDITORIAL_IMAGE_AUDIT_TARGET_TYPE = 'EditorialImageAsset' as const;
@@ -1707,10 +1771,606 @@ export class NewsAdminClient {
   }
 
   /**
+   * Enqueues or retrieves an existing server-authoritative PEIA advisory review task
+   * for the specified News item and expectedUpdatedAt version.
+   * Never invokes Qwen or performs local inference in the browser.
+   */
+  public static async requestPeiaReview(
+    id: string,
+    expectedUpdatedAt: string
+  ): Promise<RequestNewsPeiaReviewResponseDto> {
+    const validatedId = validateClientNewsPeiaIdentifier(id, 'id');
+    const validatedExpectedUpdatedAt = validateClientNewsPeiaIsoTimestamp(
+      expectedUpdatedAt,
+      'expectedUpdatedAt'
+    );
+
+    const raw = await this.executeAction<RequestNewsPeiaReviewResponseDto>(
+      'requestPeiaReview',
+      {
+        id: validatedId,
+        expectedUpdatedAt: validatedExpectedUpdatedAt,
+      }
+    );
+
+    if (!raw || typeof raw !== 'object') {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: requestPeiaReview returned an empty or malformed response.'
+      );
+    }
+
+    if (raw.disposition !== 'CREATED' && raw.disposition !== 'ALREADY_EXISTS') {
+      throw new Error(
+        `INVALID_SERVER_RESPONSE: Unexpected PEIA enqueue disposition "${String(raw.disposition)}".`
+      );
+    }
+
+    if (raw.documentId !== validatedId) {
+      throw new Error(
+        `INVALID_SERVER_RESPONSE: requestPeiaReview documentId "${String(raw.documentId)}" does not match requested id "${validatedId}".`
+      );
+    }
+
+    if (!raw.reviewStatus || typeof raw.reviewStatus !== 'object') {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: requestPeiaReview response is missing reviewStatus.'
+      );
+    }
+
+    validateNewsPeiaStatusDtoShape(raw.reviewStatus, validatedId);
+
+    if (
+      raw.reviewStatus.status === 'NotRequested' ||
+      raw.reviewStatus.task === null ||
+      raw.reviewStatus.taskSourceUpdatedAt !== validatedExpectedUpdatedAt ||
+      raw.reviewStatus.currentSourceUpdatedAt !== validatedExpectedUpdatedAt ||
+      raw.reviewStatus.isStale !== false
+    ) {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: requestPeiaReview returned an invalid or stale reviewStatus envelope for the requested version.'
+      );
+    }
+
+    if (
+      raw.taskId !== raw.reviewStatus.taskId ||
+      raw.status !== raw.reviewStatus.status ||
+      raw.isStale !== raw.reviewStatus.isStale ||
+      !raw.task ||
+      typeof raw.task !== 'object' ||
+      raw.task.taskId !== raw.reviewStatus.taskId
+    ) {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: requestPeiaReview top-level fields are inconsistent with reviewStatus.'
+      );
+    }
+
+    validateNewsPeiaTaskEnvelope(
+      raw.task,
+      raw.reviewStatus.taskId,
+      raw.reviewStatus.status,
+      validatedId,
+      validatedExpectedUpdatedAt
+    );
+
+    if (
+      Boolean(raw.advisoryResult) !== Boolean(raw.reviewStatus.advisoryResult) ||
+      Boolean(raw.nonAdvisoryOutcome) !== Boolean(raw.reviewStatus.nonAdvisoryOutcome)
+    ) {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: requestPeiaReview top-level outcome artifacts are inconsistent with reviewStatus.'
+      );
+    }
+
+    if (raw.advisoryResult !== null) {
+      validateNewsPeiaAdvisoryResultEnvelope(
+        raw.advisoryResult,
+        raw.reviewStatus.taskId,
+        validatedId,
+        validatedExpectedUpdatedAt
+      );
+    }
+
+    if (raw.nonAdvisoryOutcome !== null) {
+      if (raw.reviewStatus.status === AITaskStatus.Completed) {
+        validateNewsPeiaAbstainedOutcomeEnvelope(
+          raw.nonAdvisoryOutcome,
+          raw.reviewStatus.taskId
+        );
+      } else {
+        validateNewsPeiaFailedOutcomeEnvelope(
+          raw.nonAdvisoryOutcome,
+          raw.reviewStatus.taskId
+        );
+      }
+    }
+
+    return raw;
+  }
+
+  /**
+   * Retrieves the current server-authoritative PEIA review status, advisory result,
+   * or non-advisory outcome for the specified News item.
+   */
+  public static async getPeiaReviewStatus(
+    id: string,
+    taskId?: string
+  ): Promise<GetNewsPeiaReviewStatusResponseDto> {
+    const validatedId = validateClientNewsPeiaIdentifier(id, 'id');
+    const validatedTaskId =
+      taskId !== undefined
+        ? validateClientNewsPeiaIdentifier(taskId, 'taskId')
+        : undefined;
+
+    const payload: { id: string; taskId?: string } =
+      validatedTaskId !== undefined
+        ? { id: validatedId, taskId: validatedTaskId }
+        : { id: validatedId };
+
+    const raw = await this.executeAction<GetNewsPeiaReviewStatusResponseDto>(
+      'getPeiaReviewStatus',
+      payload
+    );
+
+    if (!raw || typeof raw !== 'object') {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: getPeiaReviewStatus returned an empty or malformed response.'
+      );
+    }
+
+    const statusCandidate: SanitizedNewsPeiaReviewStatusDto =
+      raw.reviewStatus && typeof raw.reviewStatus === 'object' ? raw.reviewStatus : raw;
+
+    validateNewsPeiaStatusDtoShape(statusCandidate, validatedId, validatedTaskId);
+    validateNewsPeiaStatusDtoShape(raw, validatedId, validatedTaskId);
+
+    if (
+      raw.status !== statusCandidate.status ||
+      raw.taskId !== statusCandidate.taskId ||
+      raw.targetType !== statusCandidate.targetType ||
+      raw.targetId !== statusCandidate.targetId ||
+      raw.currentSourceUpdatedAt !== statusCandidate.currentSourceUpdatedAt ||
+      raw.taskSourceUpdatedAt !== statusCandidate.taskSourceUpdatedAt ||
+      raw.isStale !== statusCandidate.isStale
+    ) {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: getPeiaReviewStatus top-level fields do not match reviewStatus.'
+      );
+    }
+
+    return {
+      ...statusCandidate,
+      reviewStatus: statusCandidate,
+    };
+  }
+
+  /**
    * Test/environment utility to clear test state. Does not touch live storage or local storage.
    */
   public static clear(): void {
     customImageUploadRuntime = null;
+  }
+}
+
+const CANONICAL_NEWS_PEIA_IDENTIFIER_REGEX = /^[a-zA-Z0-9_-]{3,128}$/;
+const CANONICAL_NEWS_PEIA_ISO_UTC_REGEX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+
+const VALID_NEWS_PEIA_FINDING_SEVERITIES: ReadonlySet<string> = new Set([
+  AIReviewSeverity.Info,
+  AIReviewSeverity.Warning,
+  AIReviewSeverity.ReviewRecommended,
+]);
+
+const VALID_NEWS_PEIA_FAILURE_OUTCOME_KINDS: ReadonlySet<string> = new Set(
+  NonAdvisoryOutcomeKindValues.filter((k) => k !== 'ABSTAINED')
+);
+
+const VALID_NEWS_PEIA_ABSTAINED_REASONS: ReadonlySet<string> = new Set([
+  'NO_EVIDENCE',
+  'INSUFFICIENT_EVIDENCE',
+  'INVALID_MODEL_OUTPUT',
+  'UNGROUNDED_MODEL_OUTPUT',
+]);
+
+function validateClientNewsPeiaIdentifier(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`INVALID_ARGUMENT: ${fieldName} must be a non-empty string.`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed || !CANONICAL_NEWS_PEIA_IDENTIFIER_REGEX.test(trimmed)) {
+    throw new Error(
+      `INVALID_ARGUMENT: ${fieldName} must be a canonical identifier (3-128 alphanumeric, underscore, or hyphen characters).`
+    );
+  }
+  return trimmed;
+}
+
+function validateClientNewsPeiaIsoTimestamp(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(
+      `INVALID_ARGUMENT: ${fieldName} must be a canonical ISO-8601 UTC timestamp.`
+    );
+  }
+  const trimmed = value.trim();
+  if (
+    !CANONICAL_NEWS_PEIA_ISO_UTC_REGEX.test(trimmed) ||
+    Number.isNaN(Date.parse(trimmed))
+  ) {
+    throw new Error(
+      `INVALID_ARGUMENT: ${fieldName} must be a valid canonical ISO-8601 UTC timestamp (YYYY-MM-DDTHH:mm:ss.sssZ).`
+    );
+  }
+  return trimmed;
+}
+
+function isValidServerNewsPeiaIsoTimestamp(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    CANONICAL_NEWS_PEIA_ISO_UTC_REGEX.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  );
+}
+
+function validateNewsPeiaTaskEnvelope(
+  task: unknown,
+  expectedTaskId: string,
+  expectedStatus: AITaskStatus,
+  expectedTargetId: string,
+  expectedSourceUpdatedAt: string
+): void {
+  if (!task || typeof task !== 'object' || Array.isArray(task)) {
+    throw new Error('INVALID_SERVER_RESPONSE: PEIA task record must be an object.');
+  }
+
+  const record = task as Record<string, unknown>;
+  const target = record.target as Record<string, unknown> | undefined;
+  const contentSnapshot = record.contentSnapshot as Record<string, unknown> | undefined;
+  if (
+    record.taskId !== expectedTaskId ||
+    record.taskType !== AITaskType.CONTENT_REVIEW ||
+    record.status !== expectedStatus ||
+    !isValidServerNewsPeiaIsoTimestamp(record.createdAt) ||
+    !target ||
+    typeof target !== 'object' ||
+    Array.isArray(target) ||
+    target.targetType !== AIReviewTargetType.News ||
+    target.targetId !== expectedTargetId ||
+    target.sourceUpdatedAt !== expectedSourceUpdatedAt ||
+    !contentSnapshot ||
+    typeof contentSnapshot !== 'object' ||
+    Array.isArray(contentSnapshot)
+  ) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA task record envelope does not match expected task identity or status.'
+    );
+  }
+}
+
+function validateNewsPeiaAdvisoryResultEnvelope(
+  advisoryResult: unknown,
+  expectedTaskId: string,
+  expectedTargetId: string,
+  expectedSourceUpdatedAt: string
+): void {
+  if (
+    !advisoryResult ||
+    typeof advisoryResult !== 'object' ||
+    Array.isArray(advisoryResult)
+  ) {
+    throw new Error('INVALID_SERVER_RESPONSE: PEIA advisoryResult must be an object.');
+  }
+
+  const record = advisoryResult as Record<string, unknown>;
+  if (record.schemaVersion !== 1 || record.humanReviewRequired !== true) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA advisoryResult is missing schemaVersion=1 or humanReviewRequired=true.'
+    );
+  }
+
+  if (record.libraryPreparation !== undefined) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: News PEIA advisoryResult must not include libraryPreparation.'
+    );
+  }
+
+  const taskMeta = record.task as Record<string, unknown> | undefined;
+  const targetMeta = taskMeta?.target as Record<string, unknown> | undefined;
+  if (
+    !taskMeta ||
+    typeof taskMeta !== 'object' ||
+    taskMeta.taskId !== expectedTaskId ||
+    taskMeta.taskType !== AITaskType.CONTENT_REVIEW ||
+    !targetMeta ||
+    typeof targetMeta !== 'object' ||
+    targetMeta.targetType !== AIReviewTargetType.News ||
+    targetMeta.targetId !== expectedTargetId ||
+    targetMeta.sourceUpdatedAt !== expectedSourceUpdatedAt
+  ) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA advisoryResult task/target envelope does not match the authoritative News task.'
+    );
+  }
+
+  const assessment = record.assessment as Record<string, unknown> | undefined;
+  if (
+    !assessment ||
+    typeof assessment !== 'object' ||
+    typeof assessment.summary !== 'string' ||
+    assessment.summary.trim().length === 0 ||
+    !Array.isArray(assessment.findings)
+  ) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA advisoryResult.assessment is malformed.'
+    );
+  }
+
+  for (const finding of assessment.findings) {
+    if (!finding || typeof finding !== 'object' || Array.isArray(finding)) {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: PEIA advisoryResult finding must be an object.'
+      );
+    }
+    const f = finding as Record<string, unknown>;
+    if (
+      typeof f.code !== 'string' ||
+      f.code.trim().length === 0 ||
+      (f.severity !== undefined &&
+        (typeof f.severity !== 'string' ||
+          !VALID_NEWS_PEIA_FINDING_SEVERITIES.has(f.severity))) ||
+      typeof f.message !== 'string' ||
+      f.message.trim().length === 0 ||
+      !Array.isArray(f.evidenceIds) ||
+      f.evidenceIds.length === 0 ||
+      !f.evidenceIds.every((ev) => typeof ev === 'string' && ev.trim().length > 0)
+    ) {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: PEIA advisoryResult finding entry is malformed.'
+      );
+    }
+  }
+
+  for (const listKey of ['recommendations', 'uncertainties', 'limitations'] as const) {
+    const arr = record[listKey];
+    if (
+      !Array.isArray(arr) ||
+      !arr.every((item) => typeof item === 'string' && item.trim().length > 0)
+    ) {
+      throw new Error(
+        `INVALID_SERVER_RESPONSE: PEIA advisoryResult.${listKey} must be an array of non-empty strings.`
+      );
+    }
+  }
+}
+
+function validateNewsPeiaAbstainedOutcomeEnvelope(
+  outcome: unknown,
+  expectedTaskId: string
+): void {
+  if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA nonAdvisoryOutcome must be an object.'
+    );
+  }
+
+  const record = outcome as Record<string, unknown>;
+  const allowedKeys = new Set([
+    'kind',
+    'taskId',
+    'reason',
+    'createdAt',
+    'modelAttempts',
+    'detail',
+  ]);
+  for (const key of Object.keys(record)) {
+    if (!allowedKeys.has(key)) {
+      throw new Error(
+        `INVALID_SERVER_RESPONSE: PEIA ABSTAINED outcome contains unexpected field "${key}".`
+      );
+    }
+  }
+
+  if (
+    record.kind !== 'ABSTAINED' ||
+    record.taskId !== expectedTaskId ||
+    typeof record.reason !== 'string' ||
+    !VALID_NEWS_PEIA_ABSTAINED_REASONS.has(record.reason) ||
+    !isValidServerNewsPeiaIsoTimestamp(record.createdAt) ||
+    typeof record.modelAttempts !== 'number' ||
+    !Number.isInteger(record.modelAttempts) ||
+    record.modelAttempts < 0 ||
+    record.modelAttempts > 2
+  ) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA ABSTAINED nonAdvisoryOutcome envelope is malformed.'
+    );
+  }
+
+  if (
+    (record.reason === 'NO_EVIDENCE' || record.reason === 'INSUFFICIENT_EVIDENCE') &&
+    record.modelAttempts !== 0
+  ) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA ABSTAINED outcome for NO_EVIDENCE or INSUFFICIENT_EVIDENCE must have modelAttempts === 0.'
+    );
+  }
+
+  if (
+    (record.reason === 'INVALID_MODEL_OUTPUT' ||
+      record.reason === 'UNGROUNDED_MODEL_OUTPUT') &&
+    record.modelAttempts !== 1 &&
+    record.modelAttempts !== 2
+  ) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA ABSTAINED outcome for INVALID_MODEL_OUTPUT or UNGROUNDED_MODEL_OUTPUT must have modelAttempts of 1 or 2.'
+    );
+  }
+
+  if (
+    record.detail !== undefined &&
+    (typeof record.detail !== 'string' ||
+      record.detail.trim().length === 0 ||
+      record.detail !== record.detail.trim())
+  ) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA ABSTAINED outcome detail must be a non-empty trimmed string when present.'
+    );
+  }
+}
+
+function validateNewsPeiaFailedOutcomeEnvelope(
+  outcome: unknown,
+  expectedTaskId: string
+): void {
+  if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA nonAdvisoryOutcome must be an object.'
+    );
+  }
+
+  const record = outcome as Record<string, unknown>;
+  if (
+    typeof record.kind !== 'string' ||
+    !VALID_NEWS_PEIA_FAILURE_OUTCOME_KINDS.has(record.kind) ||
+    record.taskId !== expectedTaskId ||
+    typeof record.reason !== 'string' ||
+    record.reason.trim().length === 0 ||
+    !isValidServerNewsPeiaIsoTimestamp(record.createdAt) ||
+    typeof record.modelAttempts !== 'number' ||
+    !Number.isInteger(record.modelAttempts) ||
+    record.modelAttempts < 0 ||
+    record.modelAttempts > 2
+  ) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA Failed nonAdvisoryOutcome envelope is malformed or uses an invalid failure kind.'
+    );
+  }
+}
+
+function validateNewsPeiaStatusDtoShape(
+  dto: SanitizedNewsPeiaReviewStatusDto,
+  expectedId: string,
+  expectedTaskId?: string
+): void {
+  if (dto.targetType !== AIReviewTargetType.News) {
+    throw new Error(
+      `INVALID_SERVER_RESPONSE: Expected targetType "${AIReviewTargetType.News}", received "${String(dto.targetType)}".`
+    );
+  }
+  if (dto.targetId !== expectedId) {
+    throw new Error(
+      `INVALID_SERVER_RESPONSE: Expected targetId "${expectedId}", received "${String(dto.targetId)}".`
+    );
+  }
+  if (
+    typeof dto.taskId !== 'string' ||
+    dto.taskId !== dto.taskId.trim() ||
+    !CANONICAL_NEWS_PEIA_IDENTIFIER_REGEX.test(dto.taskId)
+  ) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: Missing or invalid taskId in PEIA status response.'
+    );
+  }
+  if (expectedTaskId !== undefined && dto.taskId !== expectedTaskId) {
+    throw new Error(
+      `INVALID_SERVER_RESPONSE: Expected taskId "${expectedTaskId}", received "${dto.taskId}".`
+    );
+  }
+  if (!isValidServerNewsPeiaIsoTimestamp(dto.currentSourceUpdatedAt)) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: Missing or invalid currentSourceUpdatedAt in PEIA status response.'
+    );
+  }
+  if (typeof dto.isStale !== 'boolean') {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: Missing boolean isStale flag in PEIA status response.'
+    );
+  }
+
+  const validStatuses = new Set<string>([
+    'NotRequested',
+    AITaskStatus.Pending,
+    AITaskStatus.Completed,
+    AITaskStatus.Failed,
+  ]);
+  if (!validStatuses.has(dto.status)) {
+    throw new Error(
+      `INVALID_SERVER_RESPONSE: Unexpected PEIA status "${String(dto.status)}".`
+    );
+  }
+
+  if (dto.status === 'NotRequested') {
+    if (
+      dto.isStale !== false ||
+      dto.taskSourceUpdatedAt !== null ||
+      dto.task !== null ||
+      dto.advisoryResult !== null ||
+      dto.nonAdvisoryOutcome !== null
+    ) {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: NotRequested PEIA status must have isStale=false and null task, taskSourceUpdatedAt, advisoryResult, and nonAdvisoryOutcome.'
+      );
+    }
+    return;
+  }
+
+  if (!isValidServerNewsPeiaIsoTimestamp(dto.taskSourceUpdatedAt)) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: Active or finished PEIA status must include a valid canonical taskSourceUpdatedAt.'
+    );
+  }
+
+  const expectedStale = dto.taskSourceUpdatedAt !== dto.currentSourceUpdatedAt;
+  if (dto.isStale !== expectedStale) {
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: PEIA status isStale flag is inconsistent with taskSourceUpdatedAt and currentSourceUpdatedAt.'
+    );
+  }
+
+  validateNewsPeiaTaskEnvelope(
+    dto.task,
+    dto.taskId,
+    dto.status,
+    expectedId,
+    dto.taskSourceUpdatedAt
+  );
+
+  if (dto.status === AITaskStatus.Pending) {
+    if (dto.advisoryResult !== null || dto.nonAdvisoryOutcome !== null) {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: Pending PEIA status must not include advisoryResult or nonAdvisoryOutcome.'
+      );
+    }
+    return;
+  }
+
+  if (dto.status === AITaskStatus.Completed) {
+    if (dto.advisoryResult !== null && dto.nonAdvisoryOutcome === null) {
+      validateNewsPeiaAdvisoryResultEnvelope(
+        dto.advisoryResult,
+        dto.taskId,
+        expectedId,
+        dto.taskSourceUpdatedAt
+      );
+      return;
+    }
+
+    if (dto.advisoryResult === null && dto.nonAdvisoryOutcome !== null) {
+      validateNewsPeiaAbstainedOutcomeEnvelope(dto.nonAdvisoryOutcome, dto.taskId);
+      return;
+    }
+
+    throw new Error(
+      'INVALID_SERVER_RESPONSE: Completed PEIA status must include either a valid advisoryResult (with null nonAdvisoryOutcome) or a valid ABSTAINED nonAdvisoryOutcome (with null advisoryResult).'
+    );
+  }
+
+  if (dto.status === AITaskStatus.Failed) {
+    if (dto.advisoryResult !== null || dto.nonAdvisoryOutcome === null) {
+      throw new Error(
+        'INVALID_SERVER_RESPONSE: Failed PEIA status must include nonAdvisoryOutcome and have null advisoryResult.'
+      );
+    }
+    validateNewsPeiaFailedOutcomeEnvelope(dto.nonAdvisoryOutcome, dto.taskId);
   }
 }
 

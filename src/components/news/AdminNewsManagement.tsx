@@ -7,12 +7,19 @@ import type { JournalisticType, Video } from '../../types';
 import { WorkflowState, WorkflowAction } from '../../types/workflow';
 import { MAX_WORKFLOW_COMMENT_LENGTH } from '../../../functions/src/shared/workflowContract';
 import type { WorkflowTransitionConfig } from '../../types/workflow';
-import type { AdminUser } from '../../types/admin';
+import {
+  AdminDomain,
+  AdminPermission,
+  AdminRole,
+  hasDomainResponsibility,
+  type AdminUser,
+} from '../../types/admin';
 import { WorkflowEngine } from '../../services/workflowEngine';
 import { AdminAccessService } from '../../services/adminAccess';
-import { AdminPermission } from '../../types/admin';
 import { MediaAdminClient } from '../../services/mediaAdminClient';
 import {
+  AIReviewSeverity,
+  AITaskStatus,
   MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE,
   NewsAdminClient,
   NewsEditorImageSessionController,
@@ -21,7 +28,9 @@ import {
   type HaltedAmbiguousImageUpload,
   type NewsImageBinaryFileLike,
   type NewsImageMetadataFormInput,
+  type PeiaTaskEnqueueDisposition,
   type RetainedCompletedImageUpload,
+  type SanitizedNewsPeiaReviewStatusDto,
 } from '../../services/newsAdminClient';
 import {
   RichTextEditor,
@@ -61,7 +70,11 @@ import {
   Check, 
   History,
   AlertCircle,
+  AlertTriangle,
   Image as ImageIcon,
+  Loader2,
+  RefreshCw,
+  Sparkles,
   Trash2,
   Crop,
   Video as VideoIcon
@@ -354,6 +367,443 @@ export function canConfirmNewsTransitionComment(
   return true;
 }
 
+/**
+ * Server-aligned authorization check for reading News PEIA review status (`getPeiaReviewStatus`):
+ * - Active human admin (`user.isActive === true` and `user.role !== AdminRole.AIAssistant`)
+ * - Responsible for `AdminDomain.News`
+ * - Has `AdminPermission.View` and `AdminPermission.Review`
+ */
+export function canReadNewsPeiaReviewStatus(
+  user: AdminUser | null | undefined
+): boolean {
+  if (!user || !user.isActive || user.role === AdminRole.AIAssistant) {
+    return false;
+  }
+  if (!hasDomainResponsibility(user.role, AdminDomain.News)) {
+    return false;
+  }
+  return (
+    AdminAccessService.hasPermission(user, AdminPermission.View) &&
+    AdminAccessService.hasPermission(user, AdminPermission.Review)
+  );
+}
+
+/**
+ * Server-aligned authorization check for requesting News PEIA review (`requestPeiaReview`):
+ * - Satisfies `canReadNewsPeiaReviewStatus(user)`
+ * - Has `AdminPermission.Edit`
+ */
+export function canRequestNewsPeiaReview(
+  user: AdminUser | null | undefined
+): boolean {
+  if (!canReadNewsPeiaReviewStatus(user)) {
+    return false;
+  }
+  return AdminAccessService.hasPermission(user!, AdminPermission.Edit);
+}
+
+/**
+ * Determines whether a NewsItem in the editor represents a saved server-authoritative
+ * News article eligible for PEIA status inspection and review requests.
+ * Rejects unsaved creation forms (`isCreating === true`) and provisional client IDs.
+ */
+export function isSavedNewsArticleForPeia(
+  article: NewsItem | null | undefined,
+  isCreating: boolean = false
+): article is NewsItem {
+  if (isCreating || !article) {
+    return false;
+  }
+  if (typeof article.id !== 'string') {
+    return false;
+  }
+  const trimmedId = article.id.trim();
+  if (
+    trimmedId.length < 3 ||
+    trimmedId === 'news-sudan-initial' ||
+    trimmedId.startsWith('news-sudan-provisional-') ||
+    trimmedId.startsWith('temp-')
+  ) {
+    return false;
+  }
+  return (
+    typeof article.updatedAt === 'string' && article.updatedAt.trim().length > 0
+  );
+}
+
+/**
+ * Detects whether the local editor form has unsaved modifications relative to the
+ * authoritative saved `activeItem`. PEIA review always reviews the saved server version
+ * and never submits unsaved form state.
+ */
+export function hasUnsavedNewsEditorChanges(
+  activeItem: NewsItem | null | undefined,
+  editForm: Partial<NewsItem> & {
+    bodyArHasEdited?: boolean;
+    bodyEnHasEdited?: boolean;
+  },
+  tagsInput: string,
+  sourcesInput: string,
+  selectedImageFile: NewsImageBinaryFileLike | null
+): boolean {
+  if (!activeItem) {
+    return false;
+  }
+  if (selectedImageFile !== null) {
+    return true;
+  }
+  if (editForm.bodyArHasEdited || editForm.bodyEnHasEdited) {
+    return true;
+  }
+  const strFields: Array<keyof NewsItem> = [
+    'titleAr',
+    'titleEn',
+    'kickerAr',
+    'kickerEn',
+    'summaryAr',
+    'summaryEn',
+    'bodyAr',
+    'bodyEn',
+    'category',
+    'location',
+    'urgencyLevel',
+    'featuredImage',
+  ];
+  for (const field of strFields) {
+    if (
+      editForm[field] !== undefined &&
+      String(editForm[field] ?? '') !== String(activeItem[field] ?? '')
+    ) {
+      return true;
+    }
+  }
+  const normalizedTags = Array.isArray(activeItem.tags)
+    ? activeItem.tags.join(', ')
+    : '';
+  if (tagsInput.trim() !== normalizedTags.trim()) {
+    return true;
+  }
+  const normalizedSources = Array.isArray(activeItem.sources)
+    ? activeItem.sources.join(', ')
+    : '';
+  if (sourcesInput.trim() !== normalizedSources.trim()) {
+    return true;
+  }
+  const formVideos = Array.isArray(editForm.relatedVideoIds)
+    ? editForm.relatedVideoIds
+    : [];
+  const itemVideos = Array.isArray(activeItem.relatedVideoIds)
+    ? activeItem.relatedVideoIds
+    : [];
+  if (
+    formVideos.length !== itemVideos.length ||
+    formVideos.some((id, idx) => id !== itemVideos[idx])
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export interface NewsPeiaSessionSnapshot {
+  readonly activeArticleId: string | null;
+  readonly reviewStatus: SanitizedNewsPeiaReviewStatusDto | null;
+  readonly loadingStatus: boolean;
+  readonly requestingReview: boolean;
+  readonly errorMessage: string | null;
+  readonly lastEnqueueDisposition: PeiaTaskEnqueueDisposition | null;
+  readonly versionMismatchNotice: string | null;
+}
+
+export function createInitialNewsPeiaSessionSnapshot(
+  activeArticleId: string | null = null
+): NewsPeiaSessionSnapshot {
+  return {
+    activeArticleId,
+    reviewStatus: null,
+    loadingStatus: false,
+    requestingReview: false,
+    errorMessage: null,
+    lastEnqueueDisposition: null,
+    versionMismatchNotice: null,
+  };
+}
+
+/**
+ * Deterministic controller managing PEIA status loading, manual refresh,
+ * pre-request article version verification, duplicate-click prevention, and
+ * stale response isolation across News modal lifecycle transitions.
+ */
+export class NewsPeiaReviewController {
+  private snapshot: NewsPeiaSessionSnapshot =
+    createInitialNewsPeiaSessionSnapshot(null);
+  private sessionToken = 0;
+  private statusRequestToken = 0;
+  private listeners: Set<(snapshot: NewsPeiaSessionSnapshot) => void> = new Set();
+
+  public getSnapshot(): NewsPeiaSessionSnapshot {
+    return this.snapshot;
+  }
+
+  public subscribe(
+    listener: (snapshot: NewsPeiaSessionSnapshot) => void
+  ): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private emit(next: NewsPeiaSessionSnapshot): void {
+    this.snapshot = next;
+    for (const listener of this.listeners) {
+      listener(this.snapshot);
+    }
+  }
+
+  public resetSession(activeArticleId: string | null = null): void {
+    this.sessionToken += 1;
+    this.statusRequestToken += 1;
+    this.emit(createInitialNewsPeiaSessionSnapshot(activeArticleId));
+  }
+
+  public async loadStatusForArticle(
+    articleId: string,
+    user: AdminUser | null | undefined,
+    options?: { preserveDisposition?: boolean; preserveVersionNotice?: boolean }
+  ): Promise<SanitizedNewsPeiaReviewStatusDto | null> {
+    if (!canReadNewsPeiaReviewStatus(user) || !articleId || !articleId.trim()) {
+      this.resetSession(null);
+      return null;
+    }
+
+    const cleanId = articleId.trim();
+    const isSwitchingArticle = this.snapshot.activeArticleId !== cleanId;
+    if (isSwitchingArticle) {
+      this.sessionToken += 1;
+    }
+    const capturedSessionToken = this.sessionToken;
+    this.statusRequestToken += 1;
+    const capturedStatusToken = this.statusRequestToken;
+
+    this.emit({
+      activeArticleId: cleanId,
+      reviewStatus: isSwitchingArticle ? null : this.snapshot.reviewStatus,
+      loadingStatus: true,
+      requestingReview: isSwitchingArticle ? false : this.snapshot.requestingReview,
+      errorMessage: null,
+      lastEnqueueDisposition:
+        !isSwitchingArticle && options?.preserveDisposition
+          ? this.snapshot.lastEnqueueDisposition
+          : null,
+      versionMismatchNotice:
+        !isSwitchingArticle && options?.preserveVersionNotice
+          ? this.snapshot.versionMismatchNotice
+          : null,
+    });
+
+    try {
+      const response = await NewsAdminClient.getPeiaReviewStatus(cleanId);
+      if (
+        capturedSessionToken !== this.sessionToken ||
+        capturedStatusToken !== this.statusRequestToken ||
+        this.snapshot.activeArticleId !== cleanId
+      ) {
+        return null;
+      }
+
+      this.emit({
+        ...this.snapshot,
+        reviewStatus: response.reviewStatus,
+        loadingStatus: false,
+        errorMessage: null,
+      });
+      return response.reviewStatus;
+    } catch (err: any) {
+      if (
+        capturedSessionToken !== this.sessionToken ||
+        capturedStatusToken !== this.statusRequestToken ||
+        this.snapshot.activeArticleId !== cleanId
+      ) {
+        return null;
+      }
+
+      this.emit({
+        ...this.snapshot,
+        loadingStatus: false,
+        errorMessage: err?.message || 'Failed to load PEIA review status.',
+      });
+      return null;
+    }
+  }
+
+  public async requestReview(params: {
+    activeArticle: NewsItem | null;
+    isCreating?: boolean;
+    user: AdminUser | null | undefined;
+    isAr: boolean;
+    onArticleRefreshed?: (refreshedArticle: NewsItem) => void;
+  }): Promise<{
+    executed: boolean;
+    disposition: PeiaTaskEnqueueDisposition | null;
+    pausedForVersionMismatch: boolean;
+  }> {
+    const {
+      activeArticle,
+      isCreating = false,
+      user,
+      isAr,
+      onArticleRefreshed,
+    } = params;
+
+    if (
+      !isSavedNewsArticleForPeia(activeArticle, isCreating) ||
+      !canRequestNewsPeiaReview(user)
+    ) {
+      return {
+        executed: false,
+        disposition: null,
+        pausedForVersionMismatch: false,
+      };
+    }
+
+    if (this.snapshot.requestingReview) {
+      return {
+        executed: false,
+        disposition: null,
+        pausedForVersionMismatch: false,
+      };
+    }
+
+    const cleanId = activeArticle.id.trim();
+    if (this.snapshot.activeArticleId !== cleanId) {
+      this.sessionToken += 1;
+    }
+    const capturedSessionToken = this.sessionToken;
+
+    this.emit({
+      ...this.snapshot,
+      activeArticleId: cleanId,
+      requestingReview: true,
+      errorMessage: null,
+      lastEnqueueDisposition: null,
+      versionMismatchNotice: null,
+    });
+
+    try {
+      const refreshedArticle = await NewsAdminClient.getById(cleanId);
+      if (
+        capturedSessionToken !== this.sessionToken ||
+        this.snapshot.activeArticleId !== cleanId
+      ) {
+        return {
+          executed: false,
+          disposition: null,
+          pausedForVersionMismatch: false,
+        };
+      }
+
+      if (!refreshedArticle) {
+        this.emit({
+          ...this.snapshot,
+          requestingReview: false,
+          errorMessage: isAr
+            ? 'تعذر العثور على المقال الإخباري المحفوظ على الخادم.'
+            : 'Saved news article could not be found on the server.',
+        });
+        return {
+          executed: false,
+          disposition: null,
+          pausedForVersionMismatch: false,
+        };
+      }
+
+      if (refreshedArticle.updatedAt !== activeArticle.updatedAt) {
+        if (onArticleRefreshed) {
+          onArticleRefreshed(refreshedArticle);
+        }
+        const mismatchMsg = isAr
+          ? `تم تحديث هذا المقال على الخادم (النسخة المحفوظة الحالية: ${refreshedArticle.updatedAt} بدلاً من ${activeArticle.updatedAt}). تم تحديث بيانات المقال المعروضة؛ يرجى مراجعتها ثم الضغط على "طلب مراجعة PEIA" مجدداً لتأكيد الطلب على النسخة الأحدث.`
+          : `This article was updated on the server (latest saved version: ${refreshedArticle.updatedAt} vs displayed: ${activeArticle.updatedAt}). The displayed article has been refreshed; please review and click "Request PEIA Review" again to confirm for the latest version.`;
+
+        this.emit({
+          ...this.snapshot,
+          requestingReview: false,
+          versionMismatchNotice: mismatchMsg,
+          errorMessage: null,
+        });
+
+        await this.loadStatusForArticle(cleanId, user, {
+          preserveVersionNotice: true,
+        });
+
+        return {
+          executed: false,
+          disposition: null,
+          pausedForVersionMismatch: true,
+        };
+      }
+
+      const enqueueResult = await NewsAdminClient.requestPeiaReview(
+        cleanId,
+        refreshedArticle.updatedAt
+      );
+      if (
+        capturedSessionToken !== this.sessionToken ||
+        this.snapshot.activeArticleId !== cleanId
+      ) {
+        return {
+          executed: false,
+          disposition: null,
+          pausedForVersionMismatch: false,
+        };
+      }
+
+      this.statusRequestToken += 1;
+      this.emit({
+        ...this.snapshot,
+        reviewStatus: enqueueResult.reviewStatus,
+        requestingReview: false,
+        loadingStatus: false,
+        lastEnqueueDisposition: enqueueResult.disposition,
+        errorMessage: null,
+        versionMismatchNotice: null,
+      });
+
+      return {
+        executed: true,
+        disposition: enqueueResult.disposition,
+        pausedForVersionMismatch: false,
+      };
+    } catch (err: any) {
+      if (
+        capturedSessionToken !== this.sessionToken ||
+        this.snapshot.activeArticleId !== cleanId
+      ) {
+        return {
+          executed: false,
+          disposition: null,
+          pausedForVersionMismatch: false,
+        };
+      }
+
+      this.emit({
+        ...this.snapshot,
+        requestingReview: false,
+        errorMessage:
+          err?.message ||
+          (isAr
+            ? 'فشل إرسال طلب المراجعة الاستشارية PEIA.'
+            : 'Failed to request PEIA advisory review.'),
+      });
+      return {
+        executed: false,
+        disposition: null,
+        pausedForVersionMismatch: false,
+      };
+    }
+  }
+}
+
 interface AdminNewsManagementProps {
   currentUser: AdminUser;
   initialActiveItem?: NewsItem | null;
@@ -361,6 +811,8 @@ interface AdminNewsManagementProps {
   initialActiveTab?: 'content' | 'workflow';
   initialPendingTransition?: WorkflowTransitionConfig | null;
   initialMediaVideos?: Video[];
+  initialPeiaState?: Partial<NewsPeiaSessionSnapshot>;
+  languageOverride?: 'ar' | 'en';
 }
 
 const INITIAL_IMAGE_METADATA: NewsImageMetadataFormInput = {
@@ -379,9 +831,11 @@ export function AdminNewsManagement({
   initialActiveTab = 'content',
   initialPendingTransition = null,
   initialMediaVideos = [],
+  initialPeiaState,
+  languageOverride,
 }: AdminNewsManagementProps) {
   const { i18n } = useTranslation();
-  const isAr = i18n.language === 'ar';
+  const isAr = (languageOverride || i18n.language) === 'ar';
 
   // State
   const [newsList, setNewsList] = useState<NewsItem[]>([]);
@@ -538,6 +992,40 @@ export function AdminNewsManagement({
   const [successNotification, setSuccessNotification] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // PEIA Advisory Review session controller & state (NEWS-PEIA-01)
+  const canReadPeia = canReadNewsPeiaReviewStatus(currentUser);
+  const canRequestPeia = canRequestNewsPeiaReview(currentUser);
+  const peiaControllerRef = useRef<NewsPeiaReviewController>(
+    new NewsPeiaReviewController()
+  );
+  const [peiaState, setPeiaState] = useState<NewsPeiaSessionSnapshot>(() => ({
+    ...createInitialNewsPeiaSessionSnapshot(
+      isSavedNewsArticleForPeia(initialActiveItem, effectiveInitialIsCreating)
+        ? initialActiveItem.id
+        : null
+    ),
+    ...initialPeiaState,
+  }));
+
+  useEffect(() => {
+    const controller = peiaControllerRef.current;
+    const unsubscribe = controller.subscribe((next) => {
+      setPeiaState(next);
+    });
+    if (
+      !initialPeiaState &&
+      isSavedNewsArticleForPeia(initialActiveItem, effectiveInitialIsCreating) &&
+      canReadNewsPeiaReviewStatus(currentUser)
+    ) {
+      void controller.loadStatusForArticle(initialActiveItem.id, currentUser);
+    }
+    return () => {
+      unsubscribe();
+      controller.resetSession(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Auto-dismiss and animate success notification after 3 seconds within the single modal container
   useEffect(() => {
     if (isSaveSuccess) {
@@ -550,6 +1038,7 @@ export function AdminNewsManagement({
         const cleanupTimer = setTimeout(() => {
           persistedPreviewSessionRef.current.resetAndRevokeAll();
           imageSessionRef.current.resetSession();
+          peiaControllerRef.current.resetSession(null);
           setSelectedImageFile(null);
           setLocalPreviewUrl(null);
           setImageMetadata(INITIAL_IMAGE_METADATA);
@@ -578,6 +1067,7 @@ export function AdminNewsManagement({
 
   const handleCloseModal = () => {
     resetImageEditorSession();
+    peiaControllerRef.current.resetSession(null);
     setTimeout(() => {
       setIsSaveSuccess(false);
       setActiveItem(null);
@@ -703,13 +1193,13 @@ export function AdminNewsManagement({
     const normalizedRelatedVideoIds = Array.isArray(item.relatedVideoIds)
       ? [...item.relatedVideoIds]
       : [];
-    setActiveItem({
+    const normalizedItem: NewsItem = {
       ...item,
       relatedVideoIds: normalizedRelatedVideoIds,
-    });
+    };
+    setActiveItem(normalizedItem);
     setEditForm({
-      ...item,
-      relatedVideoIds: normalizedRelatedVideoIds,
+      ...normalizedItem,
       richBodyAr: nextRichBodyAr,
       richBodyEn: nextRichBodyEn,
       bodyArHasEdited: false,
@@ -723,6 +1213,17 @@ export function AdminNewsManagement({
     setActiveTab('content');
     setErrorMessage(null);
     triggerPersistedPreviewsForArticle(nextRichBodyAr, nextRichBodyEn);
+    if (
+      isSavedNewsArticleForPeia(normalizedItem, false) &&
+      canReadNewsPeiaReviewStatus(currentUser)
+    ) {
+      void peiaControllerRef.current.loadStatusForArticle(
+        normalizedItem.id,
+        currentUser
+      );
+    } else {
+      peiaControllerRef.current.resetSession(null);
+    }
   };
 
   const openDraftById = async (draftId: string) => {
@@ -780,6 +1281,7 @@ export function AdminNewsManagement({
       return;
     }
     resetImageEditorSession();
+    peiaControllerRef.current.resetSession(null);
     setPendingTransition(null);
     setTransitionComment('');
     setVideoSearchQuery('');
@@ -818,6 +1320,44 @@ export function AdminNewsManagement({
     setSuccessNotification(null);
     setActiveTab('content');
     setErrorMessage(null);
+  };
+
+  const handleRefreshPeiaStatus = async () => {
+    if (
+      !isSavedNewsArticleForPeia(activeItem, isCreating) ||
+      !canReadPeia
+    ) {
+      return;
+    }
+    await peiaControllerRef.current.loadStatusForArticle(
+      activeItem.id,
+      currentUser,
+      {
+        preserveDisposition: true,
+        preserveVersionNotice: true,
+      }
+    );
+  };
+
+  const handleRequestPeiaReview = async () => {
+    if (
+      !isSavedNewsArticleForPeia(activeItem, isCreating) ||
+      !canRequestPeia
+    ) {
+      return;
+    }
+    await peiaControllerRef.current.requestReview({
+      activeArticle: activeItem,
+      isCreating,
+      user: currentUser,
+      isAr,
+      onArticleRefreshed: (refreshedArticle) => {
+        setActiveItem(refreshedArticle);
+        setNewsList((prev) =>
+          prev.map((n) => (n.id === refreshedArticle.id ? refreshedArticle : n))
+        );
+      },
+    });
   };
 
   const handleAttachRelatedVideo = (video: Video) => {
@@ -1105,6 +1645,8 @@ export function AdminNewsManagement({
         id: normalizedSavedItem.id,
         featuredImage: normalizedSavedItem.featuredImage,
         relatedVideoIds: persistedRelatedVideoIds,
+        bodyArHasEdited: false,
+        bodyEnHasEdited: false,
       }));
       setIsCreating(false);
     } else {
@@ -1114,7 +1656,19 @@ export function AdminNewsManagement({
         ...prev,
         featuredImage: normalizedSavedItem.featuredImage,
         relatedVideoIds: persistedRelatedVideoIds,
+        bodyArHasEdited: false,
+        bodyEnHasEdited: false,
       }));
+    }
+
+    if (
+      isSavedNewsArticleForPeia(normalizedSavedItem, false) &&
+      canReadNewsPeiaReviewStatus(currentUser)
+    ) {
+      void peiaControllerRef.current.loadStatusForArticle(
+        normalizedSavedItem.id,
+        currentUser
+      );
     }
 
     setErrorMessage(null);
@@ -1165,11 +1719,22 @@ export function AdminNewsManagement({
       setEditForm((prev) => ({
         ...prev,
         ...updatedNewsItem,
+        bodyArHasEdited: false,
+        bodyEnHasEdited: false,
       }));
       setNewsList(newsList.map(n => n.id === updatedNewsItem.id ? updatedNewsItem : n));
       setPendingTransition(null);
       setTransitionComment('');
       setErrorMessage(null);
+      if (
+        isSavedNewsArticleForPeia(updatedNewsItem, false) &&
+        canReadNewsPeiaReviewStatus(currentUser)
+      ) {
+        void peiaControllerRef.current.loadStatusForArticle(
+          updatedNewsItem.id,
+          currentUser
+        );
+      }
     } catch (err: any) {
       setErrorMessage(err.message || (isAr ? 'فشل تنفيذ عملية الانتقال' : 'Transition failed'));
     } finally {
@@ -2679,6 +3244,489 @@ export function AdminNewsManagement({
                               : 'Confirm Feedback'}
                         </button>
                       </div>
+                    </div>
+                  )}
+
+                  {/* PEIA Advisory Review Section (NEWS-PEIA-01 — Server-Authoritative & Read-Only) */}
+                  {canReadPeia && isSavedNewsArticleForPeia(activeItem, isCreating) && (
+                    <div
+                      data-testid="news-peia-review-section"
+                      className="bg-white dark:bg-gray-900 border border-indigo-200/80 dark:border-indigo-900/60 p-5 rounded-2xl space-y-4"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-1">
+                          <h3 className="text-sm font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
+                            <Sparkles className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                            <span>
+                              {isAr
+                                ? 'المراجعة الاستشارية PEIA (للمساعدة التحريرية فقط)'
+                                : 'PEIA Editorial Advisory Review (Advisory Only)'}
+                            </span>
+                          </h3>
+                          <p className="text-xs text-gray-500 dark:text-gray-400">
+                            {isAr
+                              ? 'تُنفَّذ المراجعة عبر طابور الخادم الموحد ولا تغيّر حالة المقال أو تنشره تلقائياً. القرار التحريري النهائي بشري دائماً.'
+                              : 'Executed asynchronously via the server-authoritative PEIA task queue. Advisory output never changes workflow state or publishes content.'}
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            data-testid="news-peia-refresh-status-btn"
+                            disabled={peiaState.loadingStatus || peiaState.requestingReview}
+                            onClick={() => void handleRefreshPeiaStatus()}
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                          >
+                            <RefreshCw
+                              className={`w-3.5 h-3.5 ${peiaState.loadingStatus ? 'animate-spin' : ''}`}
+                            />
+                            <span>
+                              {isAr ? 'تحديث حالة PEIA' : 'Refresh PEIA Status'}
+                            </span>
+                          </button>
+
+                          {canRequestPeia && (
+                            <button
+                              type="button"
+                              data-testid="news-peia-request-review-btn"
+                              disabled={
+                                peiaState.requestingReview ||
+                                isSaving ||
+                                isTransitioning
+                              }
+                              onClick={() => void handleRequestPeiaReview()}
+                              className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white inline-flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-2xs"
+                            >
+                              {peiaState.requestingReview ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Sparkles className="w-3.5 h-3.5" />
+                              )}
+                              <span>
+                                {peiaState.requestingReview
+                                  ? isAr
+                                    ? 'جارٍ إرسال الطلب...'
+                                    : 'Requesting Review...'
+                                  : isAr
+                                    ? 'طلب مراجعة PEIA'
+                                    : 'Request PEIA Review'}
+                              </span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {hasUnsavedNewsEditorChanges(
+                        activeItem,
+                        editForm,
+                        tagsInput,
+                        sourcesInput,
+                        selectedImageFile
+                      ) && (
+                        <div
+                          data-testid="news-peia-unsaved-edits-notice"
+                          className="p-3 rounded-xl bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2"
+                        >
+                          <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                          <span>
+                            {isAr
+                              ? `توجد تعديلات غير محفوظة في نموذج التحرير. تعتمد مراجعة PEIA دائماً على آخر نسخة محفوظة على الخادم (${activeItem.updatedAt}) ولا ترسل التعديلات غير المحفوظة.`
+                              : `There are unsaved edits in the editor form. PEIA review always evaluates the authoritative saved server version (${activeItem.updatedAt}) and never submits unsaved form state.`}
+                          </span>
+                        </div>
+                      )}
+
+                      {peiaState.versionMismatchNotice && (
+                        <div
+                          data-testid="news-peia-version-mismatch-notice"
+                          className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2"
+                        >
+                          <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                          <span>{peiaState.versionMismatchNotice}</span>
+                        </div>
+                      )}
+
+                      {peiaState.lastEnqueueDisposition === 'CREATED' && (
+                        <div
+                          data-testid="news-peia-disposition-created"
+                          className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-800 dark:text-emerald-200 flex items-center gap-2"
+                        >
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                          <span>
+                            {isAr
+                              ? 'تم إنشاء وإدراج مهمة مراجعة PEIA جديدة في طابور الخادم للنسخة المحفوظة الحالية.'
+                              : 'A new PEIA review task was created and queued on the server for the current saved version.'}
+                          </span>
+                        </div>
+                      )}
+
+                      {peiaState.lastEnqueueDisposition === 'ALREADY_EXISTS' && (
+                        <div
+                          data-testid="news-peia-disposition-already-exists"
+                          className="p-3 rounded-xl bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 text-xs text-sky-800 dark:text-sky-200 flex items-center gap-2"
+                        >
+                          <CheckCircle2 className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
+                          <span>
+                            {isAr
+                              ? 'توجد مهمة مراجعة PEIA مسجلة بالفعل لهذه النسخة المحفوظة (طلب متكرر آمن / Idempotent).'
+                              : 'A PEIA review task already exists for this saved version (idempotent request).'}
+                          </span>
+                        </div>
+                      )}
+
+                      {peiaState.errorMessage && (
+                        <div
+                          data-testid="news-peia-error-banner"
+                          className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-800 dark:text-rose-200 flex items-start gap-2"
+                        >
+                          <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                          <span>{peiaState.errorMessage}</span>
+                        </div>
+                      )}
+
+                      {peiaState.reviewStatus && (
+                        <div className="space-y-3">
+                          {peiaState.reviewStatus.isStale && (
+                            <div
+                              data-testid="news-peia-stale-warning-banner"
+                              className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-700 text-xs text-amber-900 dark:text-amber-200 space-y-1"
+                            >
+                              <div className="font-bold flex items-center gap-1.5">
+                                <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                                <span>
+                                  {isAr
+                                    ? 'تنبيه: نتيجة PEIA المعروضة تعود إلى نسخة سابقة من هذا المقال (Stale Result)'
+                                    : 'Warning: This PEIA result belongs to an older version of the article (Stale Result)'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] leading-relaxed">
+                                {isAr
+                                  ? `نسخة المهمة (taskSourceUpdatedAt): ${peiaState.reviewStatus.taskSourceUpdatedAt ?? '—'} | النسخة المحفوظة الحالية (currentSourceUpdatedAt): ${peiaState.reviewStatus.currentSourceUpdatedAt}`
+                                  : `Task version (taskSourceUpdatedAt): ${peiaState.reviewStatus.taskSourceUpdatedAt ?? '—'} | Current saved version (currentSourceUpdatedAt): ${peiaState.reviewStatus.currentSourceUpdatedAt}`}
+                              </p>
+                            </div>
+                          )}
+
+                          {peiaState.reviewStatus.status === 'NotRequested' && (
+                            <div
+                              data-testid="news-peia-status-not-requested"
+                              className="p-3.5 rounded-xl bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 text-xs text-gray-600 dark:text-gray-300 space-y-1"
+                            >
+                              <div className="font-bold text-gray-800 dark:text-gray-100">
+                                {isAr
+                                  ? 'الحالة: لم تُطلب مراجعة PEIA لهذه النسخة بعد (NotRequested)'
+                                  : 'Status: PEIA review not requested for this version (NotRequested)'}
+                              </div>
+                              <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                                {isAr
+                                  ? `النسخة المحفوظة الحالية: ${peiaState.reviewStatus.currentSourceUpdatedAt}`
+                                  : `Current saved version: ${peiaState.reviewStatus.currentSourceUpdatedAt}`}
+                              </div>
+                            </div>
+                          )}
+
+                          {peiaState.reviewStatus.status === AITaskStatus.Pending && (
+                            <div
+                              data-testid="news-peia-status-pending"
+                              className="p-3.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 text-xs text-amber-900 dark:text-amber-200 space-y-1.5"
+                            >
+                              <div className="font-bold flex items-center gap-1.5">
+                                <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                                <span>
+                                  {isAr
+                                    ? 'الحالة: قيد الانتظار في طابور PEIA على الخادم (Pending)'
+                                    : 'Status: Queued for external PEIA worker processing (Pending)'}
+                                </span>
+                              </div>
+                              <div className="text-[11px] space-y-0.5 font-mono text-amber-800 dark:text-amber-300">
+                                <div>taskId: {peiaState.reviewStatus.taskId}</div>
+                                <div>
+                                  taskSourceUpdatedAt:{' '}
+                                  {peiaState.reviewStatus.taskSourceUpdatedAt}
+                                </div>
+                                {peiaState.reviewStatus.task?.createdAt && (
+                                  <div>
+                                    createdAt: {peiaState.reviewStatus.task.createdAt}
+                                  </div>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-amber-700 dark:text-amber-300/90">
+                                {isAr
+                                  ? 'تتم معالجة المهمة بواسطة عامل PEIA الخارجي ولا تُنفَّذ داخل المتصفح. يمكنك الضغط على "تحديث حالة PEIA" للتحقق من اكتمالها.'
+                                  : 'Task execution is handled asynchronously by the external PEIA worker and never runs in the browser. Click "Refresh PEIA Status" to check for completion.'}
+                              </p>
+                            </div>
+                          )}
+
+                          {peiaState.reviewStatus.status === AITaskStatus.Completed &&
+                            peiaState.reviewStatus.advisoryResult && (
+                              <div
+                                data-testid="news-peia-status-completed"
+                                className="p-4 rounded-xl bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800/70 text-xs space-y-3"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="font-extrabold text-indigo-900 dark:text-indigo-200 flex items-center gap-1.5">
+                                    <CheckCircle2 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                                    <span>
+                                      {isAr
+                                        ? 'الحالة: اكتملت المراجعة الاستشارية (Completed)'
+                                        : 'Status: Advisory Review Completed (Completed)'}
+                                    </span>
+                                  </span>
+                                  <span className="text-[11px] font-mono text-gray-500 dark:text-gray-400">
+                                    {peiaState.reviewStatus.taskId}
+                                  </span>
+                                </div>
+
+                                <div
+                                  data-testid="news-peia-advisory-only-warning"
+                                  className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 text-[11px] font-semibold text-amber-900 dark:text-amber-200 flex items-start gap-2"
+                                >
+                                  <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                                  <span>
+                                    {isAr
+                                      ? 'مخرجات استشارية فقط (humanReviewRequired = true): لا تُعدّ قراراً تحريرياً ولا تغيّر حالة المقال أو تنشره. يجب مراجعة كل ملاحظة بشرياً.'
+                                      : 'Advisory output only (humanReviewRequired = true): Does not alter workflow state or publish content. Human editorial verification is mandatory.'}
+                                  </span>
+                                </div>
+
+                                {/* Assessment Summary */}
+                                <div className="space-y-1">
+                                  <h4 className="font-bold text-gray-900 dark:text-white">
+                                    {isAr ? 'ملخص التقييم الاستشاري:' : 'Assessment Summary:'}
+                                  </h4>
+                                  <p
+                                    data-testid="news-peia-advisory-summary"
+                                    className="text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-900 p-3 rounded-lg border border-gray-200/80 dark:border-gray-800 leading-relaxed"
+                                  >
+                                    {peiaState.reviewStatus.advisoryResult.assessment.summary}
+                                  </p>
+                                </div>
+
+                                {/* Findings */}
+                                <div className="space-y-1.5">
+                                  <h4 className="font-bold text-gray-900 dark:text-white">
+                                    {isAr
+                                      ? `الملاحظات المسندة بالأدلة (${peiaState.reviewStatus.advisoryResult.assessment.findings.length}):`
+                                      : `Evidence-Backed Findings (${peiaState.reviewStatus.advisoryResult.assessment.findings.length}):`}
+                                  </h4>
+                                  {peiaState.reviewStatus.advisoryResult.assessment.findings
+                                    .length === 0 ? (
+                                    <p className="text-[11px] text-gray-500 italic">
+                                      {isAr
+                                        ? 'لا توجد ملاحظات مسجلة.'
+                                        : 'No findings recorded.'}
+                                    </p>
+                                  ) : (
+                                    <div
+                                      data-testid="news-peia-advisory-findings"
+                                      className="space-y-2"
+                                    >
+                                      {peiaState.reviewStatus.advisoryResult.assessment.findings.map(
+                                        (finding, idx) => (
+                                          <div
+                                            key={`${finding.code}-${idx}`}
+                                            className="p-2.5 rounded-lg bg-white dark:bg-gray-900 border border-gray-200/80 dark:border-gray-800 space-y-1"
+                                          >
+                                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                              <span className="font-mono font-bold text-[11px] text-gray-900 dark:text-white">
+                                                {finding.code}
+                                              </span>
+                                              <span
+                                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                                  finding.severity ===
+                                                  AIReviewSeverity.ReviewRecommended
+                                                    ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
+                                                    : finding.severity ===
+                                                        AIReviewSeverity.Warning
+                                                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                                                      : 'bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-300'
+                                                }`}
+                                              >
+                                                {finding.severity ?? AIReviewSeverity.Info}
+                                              </span>
+                                            </div>
+                                            <p className="text-gray-700 dark:text-gray-200 leading-relaxed">
+                                              {finding.message}
+                                            </p>
+                                            <div className="text-[10px] font-mono text-gray-500 dark:text-gray-400">
+                                              {isAr ? 'معرفات الأدلة: ' : 'Evidence IDs: '}
+                                              {finding.evidenceIds.join(', ')}
+                                            </div>
+                                          </div>
+                                        )
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Recommendations, Uncertainties, Limitations */}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                                  <div
+                                    data-testid="news-peia-advisory-recommendations"
+                                    className="p-2.5 rounded-lg bg-white dark:bg-gray-900 border border-gray-200/80 dark:border-gray-800 space-y-1"
+                                  >
+                                    <div className="font-bold text-gray-900 dark:text-white">
+                                      {isAr ? 'التوصيات:' : 'Recommendations:'}
+                                    </div>
+                                    {peiaState.reviewStatus.advisoryResult.recommendations
+                                      .length === 0 ? (
+                                      <p className="text-[11px] text-gray-400 italic">—</p>
+                                    ) : (
+                                      <ul className="list-disc ps-4 space-y-0.5 text-gray-700 dark:text-gray-300">
+                                        {peiaState.reviewStatus.advisoryResult.recommendations.map(
+                                          (rec, i) => (
+                                            <li key={i}>{rec}</li>
+                                          )
+                                        )}
+                                      </ul>
+                                    )}
+                                  </div>
+
+                                  <div
+                                    data-testid="news-peia-advisory-uncertainties"
+                                    className="p-2.5 rounded-lg bg-white dark:bg-gray-900 border border-gray-200/80 dark:border-gray-800 space-y-1"
+                                  >
+                                    <div className="font-bold text-gray-900 dark:text-white">
+                                      {isAr ? 'جوانب عدم اليقين:' : 'Uncertainties:'}
+                                    </div>
+                                    {peiaState.reviewStatus.advisoryResult.uncertainties
+                                      .length === 0 ? (
+                                      <p className="text-[11px] text-gray-400 italic">—</p>
+                                    ) : (
+                                      <ul className="list-disc ps-4 space-y-0.5 text-gray-700 dark:text-gray-300">
+                                        {peiaState.reviewStatus.advisoryResult.uncertainties.map(
+                                          (unc, i) => (
+                                            <li key={i}>{unc}</li>
+                                          )
+                                        )}
+                                      </ul>
+                                    )}
+                                  </div>
+
+                                  <div
+                                    data-testid="news-peia-advisory-limitations"
+                                    className="p-2.5 rounded-lg bg-white dark:bg-gray-900 border border-gray-200/80 dark:border-gray-800 space-y-1"
+                                  >
+                                    <div className="font-bold text-gray-900 dark:text-white">
+                                      {isAr ? 'قيود وحدود المراجعة:' : 'Limitations:'}
+                                    </div>
+                                    {peiaState.reviewStatus.advisoryResult.limitations
+                                      .length === 0 ? (
+                                      <p className="text-[11px] text-gray-400 italic">—</p>
+                                    ) : (
+                                      <ul className="list-disc ps-4 space-y-0.5 text-gray-700 dark:text-gray-300">
+                                        {peiaState.reviewStatus.advisoryResult.limitations.map(
+                                          (lim, i) => (
+                                            <li key={i}>{lim}</li>
+                                          )
+                                        )}
+                                      </ul>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                          {peiaState.reviewStatus.status === AITaskStatus.Completed &&
+                            !peiaState.reviewStatus.advisoryResult &&
+                            peiaState.reviewStatus.nonAdvisoryOutcome?.kind ===
+                              'ABSTAINED' && (
+                              <div
+                                data-testid="news-peia-status-completed-abstained"
+                                className="p-3.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70 text-xs text-amber-900 dark:text-amber-200 space-y-1.5"
+                              >
+                                <div className="font-bold flex items-center gap-1.5">
+                                  <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                                  <span>
+                                    {isAr
+                                      ? 'الحالة: مكتمل — لم تُنتج توصية استشارية (امتناع مبرر)'
+                                      : 'Status: Completed — No Advisory Produced (Abstained)'}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-amber-800 dark:text-amber-200 leading-relaxed">
+                                  {isAr
+                                    ? 'اكتملت معالجة المهمة دون إنتاج مخرجات استشارية لأن المحرك امتنع بموجب عقد الحوكمة (نقص الأدلة أو عدم كفايتها أو مخرجات نموذج غير موثوقة). لا توجد توصيات قابلة للتطبيق.'
+                                    : 'Task processing completed without producing an advisory result because PEIA abstained under its governance contract (missing/insufficient evidence or ungrounded/invalid model output). No actionable advisory recommendations were produced.'}
+                                </p>
+                                <div className="text-[11px] font-mono space-y-0.5">
+                                  <div>
+                                    kind: {peiaState.reviewStatus.nonAdvisoryOutcome.kind}
+                                  </div>
+                                  <div>
+                                    reason:{' '}
+                                    {peiaState.reviewStatus.nonAdvisoryOutcome.reason}
+                                  </div>
+                                  <div>
+                                    createdAt:{' '}
+                                    {peiaState.reviewStatus.nonAdvisoryOutcome.createdAt}
+                                  </div>
+                                  <div>
+                                    modelAttempts:{' '}
+                                    {
+                                      peiaState.reviewStatus.nonAdvisoryOutcome
+                                        .modelAttempts
+                                    }
+                                  </div>
+                                </div>
+                                {peiaState.reviewStatus.nonAdvisoryOutcome.detail && (
+                                  <p
+                                    data-testid="news-peia-abstained-detail"
+                                    className="text-[11px] bg-white/70 dark:bg-gray-900/60 p-2 rounded border border-amber-200/60 dark:border-amber-800/60"
+                                  >
+                                    {peiaState.reviewStatus.nonAdvisoryOutcome.detail}
+                                  </p>
+                                )}
+                              </div>
+                            )}
+
+                          {peiaState.reviewStatus.status === AITaskStatus.Failed &&
+                            peiaState.reviewStatus.nonAdvisoryOutcome && (
+                              <div
+                                data-testid="news-peia-status-failed"
+                                className="p-3.5 rounded-xl bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/70 text-xs text-rose-900 dark:text-rose-200 space-y-1.5"
+                              >
+                                <div className="font-bold flex items-center gap-1.5">
+                                  <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+                                  <span>
+                                    {isAr
+                                      ? 'الحالة: فشلت مهمة المراجعة الاستشارية (Failed)'
+                                      : 'Status: PEIA Review Task Failed (Failed)'}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] font-mono space-y-0.5">
+                                  <div>
+                                    kind: {peiaState.reviewStatus.nonAdvisoryOutcome.kind}
+                                  </div>
+                                  <div>
+                                    reason:{' '}
+                                    {peiaState.reviewStatus.nonAdvisoryOutcome.reason}
+                                  </div>
+                                  <div>
+                                    createdAt:{' '}
+                                    {peiaState.reviewStatus.nonAdvisoryOutcome.createdAt}
+                                  </div>
+                                  <div>
+                                    modelAttempts:{' '}
+                                    {
+                                      peiaState.reviewStatus.nonAdvisoryOutcome
+                                        .modelAttempts
+                                    }
+                                  </div>
+                                </div>
+                                {peiaState.reviewStatus.nonAdvisoryOutcome.detail && (
+                                  <p
+                                    data-testid="news-peia-failed-detail"
+                                    className="text-[11px] bg-white/70 dark:bg-gray-900/60 p-2 rounded border border-rose-200/60 dark:border-rose-800/60"
+                                  >
+                                    {peiaState.reviewStatus.nonAdvisoryOutcome.detail}
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                        </div>
+                      )}
                     </div>
                   )}
 

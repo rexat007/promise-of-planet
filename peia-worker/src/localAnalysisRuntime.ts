@@ -1172,6 +1172,133 @@ export interface LlamaTranscriptExtractionResult {
   readonly errorDetail?: string;
 }
 
+const LLAMA_CLI_RECOGNIZED_PREAMBLE_LINE_PATTERNS: readonly RegExp[] = Object.freeze([
+  /^(?:llama[-_]cli:\s*)?loading model\.{3}(?:\s*[-\\|/⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]*)?$/i,
+  /^llama_(?:init_from_file|model_loader|context|kv_cache[a-z_]*|new_context_with_model):\s+.+$/,
+  /^(?:llm_load_[a-z_]+|system_info|sampler\s+(?:seed|params|chain)):\s+.+$/,
+  /^(?:build|model|modalities)\s*:\s*\S.*$/,
+  /^available commands:\s*$/,
+  /^\/(?:exit|regen|clear|read)\b.*$/,
+]);
+
+function isRecognizedLlamaCliStartupPreambleSegment(segment: string): boolean {
+  const trimmed = segment.trim();
+  if (trimmed.length === 0) {
+    return true;
+  }
+  if (/^[▄▀█▌▐░▒▓\s]+$/.test(trimmed) && /[▄▀█▌▐░▒▓]/.test(trimmed)) {
+    return true;
+  }
+  return LLAMA_CLI_RECOGNIZED_PREAMBLE_LINE_PATTERNS.some((pattern) =>
+    pattern.test(trimmed)
+  );
+}
+
+function isRecognizedLlamaCliStartupPreambleLine(rawLine: string): boolean {
+  const segments = rawLine.split('\r');
+  let sawNonEmptySegment = false;
+  for (const seg of segments) {
+    if (seg.trim().length === 0) {
+      continue;
+    }
+    sawNonEmptySegment = true;
+    if (!isRecognizedLlamaCliStartupPreambleSegment(seg)) {
+      return false;
+    }
+  }
+  return sawNonEmptySegment;
+}
+
+function stripRecognizedLlamaCliStartupPreamble(text: string): string {
+  let offset = 0;
+  while (offset < text.length) {
+    const newlineIdx = text.indexOf('\n', offset);
+    const rawLine =
+      newlineIdx === -1 ? text.slice(offset) : text.slice(offset, newlineIdx);
+
+    if (rawLine.trim().length === 0) {
+      offset = newlineIdx === -1 ? text.length : newlineIdx + 1;
+      continue;
+    }
+
+    if (isRecognizedLlamaCliStartupPreambleLine(rawLine)) {
+      offset = newlineIdx === -1 ? text.length : newlineIdx + 1;
+      continue;
+    }
+
+    break;
+  }
+  return text.slice(offset);
+}
+
+function validateSingleJsonObjectPayloadBoundary(
+  trimmedPayload: string
+): { readonly valid: true } | { readonly valid: false; readonly errorDetail: string } {
+  if (trimmedPayload.length === 0) {
+    return {
+      valid: false,
+      errorDetail: 'No usable assistant response found in model transcript.',
+    };
+  }
+
+  if (!trimmedPayload.startsWith('{')) {
+    return {
+      valid: false,
+      errorDetail:
+        'Unrecognized or untrusted text precedes assistant JSON response in model transcript.',
+    };
+  }
+
+  if (!trimmedPayload.endsWith('}')) {
+    return {
+      valid: false,
+      errorDetail:
+        'Unrecognized or untrusted text follows assistant JSON response in model transcript.',
+    };
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < trimmedPayload.length; i++) {
+    const ch = trimmedPayload[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth < 0) {
+        return {
+          valid: false,
+          errorDetail: 'Malformed brace structure in model transcript.',
+        };
+      }
+      if (depth === 0 && i < trimmedPayload.length - 1) {
+        return {
+          valid: false,
+          errorDetail:
+            'Ambiguous model transcript: multiple candidate JSON responses or trailing content detected.',
+        };
+      }
+    }
+  }
+
+  return { valid: true };
+}
+
 export function extractAssistantResponseFromLlamaTranscript(
   rawStdout: string
 ): LlamaTranscriptExtractionResult {
@@ -1185,15 +1312,41 @@ export function extractAssistantResponseFromLlamaTranscript(
 
   let text = rawStdout;
 
-  // 1. Separate from echoed prompt / banner if prompt header is present
-  const headerIdx = text.lastIndexOf(PROMPT_AUDIT_RESPONSE_HEADER);
-  if (headerIdx !== -1) {
-    text = text.slice(headerIdx + PROMPT_AUDIT_RESPONSE_HEADER.length);
+  // 1. Separate from echoed prompt / banner if prompt header is present;
+  //    otherwise strip only explicitly recognized llama-cli startup preamble lines at the start.
+  const firstHeaderIdx = text.indexOf(PROMPT_AUDIT_RESPONSE_HEADER);
+  if (firstHeaderIdx !== -1) {
+    const secondHeaderIdx = text.indexOf(
+      PROMPT_AUDIT_RESPONSE_HEADER,
+      firstHeaderIdx + PROMPT_AUDIT_RESPONSE_HEADER.length
+    );
+    if (secondHeaderIdx !== -1) {
+      return {
+        success: false,
+        content: '',
+        errorDetail: 'Ambiguous multiple prompt response headers in model transcript.',
+      };
+    }
+    text = text.slice(firstHeaderIdx + PROMPT_AUDIT_RESPONSE_HEADER.length);
+    text = text.replace(
+      /^\r?\n\/no_think\r?\nReturn the required raw JSON immediately without reasoning prose\.\r?\n/,
+      '\n'
+    );
+  } else {
+    text = stripRecognizedLlamaCliStartupPreamble(text);
   }
 
   // 2. Separate verified reasoning block ([Start thinking]...[End thinking]) if present
   const thinkOpenIdx = text.indexOf(REASONING_START_MARKER);
   if (thinkOpenIdx !== -1) {
+    if (text.slice(0, thinkOpenIdx).trim().length > 0) {
+      return {
+        success: false,
+        content: '',
+        errorDetail:
+          'Unrecognized or untrusted text precedes [Start thinking] block in model transcript.',
+      };
+    }
     const thinkCloseIdx = text.indexOf(
       REASONING_END_MARKER,
       thinkOpenIdx + REASONING_START_MARKER.length
@@ -1228,22 +1381,38 @@ export function extractAssistantResponseFromLlamaTranscript(
 
   // 3. Separate from known llama-cli process trailers if present
   let earliestTrailerIdx = -1;
+  const leadingTrimmed = text.replace(/^[ \t\r\n]+/, '');
+  const leadingWsLen = text.length - leadingTrimmed.length;
+
   for (const marker of LLAMA_CLI_TRAILER_MARKERS) {
+    const bareMarker = marker.startsWith('\n') ? marker.slice(1) : marker;
+    if (leadingTrimmed.startsWith(bareMarker)) {
+      earliestTrailerIdx = 0;
+      break;
+    }
     const idx = text.indexOf(marker);
-    if (idx !== -1) {
-      if (earliestTrailerIdx === -1 || idx < earliestTrailerIdx) {
-        earliestTrailerIdx = idx;
-      }
+    if (idx !== -1 && (earliestTrailerIdx === -1 || idx < earliestTrailerIdx)) {
+      earliestTrailerIdx = idx;
     }
   }
 
-  if (earliestTrailerIdx !== -1) {
+  if (earliestTrailerIdx !== -1 && leadingWsLen >= 0) {
     text = text.slice(0, earliestTrailerIdx);
+  }
+
+  const trimmedContent = text.trim();
+  const boundaryCheck = validateSingleJsonObjectPayloadBoundary(trimmedContent);
+  if (!boundaryCheck.valid) {
+    return {
+      success: false,
+      content: '',
+      errorDetail: boundaryCheck.errorDetail,
+    };
   }
 
   return {
     success: true,
-    content: text.trim(),
+    content: trimmedContent,
   };
 }
 

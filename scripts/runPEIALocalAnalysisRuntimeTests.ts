@@ -2589,6 +2589,356 @@ async function runAllTests() {
     assert(prep.suggestedDocumentType === 'ExecutiveRegulation', 'suggestedDocumentType is valid concrete type');
   });
 
+  // ==========================================
+  // PEIA-TRANSCRIPT-01: LLAMA.CPP STARTUP BANNER ISOLATION (115 - 123)
+  // ==========================================
+
+  await test('115. [PEIA-TRANSCRIPT-01 #1] Startup banner followed by valid JSON, with NO echoed prompt header (LF and Windows CRLF)', async () => {
+    const expectedJson =
+      '{\n' +
+      '  "status": "READY",\n' +
+      '  "summary": "Hydrological monitoring report grounded in EPA storm runoff standards.",\n' +
+      '  "findings": [\n' +
+      '    {\n' +
+      '      "claim": "Stormwater runoff monitoring aligns with CWA section 402.",\n' +
+      '      "evidenceIds": ["EPA::epa-cwa-1"]\n' +
+      '    }\n' +
+      '  ],\n' +
+      '  "recommendations": ["Cite station measurement timestamp."],\n' +
+      '  "uncertainties": []\n' +
+      '}';
+
+    // Observed Windows llama-cli startup line without echoed prompt header
+    const minimalBannerTranscript = `Loading model...\r\n${expectedJson}\r\n`;
+    const res1 = extractAssistantResponseFromLlamaTranscript(minimalBannerTranscript);
+    assert(res1.success === true, 'Extraction must succeed for Loading model... + JSON without header');
+    assert(res1.content === expectedJson, 'Extracted JSON payload bytes must be preserved verbatim');
+    assert(!res1.content.includes('Loading model'), 'Startup banner must be isolated from assistant content');
+
+    // Full conversation-mode llama-cli startup banner without echoed prompt header
+    const fullBannerTranscript =
+      'Loading model...\r\n\r\n' +
+      '▄▄ ▄▄\r\n' +
+      '██ ██\r\n' +
+      'build      : b5012-9a8b7c6d with MSVC 19.42 for x86_64\r\n' +
+      'model      : C:\\PEIA\\models\\Qwen3-4B-Q4_K_M.gguf\r\n' +
+      'modalities : text\r\n\r\n' +
+      'available commands:\r\n' +
+      '  /exit or Ctrl+C     stop or exit\r\n' +
+      '  /regen              regenerate the last response\r\n' +
+      '  /clear              clear the chat history\r\n' +
+      '  /read               add a text file\r\n\r\n' +
+      `${expectedJson}\r\n`;
+
+    const res2 = extractAssistantResponseFromLlamaTranscript(fullBannerTranscript);
+    assert(res2.success === true, 'Extraction must succeed for full llama-cli startup banner without header');
+    assert(res2.content === expectedJson, 'Extracted JSON payload bytes must match expected JSON');
+  });
+
+  await test('116. [PEIA-TRANSCRIPT-01 #2] Recognized banner, valid JSON and existing llama-cli trailer without echoed prompt header', async () => {
+    const expectedJson = JSON.stringify(
+      {
+        status: 'READY',
+        summary: 'Verified against EPA and NOAA coastal records.',
+        findings: [
+          {
+            claim: 'Nutrient loading and SST anomaly documented.',
+            evidenceIds: ['EPA::epa-cwa-1'],
+          },
+        ],
+        recommendations: [],
+        uncertainties: [],
+      },
+      null,
+      2
+    );
+
+    const transcriptWithBannerAndTrailer =
+      'Loading model...\r\n' +
+      'llama_init_from_file: model loaded\r\n' +
+      `${expectedJson}\r\n\r\n` +
+      '[ Prompt: 142.3 t/s | Generation: 28.4 t/s ]\r\n' +
+      'llama_perf_context_print:        load time =    1240.12 ms\r\n' +
+      'Exiting...\r\n';
+
+    const extraction = extractAssistantResponseFromLlamaTranscript(transcriptWithBannerAndTrailer);
+    assert(extraction.success === true, 'Extraction must succeed for banner + JSON + trailer');
+    assert(extraction.content === expectedJson, 'Extracted content must equal exact JSON');
+    assert(!extraction.content.includes('Loading model'), 'Banner removed');
+    assert(!extraction.content.includes('Exiting...'), 'Trailer removed');
+    assert(!extraction.content.includes('[ Prompt:'), 'Performance timing trailer removed');
+  });
+
+  await test('117. [PEIA-TRANSCRIPT-01 #3] Existing echoed-header and reasoning-block behavior preserved (with and without echoed header)', async () => {
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Reasoning block + JSON extraction verified.',
+      findings: [{ claim: 'Grounded observation.', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    // With recognized banner + [Start thinking]...[End thinking] and NO echoed header
+    const noHeaderWithThinking =
+      'Loading model...\n' +
+      '[Start thinking]\n' +
+      'Checking EPA reference EPA::epa-cwa-1 before responding.\n' +
+      '[End thinking]\n' +
+      `${validJson}\n` +
+      'Exiting...\n';
+
+    const ext1 = extractAssistantResponseFromLlamaTranscript(noHeaderWithThinking);
+    assert(ext1.success === true, 'Banner + thinking block without header must succeed');
+    assert(ext1.content === validJson, 'JSON extracted cleanly after thinking block');
+
+    // With echoed header + echoed /no_think prompt tail + JSON
+    const echoedHeaderWithDirective =
+      'Loading model...\n' +
+      `${PROMPT_AUDIT_RESPONSE_HEADER}\n` +
+      '/no_think\n' +
+      'Return the required raw JSON immediately without reasoning prose.\n' +
+      `${validJson}\n` +
+      'Exiting...\n';
+
+    const ext2 = extractAssistantResponseFromLlamaTranscript(echoedHeaderWithDirective);
+    assert(ext2.success === true, 'Echoed header with directive tail must succeed');
+    assert(ext2.content === validJson, 'JSON extracted cleanly after echoed header');
+
+    // Untrusted prose before [Start thinking] when no header is present must fail closed
+    const untrustedBeforeThinking =
+      'Loading model...\n' +
+      'Untrusted preface text before thinking\n' +
+      '[Start thinking]\n' +
+      'Thinking...\n' +
+      '[End thinking]\n' +
+      `${validJson}\n`;
+
+    const ext3 = extractAssistantResponseFromLlamaTranscript(untrustedBeforeThinking);
+    assert(ext3.success === false, 'Untrusted text before [Start thinking] must fail closed');
+  });
+
+  await test('118. [PEIA-TRANSCRIPT-01 #4] Unknown/untrusted text before JSON is rejected and never bypassed by scanning for {', async () => {
+    const validJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Valid JSON body.',
+      findings: [{ claim: 'Claim 1', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+
+    const unknownPrefixes = [
+      `Unknown custom wrapper banner v2.0\n${validJson}`,
+      `Loading model...\nHere is the JSON audit result you requested:\n${validJson}`,
+      `Loading model...\nSure! Based on the provided evidence:\n${validJson}`,
+      `Commentary with { braces } before actual payload\n${validJson}`,
+      `\`\`\`json\n${validJson}\n\`\`\``,
+    ];
+
+    for (const transcript of unknownPrefixes) {
+      const extraction = extractAssistantResponseFromLlamaTranscript(transcript);
+      assert(
+        extraction.success === false,
+        `extractAssistantResponseFromLlamaTranscript must reject untrusted prefix: ${transcript.slice(0, 40)}`
+      );
+      assert(extraction.content === '', 'Rejected extraction must return empty content');
+
+      const result = await analyzeTaskLocally(
+        makeSampleTask(),
+        makeEvidenceResult([makeSampleEPAItem('1')]),
+        defaultConfig,
+        makeFakeRunner({ stdout: transcript })
+      );
+      assert(result.kind === 'ABSTAINED', 'analyzeTaskLocally must fail closed to ABSTAINED on unknown prefix');
+      if (result.kind === 'ABSTAINED') {
+        assert(result.reason === 'INVALID_MODEL_OUTPUT', 'Reason must be INVALID_MODEL_OUTPUT');
+      }
+    }
+  });
+
+  await test('119. [PEIA-TRANSCRIPT-01 #5] Ambiguous or multiple JSON outputs are rejected', async () => {
+    const json1 = JSON.stringify({
+      status: 'READY',
+      summary: 'First candidate JSON.',
+      findings: [{ claim: 'Claim 1', evidenceIds: ['EPA::epa-cwa-1'] }],
+      recommendations: [],
+      uncertainties: [],
+    });
+    const json2 = JSON.stringify({
+      status: 'ABSTAIN',
+      abstainReason: 'INSUFFICIENT_EVIDENCE',
+      summary: 'Second candidate JSON.',
+    });
+
+    const ambiguousTranscripts = [
+      `Loading model...\n${json1}\n${json2}\nExiting...\n`,
+      `Loading model...\n${json1} ${json2}`,
+      `Loading model...\n${json1}\nTrailing commentary with { brace }`,
+      `Loading model...\n${PROMPT_AUDIT_RESPONSE_HEADER}\n${json1}\n${PROMPT_AUDIT_RESPONSE_HEADER}\n${json2}`,
+    ];
+
+    for (const transcript of ambiguousTranscripts) {
+      const extraction = extractAssistantResponseFromLlamaTranscript(transcript);
+      assert(
+        extraction.success === false,
+        'extractAssistantResponseFromLlamaTranscript must reject ambiguous/multiple JSON outputs'
+      );
+      assert(extraction.content === '', 'Rejected ambiguous extraction must return empty content');
+
+      const result = await analyzeTaskLocally(
+        makeSampleTask(),
+        makeEvidenceResult([makeSampleEPAItem('1')]),
+        defaultConfig,
+        makeFakeRunner({ stdout: transcript })
+      );
+      assert(result.kind === 'ABSTAINED', 'analyzeTaskLocally must fail closed to ABSTAINED on multiple JSON outputs');
+      if (result.kind === 'ABSTAINED') {
+        assert(result.reason === 'INVALID_MODEL_OUTPUT', 'Reason must be INVALID_MODEL_OUTPUT');
+      }
+    }
+  });
+
+  await test('120. [PEIA-TRANSCRIPT-01 #6] Malformed JSON after recognized startup banner remains rejected without silent repair', async () => {
+    const malformedTranscripts = [
+      'Loading model...\r\n{\r\n  "status": "READY",\r\n  "summary": "Missing closing quote and comma\r\n}',
+      'Loading model...\n{"status": "READY", "summary": "Truncated JSON object"',
+      'Loading model...\n{ "status": "READY", trailing_comma: true, }',
+    ];
+
+    for (const transcript of malformedTranscripts) {
+      const result = await analyzeTaskLocally(
+        makeSampleTask(),
+        makeEvidenceResult([makeSampleEPAItem('1')]),
+        defaultConfig,
+        makeFakeRunner({ stdout: transcript })
+      );
+      assert(result.kind === 'ABSTAINED', 'Malformed JSON after startup banner must fail closed to ABSTAINED');
+      if (result.kind === 'ABSTAINED') {
+        assert(result.reason === 'INVALID_MODEL_OUTPUT', 'Reason must be INVALID_MODEL_OUTPUT');
+      }
+    }
+  });
+
+  await test('121. [PEIA-TRANSCRIPT-01 #7] Full analyzeTaskLocally flow with fake process runner emitting Windows banner + valid News JSON produces ADVISORY_READY', async () => {
+    const newsTask = makeSampleTask({
+      titleAr: 'تقرير رصد جودة المياه الساحلية',
+      titleEn: 'Coastal Water Quality Monitoring Report',
+      bodyEn: 'Municipal storm sewer discharges and coastal SST anomalies were evaluated.',
+    });
+    const epaItem = makeSampleEPAItem('1');
+    const noaaItem = makeSampleNOAAItem('1');
+
+    const validNewsAdvisoryJson = JSON.stringify(
+      {
+        status: 'READY',
+        summary: 'News draft is grounded in EPA storm sewer and NOAA buoy monitoring records.',
+        findings: [
+          {
+            claim: 'Municipal storm sewer discharge monitoring aligns with CWA section 402-1.',
+            evidenceIds: ['EPA::epa-cwa-1'],
+            severity: 'Info',
+          },
+          {
+            claim: 'Coastal buoy network recorded sea surface temperature anomaly 1.',
+            evidenceIds: ['NOAA::noaa-buoy-1'],
+            severity: 'Warning',
+          },
+        ],
+        recommendations: ['Include specific buoy station identifier in paragraph two.'],
+        uncertainties: ['Long-term seasonal baseline remains preliminary.'],
+      },
+      null,
+      2
+    );
+
+    const realisticWindowsStdout =
+      'Loading model...\r\n\r\n' +
+      `${validNewsAdvisoryJson}\r\n\r\n` +
+      '[ Prompt: 1850 tokens | Generation: 210 tokens ]\r\n' +
+      'Exiting...\r\n';
+
+    const runner = makeFakeRunner({ exitCode: 0, stdout: realisticWindowsStdout });
+    const result = await analyzeTaskLocally(
+      newsTask,
+      makeEvidenceResult([epaItem, noaaItem]),
+      defaultConfig,
+      runner
+    );
+
+    assert(result.kind === 'ADVISORY_READY', 'Expected ADVISORY_READY for banner + valid News JSON');
+    if (result.kind === 'ADVISORY_READY') {
+      assert(result.humanReviewRequired === true, 'humanReviewRequired must be true');
+      assert(result.advisory.findings.length === 2, 'Both grounded findings preserved');
+      assert(result.usedEvidenceIds.includes('EPA::epa-cwa-1'), 'EPA evidence ID recorded');
+      assert(result.usedEvidenceIds.includes('NOAA::noaa-buoy-1'), 'NOAA evidence ID recorded');
+      assert(result.advisory.libraryPreparation === undefined, 'News advisory must not have libraryPreparation');
+    }
+  });
+
+  await test('122. [PEIA-TRANSCRIPT-01 #8] Banner without usable assistant output fails closed', async () => {
+    const bannerOnlyTranscripts = [
+      'Loading model...\r\n',
+      'Loading model...\r\n\r\nExiting...\r\n',
+      'Loading model...\nllama_init_from_file: model loaded\n[ Prompt: 500 tokens | Generation: 0 tokens ]\nExiting...\n',
+      'Loading model...\n[Start thinking]\nThought without any JSON output after closing tag.\n[End thinking]\nExiting...\n',
+    ];
+
+    for (const transcript of bannerOnlyTranscripts) {
+      const extraction = extractAssistantResponseFromLlamaTranscript(transcript);
+      assert(extraction.success === false, 'Banner without assistant output must fail extraction');
+      assert(extraction.content === '', 'Banner without assistant output must yield empty content');
+
+      const result = await analyzeTaskLocally(
+        makeSampleTask(),
+        makeEvidenceResult([makeSampleEPAItem('1')]),
+        defaultConfig,
+        makeFakeRunner({ exitCode: 0, stdout: transcript })
+      );
+      assert(result.kind !== 'ADVISORY_READY', 'Banner without output must never become ADVISORY_READY');
+      assert(result.kind === 'ABSTAINED', 'Banner without output fails closed to ABSTAINED');
+      if (result.kind === 'ABSTAINED') {
+        assert(result.reason === 'INVALID_MODEL_OUTPUT', 'Reason must be INVALID_MODEL_OUTPUT');
+      }
+    }
+  });
+
+  await test('123. [PEIA-TRANSCRIPT-01 #9] Existing LibraryIntake/MetadataOnly contracts remain unchanged when preceeded by startup banner without echoed header', async () => {
+    const libTask = makeSampleLibraryIntakeTask();
+    const snapshotItem = makeSampleSnapshotItem('1');
+    const epaItem = makeSampleEPAItem('1');
+
+    const validLibOutput = JSON.stringify({
+      status: 'READY',
+      summary: 'Prepared bibliographic metadata from supplied intake snapshot and EPA reference.',
+      findings: [
+        {
+          claim: 'Supplied intake record identifies coastal water regulation.',
+          evidenceIds: ['SNAPSHOT::intake-snapshot-1', 'EPA::epa-cwa-1'],
+        },
+      ],
+      recommendations: ['Verify official gazette publication date before canonical registration.'],
+      uncertainties: ['Only metadata was supplied; full PDF was not read.'],
+      libraryPreparation: makeValidCanonicalLibraryPrep('MetadataOnly'),
+    });
+
+    const bannerLibTranscript = `Loading model...\r\n${validLibOutput}\r\nExiting...\r\n`;
+    const result = await analyzeTaskLocally(
+      libTask,
+      { kind: 'SELECTED_EVIDENCE', selectedItems: [snapshotItem, epaItem] },
+      defaultConfig,
+      makeFakeRunner({ exitCode: 0, stdout: bannerLibTranscript })
+    );
+
+    assert(result.kind === 'ADVISORY_READY', 'LibraryIntake MetadataOnly with banner must produce ADVISORY_READY');
+    if (result.kind === 'ADVISORY_READY') {
+      const prep = result.advisory.libraryPreparation!;
+      assert(prep !== undefined, 'libraryPreparation present');
+      assert(Object.keys(prep).length === 14, 'Exact 14 canonical keys preserved');
+      assert(prep.inputBasis === 'MetadataOnly', 'inputBasis is MetadataOnly');
+      assert(prep.suggestedSummaryAr === null, 'suggestedSummaryAr is null');
+      assert(prep.suggestedSummaryEn === null, 'suggestedSummaryEn is null');
+    }
+  });
+
   console.log('------------------------------------------------------------');
   console.log(`LOCAL ANALYSIS RUNTIME TESTS: ${passedTests}/${totalTests} PASSED`);
   if (passedTests !== totalTests) {
