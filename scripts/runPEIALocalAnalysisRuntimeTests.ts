@@ -2939,6 +2939,209 @@ async function runAllTests() {
     }
   });
 
+  // ==========================================
+  // PEIA-TRANSCRIPT-02: COMPLETE LLAMA-CLI 11118 BANNER SUPPORT (124)
+  // ==========================================
+
+  await test('124. [PEIA-TRANSCRIPT-02 A-H] Complete Windows llama-cli 11118 startup banner (with ftype and /glob) isolates cleanly and preserves all fail-closed and domain contracts', async () => {
+    const validCanonicalNewsJson = JSON.stringify(
+      {
+        status: 'READY',
+        summary: 'Blue Nile hydrological assessment grounded in EPA and NOAA monitoring evidence.',
+        findings: [
+          {
+            claim: 'Stormwater runoff monitoring aligns with Clean Water Act section 402-1.',
+            evidenceIds: ['EPA::epa-cwa-1'],
+            severity: 'Info',
+          },
+          {
+            claim: 'Coastal buoy network recorded sea surface temperature anomaly 1.',
+            evidenceIds: ['NOAA::noaa-buoy-1'],
+            severity: 'Warning',
+          },
+        ],
+        recommendations: ['Cite the official station gauge timestamp in paragraph two.'],
+        uncertainties: ['Seasonal downstream discharge projections remain preliminary.'],
+      },
+      null,
+      2
+    );
+
+    const buildLlama11118Banner = (options?: {
+      readonly includeFtype?: boolean;
+      readonly includeGlob?: boolean;
+    }): string => {
+      const includeFtype = options?.includeFtype ?? true;
+      const includeGlob = options?.includeGlob ?? true;
+
+      const lines: string[] = [
+        'Loading model...',
+        '',
+        '▄▄ ▄▄',
+        '██ ██',
+        '██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄',
+        '██ ██ ▄█▀██ ██ ██ ██ ▄█▀██   ██     ██ ██ ██ ██',
+        '██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ▄ ▀█████ ████▀ ████▀',
+        '                                    ██    ██',
+        '                                    ▀▀    ▀▀',
+        '',
+        'build      : 11118 (e092a34d)',
+        'model      : C:\\PEIA\\models\\Qwen3-4B-Q4_K_M.gguf',
+        ...(includeFtype ? ['ftype      : Q4_K - Medium'] : []),
+        'modalities : text',
+        '',
+        'available commands:',
+        '  /exit or Ctrl+C     stop or exit',
+        '  /regen              regenerate the last response',
+        '  /clear              clear the chat history',
+        '  /read <file>        add a text file',
+        ...(includeGlob
+          ? ['  /glob <pattern>     add text files using globbing pattern']
+          : []),
+        '',
+      ];
+
+      return lines.join('\r\n') + '\r\n';
+    };
+
+    const full11118Banner = buildLlama11118Banner();
+    const full11118Transcript = `${full11118Banner}${validCanonicalNewsJson}\r\n\r\n[ Prompt: 164.2 t/s | Generation: 31.8 t/s ]\r\nExiting...\r\n`;
+
+    // A & B. Full banner + valid JSON extracts successfully and matches original JSON exactly
+    const fullExtraction = extractAssistantResponseFromLlamaTranscript(full11118Transcript);
+    assert(fullExtraction.success === true, 'A. Full 11118 banner + valid JSON must extract successfully');
+    assert(
+      fullExtraction.content === validCanonicalNewsJson,
+      'B. Extracted JSON must match original JSON byte-for-byte'
+    );
+
+    // Also verify single-space `ftype : Q4_K - Medium` variant
+    const singleSpaceFtypeTranscript = full11118Transcript.replace(
+      'ftype      : Q4_K - Medium',
+      'ftype : Q4_K - Medium'
+    );
+    const singleSpaceExtraction = extractAssistantResponseFromLlamaTranscript(
+      singleSpaceFtypeTranscript
+    );
+    assert(singleSpaceExtraction.success === true, 'Single-space ftype : Q4_K - Medium must extract');
+    assert(
+      singleSpaceExtraction.content === validCanonicalNewsJson,
+      'Single-space ftype extracted JSON must match exactly'
+    );
+
+    // C. Removing ftype alone from the banner does not break extraction
+    const withoutFtypeTranscript = `${buildLlama11118Banner({ includeFtype: false })}${validCanonicalNewsJson}\r\n`;
+    const withoutFtypeExtraction = extractAssistantResponseFromLlamaTranscript(withoutFtypeTranscript);
+    assert(
+      withoutFtypeExtraction.success === true,
+      'C. Removing ftype alone from the banner must not break extraction'
+    );
+    assert(
+      withoutFtypeExtraction.content === validCanonicalNewsJson,
+      'C. Extracted JSON without ftype must match original JSON exactly'
+    );
+
+    // D. Removing /glob alone does not break extraction
+    const withoutGlobTranscript = `${buildLlama11118Banner({ includeGlob: false })}${validCanonicalNewsJson}\r\n`;
+    const withoutGlobExtraction = extractAssistantResponseFromLlamaTranscript(withoutGlobTranscript);
+    assert(
+      withoutGlobExtraction.success === true,
+      'D. Removing /glob alone from the banner must not break extraction'
+    );
+    assert(
+      withoutGlobExtraction.content === validCanonicalNewsJson,
+      'D. Extracted JSON without /glob must match original JSON exactly'
+    );
+
+    // E. Unknown lines before JSON still fail closed
+    const unknownLineTranscripts = [
+      `${full11118Banner}unrecognized_key : unexpected value\r\n${validCanonicalNewsJson}\r\n`,
+      `${full11118Banner}  /unknowncmd         untrusted command line\r\n${validCanonicalNewsJson}\r\n`,
+      `${full11118Banner}Here is the assistant JSON response:\r\n${validCanonicalNewsJson}\r\n`,
+    ];
+    for (const badTranscript of unknownLineTranscripts) {
+      const badExt = extractAssistantResponseFromLlamaTranscript(badTranscript);
+      assert(badExt.success === false, 'E. Unknown line before JSON must fail closed');
+      assert(badExt.content === '', 'E. Rejected extraction must return empty content');
+    }
+
+    // F. Multiple JSON objects and malformed JSON remain rejected
+    const multiJsonTranscript = `${full11118Banner}${validCanonicalNewsJson}\r\n${validCanonicalNewsJson}\r\n`;
+    const multiExt = extractAssistantResponseFromLlamaTranscript(multiJsonTranscript);
+    assert(multiExt.success === false, 'F. Multiple JSON objects after 11118 banner must be rejected');
+
+    const malformedJsonTranscript = `${full11118Banner}{\r\n  "status": "READY",\r\n  "summary": "unterminated\r\n`;
+    const malformedResult = await analyzeTaskLocally(
+      makeSampleTask(),
+      makeEvidenceResult([makeSampleEPAItem('1')]),
+      defaultConfig,
+      makeFakeRunner({ exitCode: 0, stdout: malformedJsonTranscript })
+    );
+    assert(
+      malformedResult.kind === 'ABSTAINED' && malformedResult.reason === 'INVALID_MODEL_OUTPUT',
+      'F. Malformed JSON after 11118 banner must fail closed to ABSTAINED (INVALID_MODEL_OUTPUT)'
+    );
+
+    // G. Complete analyzeTaskLocally flow with the full 11118 banner and valid News JSON produces ADVISORY_READY
+    const newsTask = makeSampleTask();
+    const epaItem = makeSampleEPAItem('1');
+    const noaaItem = makeSampleNOAAItem('1');
+    const readyResult = await analyzeTaskLocally(
+      newsTask,
+      makeEvidenceResult([epaItem, noaaItem]),
+      defaultConfig,
+      makeFakeRunner({ exitCode: 0, stdout: full11118Transcript })
+    );
+    assert(
+      readyResult.kind === 'ADVISORY_READY',
+      'G. analyzeTaskLocally with full 11118 banner + valid News JSON must produce ADVISORY_READY'
+    );
+    if (readyResult.kind === 'ADVISORY_READY') {
+      assert(readyResult.humanReviewRequired === true, 'G. humanReviewRequired is true');
+      assert(readyResult.advisory.findings.length === 2, 'G. Both findings preserved');
+      assert(readyResult.usedEvidenceIds.includes('EPA::epa-cwa-1'), 'G. EPA evidence ID cited');
+      assert(readyResult.usedEvidenceIds.includes('NOAA::noaa-buoy-1'), 'G. NOAA evidence ID cited');
+    }
+
+    // H. Existing LibraryIntake and MetadataOnly behavior is preserved with full 11118 banner
+    const libTask = makeSampleLibraryIntakeTask();
+    const snapshotItem = makeSampleSnapshotItem('1');
+    const validLibJson = JSON.stringify({
+      status: 'READY',
+      summary: 'Prepared bibliographic metadata from supplied intake snapshot and EPA reference.',
+      findings: [
+        {
+          claim: 'Supplied intake record identifies coastal water regulation.',
+          evidenceIds: ['SNAPSHOT::intake-snapshot-1', 'EPA::epa-cwa-1'],
+        },
+      ],
+      recommendations: ['Verify official gazette publication date before canonical registration.'],
+      uncertainties: ['Only metadata was supplied; full PDF was not read.'],
+      libraryPreparation: makeValidCanonicalLibraryPrep('MetadataOnly'),
+    });
+    const libResult = await analyzeTaskLocally(
+      libTask,
+      { kind: 'SELECTED_EVIDENCE', selectedItems: [snapshotItem, epaItem] },
+      defaultConfig,
+      makeFakeRunner({ exitCode: 0, stdout: `${full11118Banner}${validLibJson}\r\nExiting...\r\n` })
+    );
+    assert(
+      libResult.kind === 'ADVISORY_READY',
+      'H. LibraryIntake MetadataOnly with full 11118 banner must produce ADVISORY_READY'
+    );
+    if (libResult.kind === 'ADVISORY_READY') {
+      assert(
+        libResult.advisory.libraryPreparation?.inputBasis === 'MetadataOnly',
+        'H. LibraryIntake inputBasis is MetadataOnly'
+      );
+      assert(
+        libResult.advisory.libraryPreparation?.suggestedSummaryAr === null &&
+          libResult.advisory.libraryPreparation?.suggestedSummaryEn === null,
+        'H. MetadataOnly summaries remain null'
+      );
+    }
+  });
+
   console.log('------------------------------------------------------------');
   console.log(`LOCAL ANALYSIS RUNTIME TESTS: ${passedTests}/${totalTests} PASSED`);
   if (passedTests !== totalTests) {

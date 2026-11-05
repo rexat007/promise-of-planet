@@ -1176,9 +1176,9 @@ const LLAMA_CLI_RECOGNIZED_PREAMBLE_LINE_PATTERNS: readonly RegExp[] = Object.fr
   /^(?:llama[-_]cli:\s*)?loading model\.{3}(?:\s*[-\\|/⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]*)?$/i,
   /^llama_(?:init_from_file|model_loader|context|kv_cache[a-z_]*|new_context_with_model):\s+.+$/,
   /^(?:llm_load_[a-z_]+|system_info|sampler\s+(?:seed|params|chain)):\s+.+$/,
-  /^(?:build|model|modalities)\s*:\s*\S.*$/,
+  /^(?:build|model|ftype|modalities)\s*:\s*\S.*$/,
   /^available commands:\s*$/,
-  /^\/(?:exit|regen|clear|read)\b.*$/,
+  /^\/(?:exit|regen|clear|read|glob)\b.*$/,
 ]);
 
 function isRecognizedLlamaCliStartupPreambleSegment(segment: string): boolean {
