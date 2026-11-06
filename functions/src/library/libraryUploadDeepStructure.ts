@@ -132,7 +132,6 @@ export type LibraryUploadDeepStructureResult =
 
 const ZIP_LOCAL_FILE_HEADER_SIG = 0x04034b50;
 const ZIP_CENTRAL_DIR_HEADER_SIG = 0x02014b50;
-const ZIP_EOCD_SIG = 0x06054b50;
 const ZIP64_EOCD_RECORD_SIG = 0x06064b50;
 const ZIP64_EOCD_LOCATOR_SIG = 0x07064b50;
 const ZIP_EOCD_MAGIC_BYTES = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
