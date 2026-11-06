@@ -682,7 +682,7 @@ export function validateLibraryQuarantineInternalReceipt(
       reconciliationReason.trim().length === 0 ||
       reconciliationReason.length > 240 ||
       CONTROL_OR_BIDI_CHAR_REGEX.test(reconciliationReason) ||
-      reconciliationReason.includes(storagePath)
+      reconciliationReason.includes(parsedPathResult.parsed.storagePath)
     ) {
       return makeFailure(
         'INVALID_RECONCILIATION_REASON',
@@ -752,12 +752,12 @@ export function validateLibraryQuarantineInternalReceipt(
     originalFilename,
     sanitizedFilename,
     format,
-    canonicalExtension,
-    canonicalMimeType,
+    canonicalExtension: parsedPathResult.parsed.canonicalExtension,
+    canonicalMimeType: parsedPathResult.parsed.canonicalMimeType,
     byteSize,
     sha256,
-    deepInspectionStatus,
-    storagePath,
+    deepInspectionStatus: expectedInspectionStatus,
+    storagePath: parsedPathResult.parsed.storagePath,
     state: state as LibraryQuarantineReceiptState,
     generation: generation as string | null,
     reconciliationReason: reconciliationReason as string | null,
