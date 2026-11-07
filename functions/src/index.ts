@@ -9,6 +9,7 @@ export { syncYouTubeUploads } from "./youtube/manualSyncHandler";
 export { manageYouTubeIntegration, reviewYouTubeCandidate } from "./youtube/youtubeAdminHandlers";
 export { manageMedia } from "./media/mediaAdminHandlers";
 export { manageLibraryDocuments, getPublicLibrary } from "./library/libraryAdminHandlers";
+export { libraryQuarantineUploadEndpoint } from "./library/libraryQuarantineUploadEndpoint";
 export { managePlatformSettings } from "./settings/platformSettingsAdminHandlers";
 export { peiaPendingTaskGateway } from "./peia/firebasePendingTaskHttpEndpoint";
 export { peiaAdvisoryResultSubmission } from "./peia/firebaseAdvisoryResultSubmissionEndpoint";
