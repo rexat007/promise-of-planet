@@ -18,6 +18,7 @@ import {
   Globe,
   Inbox,
   Sparkles,
+  Lock,
   X
 } from 'lucide-react';
 import type { AdminUser } from '../../types/admin';
@@ -43,6 +44,12 @@ import {
   type LibraryIntakeRecord 
 } from '../../../functions/src/shared/libraryContract';
 import { LibraryDocumentEditorModal } from './LibraryDocumentEditorModal';
+import { LibraryQuarantineUploadPanel } from './LibraryQuarantineUploadPanel';
+import {
+  canUploadToLibraryQuarantine,
+  LibraryQuarantineUploadSessionController,
+  type LibraryQuarantineUploadRuntimeDependencies,
+} from '../../services/libraryQuarantineUploadClient';
 import {
   LibraryAdminClient,
   AITaskStatus,
@@ -474,6 +481,9 @@ export interface AdminLibraryManagementProps {
   initialDocuments?: LibraryDocument[];
   initialLoading?: boolean;
   initialPeiaModalState?: Partial<LibraryIntakePeiaModalSnapshot>;
+  initialQuarantineUploadOpen?: boolean;
+  quarantineUploadRuntimeDeps?: LibraryQuarantineUploadRuntimeDependencies;
+  quarantineUploadController?: LibraryQuarantineUploadSessionController;
   languageOverride?: 'ar' | 'en';
 }
 
@@ -486,6 +496,9 @@ export function AdminLibraryManagement({
   initialDocuments = [],
   initialLoading = true,
   initialPeiaModalState,
+  initialQuarantineUploadOpen = false,
+  quarantineUploadRuntimeDeps,
+  quarantineUploadController,
   languageOverride,
 }: AdminLibraryManagementProps) {
   const { i18n } = useTranslation();
@@ -549,6 +562,11 @@ export function AdminLibraryManagement({
   const [intakeFormError, setIntakeFormError] = useState<string | null>(null);
   const [intakeFormSuccess, setIntakeFormSuccess] = useState<string | null>(null);
 
+  // Modal State for Private Quarantine Document Upload
+  const [isQuarantineUploadOpen, setIsQuarantineUploadOpen] = useState(
+    initialQuarantineUploadOpen
+  );
+
   // Modal State for Reviewing Intake Reference
   const [reviewingIntake, setReviewingIntake] = useState<LibraryIntakeRecord | null>(null);
   const [reviewTargetStatus, setReviewTargetStatus] = useState<LibraryIntakeStatus>(LibraryIntakeStatus.InPreparation);
@@ -606,6 +624,7 @@ export function AdminLibraryManagement({
   const canManageRights = AdminAccessService.hasPermission(currentUser, AdminPermission.ManageRights);
   const canRegisterRegistry = canCreate || canManageRights;
   const canSubmitIntake = canCreate || canEdit;
+  const canUploadQuarantine = canUploadToLibraryQuarantine(currentUser);
   const canReviewIntake = canReview || canApprove || canManageRights;
   const canPrepareAiIntake = canAccessLibraryIntakePeiaPreparation(currentUser);
 
@@ -1883,7 +1902,7 @@ export function AdminLibraryManagement({
                 </select>
               </div>
 
-              <div className="flex items-center gap-2 w-full sm:w-auto">
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                 <button
                   onClick={loadAllData}
                   className="p-2.5 rounded-xl border border-gray-300 dark:border-gray-700 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 transition-colors cursor-pointer"
@@ -1891,6 +1910,17 @@ export function AdminLibraryManagement({
                 >
                   <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                 </button>
+                {canUploadQuarantine && (
+                  <button
+                    type="button"
+                    onClick={() => setIsQuarantineUploadOpen(true)}
+                    data-testid="open-library-quarantine-upload-btn"
+                    className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-extrabold text-xs sm:text-sm transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Lock className="h-4 w-4" />
+                    <span>{isAr ? 'رفع مستند إلى الحجر الخاص' : 'Upload document to private quarantine'}</span>
+                  </button>
+                )}
                 {canSubmitIntake && (
                   <button
                     onClick={() => {
@@ -3483,6 +3513,16 @@ export function AdminLibraryManagement({
           </div>
         </div>
       )}
+
+      {/* Private Quarantine Document Upload Panel */}
+      <LibraryQuarantineUploadPanel
+        currentUser={currentUser}
+        isOpen={isQuarantineUploadOpen}
+        onClose={() => setIsQuarantineUploadOpen(false)}
+        isAr={isAr}
+        runtimeDependencies={quarantineUploadRuntimeDeps}
+        controller={quarantineUploadController}
+      />
 
       {/* Editor & Detail Modal */}
       <LibraryDocumentEditorModal
