@@ -19,7 +19,8 @@ import {
 } from './libraryQuarantineReceiptContract';
 
 /**
- * LIB-FILE-02B2A — Private Library GCS Quarantine Adapter
+ * LIB-FILE-02B2A / LIB-FILE-02B2C — Private Library GCS Quarantine Adapter
+ * (with Generation-Pinned Readback)
  *
  * ARCHITECTURAL & SECURITY BOUNDARY:
  * - Dependency-injected server-side Google Cloud Storage adapter for privately
@@ -31,17 +32,22 @@ import {
  * - Enforces conditional creation `ifGenerationMatch: 0` (never overwrites).
  * - Sets private cache headers (`cacheControl: 'private, no-store, max-age=0'`),
  *   `contentDisposition: 'attachment'`, and server-owned immutable custom metadata.
- * - Performs authoritative post-write verification by reading object metadata AND
- *   streaming the actual stored bytes through a bounded reader (`<= 15,000,000` bytes)
- *   with early abort on excess bytes. Never trusts custom metadata SHA-256 alone,
- *   and never uses unbounded `file.download()`.
+ * - Closes the metadata-to-byte-stream generation race (`LIB-FILE-02B2C`):
+ *   1. Reads object metadata from the canonical path and validates a canonical,
+ *      non-zero, positive decimal integer GCS generation within `Number.MAX_SAFE_INTEGER`.
+ *   2. Acquires a generation-pinned file handle via
+ *      `bucket.file(canonicalStoragePath, { generation: verifiedGeneration })`.
+ *   3. Streams the actual stored bytes exclusively through that generation-pinned
+ *      handle with a bounded reader (`<= 15,000,000` bytes) and early abort on
+ *      excess bytes, never falling back to an unpinned stream and never calling
+ *      unbounded `file.download()`.
  * - Rejects any object exhibiting `firebaseStorageDownloadTokens`, download tokens,
  *   or visible public ACL grants.
  * - Does NOT claim proof of bucket-level IAM privacy from object metadata alone
  *   (`bucketIamPrivacyVerified: false`).
  * - Does NOT mutate Firestore or transition receipt states directly; returns
- *   `TrustedStorageReadbackAttestation` only after verified readback for
- *   consumption by the future `LIB-FILE-02B2B` orchestrator.
+ *   `TrustedStorageReadbackAttestation` only after verified generation-pinned
+ *   readback for consumption by the write and recovery coordinators.
  */
 
 export const LIBRARY_QUARANTINE_CACHE_CONTROL =
@@ -110,12 +116,17 @@ export interface GcsLibraryQuarantineReadableStream
   destroy?(error?: Error): void;
 }
 
+export interface GcsLibraryQuarantineFileOptions {
+  readonly generation?: string;
+}
+
 /**
  * Dependency-injected GCS File contract.
  * Intentionally omits unbounded `download()` to enforce bounded stream reading.
  */
 export interface GcsLibraryQuarantineFile {
   readonly name: string;
+  readonly generation?: string | number;
   save(
     data: Buffer,
     options: GcsLibraryQuarantineSaveOptions
@@ -128,7 +139,10 @@ export interface GcsLibraryQuarantineFile {
 
 export interface GcsLibraryQuarantineBucket {
   readonly name?: string;
-  file(objectPath: string): GcsLibraryQuarantineFile;
+  file(
+    objectPath: string,
+    options?: GcsLibraryQuarantineFileOptions
+  ): GcsLibraryQuarantineFile;
 }
 
 export interface WriteLibraryQuarantineObjectInput {
@@ -220,10 +234,50 @@ export type LibraryQuarantineGcsAdapterResult =
   | LibraryQuarantineGcsNeedsReconciliationFailure
   | LibraryQuarantineGcsDeterministicFailure;
 
-const STORAGE_GENERATION_REGEX = /^[A-Za-z0-9_.:-]{1,128}$/;
+export const MAX_SAFE_GCS_GENERATION_NUMBER = Number.MAX_SAFE_INTEGER;
+
+const CANONICAL_DECIMAL_GENERATION_REGEX = /^[1-9][0-9]{0,15}$/;
 const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/;
 const CONTROL_OR_BIDI_CHAR_REGEX =
   /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2069\uFEFF\uFFF9-\uFFFB]/g;
+
+/**
+ * Validates that a raw GCS generation value is a canonical, non-zero, positive
+ * decimal integer representation within `1..Number.MAX_SAFE_INTEGER` so that
+ * `@google-cloud/storage` (`bucket.file(path, { generation })`, which parses
+ * generation via base-10 integer conversion into a JS Number) targets the exact
+ * generation without precision loss, sign/fraction ambiguity, or leading zeros.
+ */
+export function parseCanonicalSafeGcsGeneration(
+  rawGeneration: unknown
+): string | null {
+  if (typeof rawGeneration === 'number') {
+    if (!Number.isSafeInteger(rawGeneration) || rawGeneration <= 0) {
+      return null;
+    }
+    const canonical = String(rawGeneration);
+    return CANONICAL_DECIMAL_GENERATION_REGEX.test(canonical)
+      ? canonical
+      : null;
+  }
+
+  if (typeof rawGeneration === 'string') {
+    if (!CANONICAL_DECIMAL_GENERATION_REGEX.test(rawGeneration)) {
+      return null;
+    }
+    const parsedNum = Number(rawGeneration);
+    if (
+      !Number.isSafeInteger(parsedNum) ||
+      parsedNum <= 0 ||
+      String(parsedNum) !== rawGeneration
+    ) {
+      return null;
+    }
+    return rawGeneration;
+  }
+
+  return null;
+}
 
 const ALLOWED_WRITE_INPUT_KEYS: ReadonlySet<string> = new Set([
   'receipt',
@@ -861,6 +915,47 @@ export class GcsLibraryQuarantineStorageAdapter {
     return file;
   }
 
+  private getValidatedGenerationPinnedFileHandle(
+    canonicalStoragePath: string,
+    verifiedGeneration: string,
+    unpinnedFile: GcsLibraryQuarantineFile
+  ): GcsLibraryQuarantineFile {
+    const pinnedOptions: GcsLibraryQuarantineFileOptions = Object.freeze({
+      generation: verifiedGeneration,
+    });
+    const pinnedFile = this.bucket.file(canonicalStoragePath, pinnedOptions);
+    if (
+      !pinnedFile ||
+      typeof pinnedFile !== 'object' ||
+      typeof pinnedFile.createReadStream !== 'function'
+    ) {
+      throw new Error(
+        'GCS bucket adapter must provide a valid generation-pinned file handle with bounded .createReadStream().'
+      );
+    }
+    if (pinnedFile === unpinnedFile) {
+      throw new Error(
+        'GCS bucket adapter returned the unpinned file handle instead of a distinct generation-pinned file handle.'
+      );
+    }
+    if (pinnedFile.name !== canonicalStoragePath) {
+      throw new Error(
+        'GCS generation-pinned file handle name does not match the canonical quarantine storagePath.'
+      );
+    }
+    if (pinnedFile.generation !== undefined) {
+      const pinnedHandleGen = parseCanonicalSafeGcsGeneration(
+        pinnedFile.generation
+      );
+      if (pinnedHandleGen !== verifiedGeneration) {
+        throw new Error(
+          'GCS generation-pinned file handle generation does not match the verified metadata generation.'
+        );
+      }
+    }
+    return pinnedFile;
+  }
+
   private async readAndVerifyStoredObject(
     file: GcsLibraryQuarantineFile,
     receipt: LibraryQuarantineInternalReceipt,
@@ -928,21 +1023,16 @@ export class GcsLibraryQuarantineStorageAdapter {
       );
     }
 
-    // 2. Validate generation
-    const generationStr =
-      rawMeta.generation !== undefined && rawMeta.generation !== null
-        ? String(rawMeta.generation).trim()
-        : '';
+    // 2. Validate canonical, non-zero, positive safe-integer decimal generation
+    const verifiedGeneration = parseCanonicalSafeGcsGeneration(
+      rawMeta.generation
+    );
 
-    if (
-      generationStr.length === 0 ||
-      generationStr === '0' ||
-      !STORAGE_GENERATION_REGEX.test(generationStr)
-    ) {
+    if (verifiedGeneration === null) {
       return makeDeterministicFailure(
         'CONFLICT_OR_MISMATCH',
         'STORED_GENERATION_INVALID',
-        'Stored GCS object is missing a valid non-zero generation identifier.',
+        'Stored GCS object is missing a valid canonical non-zero safe-integer decimal generation identifier.',
         receipt.receiptId
       );
     }
@@ -1045,14 +1135,37 @@ export class GcsLibraryQuarantineStorageAdapter {
       );
     }
 
-    // 7. Bounded stream readback of actual stored bytes (never trusting custom metadata SHA-256 alone)
-    const maxBudgetBytes = Math.min(MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES, receipt.byteSize);
+    // 7. Acquire generation-scoped file handle and stream actual stored bytes ONLY from that pinned handle
+    let pinnedFile: GcsLibraryQuarantineFile;
+    try {
+      pinnedFile = this.getValidatedGenerationPinnedFileHandle(
+        receipt.storagePath,
+        verifiedGeneration,
+        file
+      );
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Failed to create generation-pinned GCS file handle.';
+      return makeNeedsReconciliationFailure(
+        'READBACK_INTERRUPTED_AFTER_WRITE',
+        `GCS generation-pinned readback initialization failed for receipt "${receipt.receiptId}": ${msg}`,
+        receipt.receiptId,
+        `GCS generation-pinned readback handle initialization failed: ${msg}`
+      );
+    }
+
+    const maxBudgetBytes = Math.min(
+      MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES,
+      receipt.byteSize
+    );
     const hasher = createHash('sha256');
     let totalBytesRead = 0;
     let stream: GcsLibraryQuarantineReadableStream | null = null;
 
     try {
-      stream = file.createReadStream({ validation: false });
+      stream = pinnedFile.createReadStream({ validation: false });
       if (
         !stream ||
         typeof (stream as AsyncIterable<Uint8Array | Buffer>)[
@@ -1061,9 +1174,9 @@ export class GcsLibraryQuarantineStorageAdapter {
       ) {
         return makeNeedsReconciliationFailure(
           'READBACK_INTERRUPTED_AFTER_WRITE',
-          'GCS createReadStream did not return a valid async iterable stream.',
+          'GCS generation-pinned createReadStream did not return a valid async iterable stream.',
           receipt.receiptId,
-          'GCS readback stream initialization failed.'
+          'GCS generation-pinned readback stream initialization failed.'
         );
       }
 
@@ -1104,10 +1217,24 @@ export class GcsLibraryQuarantineStorageAdapter {
           : 'Unknown GCS stream readback error.';
       return makeNeedsReconciliationFailure(
         'READBACK_INTERRUPTED_AFTER_WRITE',
-        `GCS bounded stream readback was interrupted for receipt "${receipt.receiptId}": ${msg}`,
+        `GCS bounded generation-pinned stream readback was interrupted for receipt "${receipt.receiptId}": ${msg}`,
         receipt.receiptId,
-        `GCS bounded stream readback interrupted: ${msg}`
+        `GCS bounded generation-pinned stream readback interrupted: ${msg}`
       );
+    }
+
+    if (pinnedFile.generation !== undefined) {
+      const postStreamPinnedGen = parseCanonicalSafeGcsGeneration(
+        pinnedFile.generation
+      );
+      if (postStreamPinnedGen !== verifiedGeneration) {
+        return makeNeedsReconciliationFailure(
+          'READBACK_INTERRUPTED_AFTER_WRITE',
+          'GCS generation-pinned file handle generation changed unexpectedly during readback.',
+          receipt.receiptId,
+          'GCS generation-pinned readback detected unexpected generation drift.'
+        );
+      }
     }
 
     if (totalBytesRead !== receipt.byteSize) {
@@ -1139,7 +1266,7 @@ export class GcsLibraryQuarantineStorageAdapter {
       attestedContentType: rawMeta.contentType,
       attestedByteSize: totalBytesRead,
       attestedSha256: actualStoredSha256,
-      attestedGeneration: generationStr,
+      attestedGeneration: verifiedGeneration,
       verifiedAtIso,
     });
 

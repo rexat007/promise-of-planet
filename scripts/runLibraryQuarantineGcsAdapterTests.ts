@@ -12,6 +12,7 @@ import {
   beginLibraryQuarantineWritePending,
   confirmLibraryQuarantineWriteWithAttestation,
   markLibraryQuarantineWriteNeedsReconciliation,
+  reconcileLibraryQuarantineReceiptWithAttestation,
   rejectLibraryQuarantineReceipt,
   reserveLibraryQuarantineReceipt,
   type LibraryQuarantineInternalReceipt,
@@ -21,8 +22,11 @@ import {
   LIBRARY_QUARANTINE_CACHE_CONTROL,
   LIBRARY_QUARANTINE_CONTENT_DISPOSITION,
   LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
+  MAX_SAFE_GCS_GENERATION_NUMBER,
+  parseCanonicalSafeGcsGeneration,
   type GcsLibraryQuarantineBucket,
   type GcsLibraryQuarantineFile,
+  type GcsLibraryQuarantineFileOptions,
   type GcsLibraryQuarantineObjectMetadata,
   type GcsLibraryQuarantineReadStreamOptions,
   type GcsLibraryQuarantineReadableStream,
@@ -154,44 +158,154 @@ interface StoredFakeGcsObject {
 class FakeQuarantineGcsBucket implements GcsLibraryQuarantineBucket {
   public readonly name = 'promise-of-planet-private-quarantine-test';
   public readonly objects = new Map<string, StoredFakeGcsObject>();
+  public readonly generationsByPath = new Map<
+    string,
+    Map<string, StoredFakeGcsObject>
+  >();
 
   public saveCalls = 0;
+  public deleteCalls = 0;
   public getMetadataCalls = 0;
   public createReadStreamCalls = 0;
+  public unpinnedReadStreamCalls = 0;
   public downloadCalls = 0;
   public lastDestroyedStream = false;
   public chunksEmittedOnLastStream = 0;
+
+  public readonly fileHandleRequests: Array<{
+    readonly objectPath: string;
+    readonly generation?: string;
+  }> = [];
+  public readonly pinnedReadStreamCalls: Array<{
+    readonly objectPath: string;
+    readonly generation: string;
+  }> = [];
 
   public nextSaveError: unknown = null;
   public nextGetMetadataError: unknown = null;
   public nextStreamErrorAfterFirstChunk: Error | null = null;
   public customStreamChunksOverride: readonly Buffer[] | null = null;
+  public onAfterGetMetadata:
+    | ((
+        objectPath: string,
+        returnedMetadata: GcsLibraryQuarantineObjectMetadata
+      ) => void)
+    | null = null;
+  public customPinnedFileFactory:
+    | ((
+        objectPath: string,
+        options: GcsLibraryQuarantineFileOptions,
+        defaultHandle: GcsLibraryQuarantineFile
+      ) => GcsLibraryQuarantineFile)
+    | null = null;
+  public mutatePinnedFileGenerationDuringStream: string | null = null;
   public streamChunkSize = 64;
   private generationCounter = 1730980000000;
+
+  private storeGenerationEntry(
+    objectPath: string,
+    generationKey: string,
+    entry: StoredFakeGcsObject
+  ): void {
+    let genMap = this.generationsByPath.get(objectPath);
+    if (!genMap) {
+      genMap = new Map<string, StoredFakeGcsObject>();
+      this.generationsByPath.set(objectPath, genMap);
+    }
+    genMap.set(generationKey, {
+      bytes: Buffer.from(entry.bytes),
+      metadata: { ...entry.metadata },
+      lastSaveOptions: entry.lastSaveOptions,
+    });
+  }
 
   public putRawObject(
     objectPath: string,
     bytes: Buffer,
     metadata: GcsLibraryQuarantineObjectMetadata
   ): void {
-    this.objects.set(objectPath, {
+    const entry: StoredFakeGcsObject = {
       bytes: Buffer.from(bytes),
       metadata: { ...metadata },
-    });
+    };
+    this.objects.set(objectPath, entry);
+    const genMap = new Map<string, StoredFakeGcsObject>();
+    if (metadata.generation !== undefined && metadata.generation !== null) {
+      genMap.set(String(metadata.generation), {
+        bytes: Buffer.from(bytes),
+        metadata: { ...metadata },
+      });
+    }
+    this.generationsByPath.set(objectPath, genMap);
   }
 
-  public file(objectPath: string): GcsLibraryQuarantineFile {
+  /**
+   * Simulates an object replacement at `objectPath` with a new generation,
+   * optionally purging or retaining previous generations in storage.
+   */
+  public replaceCurrentObjectVersion(
+    objectPath: string,
+    bytes: Buffer,
+    newMetadata: GcsLibraryQuarantineObjectMetadata,
+    options?: { readonly retainPreviousGenerations?: boolean }
+  ): void {
+    const retainPrevious = options?.retainPreviousGenerations ?? true;
+    const entry: StoredFakeGcsObject = {
+      bytes: Buffer.from(bytes),
+      metadata: { ...newMetadata },
+    };
+    this.objects.set(objectPath, entry);
+    if (!retainPrevious) {
+      this.generationsByPath.set(
+        objectPath,
+        new Map<string, StoredFakeGcsObject>()
+      );
+    }
+    if (
+      newMetadata.generation !== undefined &&
+      newMetadata.generation !== null
+    ) {
+      this.storeGenerationEntry(
+        objectPath,
+        String(newMetadata.generation),
+        entry
+      );
+    }
+  }
+
+  public purgeStoredGeneration(objectPath: string, generation: string): void {
+    this.generationsByPath.get(objectPath)?.delete(generation);
+  }
+
+  public file(
+    objectPath: string,
+    fileOptions?: GcsLibraryQuarantineFileOptions
+  ): GcsLibraryQuarantineFile {
     const bucket = this;
+    const requestedGeneration = fileOptions?.generation;
+    this.fileHandleRequests.push({
+      objectPath,
+      generation: requestedGeneration,
+    });
 
     const fileHandle: GcsLibraryQuarantineFile & {
+      generation?: string | number;
       download?: () => Promise<[Buffer]>;
+      delete?: () => Promise<void>;
     } = {
       name: objectPath,
+      generation: requestedGeneration,
       async save(
         data: Buffer,
         options: GcsLibraryQuarantineSaveOptions
       ): Promise<void> {
         bucket.saveCalls += 1;
+
+        if (requestedGeneration !== undefined) {
+          throw new Error(
+            'FORBIDDEN_SAVE_ON_PINNED_HANDLE: save() must not be called on a generation-pinned readback handle.'
+          );
+        }
 
         if (bucket.nextSaveError !== null) {
           const err = bucket.nextSaveError;
@@ -225,7 +339,7 @@ class FakeQuarantineGcsBucket implements GcsLibraryQuarantineBucket {
           data.byteLength
         );
 
-        bucket.objects.set(objectPath, {
+        const storedEntry: StoredFakeGcsObject = {
           bytes: copiedBytes,
           lastSaveOptions: options,
           metadata: {
@@ -242,10 +356,15 @@ class FakeQuarantineGcsBucket implements GcsLibraryQuarantineBucket {
             updated: '2026-11-07T12:00:00.000Z',
             metadata: { ...options.metadata.metadata },
           },
-        });
+        };
+
+        bucket.objects.set(objectPath, storedEntry);
+        bucket.storeGenerationEntry(objectPath, generation, storedEntry);
       },
 
-      async getMetadata(): Promise<[GcsLibraryQuarantineObjectMetadata, unknown?]> {
+      async getMetadata(): Promise<
+        [GcsLibraryQuarantineObjectMetadata, unknown?]
+      > {
         bucket.getMetadataCalls += 1;
 
         if (bucket.nextGetMetadataError !== null) {
@@ -254,16 +373,29 @@ class FakeQuarantineGcsBucket implements GcsLibraryQuarantineBucket {
           throw err;
         }
 
-        const existing = bucket.objects.get(objectPath);
+        const existing =
+          requestedGeneration !== undefined
+            ? bucket.generationsByPath
+                .get(objectPath)
+                ?.get(requestedGeneration)
+            : bucket.objects.get(objectPath);
+
         if (!existing) {
           const notFoundErr = new Error(
-            `No such object: ${objectPath} (404)`
+            `No such object: ${objectPath}${requestedGeneration ? `#${requestedGeneration}` : ''} (404)`
           ) as Error & { code: number };
           notFoundErr.code = 404;
           throw notFoundErr;
         }
 
-        return [{ ...existing.metadata }, {}];
+        const snapshotMeta = { ...existing.metadata };
+        if (bucket.onAfterGetMetadata !== null) {
+          const hook = bucket.onAfterGetMetadata;
+          bucket.onAfterGetMetadata = null;
+          hook(objectPath, snapshotMeta);
+        }
+
+        return [snapshotMeta, {}];
       },
 
       createReadStream(
@@ -273,6 +405,21 @@ class FakeQuarantineGcsBucket implements GcsLibraryQuarantineBucket {
         bucket.lastDestroyedStream = false;
         bucket.chunksEmittedOnLastStream = 0;
 
+        if (
+          typeof requestedGeneration !== 'string' ||
+          requestedGeneration.length === 0
+        ) {
+          bucket.unpinnedReadStreamCalls += 1;
+          throw new Error(
+            'FORBIDDEN_UNPINNED_READ_STREAM: createReadStream() must only be called on a generation-pinned file handle.'
+          );
+        }
+
+        bucket.pinnedReadStreamCalls.push({
+          objectPath,
+          generation: requestedGeneration,
+        });
+
         let destroyed = false;
 
         const stream: GcsLibraryQuarantineReadableStream = {
@@ -281,13 +428,22 @@ class FakeQuarantineGcsBucket implements GcsLibraryQuarantineBucket {
             bucket.lastDestroyedStream = true;
           },
           async *[Symbol.asyncIterator](): AsyncIterator<Buffer> {
-            const existing = bucket.objects.get(objectPath);
-            if (!existing && !bucket.customStreamChunksOverride) {
+            const pinnedEntry = bucket.generationsByPath
+              .get(objectPath)
+              ?.get(requestedGeneration);
+
+            if (!pinnedEntry && !bucket.customStreamChunksOverride) {
               const notFoundErr = new Error(
-                'Object disappeared before stream read (404)'
+                `No such object generation: ${objectPath}#${requestedGeneration} (404)`
               ) as Error & { code: number };
               notFoundErr.code = 404;
               throw notFoundErr;
+            }
+
+            if (bucket.mutatePinnedFileGenerationDuringStream !== null) {
+              fileHandle.generation =
+                bucket.mutatePinnedFileGenerationDuringStream;
+              bucket.mutatePinnedFileGenerationDuringStream = null;
             }
 
             if (bucket.customStreamChunksOverride) {
@@ -306,7 +462,7 @@ class FakeQuarantineGcsBucket implements GcsLibraryQuarantineBucket {
               return;
             }
 
-            const fullBuf = existing!.bytes;
+            const fullBuf = pinnedEntry!.bytes;
             const step = Math.max(1, bucket.streamChunkSize);
             for (let offset = 0; offset < fullBuf.length; offset += step) {
               if (destroyed) {
@@ -336,7 +492,23 @@ class FakeQuarantineGcsBucket implements GcsLibraryQuarantineBucket {
           'FORBIDDEN_UNBOUNDED_DOWNLOAD: Adapter must never call file.download()'
         );
       },
+
+      async delete(): Promise<void> {
+        bucket.deleteCalls += 1;
+        throw new Error(
+          'FORBIDDEN_DELETE: Adapter must never call file.delete()'
+        );
+      },
     };
+
+    if (
+      bucket.customPinnedFileFactory !== null &&
+      fileOptions !== undefined
+    ) {
+      const factory = bucket.customPinnedFileFactory;
+      bucket.customPinnedFileFactory = null;
+      return factory(objectPath, fileOptions, fileHandle);
+    }
 
     return fileHandle;
   }
@@ -1136,6 +1308,14 @@ async function runAllTests(): Promise<void> {
         sha1: 'd9f4114222851c62c25574efbb0ffbeeb5c355e2',
       },
       {
+        path: 'functions/src/library/libraryQuarantineWriteCoordinator.ts',
+        sha1: '8f0343e72eae11158d6516d1baa6af99dca5c22a',
+      },
+      {
+        path: 'functions/src/library/libraryQuarantineRecoveryCoordinator.ts',
+        sha1: 'c2105cb5c12fc27e258943374313ad9b1f1c0e9d',
+      },
+      {
         path: 'functions/src/library/libraryUploadBinaryAdmission.ts',
         sha1: 'ea289629676addb05d89250e7f1599b71c5fb3d0',
       },
@@ -1164,6 +1344,456 @@ async function runAllTests(): Promise<void> {
         `Baseline file ${item.path} SHA-1 mismatch: expected ${item.sha1}, got ${actualSha1}`
       );
     }
+  });
+
+  await test('15. Metadata generation A followed by object replacement with generation B (where A is no longer available) fails closed even when B has identical bytes', async () => {
+    const bucket = new FakeQuarantineGcsBucket();
+    const adapter = new GcsLibraryQuarantineStorageAdapter({
+      bucket,
+      clock: () => '2026-11-07T12:14:00.000Z',
+    });
+
+    const { writePending, bytes } = makeWritePendingReceiptAndBytes({
+      format: 'PDF',
+    });
+    const rawBuf = Buffer.from(bytes);
+    const generationA = '1730980001001';
+    const generationB = '1730980002002';
+
+    const baseMeta: GcsLibraryQuarantineObjectMetadata = {
+      name: writePending.storagePath,
+      bucket: bucket.name,
+      generation: generationA,
+      contentType: CANONICAL_PDF_MIME_TYPE,
+      cacheControl: LIBRARY_QUARANTINE_CACHE_CONTROL,
+      contentDisposition: LIBRARY_QUARANTINE_CONTENT_DISPOSITION,
+      size: String(rawBuf.length),
+      metadata: {
+        receiptId: writePending.receiptId,
+        uploaderUid: writePending.uploaderUid,
+        sha256: writePending.sha256,
+        format: 'PDF',
+        quarantineState: LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
+      },
+    };
+
+    bucket.putRawObject(writePending.storagePath, rawBuf, baseMeta);
+
+    // Simulate a metadata-to-stream race: right after getMetadata() returns generation A,
+    // the object at storagePath is replaced by generation B with IDENTICAL bytes, and
+    // generation A is no longer available.
+    bucket.onAfterGetMetadata = (objectPath, returnedMeta) => {
+      assert(
+        returnedMeta.generation === generationA,
+        'Expected getMetadata to observe generation A'
+      );
+      bucket.replaceCurrentObjectVersion(
+        objectPath,
+        rawBuf, // Identical bytes!
+        {
+          ...baseMeta,
+          generation: generationB,
+        },
+        { retainPreviousGenerations: false }
+      );
+    };
+
+    const verifyOutcome = await adapter.verifyExistingQuarantineObject({
+      receipt: writePending,
+    });
+
+    assert(
+      !verifyOutcome.ok &&
+        verifyOutcome.status === 'NEEDS_RECONCILIATION' &&
+        verifyOutcome.errorCode === 'READBACK_INTERRUPTED_AFTER_WRITE',
+      `Expected NEEDS_RECONCILIATION / READBACK_INTERRUPTED_AFTER_WRITE when generation A disappears before pinned stream, got ${verifyOutcome.ok ? 'OK' : verifyOutcome.errorCode}`
+    );
+    assert(
+      bucket.pinnedReadStreamCalls.length === 1 &&
+        bucket.pinnedReadStreamCalls[0].generation === generationA,
+      'Adapter must request createReadStream exclusively on generation A and never read generation B'
+    );
+    assert(
+      bucket.unpinnedReadStreamCalls === 0,
+      'Adapter must never fall back to an unpinned stream'
+    );
+  });
+
+  await test('16. Metadata generation A followed by object replacement with generation B (while generation A remains accessible) streams generation A and attests generation A', async () => {
+    const bucket = new FakeQuarantineGcsBucket();
+    const adapter = new GcsLibraryQuarantineStorageAdapter({
+      bucket,
+      clock: () => '2026-11-07T12:15:00.000Z',
+    });
+
+    const { writePending, bytes } = makeWritePendingReceiptAndBytes({
+      format: 'DOCX',
+    });
+    const rawBufA = Buffer.from(bytes);
+    const generationA = '1730980003001';
+    const generationB = '1730980003002';
+
+    const metaA: GcsLibraryQuarantineObjectMetadata = {
+      name: writePending.storagePath,
+      bucket: bucket.name,
+      generation: generationA,
+      contentType: CANONICAL_DOCX_MIME_TYPE,
+      cacheControl: LIBRARY_QUARANTINE_CACHE_CONTROL,
+      contentDisposition: LIBRARY_QUARANTINE_CONTENT_DISPOSITION,
+      size: String(rawBufA.length),
+      metadata: {
+        receiptId: writePending.receiptId,
+        uploaderUid: writePending.uploaderUid,
+        sha256: writePending.sha256,
+        format: 'DOCX',
+        quarantineState: LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
+      },
+    };
+
+    bucket.putRawObject(writePending.storagePath, rawBufA, metaA);
+
+    // Between getMetadata() and createReadStream(), generation B becomes current with DIFFERENT/corrupted bytes,
+    // while generation A remains retained in versioned storage.
+    const corruptedBytesB = Buffer.from(rawBufA);
+    corruptedBytesB[corruptedBytesB.length - 8] ^= 0xff;
+
+    bucket.onAfterGetMetadata = (objectPath) => {
+      bucket.replaceCurrentObjectVersion(
+        objectPath,
+        corruptedBytesB,
+        {
+          ...metaA,
+          generation: generationB,
+        },
+        { retainPreviousGenerations: true }
+      );
+    };
+
+    const verifyOutcome = await adapter.verifyExistingQuarantineObject({
+      receipt: writePending,
+    });
+
+    assert(
+      verifyOutcome.ok &&
+        verifyOutcome.status === 'EXISTING_VERIFIED' &&
+        verifyOutcome.attestation.attestedGeneration === generationA,
+      'Expected pinned readback to stream retained generation A and attest generation A (not generation B)'
+    );
+
+    // Converse race: generation A had corrupted bytes, and generation B replaced it with valid bytes before stream.
+    // Pinned readback of generation A must still stream generation A's corrupted bytes and reject!
+    const generationCorruptA = '1730980004001';
+    const generationValidB = '1730980004002';
+    bucket.putRawObject(writePending.storagePath, corruptedBytesB, {
+      ...metaA,
+      generation: generationCorruptA,
+    });
+    bucket.onAfterGetMetadata = (objectPath) => {
+      bucket.replaceCurrentObjectVersion(
+        objectPath,
+        rawBufA, // Valid bytes on generation B!
+        {
+          ...metaA,
+          generation: generationValidB,
+        },
+        { retainPreviousGenerations: true }
+      );
+    };
+
+    const converseOutcome = await adapter.verifyExistingQuarantineObject({
+      receipt: writePending,
+    });
+    assert(
+      !converseOutcome.ok &&
+        converseOutcome.status === 'CONFLICT_OR_MISMATCH' &&
+        converseOutcome.errorCode === 'EXISTING_OBJECT_CONFLICT',
+      'Pinned readback must read generationCorruptA (not valid generationValidB) and reject corrupted bytes'
+    );
+  });
+
+  await test('17. Canonical nonzero positive safe-integer decimal generation validation rejects malformed, zero, negative, fractional, leading-zero, and unsafe (> MAX_SAFE_INTEGER) values', async () => {
+    const bucket = new FakeQuarantineGcsBucket();
+    const adapter = new GcsLibraryQuarantineStorageAdapter({
+      bucket,
+      clock: () => '2026-11-07T12:16:00.000Z',
+    });
+
+    const { writePending, bytes } = makeWritePendingReceiptAndBytes({
+      format: 'PDF',
+    });
+    const rawBuf = Buffer.from(bytes);
+
+    const invalidGenerations: ReadonlyArray<unknown> = [
+      undefined,
+      null,
+      '',
+      '0',
+      0,
+      -1,
+      '-1730980000001',
+      '+1730980000001',
+      '01730980000001',
+      '007',
+      '173098.5',
+      173098.5,
+      '1e12',
+      '1E12',
+      ' 1730980000001',
+      '1730980000001 ',
+      'gen_1730980000001',
+      '1730980000001-a',
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      MAX_SAFE_GCS_GENERATION_NUMBER + 1, // 9007199254740992 (unsafe JS integer)
+      '9007199254740992', // MAX_SAFE_INTEGER + 1 string
+      '9007199254740993', // MAX_SAFE_INTEGER + 2 string (rounds in IEEE-754)
+      '9999999999999999', // 16-digit > MAX_SAFE_INTEGER
+      '10000000000000000', // 17-digit > MAX_SAFE_INTEGER
+    ];
+
+    const streamsBefore = bucket.createReadStreamCalls;
+
+    for (const invalidGen of invalidGenerations) {
+      assert(
+        parseCanonicalSafeGcsGeneration(invalidGen) === null,
+        `Expected parseCanonicalSafeGcsGeneration(${String(invalidGen)}) to return null`
+      );
+
+      bucket.putRawObject(writePending.storagePath, rawBuf, {
+        name: writePending.storagePath,
+        bucket: bucket.name,
+        generation: invalidGen as string | number | undefined,
+        contentType: CANONICAL_PDF_MIME_TYPE,
+        cacheControl: LIBRARY_QUARANTINE_CACHE_CONTROL,
+        contentDisposition: LIBRARY_QUARANTINE_CONTENT_DISPOSITION,
+        size: String(rawBuf.length),
+        metadata: {
+          receiptId: writePending.receiptId,
+          uploaderUid: writePending.uploaderUid,
+          sha256: writePending.sha256,
+          format: 'PDF',
+          quarantineState: LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
+        },
+      });
+
+      const res = await adapter.verifyExistingQuarantineObject({
+        receipt: writePending,
+      });
+      assert(
+        !res.ok &&
+          res.status === 'CONFLICT_OR_MISMATCH' &&
+          res.errorCode === 'STORED_GENERATION_INVALID',
+        `Expected STORED_GENERATION_INVALID for generation ${String(invalidGen)}, got ${res.ok ? 'OK' : res.errorCode}`
+      );
+    }
+
+    assert(
+      bucket.createReadStreamCalls === streamsBefore,
+      'Zero read streams may be opened when metadata generation is invalid'
+    );
+
+    // Exact MAX_SAFE_INTEGER ('9007199254740991') and numeric 9007199254740991 must be accepted
+    const maxSafeStr = String(MAX_SAFE_GCS_GENERATION_NUMBER);
+    assert(
+      parseCanonicalSafeGcsGeneration(maxSafeStr) === maxSafeStr &&
+        parseCanonicalSafeGcsGeneration(MAX_SAFE_GCS_GENERATION_NUMBER) ===
+          maxSafeStr,
+      'Expected Number.MAX_SAFE_INTEGER to be accepted as a valid canonical generation'
+    );
+
+    bucket.putRawObject(writePending.storagePath, rawBuf, {
+      name: writePending.storagePath,
+      bucket: bucket.name,
+      generation: maxSafeStr,
+      contentType: CANONICAL_PDF_MIME_TYPE,
+      cacheControl: LIBRARY_QUARANTINE_CACHE_CONTROL,
+      contentDisposition: LIBRARY_QUARANTINE_CONTENT_DISPOSITION,
+      size: String(rawBuf.length),
+      metadata: {
+        receiptId: writePending.receiptId,
+        uploaderUid: writePending.uploaderUid,
+        sha256: writePending.sha256,
+        format: 'PDF',
+        quarantineState: LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
+      },
+    });
+
+    const maxSafeRes = await adapter.verifyExistingQuarantineObject({
+      receipt: writePending,
+    });
+    assert(
+      maxSafeRes.ok &&
+        maxSafeRes.attestation.attestedGeneration === maxSafeStr,
+      'Expected MAX_SAFE_INTEGER generation to verify cleanly'
+    );
+  });
+
+  await test('18. No unpinned read fallback when generation-scoped file handle creation fails, returns unpinned handle, mismatches generation, or drifts mid-stream', async () => {
+    const bucket = new FakeQuarantineGcsBucket();
+    const adapter = new GcsLibraryQuarantineStorageAdapter({
+      bucket,
+      clock: () => '2026-11-07T12:17:00.000Z',
+    });
+
+    const { writePending, bytes } = makeWritePendingReceiptAndBytes({
+      format: 'PDF',
+    });
+    const rawBuf = Buffer.from(bytes);
+    const validGen = '1730980005001';
+
+    bucket.putRawObject(writePending.storagePath, rawBuf, {
+      name: writePending.storagePath,
+      bucket: bucket.name,
+      generation: validGen,
+      contentType: CANONICAL_PDF_MIME_TYPE,
+      cacheControl: LIBRARY_QUARANTINE_CACHE_CONTROL,
+      contentDisposition: LIBRARY_QUARANTINE_CONTENT_DISPOSITION,
+      size: String(rawBuf.length),
+      metadata: {
+        receiptId: writePending.receiptId,
+        uploaderUid: writePending.uploaderUid,
+        sha256: writePending.sha256,
+        format: 'PDF',
+        quarantineState: LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
+      },
+    });
+
+    // 18a. bucket.file(path, { generation }) throws an error
+    bucket.customPinnedFileFactory = () => {
+      throw new Error('Generation-scoped handle creation unsupported');
+    };
+    const throwRes = await adapter.verifyExistingQuarantineObject({
+      receipt: writePending,
+    });
+    assert(
+      !throwRes.ok &&
+        throwRes.status === 'NEEDS_RECONCILIATION' &&
+        throwRes.errorCode === 'READBACK_INTERRUPTED_AFTER_WRITE',
+      'Throwing during pinned handle creation must return NEEDS_RECONCILIATION without unpinned fallback'
+    );
+
+    // 18b. bucket.file(path, { generation }) returns a handle with a mismatched generation property
+    bucket.customPinnedFileFactory = (_path, _opts, defaultHandle) => ({
+      ...defaultHandle,
+      generation: '1730980005999',
+    });
+    const mismatchHandleRes = await adapter.verifyExistingQuarantineObject({
+      receipt: writePending,
+    });
+    assert(
+      !mismatchHandleRes.ok &&
+        mismatchHandleRes.status === 'NEEDS_RECONCILIATION' &&
+        mismatchHandleRes.errorCode === 'READBACK_INTERRUPTED_AFTER_WRITE',
+      'Mismatched pinnedFile.generation must fail closed without streaming'
+    );
+
+    // 18c. pinnedFile.generation mutates during streaming
+    bucket.mutatePinnedFileGenerationDuringStream = '1730980005888';
+    const driftRes = await adapter.verifyExistingQuarantineObject({
+      receipt: writePending,
+    });
+    assert(
+      !driftRes.ok &&
+        driftRes.status === 'NEEDS_RECONCILIATION' &&
+        driftRes.errorCode === 'READBACK_INTERRUPTED_AFTER_WRITE',
+      'Mid-stream generation drift on pinned handle must fail closed'
+    );
+
+    assert(
+      bucket.unpinnedReadStreamCalls === 0,
+      'Zero unpinned createReadStream calls allowed across all handle failure modes'
+    );
+  });
+
+  await test('19. Write-and-verify, 412 existing-object verify, direct verifyExistingQuarantineObject, and NeedsReconciliation recovery paths all pin exact generation', async () => {
+    const bucket = new FakeQuarantineGcsBucket();
+    const adapter = new GcsLibraryQuarantineStorageAdapter({
+      bucket,
+      clock: () => '2026-11-07T12:18:00.000Z',
+    });
+
+    const { writePending, bytes } = makeWritePendingReceiptAndBytes({
+      format: 'DOCX',
+    });
+
+    // Path A: Write-and-verify
+    const writeRes = await adapter.writeQuarantineObjectIfAbsent({
+      receipt: writePending,
+      bytes,
+    });
+    assert(
+      writeRes.ok && writeRes.status === 'WRITTEN_AND_VERIFIED',
+      'Write-and-verify must succeed'
+    );
+    if (!writeRes.ok) return;
+    const writtenGen = writeRes.attestation.attestedGeneration;
+
+    assert(
+      bucket.fileHandleRequests.length === 2 &&
+        bucket.fileHandleRequests[0].generation === undefined &&
+        bucket.fileHandleRequests[1].generation === writtenGen &&
+        bucket.pinnedReadStreamCalls.length === 1 &&
+        bucket.pinnedReadStreamCalls[0].generation === writtenGen,
+      'Write-and-verify must use 1 unpinned handle for save/getMetadata and 1 pinned handle for createReadStream'
+    );
+
+    // Path B: 412 existing-object fallback
+    const duplicateWriteRes = await adapter.writeQuarantineObjectIfAbsent({
+      receipt: writePending,
+      bytes,
+    });
+    assert(
+      duplicateWriteRes.ok &&
+        duplicateWriteRes.status === 'EXISTING_VERIFIED' &&
+        duplicateWriteRes.attestation.attestedGeneration === writtenGen,
+      '412 existing-object fallback must succeed and attest pinned generation'
+    );
+    assert(
+      bucket.pinnedReadStreamCalls.length === 2 &&
+        bucket.pinnedReadStreamCalls[1].generation === writtenGen,
+      '412 existing-object fallback must stream via generation-pinned handle'
+    );
+
+    // Path C: Recovery readback on NeedsReconciliation receipt -> reconcileLibraryQuarantineReceiptWithAttestation
+    const reconTransition = markLibraryQuarantineWriteNeedsReconciliation({
+      receipt: writePending,
+      actorUid: writePending.uploaderUid,
+      reconciliationReason: 'Simulated interruption prior to confirmation.',
+      nowIso: '2026-11-07T12:17:30.000Z',
+    });
+    assert(reconTransition.ok, 'Transition to NeedsReconciliation must succeed');
+    if (!reconTransition.ok) return;
+
+    const recoveryVerifyRes = await adapter.verifyExistingQuarantineObject({
+      receipt: reconTransition.receipt,
+      verifiedAtIso: '2026-11-07T12:18:30.000Z',
+    });
+    assert(
+      recoveryVerifyRes.ok &&
+        recoveryVerifyRes.status === 'EXISTING_VERIFIED' &&
+        recoveryVerifyRes.attestation.attestedGeneration === writtenGen,
+      'Recovery verifyExistingQuarantineObject on NeedsReconciliation receipt must succeed'
+    );
+    if (!recoveryVerifyRes.ok) return;
+
+    const reconciled = reconcileLibraryQuarantineReceiptWithAttestation({
+      receipt: reconTransition.receipt,
+      actorUid: writePending.uploaderUid,
+      attestation: recoveryVerifyRes.attestation,
+    });
+    assert(
+      reconciled.ok &&
+        reconciled.receipt.state === LibraryQuarantineReceiptState.Quarantined &&
+        reconciled.receipt.generation === writtenGen,
+      'reconcileLibraryQuarantineReceiptWithAttestation must transition to Quarantined with exact pinned generation'
+    );
+
+    assert(
+      bucket.unpinnedReadStreamCalls === 0 &&
+        bucket.deleteCalls === 0 &&
+        bucket.downloadCalls === 0,
+      'Zero unpinned stream calls, zero delete calls, and zero unbounded download calls'
+    );
   });
 
   console.log('------------------------------------------------------------');
