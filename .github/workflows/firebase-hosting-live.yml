@@ -4,7 +4,14 @@ on:
 jobs:
   build_and_deploy:
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
     steps:
+      - name: Verify Main Branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::This workflow can only be run on the main branch."
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -166,6 +173,60 @@ jobs:
             }
             console.log("Validated VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL: " + parsed.origin + parsed.pathname);
           '
+      - name: Validate Library Quarantine Upload Configuration
+        env:
+          LIBRARY_UPLOAD_ENABLED: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED }}
+          LIBRARY_UPLOAD_ENDPOINT_URL: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL }}
+        run: |
+          if [ -z "$LIBRARY_UPLOAD_ENABLED" ]; then
+            echo "::error::Repository variable VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED is missing or empty."
+            exit 1
+          fi
+          if [ -z "$LIBRARY_UPLOAD_ENDPOINT_URL" ]; then
+            echo "::error::Repository variable VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL is missing or empty."
+            exit 1
+          fi
+          node -e '
+            const rawEnabled = process.env.LIBRARY_UPLOAD_ENABLED;
+            const rawUrl = process.env.LIBRARY_UPLOAD_ENDPOINT_URL;
+            const expectedUrl = "https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryQuarantineUploadEndpoint";
+
+            if (typeof rawEnabled !== "string" || rawEnabled.trim() !== rawEnabled || /\s/.test(rawEnabled)) {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED must not contain leading, trailing, or internal whitespace.");
+              process.exit(1);
+            }
+            if (rawEnabled !== "true") {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED must equal exactly \"true\".");
+              process.exit(1);
+            }
+
+            if (typeof rawUrl !== "string" || rawUrl.trim() !== rawUrl || /\s/.test(rawUrl)) {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must not contain leading, trailing, or internal whitespace.");
+              process.exit(1);
+            }
+            if (rawUrl.includes("?") || rawUrl.includes("#")) {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must not include query parameters or URL fragments.");
+              process.exit(1);
+            }
+
+            let parsed;
+            try {
+              parsed = new URL(rawUrl);
+            } catch (err) {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL is not a syntactically valid URL: " + err.message);
+              process.exit(1);
+            }
+            if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must be a clean https URL without credentials, query parameters, or fragments.");
+              process.exit(1);
+            }
+            if (rawUrl !== expectedUrl) {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must equal exactly \"" + expectedUrl + "\".");
+              process.exit(1);
+            }
+
+            console.log("Validated VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED=true and VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL=" + expectedUrl);
+          '
       - run: npx vite build
         env:
           VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
@@ -176,6 +237,8 @@ jobs:
           VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL: ${{ vars.VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL }}
           VITE_EDITORIAL_IMAGE_PREVIEW_URL: ${{ vars.VITE_EDITORIAL_IMAGE_PREVIEW_URL }}
           VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL: ${{ vars.VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL }}
+          VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED }}
+          VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL }}
       - uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: '${{ secrets.GITHUB_TOKEN }}'
