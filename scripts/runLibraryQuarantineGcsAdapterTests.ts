@@ -331,6 +331,16 @@ class FakeQuarantineGcsBucket implements GcsLibraryQuarantineBucket {
           throw precondErr;
         }
 
+        // Mirror real @google-cloud/storage File.prototype.save normalization:
+        // mutates options.metadata.contentType = options.contentType in place.
+        if (options.contentType) {
+          (
+            options.metadata as {
+              contentType?: string;
+            }
+          ).contentType = options.contentType;
+        }
+
         bucket.generationCounter += 1;
         const generation = String(bucket.generationCounter);
         const copiedBytes = Buffer.from(
@@ -1793,6 +1803,111 @@ async function runAllTests(): Promise<void> {
         bucket.deleteCalls === 0 &&
         bucket.downloadCalls === 0,
       'Zero unpinned stream calls, zero delete calls, and zero unbounded download calls'
+    );
+  });
+
+  await test('20. Real GCS SDK save() metadata normalization regression (options.metadata.contentType = options.contentType)', async () => {
+    const bucket = new FakeQuarantineGcsBucket();
+    const adapter = new GcsLibraryQuarantineStorageAdapter({
+      bucket,
+      clock: () => '2026-11-07T12:20:00.000Z',
+    });
+
+    const { writePending, bytes } = makeWritePendingReceiptAndBytes({
+      format: 'PDF',
+    });
+
+    // 1. Confirm that passing frozen options.metadata to fake file.save() throws the exact production TypeError
+    const rawFileHandle = bucket.file(writePending.storagePath);
+    const frozenSaveOptions: GcsLibraryQuarantineSaveOptions = Object.freeze({
+      contentType: writePending.canonicalMimeType,
+      resumable: false as const,
+      preconditionOpts: Object.freeze({ ifGenerationMatch: 0 as const }),
+      preconditions: Object.freeze({ ifGenerationMatch: 0 as const }),
+      metadata: Object.freeze({
+        cacheControl: LIBRARY_QUARANTINE_CACHE_CONTROL,
+        contentDisposition: LIBRARY_QUARANTINE_CONTENT_DISPOSITION,
+        metadata: Object.freeze({
+          receiptId: writePending.receiptId,
+          uploaderUid: writePending.uploaderUid,
+          sha256: writePending.sha256,
+          format: writePending.format,
+          quarantineState: LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
+        }),
+      }),
+    });
+
+    let frozenSaveError: Error | null = null;
+    try {
+      await rawFileHandle.save(bytes, frozenSaveOptions);
+    } catch (err) {
+      frozenSaveError = err instanceof Error ? err : new Error(String(err));
+    }
+
+    assert(
+      frozenSaveError !== null &&
+        frozenSaveError instanceof TypeError &&
+        frozenSaveError.message.includes('contentType') &&
+        frozenSaveError.message.includes('object is not extensible'),
+      'Frozen options.metadata must fail SDK metadata.contentType normalization with TypeError: Cannot add property contentType, object is not extensible'
+    );
+    assert(
+      !bucket.objects.has(writePending.storagePath),
+      'Failed frozen save must not store object'
+    );
+
+    // Reset counter before testing repaired adapter write
+    bucket.saveCalls = 0;
+    bucket.fileHandleRequests.length = 0;
+
+    // 2. Repaired adapter passes mutable saveOptions and succeeds with WRITTEN_AND_VERIFIED
+    const writeRes = await adapter.writeQuarantineObjectIfAbsent({
+      receipt: writePending,
+      bytes,
+    });
+
+    assert(
+      writeRes.ok && writeRes.status === 'WRITTEN_AND_VERIFIED',
+      'Repaired adapter must succeed with WRITTEN_AND_VERIFIED under SDK options.metadata.contentType mutation'
+    );
+    if (!writeRes.ok) return;
+
+    assert(
+      bucket.saveCalls === 1,
+      'Must perform exactly 1 conditional save call (no automatic retry)'
+    );
+
+    const stored = bucket.objects.get(writePending.storagePath);
+    assert(stored !== undefined, 'Object must be stored at canonical path');
+    if (!stored || !stored.lastSaveOptions) return;
+
+    assert(
+      stored.lastSaveOptions.preconditionOpts.ifGenerationMatch === 0 &&
+        stored.lastSaveOptions.preconditions.ifGenerationMatch === 0 &&
+        stored.lastSaveOptions.resumable === false,
+      'ifGenerationMatch === 0 and resumable === false must be preserved'
+    );
+    assert(
+      (
+        stored.lastSaveOptions.metadata as GcsLibraryQuarantineSaveOptions['metadata'] & {
+          contentType?: string;
+        }
+      ).contentType === CANONICAL_PDF_MIME_TYPE,
+      'SDK normalization options.metadata.contentType = options.contentType must succeed'
+    );
+    assert(
+      Buffer.compare(stored.bytes, bytes) === 0 &&
+        stored.metadata.contentType === CANONICAL_PDF_MIME_TYPE &&
+        stored.metadata.cacheControl === LIBRARY_QUARANTINE_CACHE_CONTROL &&
+        stored.metadata.contentDisposition ===
+          LIBRARY_QUARANTINE_CONTENT_DISPOSITION &&
+        stored.metadata.metadata?.receiptId === writePending.receiptId &&
+        stored.metadata.metadata?.uploaderUid === writePending.uploaderUid &&
+        stored.metadata.metadata?.sha256 === writePending.sha256 &&
+        stored.metadata.metadata?.format === writePending.format &&
+        stored.metadata.metadata?.quarantineState ===
+          LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
+      'Saved bytes and all security metadata fields must remain intact'
     );
   });
 

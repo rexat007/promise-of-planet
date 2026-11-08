@@ -1311,7 +1311,7 @@ async function runAllTests(): Promise<void> {
       },
       {
         path: 'functions/src/library/gcsLibraryQuarantineStorageAdapter.ts',
-        sha1: '5d25e21a25b61cfe984b18f698d59f9dcc1b02e0',
+        sha1: '4bca554dd00a5e2efc739cc166175cc63327c5ad',
       },
       {
         path: 'functions/src/library/libraryUploadBinaryAdmission.ts',
@@ -1331,7 +1331,7 @@ async function runAllTests(): Promise<void> {
       },
       {
         path: 'scripts/runLibraryQuarantineGcsAdapterTests.ts',
-        sha1: '28d809822275268916c24a424076e5165222bf92',
+        sha1: 'c389d28576f892de296837c360f3a502cf6c3230',
       },
     ];
 

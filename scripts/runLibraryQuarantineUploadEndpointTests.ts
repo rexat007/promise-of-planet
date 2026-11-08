@@ -1815,7 +1815,7 @@ async function runAllTests(): Promise<void> {
       },
       {
         path: 'functions/src/library/gcsLibraryQuarantineStorageAdapter.ts',
-        sha1: '73d6ea3f117cc23cd418b839680870a2137700ae',
+        sha1: '4bca554dd00a5e2efc739cc166175cc63327c5ad',
       },
       {
         path: 'functions/src/library/libraryQuarantineWriteCoordinator.ts',

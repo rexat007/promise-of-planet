@@ -741,23 +741,23 @@ export class GcsLibraryQuarantineStorageAdapter {
       );
     }
 
-    const saveOptions: GcsLibraryQuarantineSaveOptions = Object.freeze({
+    const saveOptions: GcsLibraryQuarantineSaveOptions = {
       contentType: receipt.canonicalMimeType,
       resumable: false as const,
-      preconditionOpts: Object.freeze({ ifGenerationMatch: 0 as const }),
-      preconditions: Object.freeze({ ifGenerationMatch: 0 as const }),
-      metadata: Object.freeze({
+      preconditionOpts: { ifGenerationMatch: 0 as const },
+      preconditions: { ifGenerationMatch: 0 as const },
+      metadata: {
         cacheControl: LIBRARY_QUARANTINE_CACHE_CONTROL,
         contentDisposition: LIBRARY_QUARANTINE_CONTENT_DISPOSITION,
-        metadata: Object.freeze({
+        metadata: {
           receiptId: receipt.receiptId,
           uploaderUid: receipt.uploaderUid,
           sha256: receipt.sha256,
           format: receipt.format,
           quarantineState: LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
-        }),
-      }),
-    });
+        },
+      },
+    };
 
     let createdNewObject = false;
 
