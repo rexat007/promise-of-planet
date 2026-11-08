@@ -636,11 +636,20 @@ async function runTests(): Promise<void> {
     }
   });
 
-  await test('11. PDF with active content (/JavaScript, /OpenAction, /Launch, hex-escaped /#4a#53) is rejected and never classified as sanitized', () => {
+  await test('11. PDF with active content (/JavaScript, /JS, /Launch, /EmbeddedFiles, /EmbeddedFile, /RichMedia, /SubmitForm, /ImportData, /GoToR, /GoToE, /OpenAction, /AA, /XFA, hex-escaped /#4a#53) is rejected and never classified as sanitized', () => {
     const activeConstructs = [
       '/OpenAction << /S /JavaScript /JS (app.alert(1)) >>\n',
-      '/AA << /O << /S /Launch /F (cmd.exe) >> >>\n',
+      '/JS (app.alert(1))\n',
+      '/Launch << /F (cmd.exe) >>\n',
       '/Names << /EmbeddedFiles << >> >>\n',
+      '/EF << /F 10 0 R /Type /EmbeddedFile >>\n',
+      '/Subtype /RichMedia\n',
+      '/S /SubmitForm\n',
+      '/S /ImportData\n',
+      '/S /GoToR\n',
+      '/S /GoToE\n',
+      '/OpenAction [ 1 0 R /Fit ]\n',
+      '/AA << /O << /S /Launch /F (cmd.exe) >> >>\n',
       '/#4a#61#76#61#53#63#72#69#70#74 (escaped js)\n',
       '/XFA [ (form) ]\n',
     ];
@@ -661,6 +670,76 @@ async function runTests(): Promise<void> {
         );
       }
     }
+  });
+
+  await test('14. LIB-FILE-PDF-URI-R1: PDF with 4 ordinary /URI link entries passes preliminary admission as PENDING_DEEP_INSPECTION only, while /URI combined with /OpenAction or /JavaScript is rejected', () => {
+    const fourUriObjects =
+      '3 0 obj\n<< /Type /Annot /Subtype /Link /A << /Type /Action /S /URI /URI (https://doi.org/10.1000/env-2026-01) >> >>\nendobj\n' +
+      '4 0 obj\n<< /Type /Annot /Subtype /Link /A << /Type /Action /S /URI /URI (https://doi.org/10.1000/env-2026-02) >> >>\nendobj\n' +
+      '5 0 obj\n<< /Type /Annot /Subtype /Link /A << /Type /Action /S /URI /URI (https://doi.org/10.1000/env-2026-03) >> >>\nendobj\n' +
+      '6 0 obj\n<< /Type /Annot /Subtype /Link /A << /Type /Action /S /URI /URI (https://doi.org/10.1000/env-2026-04) >> >>\nendobj\n';
+
+    const uriOnlyPdfBytes = makeMinimalPreliminaryPdfBuffer(fourUriObjects);
+    const expectedSha = createHash('sha256').update(uriOnlyPdfBytes).digest('hex');
+
+    const uriOnlyRes = assessLibraryUploadBinaryCandidate({
+      originalFilename: 'scholarly-environmental-report-with-links.pdf',
+      claimedMimeType: CANONICAL_PDF_MIME_TYPE,
+      bytes: uriOnlyPdfBytes,
+    });
+
+    assert(
+      uriOnlyRes.status === 'PENDING_DEEP_INSPECTION',
+      'PDF containing 4 ordinary /URI link entries must not be rejected by preliminary admission'
+    );
+    if (uriOnlyRes.status === 'PENDING_DEEP_INSPECTION') {
+      assert(uriOnlyRes.format === 'PDF', 'Format must be PDF');
+      assert(uriOnlyRes.sizeBytes === uriOnlyPdfBytes.length, 'sizeBytes matches');
+      assert(uriOnlyRes.sha256 === expectedSha, 'sha256 matches actual bytes');
+      assert(uriOnlyRes.deepInspectionRequired === true, 'deepInspectionRequired must remain true');
+      assert(uriOnlyRes.isSanitized === false, 'isSanitized must be false');
+      assert(uriOnlyRes.isVerifiedSafe === false, 'isVerifiedSafe must be false');
+      assert(uriOnlyRes.isStored === false, 'isStored must be false');
+      assert(uriOnlyRes.isPublished === false, 'isPublished must be false');
+      assert(uriOnlyRes.isRightsApproved === false, 'isRightsApproved must be false');
+      assert(uriOnlyRes.isReadyForPeia === false, 'isReadyForPeia must be false');
+    }
+
+    const serialized = JSON.stringify(uriOnlyRes);
+    assert(!serialized.includes('"VERIFIED"'), 'Must not produce VERIFIED status');
+    assert(!serialized.includes('"SANITIZED"'), 'Must not produce SANITIZED status');
+    assert(!serialized.includes('"PUBLISHED"'), 'Must not produce PUBLISHED status');
+    assert(!serialized.includes('SAFE_TO_EXECUTE'), 'Must not produce SAFE_TO_EXECUTE status');
+
+    // /URI combined with /OpenAction must still be rejected
+    const uriWithOpenActionBytes = makeMinimalPreliminaryPdfBuffer(
+      fourUriObjects + '7 0 obj\n<< /Type /Catalog /OpenAction 3 0 R >>\nendobj\n'
+    );
+    const uriWithOpenActionRes = assessLibraryUploadBinaryCandidate({
+      originalFilename: 'uri-openaction.pdf',
+      claimedMimeType: CANONICAL_PDF_MIME_TYPE,
+      bytes: uriWithOpenActionBytes,
+    });
+    assert(
+      uriWithOpenActionRes.status === 'REJECTED' &&
+        uriWithOpenActionRes.reasonCode === 'PDF_ACTIVE_CONTENT_DETECTED',
+      '/URI combined with /OpenAction must be rejected with PDF_ACTIVE_CONTENT_DETECTED'
+    );
+
+    // /URI combined with /JavaScript must still be rejected
+    const uriWithJsBytes = makeMinimalPreliminaryPdfBuffer(
+      fourUriObjects + '7 0 obj\n<< /S /JavaScript /JS (app.alert(1)) >>\nendobj\n'
+    );
+    const uriWithJsRes = assessLibraryUploadBinaryCandidate({
+      originalFilename: 'uri-javascript.pdf',
+      claimedMimeType: CANONICAL_PDF_MIME_TYPE,
+      bytes: uriWithJsBytes,
+    });
+    assert(
+      uriWithJsRes.status === 'REJECTED' &&
+        uriWithJsRes.reasonCode === 'PDF_ACTIVE_CONTENT_DETECTED',
+      '/URI combined with /JavaScript must be rejected with PDF_ACTIVE_CONTENT_DETECTED'
+    );
   });
 
   await test('12. No false VERIFIED, SANITIZED, PUBLISHED, URL, or storage-path states, and untrusted extra input fields fail closed', () => {

@@ -1315,7 +1315,7 @@ async function runAllTests(): Promise<void> {
       },
       {
         path: 'functions/src/library/libraryUploadBinaryAdmission.ts',
-        sha1: 'ea289629676addb05d89250e7f1599b71c5fb3d0',
+        sha1: 'c479007641d799afb145436bf91e661a7c2d5611',
       },
       {
         path: 'functions/src/library/libraryUploadDeepStructure.ts',
@@ -1323,15 +1323,15 @@ async function runAllTests(): Promise<void> {
       },
       {
         path: 'scripts/runLibraryQuarantineReceiptContractTests.ts',
-        sha1: 'c4d36b366dd5ab72eaeaf9af46c79f22217ff3c1',
+        sha1: '057c360bbcfa1126a8a49f93250a5f2aa145b1bb',
       },
       {
         path: 'scripts/runLibraryQuarantineReceiptStoreTests.ts',
-        sha1: '2a090efdc66d8d842776b4a817aed61f9fcbdd17',
+        sha1: 'b9f07538ad006fe8781ae01af4603ecf6efa8540',
       },
       {
         path: 'scripts/runLibraryQuarantineGcsAdapterTests.ts',
-        sha1: 'c389d28576f892de296837c360f3a502cf6c3230',
+        sha1: '62703e53de9e9d31d880f1bb461323941e43f06c',
       },
     ];
 

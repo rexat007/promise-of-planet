@@ -1047,7 +1047,7 @@ async function runTests(): Promise<void> {
     }
   });
 
-  await test('12. PDF candidates passing 01A return PDF_REQUIRES_ISOLATED_PARSER (never verified safe), and unsafe PDFs or spoofed caller fields are rejected', () => {
+  await test('12. PDF candidates passing 01A (including PDFs with /URI links) return PDF_REQUIRES_ISOLATED_PARSER (never verified safe), and unsafe PDFs or spoofed caller fields are rejected', () => {
     const cleanPreliminaryPdf = makeMinimalPreliminaryPdfBuffer();
     const expectedPdfSha = createHash('sha256').update(cleanPreliminaryPdf).digest('hex');
 
@@ -1073,20 +1073,56 @@ async function runTests(): Promise<void> {
       assert(pdfRes.isReadyForPeia === false, 'isReadyForPeia must be false');
     }
 
-    // PDF with active content (/JavaScript) must still be REJECTED via 01A re-execution
-    const activePdf = makeMinimalPreliminaryPdfBuffer(
-      '/OpenAction << /S /JavaScript /JS (app.alert(1)) >>\n'
-    );
-    const activePdfRes = inspectLibraryUploadDeepStructure({
-      originalFilename: 'malicious.pdf',
+    // LIB-FILE-PDF-URI-R1: PDF containing 4 ordinary /URI links returns PDF_REQUIRES_ISOLATED_PARSER with all safety flags false
+    const fourUriObjects =
+      '3 0 obj\n<< /Type /Annot /Subtype /Link /A << /Type /Action /S /URI /URI (https://doi.org/10.1000/env-2026-01) >> >>\nendobj\n' +
+      '4 0 obj\n<< /Type /Annot /Subtype /Link /A << /Type /Action /S /URI /URI (https://doi.org/10.1000/env-2026-02) >> >>\nendobj\n' +
+      '5 0 obj\n<< /Type /Annot /Subtype /Link /A << /Type /Action /S /URI /URI (https://doi.org/10.1000/env-2026-03) >> >>\nendobj\n' +
+      '6 0 obj\n<< /Type /Annot /Subtype /Link /A << /Type /Action /S /URI /URI (https://doi.org/10.1000/env-2026-04) >> >>\nendobj\n';
+    const uriPdfBytes = makeMinimalPreliminaryPdfBuffer(fourUriObjects);
+    const expectedUriPdfSha = createHash('sha256').update(uriPdfBytes).digest('hex');
+
+    const uriPdfRes = inspectLibraryUploadDeepStructure({
+      originalFilename: 'scholarly-environmental-report-with-links.pdf',
       claimedMimeType: CANONICAL_PDF_MIME_TYPE,
-      bytes: activePdf,
+      bytes: uriPdfBytes,
     });
+
     assert(
-      activePdfRes.status === 'REJECTED' &&
-        activePdfRes.reasonCode === 'PDF_ACTIVE_CONTENT_DETECTED',
-      'PDF with /JavaScript must be rejected with PDF_ACTIVE_CONTENT_DETECTED'
+      uriPdfRes.status === 'PDF_REQUIRES_ISOLATED_PARSER',
+      'PDF containing ordinary /URI links must return PDF_REQUIRES_ISOLATED_PARSER'
     );
+    if (uriPdfRes.status === 'PDF_REQUIRES_ISOLATED_PARSER') {
+      assert(uriPdfRes.format === 'PDF', 'format must be PDF');
+      assert(uriPdfRes.sizeBytes === uriPdfBytes.length, 'sizeBytes matches');
+      assert(uriPdfRes.sha256 === expectedUriPdfSha, 'sha256 preserved');
+      assert(uriPdfRes.isSanitized === false, 'isSanitized must be false');
+      assert(uriPdfRes.isVerifiedSafe === false, 'isVerifiedSafe must be false');
+      assert(uriPdfRes.isStored === false, 'isStored must be false');
+      assert(uriPdfRes.isPublished === false, 'isPublished must be false');
+      assert(uriPdfRes.isRightsApproved === false, 'isRightsApproved must be false');
+      assert(uriPdfRes.isReadyForPeia === false, 'isReadyForPeia must be false');
+    }
+
+    // PDF with active content (/JavaScript, /Launch, or /URI + /OpenAction) must still be REJECTED via 01A re-execution
+    for (const maliciousSnippet of [
+      '/OpenAction << /S /JavaScript /JS (app.alert(1)) >>\n',
+      '/AA << /O << /S /Launch /F (cmd.exe) >> >>\n',
+      fourUriObjects + '7 0 obj\n<< /Type /Catalog /OpenAction 3 0 R >>\nendobj\n',
+      fourUriObjects + '7 0 obj\n<< /S /JavaScript /JS (app.alert(1)) >>\nendobj\n',
+    ]) {
+      const activePdf = makeMinimalPreliminaryPdfBuffer(maliciousSnippet);
+      const activePdfRes = inspectLibraryUploadDeepStructure({
+        originalFilename: 'malicious.pdf',
+        claimedMimeType: CANONICAL_PDF_MIME_TYPE,
+        bytes: activePdf,
+      });
+      assert(
+        activePdfRes.status === 'REJECTED' &&
+          activePdfRes.reasonCode === 'PDF_ACTIVE_CONTENT_DETECTED',
+        'Malicious PDF with active content must be rejected with PDF_ACTIVE_CONTENT_DETECTED'
+      );
+    }
 
     // Caller attempting to pass pre-verified status or extra fields must be rejected
     const spoofedCallerInput = {
@@ -1128,8 +1164,8 @@ async function runTests(): Promise<void> {
     }
 
     const expectedHashes: ReadonlyArray<readonly [string, string]> = [
-      ['functions/src/library/libraryUploadBinaryAdmission.ts', 'ea289629676addb05d89250e7f1599b71c5fb3d0'],
-      ['scripts/runLibraryUploadBinaryAdmissionTests.ts', 'f394d0beb24da9404b3b9b0cd5838fd7507f2248'],
+      ['functions/src/library/libraryUploadBinaryAdmission.ts', 'c479007641d799afb145436bf91e661a7c2d5611'],
+      ['scripts/runLibraryUploadBinaryAdmissionTests.ts', 'daaaeee64e31dcbd0d9ef126769875829a6f75a5'],
       ['functions/src/shared/libraryContract.ts', 'cfb0849c0418ba7b075f7de49c3debe668adc724'],
       ['functions/src/library/libraryApplicationService.ts', '32b54a8946f3749c18b21ab7f4d0fb4c21b2ebcf'],
       ['functions/src/library/libraryAdminHandlers.ts', 'e8711ca2c4430fa4ea53d1e5c1005890ef33a479'],

@@ -286,7 +286,6 @@ const FORBIDDEN_PDF_ACTIVE_CONSTRUCT_PATTERNS: readonly {
   { regex: /\/OpenAction(?![A-Za-z0-9_])/i, label: '/OpenAction' },
   { regex: /\/AA(?![A-Za-z0-9_])/i, label: '/AA' },
   { regex: /\/XFA(?![A-Za-z0-9_])/i, label: '/XFA' },
-  { regex: /\/URI(?![A-Za-z0-9_])/i, label: '/URI' },
 ]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -906,10 +906,10 @@ async function runTests(): Promise<void> {
 
   await test('12. Zero storage, database, or network side effects and baseline file SHA-1 preservation', () => {
     const expectedBaselineHashes: ReadonlyArray<readonly [string, string]> = [
-      ['functions/src/library/libraryUploadBinaryAdmission.ts', 'ea289629676addb05d89250e7f1599b71c5fb3d0'],
+      ['functions/src/library/libraryUploadBinaryAdmission.ts', 'c479007641d799afb145436bf91e661a7c2d5611'],
       ['functions/src/library/libraryUploadDeepStructure.ts', '7e6ba463502bc8d6c796378d6b381cdaaf01c60e'],
-      ['scripts/runLibraryUploadBinaryAdmissionTests.ts', 'f394d0beb24da9404b3b9b0cd5838fd7507f2248'],
-      ['scripts/runLibraryUploadDeepStructureTests.ts', 'ee11914872708dd7f77b5b7192b3da18b7167959'],
+      ['scripts/runLibraryUploadBinaryAdmissionTests.ts', 'daaaeee64e31dcbd0d9ef126769875829a6f75a5'],
+      ['scripts/runLibraryUploadDeepStructureTests.ts', 'c46e8edd64456dc8db09652921ad957b9dbf1921'],
       ['functions/src/shared/libraryContract.ts', 'cfb0849c0418ba7b075f7de49c3debe668adc724'],
       ['functions/src/news/editorialBinaryIntakeService.ts', 'c905d500df376e546b71e6a091d1624890f39542'],
       ['functions/src/news/gcsEditorialBinaryStorageAdapter.ts', '4bc2c40dd72c4bd3d8c09b349958db7a8e291e9e'],

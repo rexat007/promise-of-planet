@@ -1237,7 +1237,7 @@ async function runAllTests(): Promise<void> {
       },
       {
         path: 'scripts/runLibraryQuarantineReceiptContractTests.ts',
-        sha1: 'c4d36b366dd5ab72eaeaf9af46c79f22217ff3c1',
+        sha1: '057c360bbcfa1126a8a49f93250a5f2aa145b1bb',
       },
       {
         path: 'functions/src/news/firestoreEditorialBinaryIntakeSessionStore.ts',
@@ -1249,7 +1249,7 @@ async function runAllTests(): Promise<void> {
       },
       {
         path: 'functions/src/library/libraryUploadBinaryAdmission.ts',
-        sha1: 'ea289629676addb05d89250e7f1599b71c5fb3d0',
+        sha1: 'c479007641d799afb145436bf91e661a7c2d5611',
       },
       {
         path: 'functions/src/library/libraryUploadDeepStructure.ts',
