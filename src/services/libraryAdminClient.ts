@@ -36,6 +36,24 @@ import {
   type SourceFailureRecord,
 } from '../../functions/src/peia/nonAdvisoryOutcomeIntakeContract';
 import type { WorkflowState } from '../types/workflow';
+import type {
+  LibraryQuarantineReceiptState,
+  SanitizedLibraryQuarantineAdminReceiptDto,
+} from '../../functions/src/library/libraryQuarantineReceiptContract';
+
+export type {
+  LibraryQuarantineReceiptState,
+  SanitizedLibraryQuarantineAdminReceiptDto,
+};
+
+export interface SanitizedLibraryQuarantineReceiptListItemDto {
+  readonly revision: number;
+  readonly adminReceipt: SanitizedLibraryQuarantineAdminReceiptDto;
+}
+
+export interface ListLibraryQuarantineReceiptsResponseDto {
+  readonly receipts: readonly SanitizedLibraryQuarantineReceiptListItemDto[];
+}
 
 export {
   AIReviewTargetType,
@@ -1142,4 +1160,425 @@ export const LibraryAdminClient = {
       reviewStatus: validatedRevStatus,
     });
   },
+
+  async listQuarantineReceipts(): Promise<
+    readonly SanitizedLibraryQuarantineReceiptListItemDto[]
+  > {
+    const fns = getFunctionsInstance();
+    const callable = httpsCallable<
+      { readonly action: 'listQuarantineReceipts' },
+      ListLibraryQuarantineReceiptsResponseDto
+    >(fns, 'manageLibraryDocuments');
+
+    const res = await callable({ action: 'listQuarantineReceipts' });
+    return validateSanitizedLibraryQuarantineReceiptListResponse(res?.data);
+  },
 };
+
+const MAX_QUARANTINE_RECEIPT_LIST_ITEMS = 20 as const;
+const QUARANTINE_RECEIPT_ID_REGEX = /^[0-9a-f]{32}$/;
+const QUARANTINE_SHA256_REGEX = /^[0-9a-f]{64}$/;
+const QUARANTINE_ISO_UTC_REGEX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+
+const ALLOWED_SANITIZED_QUARANTINE_RECEIPT_KEYS: ReadonlySet<string> = new Set([
+  'receiptId',
+  'uploaderUid',
+  'originalFilename',
+  'sanitizedFilename',
+  'format',
+  'canonicalExtension',
+  'canonicalMimeType',
+  'byteSize',
+  'sha256',
+  'state',
+  'deepInspectionStatus',
+  'hasVerifiedStorageWrite',
+  'reconciliationRequired',
+  'reconciliationReason',
+  'rejectionReasonCode',
+  'createdAt',
+  'updatedAt',
+  'isQuarantinedPrivateOnly',
+  'isSanitized',
+  'isVerifiedSafe',
+  'isRightsApproved',
+  'isPublished',
+  'isReadyForPeia',
+]);
+
+const FORBIDDEN_QUARANTINE_LEAK_KEYS: ReadonlySet<string> = new Set([
+  'storagePath',
+  'generation',
+  'bucket',
+  'signedUrl',
+  'downloadUrl',
+  'mediaLink',
+  'downloadTokens',
+  'rawBytes',
+  'bytes',
+]);
+
+function hasForbiddenQuarantineLeakInPayload(
+  value: unknown,
+  depth = 0
+): boolean {
+  if (depth > 6 || value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === 'string') {
+    const lower = value.toLowerCase();
+    return (
+      lower.includes('library/quarantine/') ||
+      lower.includes('library-quarantine/') ||
+      lower.includes('gs://') ||
+      lower.includes('https://storage.googleapis.com') ||
+      lower.includes('firebasestorage.googleapis.com')
+    );
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) =>
+      hasForbiddenQuarantineLeakInPayload(entry, depth + 1)
+    );
+  }
+  if (typeof value === 'object') {
+    for (const [key, nested] of Object.entries(
+      value as Record<string, unknown>
+    )) {
+      if (FORBIDDEN_QUARANTINE_LEAK_KEYS.has(key)) {
+        return true;
+      }
+      if (hasForbiddenQuarantineLeakInPayload(nested, depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function assertExactObjectKeys(
+  obj: Record<string, unknown>,
+  requiredKeys: ReadonlySet<string>,
+  allowedKeys: ReadonlySet<string>,
+  label: string
+): void {
+  for (const key of Object.keys(obj)) {
+    if (!allowedKeys.has(key)) {
+      throw new Error(
+        `INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Unexpected field "${key}" in ${label}.`
+      );
+    }
+  }
+  for (const reqKey of requiredKeys) {
+    if (!(reqKey in obj)) {
+      throw new Error(
+        `INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Missing required field "${reqKey}" in ${label}.`
+      );
+    }
+  }
+}
+
+export function validateSanitizedLibraryQuarantineReceiptListItem(
+  candidate: unknown
+): SanitizedLibraryQuarantineReceiptListItemDto {
+  if (!isPlainObject(candidate)) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Receipt list item must be a plain object.'
+    );
+  }
+  assertExactObjectKeys(
+    candidate,
+    new Set(['revision', 'adminReceipt']),
+    new Set(['revision', 'adminReceipt']),
+    'QuarantineReceiptListItem'
+  );
+
+  if (hasForbiddenQuarantineLeakInPayload(candidate)) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Receipt list item contains leaked internal storage paths, generations, or URLs.'
+    );
+  }
+
+  const revision = candidate.revision;
+  if (
+    typeof revision !== 'number' ||
+    !Number.isSafeInteger(revision) ||
+    revision < 1
+  ) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Receipt revision must be a positive safe integer.'
+    );
+  }
+
+  const rawReceipt = candidate.adminReceipt;
+  if (!isPlainObject(rawReceipt)) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: adminReceipt must be a plain object.'
+    );
+  }
+
+  assertExactObjectKeys(
+    rawReceipt,
+    ALLOWED_SANITIZED_QUARANTINE_RECEIPT_KEYS,
+    ALLOWED_SANITIZED_QUARANTINE_RECEIPT_KEYS,
+    'SanitizedLibraryQuarantineAdminReceiptDto'
+  );
+
+  const {
+    receiptId,
+    uploaderUid,
+    originalFilename,
+    sanitizedFilename,
+    format,
+    canonicalExtension,
+    canonicalMimeType,
+    byteSize,
+    sha256,
+    state,
+    deepInspectionStatus,
+    hasVerifiedStorageWrite,
+    reconciliationRequired,
+    reconciliationReason,
+    rejectionReasonCode,
+    createdAt,
+    updatedAt,
+    isQuarantinedPrivateOnly,
+    isSanitized,
+    isVerifiedSafe,
+    isRightsApproved,
+    isPublished,
+    isReadyForPeia,
+  } = rawReceipt;
+
+  if (
+    typeof receiptId !== 'string' ||
+    !QUARANTINE_RECEIPT_ID_REGEX.test(receiptId)
+  ) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: receiptId must be a 32-character lowercase hexadecimal string.'
+    );
+  }
+
+  if (typeof uploaderUid !== 'string' || uploaderUid.trim().length === 0) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: uploaderUid must be a non-empty string.'
+    );
+  }
+
+  if (
+    typeof originalFilename !== 'string' ||
+    originalFilename.trim().length === 0 ||
+    typeof sanitizedFilename !== 'string' ||
+    sanitizedFilename.trim().length === 0
+  ) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: originalFilename and sanitizedFilename must be non-empty strings.'
+    );
+  }
+
+  if (format !== 'PDF' && format !== 'DOCX') {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: format must be "PDF" or "DOCX".'
+    );
+  }
+
+  const expectedExt: 'pdf' | 'docx' = format === 'PDF' ? 'pdf' : 'docx';
+  const expectedMime:
+    | 'application/pdf'
+    | 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' =
+    format === 'PDF'
+      ? 'application/pdf'
+      : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  const expectedInspectionStatus:
+    | 'PDF_REQUIRES_ISOLATED_PARSER'
+    | 'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION' =
+    format === 'PDF'
+      ? 'PDF_REQUIRES_ISOLATED_PARSER'
+      : 'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION';
+
+  if (
+    canonicalExtension !== expectedExt ||
+    canonicalMimeType !== expectedMime ||
+    deepInspectionStatus !== expectedInspectionStatus
+  ) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: format/extension/MIME/deepInspectionStatus invariant mismatch.'
+    );
+  }
+
+  if (
+    typeof byteSize !== 'number' ||
+    !Number.isSafeInteger(byteSize) ||
+    byteSize <= 0 ||
+    byteSize > 15_000_000
+  ) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: byteSize must be a positive integer within 15,000,000 bytes.'
+    );
+  }
+
+  if (typeof sha256 !== 'string' || !QUARANTINE_SHA256_REGEX.test(sha256)) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: sha256 must be a 64-character lowercase hexadecimal digest.'
+    );
+  }
+
+  if (
+    typeof createdAt !== 'string' ||
+    !QUARANTINE_ISO_UTC_REGEX.test(createdAt) ||
+    !Number.isFinite(Date.parse(createdAt)) ||
+    typeof updatedAt !== 'string' ||
+    !QUARANTINE_ISO_UTC_REGEX.test(updatedAt) ||
+    !Number.isFinite(Date.parse(updatedAt)) ||
+    Date.parse(updatedAt) < Date.parse(createdAt)
+  ) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: createdAt and updatedAt must be valid non-decreasing ISO-8601 UTC timestamps.'
+    );
+  }
+
+  if (
+    isSanitized !== false ||
+    isVerifiedSafe !== false ||
+    isRightsApproved !== false ||
+    isPublished !== false ||
+    isReadyForPeia !== false
+  ) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Quarantine receipt posture flags must all be strictly false.'
+    );
+  }
+
+  if (state === 'Quarantined') {
+    if (
+      hasVerifiedStorageWrite !== true ||
+      isQuarantinedPrivateOnly !== true ||
+      reconciliationRequired !== false ||
+      reconciliationReason !== null ||
+      rejectionReasonCode !== null
+    ) {
+      throw new Error(
+        'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Invalid state invariants for Quarantined receipt.'
+      );
+    }
+  } else if (state === 'NeedsReconciliation') {
+    if (
+      hasVerifiedStorageWrite !== false ||
+      isQuarantinedPrivateOnly !== false ||
+      reconciliationRequired !== true ||
+      typeof reconciliationReason !== 'string' ||
+      reconciliationReason.trim().length === 0 ||
+      rejectionReasonCode !== null
+    ) {
+      throw new Error(
+        'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Invalid state invariants for NeedsReconciliation receipt.'
+      );
+    }
+  } else if (state === 'Rejected') {
+    if (
+      hasVerifiedStorageWrite !== false ||
+      isQuarantinedPrivateOnly !== false ||
+      reconciliationRequired !== false ||
+      reconciliationReason !== null ||
+      typeof rejectionReasonCode !== 'string' ||
+      rejectionReasonCode.trim().length === 0
+    ) {
+      throw new Error(
+        'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Invalid state invariants for Rejected receipt.'
+      );
+    }
+  } else if (state === 'Reserved' || state === 'WritePending') {
+    if (
+      hasVerifiedStorageWrite !== false ||
+      isQuarantinedPrivateOnly !== false ||
+      reconciliationRequired !== false ||
+      reconciliationReason !== null ||
+      rejectionReasonCode !== null
+    ) {
+      throw new Error(
+        `INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Invalid state invariants for ${state} receipt.`
+      );
+    }
+  } else {
+    throw new Error(
+      `INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Unsupported receipt state "${String(state)}".`
+    );
+  }
+
+  const validatedReceipt: SanitizedLibraryQuarantineAdminReceiptDto =
+    Object.freeze({
+      receiptId,
+      uploaderUid,
+      originalFilename,
+      sanitizedFilename,
+      format,
+      canonicalExtension: expectedExt,
+      canonicalMimeType: expectedMime,
+      byteSize,
+      sha256,
+      state,
+      deepInspectionStatus: expectedInspectionStatus,
+      hasVerifiedStorageWrite: Boolean(hasVerifiedStorageWrite),
+      reconciliationRequired: Boolean(reconciliationRequired),
+      reconciliationReason: reconciliationReason as string | null,
+      rejectionReasonCode: rejectionReasonCode as string | null,
+      createdAt,
+      updatedAt,
+      isQuarantinedPrivateOnly: Boolean(isQuarantinedPrivateOnly),
+      isSanitized: false as const,
+      isVerifiedSafe: false as const,
+      isRightsApproved: false as const,
+      isPublished: false as const,
+      isReadyForPeia: false as const,
+    });
+
+  return Object.freeze({
+    revision,
+    adminReceipt: validatedReceipt,
+  });
+}
+
+export function validateSanitizedLibraryQuarantineReceiptListResponse(
+  rawData: unknown
+): readonly SanitizedLibraryQuarantineReceiptListItemDto[] {
+  if (!isPlainObject(rawData)) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Response must be a plain object.'
+    );
+  }
+  assertExactObjectKeys(
+    rawData,
+    new Set(['receipts']),
+    new Set(['receipts']),
+    'ListLibraryQuarantineReceiptsResponseDto'
+  );
+
+  if (!Array.isArray(rawData.receipts)) {
+    throw new Error(
+      'INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: receipts must be an array.'
+    );
+  }
+
+  if (rawData.receipts.length > MAX_QUARANTINE_RECEIPT_LIST_ITEMS) {
+    throw new Error(
+      `INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: receipts count (${rawData.receipts.length}) exceeds maximum bound (${MAX_QUARANTINE_RECEIPT_LIST_ITEMS}).`
+    );
+  }
+
+  const seenIds = new Set<string>();
+  const validatedItems: SanitizedLibraryQuarantineReceiptListItemDto[] = [];
+
+  for (const rawItem of rawData.receipts) {
+    const validated = validateSanitizedLibraryQuarantineReceiptListItem(rawItem);
+    if (seenIds.has(validated.adminReceipt.receiptId)) {
+      throw new Error(
+        `INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE: Duplicate receiptId "${validated.adminReceipt.receiptId}" in response.`
+      );
+    }
+    seenIds.add(validated.adminReceipt.receiptId);
+    validatedItems.push(validated);
+  }
+
+  return Object.freeze(validatedItems);
+}
+

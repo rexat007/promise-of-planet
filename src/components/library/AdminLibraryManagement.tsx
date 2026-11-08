@@ -58,6 +58,7 @@ import {
   type GetLibraryIntakePeiaPreparationStatusResponseDto,
   type RequestLibraryIntakePeiaPreparationResponseDto,
   type PeiaTaskEnqueueDisposition,
+  type SanitizedLibraryQuarantineReceiptListItemDto,
 } from '../../services/libraryAdminClient';
 
 const LIBRARY_INTAKE_PEIA_REQUIRED_ANY_PERMISSIONS: readonly AdminPermission[] = Object.freeze([
@@ -110,6 +111,199 @@ export function canRequestLibraryIntakePeiaForRecord(
     return false;
   }
   return true;
+}
+
+/**
+ * Canonical role & permission check for viewing the read-only Private Quarantine Receipts
+ * inbox section inside the Admin Library Intake Inbox.
+ * Matches server-side `listQuarantineReceipts` authorization in `libraryAdminHandlers.ts`:
+ * - Active human admin (`isActive === true` and `role !== AdminRole.AIAssistant`)
+ * - Library domain responsibility (`Owner`, `LibraryCurator`) or `RightsReviewer`
+ * - `AdminPermission.View`
+ */
+export function canViewLibraryQuarantineReceipts(
+  user: AdminUser | null | undefined
+): boolean {
+  if (!user || user.isActive !== true) {
+    return false;
+  }
+  if (user.role === AdminRole.AIAssistant) {
+    return false;
+  }
+  const hasLibraryDomainAccess =
+    hasDomainResponsibility(user.role, AdminDomain.Library) ||
+    user.role === AdminRole.RightsReviewer;
+  if (!hasLibraryDomainAccess) {
+    return false;
+  }
+  return AdminAccessService.hasPermission(user, AdminPermission.View);
+}
+
+export interface LibraryQuarantineReceiptsInboxSnapshot {
+  readonly receipts: readonly SanitizedLibraryQuarantineReceiptListItemDto[];
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly sessionToken: number;
+}
+
+export function createInitialLibraryQuarantineReceiptsInboxSnapshot(
+  sessionToken = 0
+): LibraryQuarantineReceiptsInboxSnapshot {
+  return {
+    receipts: [],
+    loading: false,
+    error: null,
+    sessionToken,
+  };
+}
+
+/**
+ * Component-scoped read-only controller for the Private Quarantine Receipts Inbox section.
+ * - Keeps all state in memory only (no browser storage or global singletons).
+ * - Prevents overlapping in-flight requests.
+ * - Invalidates stale responses when the active admin user/session changes or on unmount.
+ * - Preserves failed-read errors explicitly so failed reads are never misrendered as empty.
+ */
+export class LibraryQuarantineReceiptsInboxController {
+  private state: LibraryQuarantineReceiptsInboxSnapshot;
+  private currentUser: AdminUser | null | undefined;
+  private listReceiptsFn: () => Promise<
+    readonly SanitizedLibraryQuarantineReceiptListItemDto[]
+  >;
+  private readonly listeners = new Set<
+    (snapshot: LibraryQuarantineReceiptsInboxSnapshot) => void
+  >();
+
+  constructor(
+    currentUser: AdminUser | null | undefined,
+    listReceiptsFn: () => Promise<
+      readonly SanitizedLibraryQuarantineReceiptListItemDto[]
+    > = () => LibraryAdminClient.listQuarantineReceipts(),
+    initialState?: Partial<LibraryQuarantineReceiptsInboxSnapshot>
+  ) {
+    this.currentUser = currentUser;
+    this.listReceiptsFn = listReceiptsFn;
+    this.state = {
+      ...createInitialLibraryQuarantineReceiptsInboxSnapshot(
+        initialState?.sessionToken ?? 0
+      ),
+      ...initialState,
+    };
+  }
+
+  public getSnapshot(): LibraryQuarantineReceiptsInboxSnapshot {
+    return this.state;
+  }
+
+  public subscribe(
+    listener: (snapshot: LibraryQuarantineReceiptsInboxSnapshot) => void
+  ): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  public setCurrentUser(user: AdminUser | null | undefined): void {
+    const prevId = this.currentUser?.id ?? null;
+    const prevRole = this.currentUser?.role ?? null;
+    const prevActive = this.currentUser?.isActive ?? null;
+    const nextId = user?.id ?? null;
+    const nextRole = user?.role ?? null;
+    const nextActive = user?.isActive ?? null;
+
+    this.currentUser = user;
+
+    if (
+      prevId !== nextId ||
+      prevRole !== nextRole ||
+      prevActive !== nextActive
+    ) {
+      this.invalidateSession();
+    }
+  }
+
+  public setListReceiptsFn(
+    fn: () => Promise<readonly SanitizedLibraryQuarantineReceiptListItemDto[]>
+  ): void {
+    this.listReceiptsFn = fn;
+  }
+
+  public invalidateSession(): void {
+    const nextToken = this.state.sessionToken + 1;
+    this.setState(createInitialLibraryQuarantineReceiptsInboxSnapshot(nextToken));
+  }
+
+  private setState(
+    patch: Partial<LibraryQuarantineReceiptsInboxSnapshot>
+  ): void {
+    this.state = {
+      ...this.state,
+      ...patch,
+    };
+    for (const listener of this.listeners) {
+      listener(this.state);
+    }
+  }
+
+  public async loadReceipts(): Promise<
+    readonly SanitizedLibraryQuarantineReceiptListItemDto[] | null
+  > {
+    if (!canViewLibraryQuarantineReceipts(this.currentUser)) {
+      this.invalidateSession();
+      return null;
+    }
+
+    if (this.state.loading) {
+      return null;
+    }
+
+    const activeToken = this.state.sessionToken + 1;
+    const expectedUserId = this.currentUser?.id ?? null;
+
+    this.setState({
+      sessionToken: activeToken,
+      loading: true,
+      error: null,
+    });
+
+    try {
+      const receipts = await this.listReceiptsFn();
+      if (
+        this.state.sessionToken !== activeToken ||
+        (this.currentUser?.id ?? null) !== expectedUserId ||
+        !canViewLibraryQuarantineReceipts(this.currentUser)
+      ) {
+        return null;
+      }
+
+      this.setState({
+        receipts,
+        loading: false,
+        error: null,
+      });
+      return receipts;
+    } catch (err: unknown) {
+      if (
+        this.state.sessionToken !== activeToken ||
+        (this.currentUser?.id ?? null) !== expectedUserId
+      ) {
+        return null;
+      }
+
+      const detail =
+        err instanceof Error && err.message.trim().length > 0
+          ? err.message
+          : 'QUARANTINE_RECEIPTS_READ_FAILED: Failed to load private quarantine receipts.';
+
+      this.setState({
+        receipts: [],
+        loading: false,
+        error: detail,
+      });
+      return null;
+    }
+  }
 }
 
 export interface LibraryIntakePeiaVersionMismatchNotice {
@@ -484,6 +678,13 @@ export interface AdminLibraryManagementProps {
   initialQuarantineUploadOpen?: boolean;
   quarantineUploadRuntimeDeps?: LibraryQuarantineUploadRuntimeDependencies;
   quarantineUploadController?: LibraryQuarantineUploadSessionController;
+  initialQuarantineReceipts?: readonly SanitizedLibraryQuarantineReceiptListItemDto[];
+  initialQuarantineReceiptsLoading?: boolean;
+  initialQuarantineReceiptsError?: string | null;
+  quarantineReceiptsInboxController?: LibraryQuarantineReceiptsInboxController;
+  listQuarantineReceiptsFn?: () => Promise<
+    readonly SanitizedLibraryQuarantineReceiptListItemDto[]
+  >;
   languageOverride?: 'ar' | 'en';
 }
 
@@ -499,6 +700,11 @@ export function AdminLibraryManagement({
   initialQuarantineUploadOpen = false,
   quarantineUploadRuntimeDeps,
   quarantineUploadController,
+  initialQuarantineReceipts,
+  initialQuarantineReceiptsLoading = false,
+  initialQuarantineReceiptsError = null,
+  quarantineReceiptsInboxController,
+  listQuarantineReceiptsFn,
   languageOverride,
 }: AdminLibraryManagementProps) {
   const { i18n } = useTranslation();
@@ -625,8 +831,90 @@ export function AdminLibraryManagement({
   const canRegisterRegistry = canCreate || canManageRights;
   const canSubmitIntake = canCreate || canEdit;
   const canUploadQuarantine = canUploadToLibraryQuarantine(currentUser);
+  const canViewQuarantineReceipts = canViewLibraryQuarantineReceipts(currentUser);
   const canReviewIntake = canReview || canApprove || canManageRights;
   const canPrepareAiIntake = canAccessLibraryIntakePeiaPreparation(currentUser);
+
+  // Component-Scoped State & Controller for Read-Only Private Quarantine Receipts Inbox
+  const hasExplicitInitialQuarantineState =
+    initialQuarantineReceipts !== undefined ||
+    initialQuarantineReceiptsLoading === true ||
+    initialQuarantineReceiptsError !== null ||
+    quarantineReceiptsInboxController !== undefined;
+
+  const quarantineInboxControllerRef =
+    useRef<LibraryQuarantineReceiptsInboxController | null>(null);
+  if (!quarantineInboxControllerRef.current) {
+    quarantineInboxControllerRef.current =
+      quarantineReceiptsInboxController ??
+      new LibraryQuarantineReceiptsInboxController(
+        currentUser,
+        listQuarantineReceiptsFn ??
+          (() => LibraryAdminClient.listQuarantineReceipts()),
+        {
+          receipts: initialQuarantineReceipts ?? [],
+          loading: initialQuarantineReceiptsLoading,
+          error: initialQuarantineReceiptsError,
+        }
+      );
+  }
+  const activeQuarantineInboxController =
+    quarantineReceiptsInboxController ?? quarantineInboxControllerRef.current;
+  activeQuarantineInboxController.setCurrentUser(currentUser);
+  if (listQuarantineReceiptsFn) {
+    activeQuarantineInboxController.setListReceiptsFn(listQuarantineReceiptsFn);
+  }
+
+  const [quarantineInboxState, setQuarantineInboxState] =
+    useState<LibraryQuarantineReceiptsInboxSnapshot>(() =>
+      activeQuarantineInboxController.getSnapshot()
+    );
+
+  useEffect(() => {
+    setQuarantineInboxState(activeQuarantineInboxController.getSnapshot());
+    const unsubscribe = activeQuarantineInboxController.subscribe((snapshot) => {
+      setQuarantineInboxState(snapshot);
+    });
+    return () => {
+      unsubscribe();
+      if (!quarantineReceiptsInboxController) {
+        activeQuarantineInboxController.invalidateSession();
+      }
+    };
+  }, [activeQuarantineInboxController, quarantineReceiptsInboxController]);
+
+  useEffect(() => {
+    if (
+      activeTab === 'intake' &&
+      canViewQuarantineReceipts &&
+      !hasExplicitInitialQuarantineState
+    ) {
+      if (
+        !listQuarantineReceiptsFn &&
+        (!LibraryAdminClient.isBackendAvailable() ||
+          !LibraryAdminClient.isAuthenticated())
+      ) {
+        return;
+      }
+      void activeQuarantineInboxController.loadReceipts();
+    }
+  }, [
+    activeTab,
+    canViewQuarantineReceipts,
+    currentUser?.id,
+    hasExplicitInitialQuarantineState,
+    listQuarantineReceiptsFn,
+    activeQuarantineInboxController,
+  ]);
+
+  const handleRefreshQuarantineReceipts = useCallback(async () => {
+    if (!canViewQuarantineReceipts) return;
+    await activeQuarantineInboxController.loadReceipts();
+  }, [canViewQuarantineReceipts, activeQuarantineInboxController]);
+
+  const quarantineReceipts = quarantineInboxState.receipts;
+  const quarantineReceiptsLoading = quarantineInboxState.loading;
+  const quarantineReceiptsError = quarantineInboxState.error;
 
   const loadAllData = useCallback(async () => {
     setLoading(true);
@@ -2244,6 +2532,438 @@ export function AdminLibraryManagement({
               </div>
             )}
           </div>
+
+          {/* Read-Only Private Quarantine Receipts Section (LIB-FILE-INBOX-01) */}
+          {canViewQuarantineReceipts && (
+            <div
+              data-testid="quarantine-receipts-inbox-section"
+              className="bg-white dark:bg-gray-900 border border-teal-200 dark:border-teal-900/70 rounded-2xl shadow-sm overflow-hidden"
+            >
+              {/* Section Header + Manual Refresh */}
+              <div className="p-4 sm:p-5 border-b border-teal-100 dark:border-teal-900/50 bg-teal-50/40 dark:bg-teal-950/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1 min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Lock className="h-4 w-4 text-teal-700 dark:text-teal-400 shrink-0" />
+                    <h4
+                      data-testid="quarantine-receipts-section-title"
+                      className="font-extrabold text-sm sm:text-base text-gray-900 dark:text-gray-100"
+                    >
+                      {isAr
+                        ? 'إيصالات الملفات المحجورة'
+                        : 'Private Quarantine Receipts'}
+                    </h4>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-teal-100 text-teal-900 dark:bg-teal-950/80 dark:text-teal-300 border border-teal-300 dark:border-teal-800">
+                      {isAr ? 'للقراءة فقط • آخر 20 إيصالاً' : 'Read-Only • Latest 20 Receipts'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-gray-400">
+                    {isAr
+                      ? 'سجل إيصالات الحجر الخاص للملفات المرفوعة مرتبة تنازلياً حسب وقت الإنشاء.'
+                      : 'Private quarantine upload receipts ordered newest-first by creation timestamp.'}
+                  </p>
+                </div>
+
+                <div className="shrink-0">
+                  <button
+                    type="button"
+                    data-testid="refresh-quarantine-receipts-btn"
+                    disabled={quarantineReceiptsLoading}
+                    onClick={() => {
+                      void handleRefreshQuarantineReceipts();
+                    }}
+                    className="w-full sm:w-auto px-3.5 py-2 rounded-xl bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-800 dark:text-teal-300 border border-teal-300 dark:border-teal-800 text-xs font-extrabold transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 shadow-2xs"
+                  >
+                    <RefreshCw
+                      className={`h-3.5 w-3.5 shrink-0 ${
+                        quarantineReceiptsLoading ? 'animate-spin' : ''
+                      }`}
+                    />
+                    <span>
+                      {isAr ? 'تحديث إيصالات الحجر' : 'Refresh Quarantine Receipts'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Explicit Non-Assurance Boundary Banner */}
+              <div
+                data-testid="quarantine-receipts-boundary-notice"
+                className="px-4 py-3 bg-amber-50/70 dark:bg-amber-950/30 border-b border-amber-200/80 dark:border-amber-900/60 flex items-start gap-2.5 text-xs text-amber-900 dark:text-amber-200"
+              >
+                <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1 min-w-0">
+                  <p className="font-extrabold">
+                    {isAr
+                      ? 'تنبيه حدود الأمان والحوكمة: حالة «محجور في التخزين الخاص (Quarantined)» تعني تأكيد الحفظ في الحجر الخاص فقط.'
+                      : 'Security & Governance Boundary Notice: "Quarantined" confirms private quarantine storage persistence ONLY.'}
+                  </p>
+                  <p className="text-[11px] text-amber-800 dark:text-amber-300 leading-relaxed">
+                    {isAr
+                      ? 'لا يُعد هذا الإيصال شهادة خلو ملف PDF من المحتوى النشط (isVerifiedSafe: false)، ولا تطهيراً للملف (isSanitized: false)، ولا موافقة حقوقية (isRightsApproved: false)، ولا نشراً عاماً (isPublished: false)، ولا جاهزية لمراجعة PEIA (isReadyForPeia: false).'
+                      : 'This receipt does NOT certify PDF deep-structure safety (isVerifiedSafe: false), file sanitization (isSanitized: false), rights approval (isRightsApproved: false), public publication (isPublished: false), or PEIA readiness (isReadyForPeia: false).'}
+                  </p>
+                </div>
+              </div>
+
+              {/* 1. Loading State */}
+              {quarantineReceiptsLoading && (
+                <div
+                  data-testid="quarantine-receipts-loading-state"
+                  className="p-8 text-center space-y-2.5"
+                >
+                  <Loader2 className="h-6 w-6 text-teal-600 animate-spin mx-auto" />
+                  <p className="text-xs font-extrabold text-gray-700 dark:text-gray-300">
+                    {isAr
+                      ? 'جاري تحميل إيصالات الحجر الخاص...'
+                      : 'Loading private quarantine receipts...'}
+                  </p>
+                </div>
+              )}
+
+              {/* 2. Failed Read State (Never rendered as empty) */}
+              {!quarantineReceiptsLoading && quarantineReceiptsError && (
+                <div
+                  data-testid="quarantine-receipts-error-state"
+                  role="alert"
+                  className="p-5 sm:p-6 bg-rose-50/70 dark:bg-rose-950/30 text-rose-900 dark:text-rose-200 space-y-3"
+                >
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="h-5 w-5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                    <div className="space-y-1 min-w-0">
+                      <h5 className="font-extrabold text-xs sm:text-sm">
+                        {isAr
+                          ? 'تعذر قراءة إيصالات الحجر الخاص (فشل الاستعلام — لا يعني عدم وجود إيصالات)'
+                          : 'Failed to Read Private Quarantine Receipts (Read Failure — Not an Empty Inbox)'}
+                      </h5>
+                      <p
+                        data-testid="quarantine-receipts-error-message"
+                        className="text-xs font-mono break-words text-rose-800 dark:text-rose-300"
+                      >
+                        {quarantineReceiptsError}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 3. Empty State */}
+              {!quarantineReceiptsLoading &&
+                !quarantineReceiptsError &&
+                quarantineReceipts.length === 0 && (
+                  <div
+                    data-testid="quarantine-receipts-empty-state"
+                    className="p-8 text-center space-y-2"
+                  >
+                    <Lock className="h-7 w-7 text-gray-400 mx-auto" />
+                    <h5 className="font-extrabold text-xs sm:text-sm text-gray-800 dark:text-gray-200">
+                      {isAr
+                        ? 'لا توجد إيصالات ملفات محجورة مسجلة حالياً'
+                        : 'No Private Quarantine Receipts Recorded Yet'}
+                    </h5>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 max-w-md mx-auto">
+                      {isAr
+                        ? 'عند رفع ملفات PDF أو DOCX عبر نافذة الحجر الخاص، ستظهر إيصالاتها الإدارية المنقحة هنا.'
+                        : 'When PDF or DOCX files are uploaded to private quarantine, their sanitized administrative receipts will appear here.'}
+                    </p>
+                  </div>
+                )}
+
+              {/* 4. Populated State */}
+              {!quarantineReceiptsLoading &&
+                !quarantineReceiptsError &&
+                quarantineReceipts.length > 0 && (
+                  <div data-testid="quarantine-receipts-populated-state">
+                    {/* Desktop Table View (>= lg) */}
+                    <div
+                      data-testid="quarantine-receipts-desktop-table"
+                      className="hidden lg:block overflow-x-auto"
+                    >
+                      <table className="w-full text-start border-collapse text-sm">
+                        <thead>
+                          <tr className="bg-gray-50 dark:bg-gray-800/80 text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-800 text-xs uppercase font-extrabold">
+                            <th className="p-3.5 text-start">
+                              {isAr ? 'الملف المرفوع' : 'Uploaded File'}
+                            </th>
+                            <th className="p-3.5 text-start">
+                              {isAr ? 'الصيغة والحجم' : 'Format & Size'}
+                            </th>
+                            <th className="p-3.5 text-start">
+                              {isAr ? 'معرّف الإيصال (Receipt ID)' : 'Receipt ID'}
+                            </th>
+                            <th className="p-3.5 text-start">
+                              {isAr ? 'الحالة والنسخة' : 'Persisted State & Revision'}
+                            </th>
+                            <th className="p-3.5 text-start">
+                              {isAr ? 'تاريخ الإنشاء' : 'Created At'}
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200 dark:divide-gray-800">
+                          {quarantineReceipts.map(({ revision, adminReceipt }) => {
+                            const sizeKb = (adminReceipt.byteSize / 1024).toFixed(1);
+                            return (
+                              <tr
+                                key={adminReceipt.receiptId}
+                                data-testid={`quarantine-receipt-row-${adminReceipt.receiptId}`}
+                                className="hover:bg-gray-50/70 dark:hover:bg-gray-800/40 transition-colors"
+                              >
+                                <td className="p-3.5 max-w-xs">
+                                  <div className="font-extrabold text-gray-900 dark:text-gray-100 break-words">
+                                    {adminReceipt.originalFilename}
+                                  </div>
+                                  <div className="text-[11px] text-gray-500 dark:text-gray-400 font-mono mt-0.5 break-all">
+                                    {adminReceipt.deepInspectionStatus}
+                                  </div>
+                                  <div className="text-[10px] text-gray-400 font-mono mt-0.5" dir="ltr">
+                                    isQuarantinedPrivateOnly: {String(adminReceipt.isQuarantinedPrivateOnly)} • isReadyForPeia: false
+                                  </div>
+                                </td>
+
+                                <td className="p-3.5 whitespace-nowrap">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="px-2 py-0.5 rounded-md bg-teal-100 dark:bg-teal-950/80 text-teal-900 dark:text-teal-300 border border-teal-300 dark:border-teal-800 font-extrabold text-[11px]">
+                                      {adminReceipt.format}
+                                    </span>
+                                    <span className="text-xs font-bold text-gray-700 dark:text-gray-300">
+                                      {sizeKb} KB
+                                    </span>
+                                  </div>
+                                  <div className="text-[11px] text-gray-400 font-mono mt-0.5" dir="ltr">
+                                    {adminReceipt.byteSize.toLocaleString('en-US')} bytes
+                                  </div>
+                                </td>
+
+                                <td className="p-3.5">
+                                  <div
+                                    data-testid={`quarantine-receipt-id-${adminReceipt.receiptId}`}
+                                    dir="ltr"
+                                    className="font-mono text-xs font-bold text-gray-800 dark:text-gray-200 break-all"
+                                  >
+                                    {adminReceipt.receiptId}
+                                  </div>
+                                  <div className="text-[10px] text-gray-400 font-mono mt-0.5" dir="ltr">
+                                    SHA-256: {adminReceipt.sha256.slice(0, 16)}…
+                                  </div>
+                                </td>
+
+                                <td className="p-3.5">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    {adminReceipt.state === 'Quarantined' && (
+                                      <span
+                                        data-testid={`quarantine-receipt-state-${adminReceipt.receiptId}`}
+                                        className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-emerald-100 text-emerald-900 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 inline-flex items-center gap-1"
+                                      >
+                                        <Lock className="h-3 w-3 shrink-0" />
+                                        <span>
+                                          {isAr
+                                            ? 'محجور في التخزين الخاص (Quarantined)'
+                                            : 'Quarantined (Private Only)'}
+                                        </span>
+                                      </span>
+                                    )}
+                                    {adminReceipt.state === 'NeedsReconciliation' && (
+                                      <span
+                                        data-testid={`quarantine-receipt-state-${adminReceipt.receiptId}`}
+                                        className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-300 dark:border-amber-800 inline-flex items-center gap-1"
+                                      >
+                                        <AlertTriangle className="h-3 w-3 shrink-0" />
+                                        <span>
+                                          {isAr
+                                            ? 'يتطلب مطابقة (NeedsReconciliation)'
+                                            : 'NeedsReconciliation'}
+                                        </span>
+                                      </span>
+                                    )}
+                                    {adminReceipt.state === 'Reserved' && (
+                                      <span
+                                        data-testid={`quarantine-receipt-state-${adminReceipt.receiptId}`}
+                                        className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-blue-100 text-blue-900 dark:bg-blue-950/80 dark:text-blue-300 border border-blue-300 dark:border-blue-800 inline-flex items-center gap-1"
+                                      >
+                                        <Clock className="h-3 w-3 shrink-0" />
+                                        <span>
+                                          {isAr ? 'محجوز (Reserved)' : 'Reserved'}
+                                        </span>
+                                      </span>
+                                    )}
+                                    {adminReceipt.state === 'WritePending' && (
+                                      <span
+                                        data-testid={`quarantine-receipt-state-${adminReceipt.receiptId}`}
+                                        className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-indigo-100 text-indigo-900 dark:bg-indigo-950/80 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-800 inline-flex items-center gap-1"
+                                      >
+                                        <Clock className="h-3 w-3 shrink-0" />
+                                        <span>
+                                          {isAr
+                                            ? 'قيد الكتابة (WritePending)'
+                                            : 'WritePending'}
+                                        </span>
+                                      </span>
+                                    )}
+                                    {adminReceipt.state === 'Rejected' && (
+                                      <span
+                                        data-testid={`quarantine-receipt-state-${adminReceipt.receiptId}`}
+                                        className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-rose-100 text-rose-900 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-300 dark:border-rose-800 inline-flex items-center gap-1"
+                                      >
+                                        <AlertTriangle className="h-3 w-3 shrink-0" />
+                                        <span>
+                                          {isAr ? 'مرفوض (Rejected)' : 'Rejected'}
+                                        </span>
+                                      </span>
+                                    )}
+                                    <span
+                                      data-testid={`quarantine-receipt-revision-${adminReceipt.receiptId}`}
+                                      className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-mono font-bold text-[11px]"
+                                    >
+                                      {isAr ? `النسخة #${revision}` : `Rev #${revision}`}
+                                    </span>
+                                  </div>
+                                  {adminReceipt.reconciliationReason && (
+                                    <div className="mt-1.5 text-[11px] text-amber-800 dark:text-amber-300 bg-amber-50/80 dark:bg-amber-950/40 px-2 py-1 rounded-lg border border-amber-200 dark:border-amber-800/60 break-words">
+                                      <span className="font-extrabold">
+                                        {isAr ? 'سبب المطابقة: ' : 'Reconciliation Reason: '}
+                                      </span>
+                                      <span>{adminReceipt.reconciliationReason}</span>
+                                    </div>
+                                  )}
+                                  {adminReceipt.rejectionReasonCode && (
+                                    <div className="mt-1.5 text-[11px] text-rose-800 dark:text-rose-300 font-mono">
+                                      {adminReceipt.rejectionReasonCode}
+                                    </div>
+                                  )}
+                                </td>
+
+                                <td className="p-3.5 whitespace-nowrap text-xs text-gray-600 dark:text-gray-400">
+                                  <div
+                                    dir="ltr"
+                                    className="font-mono text-[11px] font-bold text-gray-800 dark:text-gray-200"
+                                  >
+                                    {adminReceipt.createdAt}
+                                  </div>
+                                  <div className="text-[11px] text-gray-400 mt-0.5">
+                                    {new Date(adminReceipt.createdAt).toLocaleDateString(
+                                      isAr ? 'ar-EG' : 'en-US'
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Mobile / Tablet Card View (< lg) */}
+                    <div
+                      data-testid="quarantine-receipts-mobile-cards"
+                      className="block lg:hidden divide-y divide-gray-200 dark:divide-gray-800"
+                    >
+                      {quarantineReceipts.map(({ revision, adminReceipt }) => {
+                        const sizeKb = (adminReceipt.byteSize / 1024).toFixed(1);
+                        return (
+                          <div
+                            key={adminReceipt.receiptId}
+                            data-testid={`quarantine-receipt-mobile-card-${adminReceipt.receiptId}`}
+                            className="p-4 space-y-2.5 bg-white dark:bg-gray-900"
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <h5 className="font-extrabold text-sm text-gray-900 dark:text-gray-100 break-words">
+                                  {adminReceipt.originalFilename}
+                                </h5>
+                                <div
+                                  dir="ltr"
+                                  className="text-[11px] font-mono text-gray-500 dark:text-gray-400 break-all mt-0.5"
+                                >
+                                  {adminReceipt.receiptId}
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                {adminReceipt.state === 'Quarantined' && (
+                                  <span className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-emerald-100 text-emerald-900 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 inline-flex items-center gap-1">
+                                    <Lock className="h-3 w-3 shrink-0" />
+                                    <span>
+                                      {isAr
+                                        ? 'محجور في التخزين الخاص (Quarantined)'
+                                        : 'Quarantined (Private Only)'}
+                                    </span>
+                                  </span>
+                                )}
+                                {adminReceipt.state === 'NeedsReconciliation' && (
+                                  <span className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-300 dark:border-amber-800 inline-flex items-center gap-1">
+                                    <AlertTriangle className="h-3 w-3 shrink-0" />
+                                    <span>
+                                      {isAr
+                                        ? 'يتطلب مطابقة (NeedsReconciliation)'
+                                        : 'NeedsReconciliation'}
+                                    </span>
+                                  </span>
+                                )}
+                                {adminReceipt.state === 'Reserved' && (
+                                  <span className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-blue-100 text-blue-900 dark:bg-blue-950/80 dark:text-blue-300 border border-blue-300 dark:border-blue-800 inline-flex items-center gap-1">
+                                    <Clock className="h-3 w-3 shrink-0" />
+                                    <span>
+                                      {isAr ? 'محجوز (Reserved)' : 'Reserved'}
+                                    </span>
+                                  </span>
+                                )}
+                                {adminReceipt.state === 'WritePending' && (
+                                  <span className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-indigo-100 text-indigo-900 dark:bg-indigo-950/80 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-800 inline-flex items-center gap-1">
+                                    <Clock className="h-3 w-3 shrink-0" />
+                                    <span>
+                                      {isAr
+                                        ? 'قيد الكتابة (WritePending)'
+                                        : 'WritePending'}
+                                    </span>
+                                  </span>
+                                )}
+                                {adminReceipt.state === 'Rejected' && (
+                                  <span className="px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-rose-100 text-rose-900 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-300 dark:border-rose-800 inline-flex items-center gap-1">
+                                    <AlertTriangle className="h-3 w-3 shrink-0" />
+                                    <span>
+                                      {isAr ? 'مرفوض (Rejected)' : 'Rejected'}
+                                    </span>
+                                  </span>
+                                )}
+                                <span className="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-mono font-bold text-[11px]">
+                                  {isAr ? `النسخة #${revision}` : `Rev #${revision}`}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                              <span className="px-2 py-0.5 rounded-md bg-teal-100 dark:bg-teal-950/80 text-teal-900 dark:text-teal-300 border border-teal-300 dark:border-teal-800 font-extrabold text-[11px]">
+                                {adminReceipt.format}
+                              </span>
+                              <span className="font-bold text-gray-700 dark:text-gray-300">
+                                {sizeKb} KB ({adminReceipt.byteSize.toLocaleString('en-US')} bytes)
+                              </span>
+                              <span className="text-gray-400">•</span>
+                              <span dir="ltr" className="font-mono text-[11px] text-gray-600 dark:text-gray-400">
+                                {adminReceipt.createdAt}
+                              </span>
+                            </div>
+
+                            {adminReceipt.reconciliationReason && (
+                              <div className="text-[11px] text-amber-800 dark:text-amber-300 bg-amber-50/80 dark:bg-amber-950/40 px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-800/60 break-words">
+                                <span className="font-extrabold">
+                                  {isAr ? 'سبب المطابقة: ' : 'Reconciliation Reason: '}
+                                </span>
+                                <span>{adminReceipt.reconciliationReason}</span>
+                              </div>
+                            )}
+
+                            {adminReceipt.rejectionReasonCode && (
+                              <div className="text-[11px] text-rose-800 dark:text-rose-300 font-mono">
+                                {adminReceipt.rejectionReasonCode}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+            </div>
+          )}
         </div>
       )}
 

@@ -40,6 +40,17 @@ import {
   type PeiaTaskQueueTransaction,
   type ReconciledPeiaTaskStatusResult,
 } from '../peia/firestorePeiaTaskQueueService';
+import {
+  listLatestSanitizedLibraryQuarantineReceipts,
+  type LibraryQuarantineAdminReadFirestoreDatabase,
+  type ListLibraryQuarantineReceiptsResponseDto,
+  type SanitizedLibraryQuarantineReceiptListItemDto,
+} from './libraryQuarantineAdminReadService';
+
+export type {
+  ListLibraryQuarantineReceiptsResponseDto,
+  SanitizedLibraryQuarantineReceiptListItemDto,
+};
 
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
 
@@ -66,6 +77,10 @@ const GET_INTAKE_PEIA_PREPARATION_STATUS_ALLOWED_KEYS: ReadonlySet<string> = new
   'action',
   'intakeId',
   'taskId',
+]);
+
+const LIST_QUARANTINE_RECEIPTS_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  'action',
 ]);
 
 const LIBRARY_EDITORIAL_CURATION_PERMISSIONS: readonly AdminPermission[] = Object.freeze([
@@ -808,7 +823,8 @@ export async function executeManageLibraryDocumentsRequest(
     readonly apiKey?: string;
     readonly fetchImpl?: typeof fetch;
     readonly timeoutMs?: number;
-  }
+  },
+  quarantineReadDatabase?: LibraryQuarantineAdminReadFirestoreDatabase
 ): Promise<any> {
   const data =
     requestContext &&
@@ -818,6 +834,36 @@ export async function executeManageLibraryDocumentsRequest(
       ? requestContext.data
       : {};
   const action = data.action;
+
+  if (action === 'listQuarantineReceipts') {
+    await authenticateHumanAdminForLibraryPeiaAction(
+      requestContext,
+      [AdminPermission.View],
+      adminRepo
+    );
+
+    assertStrictAllowedCallerKeys(
+      requestContext.data,
+      LIST_QUARANTINE_RECEIPTS_ALLOWED_KEYS,
+      'listQuarantineReceipts'
+    );
+
+    const effectiveQuarantineReadDb =
+      quarantineReadDatabase ??
+      (getFirestore() as unknown as LibraryQuarantineAdminReadFirestoreDatabase);
+
+    const readResult = await listLatestSanitizedLibraryQuarantineReceipts(
+      effectiveQuarantineReadDb
+    );
+    if (!readResult.ok) {
+      throw new HttpsError(
+        'failed-precondition',
+        `${readResult.errorCode}: ${readResult.errorMessage}`
+      );
+    }
+
+    return readResult.response;
+  }
 
   if (typeof action === 'string' && LIBRARY_PEIA_PREPARATION_ACTIONS.has(action)) {
     try {

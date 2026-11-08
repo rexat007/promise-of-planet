@@ -4,7 +4,11 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { build as viteBuild } from 'vite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AdminLibraryManagement } from './AdminLibraryManagement';
+import {
+  AdminLibraryManagement,
+  canViewLibraryQuarantineReceipts,
+  LibraryQuarantineReceiptsInboxController,
+} from './AdminLibraryManagement';
 import { LibraryQuarantineUploadPanel } from './LibraryQuarantineUploadPanel';
 import {
   CANONICAL_DOCX_MIME_TYPE,
@@ -24,7 +28,11 @@ import {
   type LibraryIntakeRecord,
 } from '../../../functions/src/shared/libraryContract';
 import type { SanitizedLibraryQuarantineAdminReceiptDto } from '../../../functions/src/library/libraryQuarantineReceiptContract';
-import { LibraryAdminClient } from '../../services/libraryAdminClient';
+import {
+  LibraryAdminClient,
+  validateSanitizedLibraryQuarantineReceiptListResponse,
+  type SanitizedLibraryQuarantineReceiptListItemDto,
+} from '../../services/libraryAdminClient';
 
 const VERIFIED_ENDPOINT_URL =
   'https://europe-west1-promiseofplanet-bb325.cloudfunctions.net/libraryQuarantineUploadEndpoint';
@@ -884,6 +892,7 @@ describe('LIB-FILE-UPLOAD-02 — Admin Library PDF/DOCX Private Quarantine Uploa
 
   it('9. Enforces browser/Node import boundary: zero runtime imports of server/Node modules and clean browser Rollup module graph without node:buffer externalization', async () => {
     const frontendEntryFiles = [
+      'src/services/libraryAdminClient.ts',
       'src/services/libraryQuarantineUploadClient.ts',
       'src/components/library/LibraryQuarantineUploadPanel.tsx',
       'src/components/library/AdminLibraryManagement.tsx',
@@ -891,6 +900,7 @@ describe('LIB-FILE-UPLOAD-02 — Admin Library PDF/DOCX Private Quarantine Uploa
 
     const forbiddenServerOrNodeSpecifiers = [
       'libraryQuarantineReceiptContract',
+      'libraryQuarantineAdminReadService',
       'libraryUploadBinaryAdmission',
       'libraryUploadDeepStructure',
       'libraryQuarantineUploadEndpoint',
@@ -999,4 +1009,243 @@ describe('LIB-FILE-UPLOAD-02 — Admin Library PDF/DOCX Private Quarantine Uploa
     expect(bundledCode).not.toContain('node:zlib');
     expect(bundledCode).not.toContain('__vite-browser-external');
   });
+
+  it('10. LIB-FILE-INBOX-01: Renders read-only Private Quarantine Receipts section in Arabic (RTL) and English (LTR) with loading, empty, failed-read, and populated states and enforces RBAC invisibility', () => {
+    const owner = buildAdminUser(AdminRole.Owner);
+    const curator = buildAdminUser(AdminRole.LibraryCurator);
+    const rightsReviewer = buildAdminUser(AdminRole.RightsReviewer);
+    const inactiveCurator = buildAdminUser(AdminRole.LibraryCurator, {
+      isActive: false,
+    });
+    const aiAssistant = buildAdminUser(AdminRole.AIAssistant);
+    const newsEditor = buildAdminUser(AdminRole.NewsEditor);
+    const financeAuditor = buildAdminUser(AdminRole.FinanceAuditor);
+
+    expect(canViewLibraryQuarantineReceipts(owner)).toBe(true);
+    expect(canViewLibraryQuarantineReceipts(curator)).toBe(true);
+    expect(canViewLibraryQuarantineReceipts(rightsReviewer)).toBe(true);
+
+    expect(canViewLibraryQuarantineReceipts(inactiveCurator)).toBe(false);
+    expect(canViewLibraryQuarantineReceipts(aiAssistant)).toBe(false);
+    expect(canViewLibraryQuarantineReceipts(newsEditor)).toBe(false);
+    expect(canViewLibraryQuarantineReceipts(financeAuditor)).toBe(false);
+    expect(canViewLibraryQuarantineReceipts(null)).toBe(false);
+
+    // 10a. Unauthorized user in Intake tab does NOT see the Private Quarantine Receipts section
+    const unauthorizedInboxHtml = renderToStaticMarkup(
+      <AdminLibraryManagement
+        currentUser={newsEditor}
+        initialTab="intake"
+        initialLoading={false}
+        languageOverride="ar"
+      />
+    );
+    expect(unauthorizedInboxHtml).not.toContain(
+      'quarantine-receipts-inbox-section'
+    );
+
+    // 10b. Loading state in Arabic
+    const loadingHtmlAr = renderToStaticMarkup(
+      <AdminLibraryManagement
+        currentUser={curator}
+        initialTab="intake"
+        initialLoading={false}
+        initialQuarantineReceiptsLoading={true}
+        languageOverride="ar"
+      />
+    );
+    expect(loadingHtmlAr).toContain('quarantine-receipts-inbox-section');
+    expect(loadingHtmlAr).toContain('إيصالات الملفات المحجورة');
+    expect(loadingHtmlAr).toContain('quarantine-receipts-loading-state');
+    expect(loadingHtmlAr).not.toContain('quarantine-receipts-empty-state');
+
+    // 10c. Empty state in English
+    const emptyHtmlEn = renderToStaticMarkup(
+      <AdminLibraryManagement
+        currentUser={rightsReviewer}
+        initialTab="intake"
+        initialLoading={false}
+        initialQuarantineReceipts={[]}
+        languageOverride="en"
+      />
+    );
+    expect(emptyHtmlEn).toContain('Private Quarantine Receipts');
+    expect(emptyHtmlEn).toContain('quarantine-receipts-empty-state');
+    expect(emptyHtmlEn).toContain('No Private Quarantine Receipts Recorded Yet');
+    expect(emptyHtmlEn).not.toContain('quarantine-receipts-error-state');
+
+    // 10d. Failed-read state is NEVER rendered as an empty inbox
+    const errorHtmlAr = renderToStaticMarkup(
+      <AdminLibraryManagement
+        currentUser={curator}
+        initialTab="intake"
+        initialLoading={false}
+        initialQuarantineReceiptsError="CORRUPT_PERSISTED_RECEIPT_ENVELOPE: Receipt failed validation."
+        languageOverride="ar"
+      />
+    );
+    expect(errorHtmlAr).toContain('quarantine-receipts-error-state');
+    expect(errorHtmlAr).toContain(
+      'CORRUPT_PERSISTED_RECEIPT_ENVELOPE: Receipt failed validation.'
+    );
+    expect(errorHtmlAr).not.toContain('quarantine-receipts-empty-state');
+    expect(errorHtmlAr).not.toContain('quarantine-receipts-populated-state');
+
+    // 10e. Populated state with both Quarantined and NeedsReconciliation receipts in Arabic and English
+    const secondReceiptId = 'b2c3d4e5f60718293a4b5c6d7e8f90a1';
+    const populatedItems: readonly SanitizedLibraryQuarantineReceiptListItemDto[] =
+      [
+        {
+          revision: 4,
+          adminReceipt: buildSanitizedAdminReceipt({
+            receiptId: secondReceiptId,
+            originalFilename: 'water-treaty-2026.docx',
+            sanitizedFilename: 'water-treaty-2026.docx',
+            format: 'DOCX',
+            canonicalExtension: 'docx',
+            canonicalMimeType: CANONICAL_DOCX_MIME_TYPE,
+            byteSize: 16384,
+            state: 'NeedsReconciliation',
+            deepInspectionStatus:
+              'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION',
+            hasVerifiedStorageWrite: false,
+            isQuarantinedPrivateOnly: false,
+            reconciliationRequired: true,
+            reconciliationReason:
+              'GCS conditional write outcome was ambiguous during finalize.',
+            createdAt: '2026-11-08T12:10:00.000Z',
+            updatedAt: '2026-11-08T12:10:05.000Z',
+          }),
+        },
+        {
+          revision: 3,
+          adminReceipt: buildSanitizedAdminReceipt({
+            receiptId: SAMPLE_RECEIPT_ID,
+            originalFilename: 'climate-policy-2026.pdf',
+            byteSize: 4096,
+            state: 'Quarantined',
+            createdAt: '2026-11-07T10:00:00.000Z',
+            updatedAt: '2026-11-07T10:00:02.000Z',
+          }),
+        },
+      ];
+
+    const populatedHtmlAr = renderToStaticMarkup(
+      <AdminLibraryManagement
+        currentUser={curator}
+        initialTab="intake"
+        initialLoading={false}
+        initialQuarantineReceipts={populatedItems}
+        languageOverride="ar"
+      />
+    );
+    expect(populatedHtmlAr).toContain('quarantine-receipts-populated-state');
+    expect(populatedHtmlAr).toContain('quarantine-receipts-boundary-notice');
+    expect(populatedHtmlAr).toContain('climate-policy-2026.pdf');
+    expect(populatedHtmlAr).toContain('water-treaty-2026.docx');
+    expect(populatedHtmlAr).toContain(SAMPLE_RECEIPT_ID);
+    expect(populatedHtmlAr).toContain(secondReceiptId);
+    expect(populatedHtmlAr).toContain('محجور في التخزين الخاص (Quarantined)');
+    expect(populatedHtmlAr).toContain('يتطلب مطابقة (NeedsReconciliation)');
+    expect(populatedHtmlAr).toContain('النسخة #3');
+    expect(populatedHtmlAr).toContain('النسخة #4');
+
+    const populatedHtmlEn = renderToStaticMarkup(
+      <AdminLibraryManagement
+        currentUser={curator}
+        initialTab="intake"
+        initialLoading={false}
+        initialQuarantineReceipts={populatedItems}
+        languageOverride="en"
+      />
+    );
+    expect(populatedHtmlEn).toContain('Private Quarantine Receipts');
+    expect(populatedHtmlEn).toContain('Quarantined (Private Only)');
+    expect(populatedHtmlEn).toContain('NeedsReconciliation');
+    expect(populatedHtmlEn).toContain('Rev #3');
+    expect(populatedHtmlEn).toContain('Rev #4');
+  });
+
+  it('11. LIB-FILE-INBOX-01: Enforces refresh behavior, duplicate in-flight guard, session staleness guard on user switch, and strict client DTO validation', async () => {
+    const curator = buildAdminUser(AdminRole.LibraryCurator);
+    const owner = buildAdminUser(AdminRole.Owner);
+    const newsEditor = buildAdminUser(AdminRole.NewsEditor);
+
+    let resolveRead!: (
+      value: readonly SanitizedLibraryQuarantineReceiptListItemDto[]
+    ) => void;
+    const delayedRead = vi.fn(
+      () =>
+        new Promise<readonly SanitizedLibraryQuarantineReceiptListItemDto[]>(
+          (resolve) => {
+            resolveRead = resolve;
+          }
+        )
+    );
+
+    const inboxController = new LibraryQuarantineReceiptsInboxController(
+      curator,
+      delayedRead
+    );
+
+    // Start first read
+    const firstLoad = inboxController.loadReceipts();
+    expect(inboxController.getSnapshot().loading).toBe(true);
+
+    // Duplicate refresh while in-flight is ignored
+    const duplicateLoad = await inboxController.loadReceipts();
+    expect(duplicateLoad).toBeNull();
+    expect(delayedRead).toHaveBeenCalledTimes(1);
+
+    // Switch user while request is in flight -> invalidates session token
+    inboxController.setCurrentUser(owner);
+    expect(inboxController.getSnapshot().loading).toBe(false);
+
+    // Resolve stale response from previous user session -> discarded
+    resolveRead([
+      {
+        revision: 3,
+        adminReceipt: buildSanitizedAdminReceipt(),
+      },
+    ]);
+    const staleResult = await firstLoad;
+    expect(staleResult).toBeNull();
+    expect(inboxController.getSnapshot().receipts).toHaveLength(0);
+
+    // Unauthorized user switch clears state and refuses to load
+    inboxController.setCurrentUser(newsEditor);
+    const unauthorizedLoad = await inboxController.loadReceipts();
+    expect(unauthorizedLoad).toBeNull();
+    expect(delayedRead).toHaveBeenCalledTimes(1);
+
+    // Client response validator accepts valid Quarantined + NeedsReconciliation items and rejects leaks or > 20 items
+    const validValidated = validateSanitizedLibraryQuarantineReceiptListResponse(
+      {
+        receipts: [
+          {
+            revision: 3,
+            adminReceipt: buildSanitizedAdminReceipt(),
+          },
+        ],
+      }
+    );
+    expect(validValidated).toHaveLength(1);
+    expect(validValidated[0].revision).toBe(3);
+
+    expect(() =>
+      validateSanitizedLibraryQuarantineReceiptListResponse({
+        receipts: [
+          {
+            revision: 3,
+            adminReceipt: {
+              ...buildSanitizedAdminReceipt(),
+              storagePath:
+                'library/quarantine/a1b2c3d4e5f60718293a4b5c6d7e8f90/source.pdf',
+            },
+          },
+        ],
+      })
+    ).toThrow(/INVALID_QUARANTINE_RECEIPT_LIST_RESPONSE/);
+  });
 });
+
