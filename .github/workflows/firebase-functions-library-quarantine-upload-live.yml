@@ -1,0 +1,354 @@
+name: Deploy Library Quarantine Upload libraryQuarantineUploadEndpoint Live
+
+# PREREQUISITE & SECURITY NOTICE FOR PROJECT OWNER:
+# 1. Before triggering this workflow, ensure that the Google Cloud Artifact Registry cleanup policy
+#    for Cloud Functions Gen 2 container images has been configured in project 'promiseofplanet-bb325'
+#    to automatically delete stale container build layers and prevent storage quota exhaustion.
+# 2. This workflow deploys ONLY 'functions:libraryQuarantineUploadEndpoint' after fail-closed
+#    verification of:
+#    - Main branch execution ('refs/heads/main')
+#    - Service-account credential identity for project 'promiseofplanet-bb325'
+#    - Clean 'npm ci', TypeScript build, and compiled export in 'functions/lib/index.js'
+#    - Read-only verification of the installed '@google-cloud/storage' generation-pinned file-handle API
+#    - Read-only verification of dedicated GCS bucket 'promiseofplanet-bb325-library-quarantine':
+#      existence, Uniform Bucket-Level Access (UBLA = true), Public Access Prevention ('enforced'),
+#      and absence of 'allUsers' / 'allAuthenticatedUsers' in bucket IAM bindings.
+# 3. IAM LIMITATION NOTICE:
+#    Passing bucket settings and CI deployment credential checks does NOT prove that the Cloud Functions
+#    runtime service account is restricted to least-privilege IAM or free of project-level inherited roles.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-library-quarantine-upload-live
+  cancel-in-progress: false
+
+jobs:
+  deploy_library_quarantine_upload_function:
+    name: Deploy libraryQuarantineUploadEndpoint
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Verify Main Branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::This workflow can only be run on the main branch (refs/heads/main)."
+            exit 1
+          fi
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify Service Account Credential and Project Identity
+        env:
+          CREDENTIAL_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+        run: |
+          if [ -z "$CREDENTIAL_JSON" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 secret is empty or missing."
+            exit 1
+          fi
+          node -e '
+            const raw = process.env.CREDENTIAL_JSON;
+            let cred;
+            try {
+              cred = JSON.parse(raw);
+            } catch (err) {
+              console.error("::error::Failed to parse credential JSON.");
+              process.exit(1);
+            }
+            if (cred.type !== "service_account") {
+              console.error("::error::Credential is not a service_account (type: " + cred.type + ")");
+              process.exit(1);
+            }
+            if (cred.project_id !== "promiseofplanet-bb325") {
+              console.error("::error::Credential project_id mismatch. Expected promiseofplanet-bb325, found: " + cred.project_id);
+              process.exit(1);
+            }
+            if (typeof cred.client_email !== "string" || !cred.client_email.endsWith(".iam.gserviceaccount.com")) {
+              console.error("::error::Credential client_email is missing or not a valid IAM service account email.");
+              process.exit(1);
+            }
+            if (typeof cred.private_key !== "string" || !cred.private_key.includes("BEGIN PRIVATE KEY")) {
+              console.error("::error::Credential private_key is missing or malformed.");
+              process.exit(1);
+            }
+            console.log("Verified service-account credential for project: " + cred.project_id + " (" + cred.client_email + ")");
+          '
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+
+      - name: Verify Required Function Source Export and Bucket Constants
+        working-directory: functions
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const indexCode = fs.readFileSync("src/index.ts", "utf8");
+            if (!indexCode.includes("libraryQuarantineUploadEndpoint")) {
+              console.error("::error::Missing required export in functions/src/index.ts: libraryQuarantineUploadEndpoint");
+              process.exit(1);
+            }
+            const endpointCode = fs.readFileSync("src/library/libraryQuarantineUploadEndpoint.ts", "utf8");
+            if (!endpointCode.includes("promiseofplanet-bb325-library-quarantine")) {
+              console.error("::error::Missing dedicated quarantine bucket constant in functions/src/library/libraryQuarantineUploadEndpoint.ts");
+              process.exit(1);
+            }
+            console.log("Verified libraryQuarantineUploadEndpoint source export and dedicated bucket binding constant.");
+          '
+
+      - name: Install Functions Dependencies
+        working-directory: functions
+        run: npm ci
+
+      - name: Build Functions TypeScript
+        working-directory: functions
+        run: npm run build
+
+      - name: Verify Compiled Function Export and Runtime Bucket Binding
+        working-directory: functions
+        run: |
+          node -e '
+            const lib = require("./lib/index.js");
+            if (typeof lib.libraryQuarantineUploadEndpoint !== "function") {
+              console.error("::error::Compiled lib/index.js is missing required function: libraryQuarantineUploadEndpoint");
+              process.exit(1);
+            }
+            const endpointMod = require("./lib/library/libraryQuarantineUploadEndpoint.js");
+            if (endpointMod.LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME !== "promiseofplanet-bb325-library-quarantine") {
+              console.error("::error::Compiled LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME mismatch: " + endpointMod.LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME);
+              process.exit(1);
+            }
+            if (endpointMod.FORBIDDEN_DEFAULT_FIREBASE_STORAGE_BUCKET_NAME !== "promiseofplanet-bb325.firebasestorage.app") {
+              console.error("::error::Compiled FORBIDDEN_DEFAULT_FIREBASE_STORAGE_BUCKET_NAME mismatch.");
+              process.exit(1);
+            }
+            console.log("Verified libraryQuarantineUploadEndpoint compiled export and bucket constants in lib/.");
+          '
+
+      - name: Verify GCS SDK Generation-Pinned File-Handle API Compatibility (Read-Only)
+        working-directory: functions
+        run: |
+          node -e '
+            const { initializeApp, deleteApp } = require("firebase-admin/app");
+            const { getStorage } = require("firebase-admin/storage");
+            const { createProductionLibraryQuarantineUploadRuntime } = require("./lib/library/libraryQuarantineUploadEndpoint.js");
+
+            (async () => {
+              const app = initializeApp({ projectId: "promiseofplanet-bb325" }, "sdk-generation-pin-verify");
+              try {
+                const storage = getStorage(app);
+                if (!storage || typeof storage.bucket !== "function") {
+                  console.error("::error::firebase-admin/storage getStorage() did not return a valid Storage instance.");
+                  process.exit(1);
+                }
+
+                const targetBucketName = "promiseofplanet-bb325-library-quarantine";
+                const bucket = storage.bucket(targetBucketName);
+                if (!bucket || bucket.name !== targetBucketName || typeof bucket.file !== "function") {
+                  console.error("::error::GCS bucket handle failed name or .file() verification.");
+                  process.exit(1);
+                }
+
+                const samplePath = "library/quarantine/0123456789abcdef0123456789abcdef/source.pdf";
+                const sampleGeneration = "1730981122334455";
+
+                const unpinnedFile = bucket.file(samplePath);
+                const pinnedFile = bucket.file(samplePath, { generation: sampleGeneration });
+
+                if (!unpinnedFile || typeof unpinnedFile.save !== "function" || typeof unpinnedFile.getMetadata !== "function" || typeof unpinnedFile.createReadStream !== "function") {
+                  console.error("::error::Unpinned GCS file handle is missing .save(), .getMetadata(), or .createReadStream().");
+                  process.exit(1);
+                }
+                if (unpinnedFile.name !== samplePath) {
+                  console.error("::error::Unpinned GCS file handle name mismatch: " + unpinnedFile.name);
+                  process.exit(1);
+                }
+
+                if (!pinnedFile || typeof pinnedFile !== "object" || pinnedFile === unpinnedFile) {
+                  console.error("::error::bucket.file(path, { generation }) did not return a distinct file handle object.");
+                  process.exit(1);
+                }
+                if (typeof pinnedFile.createReadStream !== "function" || typeof pinnedFile.getMetadata !== "function" || typeof pinnedFile.save !== "function") {
+                  console.error("::error::Generation-pinned GCS file handle is missing .createReadStream(), .getMetadata(), or .save().");
+                  process.exit(1);
+                }
+                if (pinnedFile.name !== samplePath) {
+                  console.error("::error::Generation-pinned GCS file handle name mismatch: " + pinnedFile.name);
+                  process.exit(1);
+                }
+
+                const exposedGeneration = pinnedFile.generation !== undefined
+                  ? String(pinnedFile.generation)
+                  : (pinnedFile.requestQueryObject && pinnedFile.requestQueryObject.generation !== undefined
+                      ? String(pinnedFile.requestQueryObject.generation)
+                      : null);
+
+                if (exposedGeneration !== sampleGeneration) {
+                  console.error("::error::GCS SDK file handle did not preserve generation pin (expected " + sampleGeneration + ", found " + String(exposedGeneration) + ").");
+                  process.exit(1);
+                }
+
+                if (pinnedFile.generation !== undefined && String(pinnedFile.generation) !== sampleGeneration) {
+                  console.error("::error::pinnedFile.generation property does not match requested generation.");
+                  process.exit(1);
+                }
+
+                // Verify production runtime factory binds strictly to the dedicated quarantine bucket
+                const prodRuntime = createProductionLibraryQuarantineUploadRuntime({
+                  getFirestore: () => ({ collection: () => ({ doc: () => ({}) }), runTransaction: async () => {} }),
+                  getStorage: () => storage,
+                  getAuth: () => ({ verifyIdToken: async () => ({ uid: "verify-only" }) }),
+                });
+
+                if (prodRuntime.targetBucketName !== targetBucketName) {
+                  console.error("::error::Production runtime factory bound to unexpected bucket: " + prodRuntime.targetBucketName);
+                  process.exit(1);
+                }
+
+                console.log("Verified GCS SDK generation-pinned file-handle API compatibility (generation=" + exposedGeneration + ") and dedicated bucket runtime binding.");
+              } finally {
+                await deleteApp(app);
+              }
+            })().catch((err) => {
+              console.error("::error::GCS SDK compatibility check failed: " + (err && err.message ? err.message : String(err)));
+              process.exit(1);
+            });
+          '
+
+      - name: Verify Dedicated Quarantine Bucket Existence, UBLA, PAP, and Non-Public IAM (Read-Only)
+        working-directory: functions
+        run: |
+          node -e '
+            const { initializeApp, applicationDefault, deleteApp } = require("firebase-admin/app");
+            const { getStorage } = require("firebase-admin/storage");
+
+            (async () => {
+              const targetBucketName = "promiseofplanet-bb325-library-quarantine";
+              const forbiddenDefaultBucket = "promiseofplanet-bb325.firebasestorage.app";
+
+              if (targetBucketName === forbiddenDefaultBucket) {
+                console.error("::error::Target bucket must never equal the default Firebase Storage bucket.");
+                process.exit(1);
+              }
+
+              const app = initializeApp({
+                credential: applicationDefault(),
+                projectId: "promiseofplanet-bb325",
+              }, "bucket-security-gate-verify");
+
+              try {
+                const bucket = getStorage(app).bucket(targetBucketName);
+
+                // 1. Read-only bucket existence check
+                const [exists] = await bucket.exists();
+                if (exists !== true) {
+                  console.error("::error::Dedicated quarantine bucket does not exist: " + targetBucketName);
+                  process.exit(1);
+                }
+
+                // 2. Read-only bucket metadata check (Uniform Bucket-Level Access & Public Access Prevention)
+                const [metadata] = await bucket.getMetadata();
+                if (!metadata || metadata.name !== targetBucketName) {
+                  console.error("::error::Bucket metadata missing or bucket name mismatch.");
+                  process.exit(1);
+                }
+
+                const iamConfig = metadata.iamConfiguration || {};
+                const ublaEnabled = Boolean(
+                  iamConfig.uniformBucketLevelAccess &&
+                  iamConfig.uniformBucketLevelAccess.enabled === true
+                );
+                if (!ublaEnabled) {
+                  console.error("::error::Uniform bucket-level access (UBLA) is NOT enabled on " + targetBucketName + ".");
+                  process.exit(1);
+                }
+
+                const papStatus = iamConfig.publicAccessPrevention;
+                if (papStatus !== "enforced") {
+                  console.error("::error::Public Access Prevention (PAP) is NOT enforced on " + targetBucketName + " (found: " + String(papStatus) + ").");
+                  process.exit(1);
+                }
+
+                // 3. Read-only bucket IAM policy check (no public principals)
+                const [policy] = await bucket.iam.getPolicy({ requestedPolicyVersion: 3 });
+                if (!policy || !Array.isArray(policy.bindings)) {
+                  console.error("::error::Bucket IAM policy returned an invalid bindings structure.");
+                  process.exit(1);
+                }
+
+                const forbiddenPublicPrincipals = new Set([
+                  "allusers",
+                  "allauthenticatedusers",
+                ]);
+
+                for (const binding of policy.bindings) {
+                  const role = binding && typeof binding.role === "string" ? binding.role : "unknown";
+                  const members = binding && Array.isArray(binding.members) ? binding.members : [];
+                  for (const member of members) {
+                    const normalized = String(member).trim().toLowerCase();
+                    if (
+                      forbiddenPublicPrincipals.has(normalized) ||
+                      normalized.startsWith("allusers:") ||
+                      normalized.startsWith("allauthenticatedusers:") ||
+                      normalized.startsWith("domain:")
+                    ) {
+                      console.error("::error::Forbidden public/broad IAM principal \"" + member + "\" detected on bucket " + targetBucketName + " in role \"" + role + "\".");
+                      process.exit(1);
+                    }
+                  }
+                }
+
+                console.log("Verified dedicated bucket security posture for " + targetBucketName + ":");
+                console.log("  - Exists: true");
+                console.log("  - Uniform Bucket-Level Access (UBLA): true");
+                console.log("  - Public Access Prevention (PAP): enforced");
+                console.log("  - Public IAM principals (allUsers / allAuthenticatedUsers / domain:*): none found across " + policy.bindings.length + " binding(s)");
+              } finally {
+                await deleteApp(app);
+              }
+            })().catch((err) => {
+              console.error("::error::Dedicated quarantine bucket read-only security gate failed (failing closed): " + (err && err.message ? err.message : String(err)));
+              process.exit(1);
+            });
+          '
+
+      - name: Report Runtime Service-Account IAM Verification Boundaries
+        run: |
+          echo "::notice::Runtime IAM Boundary Notice: Pre-deployment checks verified bucket existence, UBLA=true, PAP=enforced, and absence of public bucket IAM principals on promiseofplanet-bb325-library-quarantine."
+          echo "::notice::Unproven by these checks (requires Owner cloud IAM audit): (1) the exact Cloud Functions Gen 2 / Cloud Run runtime service account identity bound to libraryQuarantineUploadEndpoint; (2) least-privilege scoping of that runtime service account (confirming it has storage.objects.create and storage.objects.get on promiseofplanet-bb325-library-quarantine only, without broad project-wide Editor/Owner/Storage Admin roles or write access to promiseofplanet-bb325.firebasestorage.app); and (3) project/folder/org-level inherited IAM bindings not enumerated by bucket-level getIamPolicy."
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy libraryQuarantineUploadEndpoint Function to Firebase
+        run: |
+          firebase deploy --project promiseofplanet-bb325 --only "functions:libraryQuarantineUploadEndpoint" --non-interactive
+
+      - name: Generate Deployment Summary
+        if: always()
+        run: |
+          echo "### Library Quarantine Upload Function Deployment Summary 🔒" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Project:** \`promiseofplanet-bb325\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Bucket:** \`promiseofplanet-bb325-library-quarantine\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Ref:** \`${{ github.ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit SHA:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed Function Scope:** \`functions:libraryQuarantineUploadEndpoint\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Workflow Status:** \`${{ job.status }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Runtime Service-Account IAM Boundaries Not Proven by This Workflow" >> $GITHUB_STEP_SUMMARY
+          echo "- **Runtime Service Account Identity:** Deployment credential verification checks the CI deployer service account (\`FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325\`), not the Cloud Functions Gen 2 / Cloud Run runtime execution service account." >> $GITHUB_STEP_SUMMARY
+          echo "- **Least-Privilege Object Permissions:** Bucket UBLA/PAP and bucket-level IAM policy checks do not prove that the runtime service account lacks broad project-level inherited roles (e.g., \`roles/editor\`, \`roles/owner\`, \`roles/storage.admin\`, or \`storage.objects.delete\`) or access to \`promiseofplanet-bb325.firebasestorage.app\`." >> $GITHUB_STEP_SUMMARY
+          echo "- **Firestore Admin SDK Scope:** Firebase Admin SDK bypasses \`firestore.rules\`; collection isolation to \`library_quarantine_receipts\` and \`admin_users\` is enforced by compiled server code rather than IAM collection scoping." >> $GITHUB_STEP_SUMMARY
