@@ -555,15 +555,15 @@ function validateSanitizedAdminReceiptDto(
   ) {
     return null;
   }
-  if (candidate.format !== 'pdf' && candidate.format !== 'docx') {
+  if (candidate.format !== 'PDF' && candidate.format !== 'DOCX') {
     return null;
   }
   if (
-    (candidate.format === 'pdf' &&
+    (candidate.format === 'PDF' &&
       (candidate.canonicalExtension !== 'pdf' ||
         candidate.canonicalMimeType !== CANONICAL_PDF_MIME_TYPE ||
         candidate.deepInspectionStatus !== 'PDF_REQUIRES_ISOLATED_PARSER')) ||
-    (candidate.format === 'docx' &&
+    (candidate.format === 'DOCX' &&
       (candidate.canonicalExtension !== 'docx' ||
         candidate.canonicalMimeType !== CANONICAL_DOCX_MIME_TYPE ||
         candidate.deepInspectionStatus !==

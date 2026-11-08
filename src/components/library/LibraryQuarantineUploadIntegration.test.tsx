@@ -93,7 +93,7 @@ function buildSanitizedAdminReceipt(
     uploaderUid: 'admin-librarycurator',
     originalFilename: 'climate-policy-2026.pdf',
     sanitizedFilename: 'climate-policy-2026.pdf',
-    format: 'pdf',
+    format: 'PDF',
     canonicalExtension: 'pdf',
     canonicalMimeType: CANONICAL_PDF_MIME_TYPE,
     byteSize: 4096,
@@ -389,6 +389,8 @@ describe('LIB-FILE-UPLOAD-02 — Admin Library PDF/DOCX Private Quarantine Uploa
       expect(result.outcome).toBe('QUARANTINED');
       expect(result.receiptId).toBe(SAMPLE_RECEIPT_ID);
       expect(result.revision).toBe(3);
+      expect(result.adminReceipt.format).toBe('PDF');
+      expect(result.adminReceipt.canonicalExtension).toBe('pdf');
       expect(result.adminReceipt.state).toBe('Quarantined');
       expect(result.adminReceipt.hasVerifiedStorageWrite).toBe(true);
       expect(result.adminReceipt.isQuarantinedPrivateOnly).toBe(true);
@@ -423,15 +425,127 @@ describe('LIB-FILE-UPLOAD-02 — Admin Library PDF/DOCX Private Quarantine Uploa
     );
   });
 
-  it('5. Rejects HTTP 201 responses that violate receipt invariants or leak internal storage paths/buckets/generations', () => {
-    // Valid 201 succeeds
-    const validRes = validateLibraryQuarantineUploadResponse(
+  it('5. Accepts server-shaped PDF and DOCX HTTP 201 receipts and rejects lowercase formats, mismatched extension/MIME, unverified writes, or leaked internal storage data', () => {
+    // 5a. Valid server-shaped PDF HTTP 201 succeeds as QUARANTINED
+    const validPdfRes = validateLibraryQuarantineUploadResponse(
       201,
       buildQuarantined201Body()
     );
-    expect(validRes.ok).toBe(true);
+    expect(validPdfRes.ok).toBe(true);
+    if (validPdfRes.ok) {
+      expect(validPdfRes.outcome).toBe('QUARANTINED');
+      expect(validPdfRes.adminReceipt.format).toBe('PDF');
+      expect(validPdfRes.adminReceipt.canonicalExtension).toBe('pdf');
+      expect(validPdfRes.adminReceipt.canonicalMimeType).toBe(
+        CANONICAL_PDF_MIME_TYPE
+      );
+      expect(validPdfRes.adminReceipt.deepInspectionStatus).toBe(
+        'PDF_REQUIRES_ISOLATED_PARSER'
+      );
+    }
 
-    // Mismatched receiptId between top-level and adminReceipt
+    // 5b. Valid server-shaped DOCX HTTP 201 succeeds as QUARANTINED
+    const validDocxRes = validateLibraryQuarantineUploadResponse(
+      201,
+      buildQuarantined201Body({
+        adminReceipt: buildSanitizedAdminReceipt({
+          originalFilename: 'treaty-draft-2026.docx',
+          sanitizedFilename: 'treaty-draft-2026.docx',
+          format: 'DOCX',
+          canonicalExtension: 'docx',
+          canonicalMimeType: CANONICAL_DOCX_MIME_TYPE,
+          deepInspectionStatus: 'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION',
+        }),
+      })
+    );
+    expect(validDocxRes.ok).toBe(true);
+    if (validDocxRes.ok) {
+      expect(validDocxRes.outcome).toBe('QUARANTINED');
+      expect(validDocxRes.adminReceipt.format).toBe('DOCX');
+      expect(validDocxRes.adminReceipt.canonicalExtension).toBe('docx');
+      expect(validDocxRes.adminReceipt.canonicalMimeType).toBe(
+        CANONICAL_DOCX_MIME_TYPE
+      );
+      expect(validDocxRes.adminReceipt.deepInspectionStatus).toBe(
+        'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION'
+      );
+    }
+
+    // 5c. Lowercase server receipt format ('pdf' or 'docx') is strictly rejected
+    for (const lowercaseFormat of ['pdf', 'docx']) {
+      const lowercaseFormatRes = validateLibraryQuarantineUploadResponse(
+        201,
+        buildQuarantined201Body({
+          adminReceipt: {
+            ...buildSanitizedAdminReceipt(),
+            format: lowercaseFormat,
+          },
+        })
+      );
+      expect(lowercaseFormatRes.ok).toBe(false);
+      if (!lowercaseFormatRes.ok) {
+        expect(lowercaseFormatRes.outcome).toBe('UPLOAD_OUTCOME_UNCERTAIN');
+        expect(lowercaseFormatRes.errorCode).toBe(
+          'INVALID_QUARANTINED_RECEIPT_INVARIANT'
+        );
+      }
+    }
+
+    // 5d. Mismatched extension, MIME, or deepInspectionStatus is strictly rejected
+    for (const mismatchedReceipt of [
+      {
+        ...buildSanitizedAdminReceipt(),
+        format: 'PDF',
+        canonicalExtension: 'docx',
+      },
+      {
+        ...buildSanitizedAdminReceipt(),
+        format: 'PDF',
+        canonicalExtension: '.pdf',
+      },
+      {
+        ...buildSanitizedAdminReceipt(),
+        format: 'PDF',
+        canonicalMimeType: CANONICAL_DOCX_MIME_TYPE,
+      },
+      {
+        ...buildSanitizedAdminReceipt(),
+        format: 'PDF',
+        deepInspectionStatus: 'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION',
+      },
+      {
+        ...buildSanitizedAdminReceipt({
+          format: 'DOCX',
+          canonicalExtension: 'docx',
+          canonicalMimeType: CANONICAL_DOCX_MIME_TYPE,
+          deepInspectionStatus: 'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION',
+        }),
+        canonicalExtension: 'pdf',
+      },
+      {
+        ...buildSanitizedAdminReceipt({
+          format: 'DOCX',
+          canonicalExtension: 'docx',
+          canonicalMimeType: CANONICAL_DOCX_MIME_TYPE,
+          deepInspectionStatus: 'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION',
+        }),
+        canonicalMimeType: CANONICAL_PDF_MIME_TYPE,
+      },
+    ]) {
+      const mismatchRes = validateLibraryQuarantineUploadResponse(
+        201,
+        buildQuarantined201Body({ adminReceipt: mismatchedReceipt })
+      );
+      expect(mismatchRes.ok).toBe(false);
+      if (!mismatchRes.ok) {
+        expect(mismatchRes.outcome).toBe('UPLOAD_OUTCOME_UNCERTAIN');
+        expect(mismatchRes.errorCode).toBe(
+          'INVALID_QUARANTINED_RECEIPT_INVARIANT'
+        );
+      }
+    }
+
+    // 5e. Mismatched receiptId between top-level and adminReceipt
     const mismatchedIdRes = validateLibraryQuarantineUploadResponse(
       201,
       buildQuarantined201Body({
@@ -443,7 +557,7 @@ describe('LIB-FILE-UPLOAD-02 — Admin Library PDF/DOCX Private Quarantine Uploa
       expect(mismatchedIdRes.outcome).toBe('UPLOAD_OUTCOME_UNCERTAIN');
     }
 
-    // Posture flag true on 201 fails closed
+    // 5f. Posture flag true on 201 fails closed
     const badPostureRes = validateLibraryQuarantineUploadResponse(
       201,
       buildQuarantined201Body({
@@ -455,7 +569,7 @@ describe('LIB-FILE-UPLOAD-02 — Admin Library PDF/DOCX Private Quarantine Uploa
       expect(badPostureRes.outcome).toBe('UPLOAD_OUTCOME_UNCERTAIN');
     }
 
-    // hasVerifiedStorageWrite: false on 201 fails closed
+    // 5g. hasVerifiedStorageWrite: false on 201 fails closed
     const unverifiedWriteRes = validateLibraryQuarantineUploadResponse(
       201,
       buildQuarantined201Body({
@@ -466,7 +580,7 @@ describe('LIB-FILE-UPLOAD-02 — Admin Library PDF/DOCX Private Quarantine Uploa
     );
     expect(unverifiedWriteRes.ok).toBe(false);
 
-    // Leaked storagePath, bucket, generation, or gs:// URI fails closed
+    // 5h. Leaked storagePath, bucket, generation, or gs:// URI fails closed
     for (const leakedPayload of [
       { ...buildQuarantined201Body(), storagePath: 'library-quarantine/uploads/x' },
       { ...buildQuarantined201Body(), bucket: 'promiseofplanet-bb325-library-quarantine' },
