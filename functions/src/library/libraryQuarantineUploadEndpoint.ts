@@ -1662,6 +1662,7 @@ function getOrCreateProductionLibraryQuarantineUploadRuntime(): ProductionLibrar
  */
 export const libraryQuarantineUploadEndpoint = onRequest(
   {
+    serviceAccount: 'pop-library-upload@promiseofplanet-bb325.iam.gserviceaccount.com',
     cors: false,
     maxInstances: 10,
     memory: '512MiB',
