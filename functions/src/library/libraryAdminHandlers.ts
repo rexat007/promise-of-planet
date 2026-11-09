@@ -48,9 +48,31 @@ import {
   type SanitizedLibraryQuarantineReceiptListItemDto,
 } from './libraryQuarantineAdminReadService';
 import { isValidLibraryQuarantineReceiptId } from './libraryQuarantineReceiptContract';
-import type {
-  LibraryQuarantineReviewDraftFirestoreDatabase,
+import {
+  FirestoreLibraryQuarantineReceiptStore,
+  type LibraryQuarantineFirestoreDatabase,
+} from './firestoreLibraryQuarantineReceiptStore';
+import {
+  FirestoreLibraryQuarantineReviewDraftStore,
+  type LibraryQuarantineReviewDraftFirestoreDatabase,
 } from './firestoreLibraryQuarantineReviewDraftStore';
+import {
+  FirestoreLibraryQuarantineHumanReviewCaseStore,
+} from './firestoreLibraryQuarantineHumanReviewCaseStore';
+import type {
+  SanitizedLibraryQuarantineHumanReviewCaseDto,
+  SaveLibraryQuarantineHumanReviewCaseEditorialInput,
+  LibraryQuarantineHumanReviewCaseStatus,
+} from './libraryQuarantineHumanReviewCaseContract';
+import {
+  LibraryQuarantineHumanReviewService,
+  type GetLibraryQuarantineHumanReviewCaseResponseDto,
+  type LibraryQuarantineHumanReviewCaseStorePort,
+  type SaveLibraryQuarantineHumanReviewCaseResponseDto,
+} from './libraryQuarantineHumanReviewService';
+import type {
+  LibraryQuarantineReceiptReadOnlyPort,
+} from './libraryQuarantineReviewDraftPersistenceService';
 import type {
   LibraryQuarantineReviewDraftCallableBridgeDependencies,
   LibraryQuarantineReviewDraftCallableBridgeResponseDto,
@@ -71,19 +93,31 @@ export type {
   ListLibraryQuarantineReviewWorkbenchResponseDto,
   SanitizedLibraryQuarantineReviewWorkbenchItemDto,
   LibraryQuarantineReviewDraftCallableBridgeResponseDto,
+  SanitizedLibraryQuarantineHumanReviewCaseDto,
+  SaveLibraryQuarantineHumanReviewCaseEditorialInput,
+  LibraryQuarantineHumanReviewCaseStatus,
+  GetLibraryQuarantineHumanReviewCaseResponseDto,
+  SaveLibraryQuarantineHumanReviewCaseResponseDto,
 };
 
 export const LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR =
   'POP_LIBRARY_REVIEW_WORKBENCH_ENABLED' as const;
 
+export const LIBRARY_HUMAN_CASE_REVIEW_RELEASE_ENV_VAR =
+  'POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED' as const;
+
 export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly workbenchEnabled?: boolean;
+  readonly humanCaseReviewEnabled?: boolean;
   readonly receiptReadDatabase?: LibraryQuarantineAdminReadFirestoreDatabase;
   readonly draftDatabase?: LibraryQuarantineReviewDraftFirestoreDatabase;
   readonly listReceiptsFn?: () => Promise<LibraryQuarantineAdminReadResult>;
   readonly draftStore?: LibraryQuarantineReviewDraftReadOnlyLookupPort;
   readonly bridgeDependencies?: LibraryQuarantineReviewDraftCallableBridgeDependencies;
   readonly productionRuntimeOverrides?: ProductionLibraryQuarantineReviewDraftBridgeRuntimeOverrides;
+  readonly receiptStore?: LibraryQuarantineReceiptReadOnlyPort;
+  readonly humanReviewCaseStore?: LibraryQuarantineHumanReviewCaseStorePort;
+  readonly humanReviewClock?: () => string;
 }
 
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
@@ -124,6 +158,12 @@ const LINK_QUARANTINE_REVIEW_DRAFT_ALLOWED_KEYS: ReadonlySet<string> = new Set([
   'action',
   'receiptId',
 ]);
+
+const GET_QUARANTINE_HUMAN_REVIEW_CASE_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set(['action', 'receiptId']);
+
+const SAVE_QUARANTINE_HUMAN_REVIEW_CASE_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set(['action', 'receiptId', 'expectedRevision', 'input']);
 
 const WORKBENCH_ALLOWED_AUTH_ENVELOPE_KEYS: ReadonlySet<string> = new Set([
   'uid',
@@ -887,6 +927,24 @@ function assertWorkbenchReleaseGateEnabled(
   }
 }
 
+function assertHumanCaseReviewReleaseGatesEnabled(
+  options?: LibraryQuarantineReviewWorkbenchHandlerOptions
+): void {
+  assertWorkbenchReleaseGateEnabled(options);
+
+  const isHumanCaseEnabled =
+    options?.humanCaseReviewEnabled !== undefined
+      ? options.humanCaseReviewEnabled === true
+      : process.env[LIBRARY_HUMAN_CASE_REVIEW_RELEASE_ENV_VAR] === 'true';
+
+  if (!isHumanCaseEnabled) {
+    throw new HttpsError(
+      'failed-precondition',
+      'HUMAN_CASE_REVIEW_NOT_RELEASED: Library quarantine human case review is not enabled on the server.'
+    );
+  }
+}
+
 function assertStrictWorkbenchAuthEnvelope(
   requestContext: LibraryAdminRequestContext
 ): void {
@@ -1215,6 +1273,196 @@ export async function executeManageLibraryDocumentsRequest(
       );
 
     return bridgeResult;
+  }
+
+  if (
+    action === 'getQuarantineHumanReviewCase' ||
+    action === 'saveQuarantineHumanReviewCase'
+  ) {
+    assertHumanCaseReviewReleaseGatesEnabled(quarantineWorkbenchOptions);
+    assertStrictNoSymbolCallerKeys(requestContext?.data, action);
+
+    const allowedKeys =
+      action === 'getQuarantineHumanReviewCase'
+        ? GET_QUARANTINE_HUMAN_REVIEW_CASE_ALLOWED_KEYS
+        : SAVE_QUARANTINE_HUMAN_REVIEW_CASE_ALLOWED_KEYS;
+
+    const validatedPayload = assertStrictAllowedCallerKeys(
+      requestContext?.data,
+      allowedKeys,
+      action
+    );
+
+    if (
+      !Object.prototype.hasOwnProperty.call(validatedPayload, 'receiptId') ||
+      !isValidLibraryQuarantineReceiptId(validatedPayload.receiptId)
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'INVALID_RECEIPT_ID: receiptId must be a 32-character lowercase hexadecimal string.'
+      );
+    }
+
+    if (action === 'saveQuarantineHumanReviewCase') {
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedRevision'
+        ) ||
+        typeof validatedPayload.expectedRevision !== 'number' ||
+        !Number.isSafeInteger(validatedPayload.expectedRevision) ||
+        validatedPayload.expectedRevision < 0
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_REVISION: expectedRevision must be a non-negative safe integer.'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(validatedPayload, 'input') ||
+        typeof validatedPayload.input !== 'object' ||
+        validatedPayload.input === null ||
+        Array.isArray(validatedPayload.input) ||
+        Object.getOwnPropertySymbols(validatedPayload.input).length > 0
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_CASE_INPUT_OBJECT: input must be a plain object.'
+        );
+      }
+    }
+
+    assertStrictWorkbenchAuthEnvelope(requestContext);
+
+    const baseAdminRepo: Pick<AdminRepository, 'getAdminByUid'> =
+      quarantineWorkbenchOptions?.bridgeDependencies?.adminRepository ??
+      adminRepo;
+
+    let cachedLookupDone = false;
+    let cachedLookupUid = '';
+    let cachedAdminUser: AdminUser | null = null;
+
+    const requestScopedAdminRepo: AdminRepository = {
+      async getAdminByUid(uid: string): Promise<AdminUser | null> {
+        if (cachedLookupDone && cachedLookupUid === uid) {
+          return cachedAdminUser;
+        }
+        const resolved = await baseAdminRepo.getAdminByUid(uid);
+        cachedLookupDone = true;
+        cachedLookupUid = uid;
+        cachedAdminUser = resolved;
+        return resolved;
+      },
+      async saveAdmin(admin: AdminUser): Promise<AdminUser> {
+        if (
+          typeof (baseAdminRepo as AdminRepository).saveAdmin === 'function'
+        ) {
+          return (baseAdminRepo as AdminRepository).saveAdmin(admin);
+        }
+        throw new Error(
+          `UNSAFE_DIRECT_WRITE_FORBIDDEN: saveAdmin is forbidden in ${action}.`
+        );
+      },
+      async listAdmins(): Promise<AdminUser[]> {
+        return typeof (baseAdminRepo as AdminRepository).listAdmins ===
+          'function'
+          ? (baseAdminRepo as AdminRepository).listAdmins!()
+          : [];
+      },
+    };
+
+    const authorizedReviewer = await authenticateHumanAdminForLibraryPeiaAction(
+      requestContext,
+      [AdminPermission.Review],
+      requestScopedAdminRepo
+    );
+    const explicitPermissions = (
+      authorizedReviewer as { readonly permissions?: unknown }
+    ).permissions;
+    if (
+      Array.isArray(explicitPermissions) &&
+      !explicitPermissions.includes(AdminPermission.Review)
+    ) {
+      throw new HttpsError(
+        'permission-denied',
+        `INSUFFICIENT_PERMISSION: Role ${authorizedReviewer.role} lacks required permission ${AdminPermission.Review}`
+      );
+    }
+
+    const verifiedUid = requestContext.auth!.uid.trim();
+    const verifiedToken = requestContext.auth?.token;
+
+    const needsDefaultDb =
+      (quarantineWorkbenchOptions?.receiptStore === undefined &&
+        quarantineWorkbenchOptions?.bridgeDependencies?.receiptStore ===
+          undefined) ||
+      (quarantineWorkbenchOptions?.draftStore === undefined &&
+        quarantineWorkbenchOptions?.bridgeDependencies?.draftStore ===
+          undefined) ||
+      quarantineWorkbenchOptions?.humanReviewCaseStore === undefined;
+
+    const fallbackDb =
+      quarantineWorkbenchOptions?.draftDatabase ??
+      (needsDefaultDb
+        ? (getFirestore() as unknown as LibraryQuarantineReviewDraftFirestoreDatabase)
+        : undefined);
+
+    const effectiveReceiptStore: LibraryQuarantineReceiptReadOnlyPort =
+      quarantineWorkbenchOptions?.receiptStore ??
+      quarantineWorkbenchOptions?.bridgeDependencies?.receiptStore ??
+      new FirestoreLibraryQuarantineReceiptStore(
+        fallbackDb as unknown as LibraryQuarantineFirestoreDatabase
+      );
+
+    const effectiveDraftStore: LibraryQuarantineReviewDraftReadOnlyLookupPort =
+      quarantineWorkbenchOptions?.draftStore ??
+      quarantineWorkbenchOptions?.bridgeDependencies?.draftStore ??
+      new FirestoreLibraryQuarantineReviewDraftStore(
+        fallbackDb as LibraryQuarantineReviewDraftFirestoreDatabase
+      );
+
+    const effectiveCaseStore: LibraryQuarantineHumanReviewCaseStorePort =
+      quarantineWorkbenchOptions?.humanReviewCaseStore ??
+      new FirestoreLibraryQuarantineHumanReviewCaseStore(
+        fallbackDb as LibraryQuarantineReviewDraftFirestoreDatabase
+      );
+
+    const effectiveClock =
+      quarantineWorkbenchOptions?.humanReviewClock ??
+      quarantineWorkbenchOptions?.bridgeDependencies?.clock;
+
+    const humanReviewService = new LibraryQuarantineHumanReviewService({
+      trustedPrincipalProvider: Object.freeze({
+        resolveAuthenticatedPrincipal: () =>
+          Object.freeze({
+            uid: verifiedUid,
+            ...(verifiedToken !== undefined ? { token: verifiedToken } : {}),
+          }),
+      }),
+      adminRepository: requestScopedAdminRepo,
+      receiptStore: effectiveReceiptStore,
+      draftStore: effectiveDraftStore,
+      caseStore: effectiveCaseStore,
+      ...(effectiveClock !== undefined ? { clock: effectiveClock } : {}),
+    });
+
+    if (action === 'getQuarantineHumanReviewCase') {
+      return humanReviewService.getQuarantineHumanReviewCase(
+        Object.freeze({
+          receiptId: validatedPayload.receiptId,
+        })
+      );
+    }
+
+    return humanReviewService.saveQuarantineHumanReviewCase(
+      Object.freeze({
+        receiptId: validatedPayload.receiptId,
+        expectedRevision: validatedPayload.expectedRevision as number,
+        input:
+          validatedPayload.input as SaveLibraryQuarantineHumanReviewCaseEditorialInput,
+      })
+    );
   }
 
   if (typeof action === 'string' && LIBRARY_PEIA_PREPARATION_ACTIONS.has(action)) {

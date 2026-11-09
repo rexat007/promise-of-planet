@@ -73,11 +73,26 @@ import {
   type LibraryQuarantineReviewWorkbenchDisplayStatus,
   type SanitizedLibraryQuarantineReviewWorkbenchItemDto,
 } from '../../services/libraryQuarantineReviewWorkbenchClient';
+import {
+  canOpenLibraryQuarantineHumanReviewCase,
+  isLibraryQuarantineHumanReviewEnabled,
+  isQuarantineWorkbenchItemEligibleForHumanReviewCase,
+  type GetLibraryQuarantineHumanReviewCaseResponseDto,
+  type SaveLibraryQuarantineHumanReviewCaseEditorialInput,
+  type SaveLibraryQuarantineHumanReviewCaseResponseDto,
+} from '../../services/libraryQuarantineHumanReviewClient';
+import {
+  LibraryQuarantineHumanReviewModal,
+  LibraryQuarantineHumanReviewModalController,
+} from './LibraryQuarantineHumanReviewModal';
 
 export {
   canPrepareLibraryQuarantineReviewDraft,
   isLibraryQuarantineReviewWorkbenchEnabled,
   isQuarantineWorkbenchItemEligibleForDraftLink,
+  canOpenLibraryQuarantineHumanReviewCase,
+  isLibraryQuarantineHumanReviewEnabled,
+  isQuarantineWorkbenchItemEligibleForHumanReviewCase,
 };
 
 const LIBRARY_INTAKE_PEIA_REQUIRED_ANY_PERMISSIONS: readonly AdminPermission[] = Object.freeze([
@@ -1081,6 +1096,16 @@ export interface AdminLibraryManagementProps {
     receiptId: string
   ) => Promise<LibraryQuarantineReviewDraftCallableBridgeResponseDto>;
   quarantineWorkbenchEnabledOverride?: boolean;
+  quarantineHumanReviewEnabledOverride?: boolean;
+  quarantineHumanReviewController?: LibraryQuarantineHumanReviewModalController;
+  getQuarantineHumanReviewCaseFn?: (
+    receiptId: string
+  ) => Promise<GetLibraryQuarantineHumanReviewCaseResponseDto>;
+  saveQuarantineHumanReviewCaseFn?: (params: {
+    readonly receiptId: string;
+    readonly expectedRevision: number;
+    readonly input: SaveLibraryQuarantineHumanReviewCaseEditorialInput;
+  }) => Promise<SaveLibraryQuarantineHumanReviewCaseResponseDto>;
   languageOverride?: 'ar' | 'en';
 }
 
@@ -1105,6 +1130,10 @@ export function AdminLibraryManagement({
   listQuarantineWorkbenchFn,
   linkQuarantineReviewDraftFn,
   quarantineWorkbenchEnabledOverride,
+  quarantineHumanReviewEnabledOverride,
+  quarantineHumanReviewController,
+  getQuarantineHumanReviewCaseFn,
+  saveQuarantineHumanReviewCaseFn,
   languageOverride,
 }: AdminLibraryManagementProps) {
   const { i18n } = useTranslation();
@@ -1234,8 +1263,57 @@ export function AdminLibraryManagement({
   const canViewQuarantineReceipts = canViewLibraryQuarantineReceipts(currentUser);
   const canPrepareQuarantineReviewDraft =
     canPrepareLibraryQuarantineReviewDraft(currentUser);
+  const canOpenQuarantineHumanReviewCase =
+    canOpenLibraryQuarantineHumanReviewCase(currentUser);
   const canReviewIntake = canReview || canApprove || canManageRights;
   const canPrepareAiIntake = canAccessLibraryIntakePeiaPreparation(currentUser);
+
+  const resolvedHumanReviewEnabled =
+    quarantineHumanReviewEnabledOverride !== undefined
+      ? quarantineHumanReviewEnabledOverride === true &&
+        (quarantineWorkbenchEnabledOverride !== undefined
+          ? quarantineWorkbenchEnabledOverride === true
+          : isLibraryQuarantineReviewWorkbenchEnabled())
+      : isLibraryQuarantineHumanReviewEnabled();
+
+  const quarantineHumanReviewControllerRef =
+    useRef<LibraryQuarantineHumanReviewModalController | null>(null);
+  if (!quarantineHumanReviewControllerRef.current) {
+    quarantineHumanReviewControllerRef.current =
+      quarantineHumanReviewController ??
+      new LibraryQuarantineHumanReviewModalController(currentUser, {
+        humanReviewEnabled: resolvedHumanReviewEnabled,
+        getCaseFn: getQuarantineHumanReviewCaseFn,
+        saveCaseFn: saveQuarantineHumanReviewCaseFn,
+      });
+  }
+  const activeQuarantineHumanReviewController =
+    quarantineHumanReviewController ??
+    quarantineHumanReviewControllerRef.current;
+  activeQuarantineHumanReviewController.setCurrentUser(currentUser);
+  activeQuarantineHumanReviewController.setOptions({
+    humanReviewEnabled: resolvedHumanReviewEnabled,
+    getCaseFn: getQuarantineHumanReviewCaseFn,
+    saveCaseFn: saveQuarantineHumanReviewCaseFn,
+  });
+
+  const [quarantineHumanReviewSnapshot, setQuarantineHumanReviewSnapshot] =
+    useState(() => activeQuarantineHumanReviewController.getSnapshot());
+
+  useEffect(() => {
+    setQuarantineHumanReviewSnapshot(
+      activeQuarantineHumanReviewController.getSnapshot()
+    );
+    const unsub = activeQuarantineHumanReviewController.subscribe((snap) => {
+      setQuarantineHumanReviewSnapshot(snap);
+    });
+    return () => {
+      unsub();
+      if (!quarantineHumanReviewController) {
+        activeQuarantineHumanReviewController.invalidateSession();
+      }
+    };
+  }, [activeQuarantineHumanReviewController, quarantineHumanReviewController]);
 
   // Component-Scoped State & Controller for Read-Only Private Quarantine Receipts Inbox + Workbench
   const hasExplicitInitialQuarantineState =
@@ -1342,10 +1420,20 @@ export function AdminLibraryManagement({
     [canPrepareQuarantineReviewDraft, activeQuarantineInboxController]
   );
 
+  const handleOpenQuarantineHumanReviewCase = useCallback(
+    async (adminReceipt: SanitizedLibraryQuarantineAdminReceiptDto) => {
+      if (!canOpenQuarantineHumanReviewCase) return;
+      await activeQuarantineHumanReviewController.openCase(adminReceipt);
+    },
+    [canOpenQuarantineHumanReviewCase, activeQuarantineHumanReviewController]
+  );
+
   const quarantineReceipts = quarantineInboxState.receipts;
   const quarantineReceiptsLoading = quarantineInboxState.loading;
   const quarantineReceiptsError = quarantineInboxState.error;
   const quarantineWorkbenchEnabled = quarantineInboxState.workbenchEnabled;
+  const quarantineHumanReviewEnabled =
+    quarantineWorkbenchEnabled && quarantineHumanReviewSnapshot.humanReviewEnabled;
   const quarantineDraftStatusByReceiptId =
     quarantineInboxState.draftStatusByReceiptId;
   const quarantineLinkingReceiptId = quarantineInboxState.linkingReceiptId;
@@ -1378,6 +1466,11 @@ export function AdminLibraryManagement({
       adminReceipt,
       draftStatus,
     });
+    const isEligibleForHumanCase =
+      isQuarantineWorkbenchItemEligibleForHumanReviewCase({
+        adminReceipt,
+        draftStatus,
+      });
 
     const statusTestId =
       layout === 'desktop'
@@ -1387,6 +1480,10 @@ export function AdminLibraryManagement({
       layout === 'desktop'
         ? `prepare-quarantine-review-draft-btn-${receiptId}`
         : `prepare-quarantine-review-draft-mobile-btn-${receiptId}`;
+    const openHumanCaseBtnTestId =
+      layout === 'desktop'
+        ? `open-quarantine-human-review-case-btn-${receiptId}`
+        : `open-quarantine-human-review-case-mobile-btn-${receiptId}`;
 
     return (
       <div className="space-y-2 text-xs">
@@ -1415,6 +1512,26 @@ export function AdminLibraryManagement({
                 ? 'مسودة مرتبطة للمراجعة البشرية فقط — غير مطهّرة (isSanitized: false) • غير معتمدة أمنياً أو حقوقياً • غير منشورة'
                 : 'Linked review draft only — Not sanitized (isSanitized: false) • Not safety/rights approved • Not published'}
             </p>
+            {quarantineHumanReviewEnabled &&
+              isEligibleForHumanCase &&
+              canOpenQuarantineHumanReviewCase && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    data-testid={openHumanCaseBtnTestId}
+                    disabled={isAnyOperationPending}
+                    onClick={() => {
+                      void handleOpenQuarantineHumanReviewCase(adminReceipt);
+                    }}
+                    className="w-full sm:w-auto px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white font-extrabold text-xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 shadow-2xs"
+                  >
+                    <Edit3 className="h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {isAr ? 'فتح سجل المراجعة' : 'Open review case'}
+                    </span>
+                  </button>
+                </div>
+              )}
           </div>
         )}
 
@@ -4940,6 +5057,12 @@ export function AdminLibraryManagement({
         isAr={isAr}
         runtimeDependencies={quarantineUploadRuntimeDeps}
         controller={quarantineUploadController}
+      />
+
+      {/* Quarantined File Human Review Case Modal */}
+      <LibraryQuarantineHumanReviewModal
+        controller={activeQuarantineHumanReviewController}
+        isAr={isAr}
       />
 
       {/* Editor & Detail Modal */}
