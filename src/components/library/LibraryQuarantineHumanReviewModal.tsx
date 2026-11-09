@@ -35,6 +35,10 @@ import {
   LibraryQuarantineCatalogHandoffPanel,
   type LibraryQuarantineCatalogHandoffPanelController,
 } from './LibraryQuarantineCatalogHandoffPanel';
+import {
+  LibraryQuarantineRightsDecisionPanel,
+  LibraryQuarantineRightsDecisionPanelController,
+} from './LibraryQuarantineRightsDecisionPanel';
 
 /**
  * LIB-FILE-HUMAN-CASEWORK-01 — Human Review Case Modal & State Controller
@@ -636,6 +640,7 @@ export interface LibraryQuarantineHumanReviewModalProps {
   readonly organizations?: readonly LibraryOrganization[];
   readonly sources?: readonly LibrarySource[];
   readonly catalogHandoffController?: LibraryQuarantineCatalogHandoffPanelController;
+  readonly rightsDecisionController?: LibraryQuarantineRightsDecisionPanelController;
 }
 
 export function getHumanReviewCaseStatusLabel(
@@ -669,6 +674,7 @@ export function LibraryQuarantineHumanReviewModal({
   organizations = [],
   sources = [],
   catalogHandoffController,
+  rightsDecisionController,
 }: LibraryQuarantineHumanReviewModalProps) {
   const [snapshot, setSnapshot] =
     useState<LibraryQuarantineHumanReviewModalSnapshot>(() =>
@@ -676,6 +682,16 @@ export function LibraryQuarantineHumanReviewModal({
     );
 
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const fallbackRightsControllerRef =
+    useRef<LibraryQuarantineRightsDecisionPanelController | null>(null);
+
+  if (!rightsDecisionController && !fallbackRightsControllerRef.current) {
+    fallbackRightsControllerRef.current =
+      new LibraryQuarantineRightsDecisionPanelController(currentUser);
+  }
+
+  const effectiveRightsDecisionController =
+    rightsDecisionController ?? fallbackRightsControllerRef.current!;
 
   useEffect(() => {
     setSnapshot(controller.getSnapshot());
@@ -686,6 +702,7 @@ export function LibraryQuarantineHumanReviewModal({
 
   useEffect(() => {
     if (!snapshot.isOpen) {
+      effectiveRightsDecisionController.resetPanel();
       return;
     }
     closeButtonRef.current?.focus();
@@ -701,7 +718,12 @@ export function LibraryQuarantineHumanReviewModal({
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [snapshot.isOpen, snapshot.saving, controller]);
+  }, [
+    snapshot.isOpen,
+    snapshot.saving,
+    controller,
+    effectiveRightsDecisionController,
+  ]);
 
   if (!snapshot.isOpen || !snapshot.activeReceipt) {
     return null;
@@ -1413,6 +1435,28 @@ export function LibraryQuarantineHumanReviewModal({
             onReloadHumanReviewCase={() => {
               void controller.reloadCase();
             }}
+          />
+        )}
+
+        {/* Inline Human Rights Decision & Readiness Panel (Independent of CatalogHandoffPanel so RightsReviewer without Create can access) */}
+        {!loading && !loadError && (
+          <LibraryQuarantineRightsDecisionPanel
+            controller={effectiveRightsDecisionController}
+            currentUser={currentUser}
+            savedReviewCase={reviewCase}
+            hasUnsavedCaseEdits={Boolean(
+              reviewCase &&
+                (form.status !== reviewCase.status ||
+                  form.titleAr !== reviewCase.titleAr ||
+                  form.titleEn !== reviewCase.titleEn ||
+                  form.issuingOrganization !== reviewCase.issuingOrganization ||
+                  form.summaryAr !== reviewCase.summaryAr ||
+                  form.summaryEn !== reviewCase.summaryEn ||
+                  form.sourceEvidenceNotes !== reviewCase.sourceEvidenceNotes ||
+                  form.rightsEvidenceNotes !== reviewCase.rightsEvidenceNotes ||
+                  form.editorialNotes !== reviewCase.editorialNotes)
+            )}
+            isAr={isAr}
           />
         )}
       </div>

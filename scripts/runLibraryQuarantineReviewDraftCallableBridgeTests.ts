@@ -775,13 +775,94 @@ const EXPECTED_FAILURE_DTO_KEYS = Object.freeze([
   'status',
 ]);
 
+const FORBIDDEN_BRIDGE_DTO_JSON_KEYS_LOWER: ReadonlySet<string> = new Set([
+  'generation',
+  'attestedgeneration',
+  'gcsgeneration',
+  'objectgeneration',
+  'metageneration',
+  'storagepath',
+  'bucket',
+  'bucketname',
+  'attestation',
+  'sha256',
+  'sourcesha256',
+  'attestedsha256',
+  'draft',
+  'candidate',
+  'uploaderuid',
+  'createdby',
+  'updatedby',
+  'actoruid',
+  'signedurl',
+  'downloadurl',
+  'downloadtoken',
+  'referenceurl',
+  'rawbytes',
+  'bytes',
+  'buffer',
+]);
+
+const FORBIDDEN_BRIDGE_DTO_JSON_KEY_REGEX =
+  /"(?:generation|attestedgeneration|gcsgeneration|objectgeneration|metageneration|storagepath|bucket|bucketname|attestation|sha256|sourcesha256|attestedsha256|draft|candidate|uploaderuid|createdby|updatedby|actoruid|signedurl|downloadurl|downloadtoken|referenceurl|rawbytes|bytes|buffer)"\s*:/i;
+
+function findForbiddenBridgeJsonKeyAtAnyDepth(
+  value: unknown,
+  visited = new Set<object>()
+): string | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+  if (visited.has(value)) {
+    return null;
+  }
+  visited.add(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findForbiddenBridgeJsonKeyAtAnyDepth(item, visited);
+      if (found !== null) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    if (FORBIDDEN_BRIDGE_DTO_JSON_KEYS_LOWER.has(key.toLowerCase())) {
+      return key;
+    }
+    const childFound = findForbiddenBridgeJsonKeyAtAnyDepth(
+      (value as Record<string, unknown>)[key],
+      visited
+    );
+    if (childFound !== null) {
+      return childFound;
+    }
+  }
+  return null;
+}
+
 function assertBridgeDtoZeroLeakage(
   dto: unknown,
   contextLabel: string,
   forbiddenLiterals: readonly string[]
 ): void {
+  const forbiddenKey = findForbiddenBridgeJsonKeyAtAnyDepth(dto);
+  assert.equal(
+    forbiddenKey,
+    null,
+    `${contextLabel}: must not contain forbidden JSON key "${forbiddenKey ?? ''}" at any depth`
+  );
+
   const serialized = JSON.stringify(dto);
   const lower = serialized.toLowerCase();
+
+  assert.equal(
+    FORBIDDEN_BRIDGE_DTO_JSON_KEY_REGEX.test(serialized),
+    false,
+    `${contextLabel}: must not contain forbidden generation or secret JSON property key`
+  );
 
   assert.equal(
     lower.includes('library/quarantine/'),
@@ -794,9 +875,9 @@ function assertBridgeDtoZeroLeakage(
     `${contextLabel}: must not contain storagePath`
   );
   assert.equal(
-    /"(?:attested)?generation"\s*:/i.test(serialized),
+    lower.includes('bucketname'),
     false,
-    `${contextLabel}: must not contain generation or attestedGeneration`
+    `${contextLabel}: must not contain bucketName`
   );
   assert.equal(
     lower.includes('"attestation"'),
@@ -1926,6 +2007,81 @@ async function runTests(): Promise<void> {
       'Uncaught service exception sentinel error',
       forbiddenList
     );
+
+    // 6E-bis: Verify assertBridgeDtoZeroLeakage allows safe "Generation-pinned"
+    // message text while rejecting generation/attestedGeneration/gcsGeneration/
+    // objectGeneration/metageneration/storagePath/bucketName/signedUrl/downloadToken
+    // keys at any depth (root, nested object, nested array)
+    assertBridgeDtoZeroLeakage(
+      {
+        ok: false,
+        status: 'HOLD',
+        callableStatus: 'failed-precondition',
+        errorCode: 'QUARANTINE_OBJECT_NOT_FOUND_HOLD',
+        errorMessage:
+          'Generation-pinned private storage object was not found in the quarantine bucket.',
+        receiptId: fix.receipt.receiptId,
+        draftCreationOutcome: 'NOT_CREATED',
+        draftCreated: false,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      },
+      'Safe Generation-pinned constant error message',
+      forbiddenList
+    );
+
+    const forbiddenKeyFixtures: ReadonlyArray<readonly [string, unknown]> = [
+      ['generation (root)', { ok: true, generation: '1731158400999111' }],
+      [
+        'attestedGeneration (nested)',
+        { ok: true, meta: { attestedGeneration: '1731158400999111' } },
+      ],
+      [
+        'gcsGeneration (deep array)',
+        { ok: true, layers: [{ inner: { gcsGeneration: '1731158400999111' } }] },
+      ],
+      [
+        'OBJECTGENERATION (case-insensitive)',
+        { ok: false, details: { OBJECTGENERATION: '1731158400999111' } },
+      ],
+      [
+        'MetaGeneration (case-insensitive nested)',
+        { ok: false, envelope: [{ MetaGeneration: '2' }] },
+      ],
+      [
+        'storagePath (nested)',
+        { ok: false, debug: { storagePath: 'secret/path.pdf' } },
+      ],
+      [
+        'bucketName (nested)',
+        { ok: false, debug: { bucketName: 'private-bucket' } },
+      ],
+      [
+        'signedUrl (nested)',
+        { ok: false, links: [{ signedUrl: 'redacted' }] },
+      ],
+      [
+        'downloadToken (nested)',
+        { ok: false, tokenInfo: { downloadToken: 'tok_123' } },
+      ],
+    ];
+
+    for (const [fixtureLabel, poisonDto] of forbiddenKeyFixtures) {
+      assert.throws(
+        () => {
+          assertBridgeDtoZeroLeakage(
+            poisonDto,
+            `Fixture ${fixtureLabel}`,
+            []
+          );
+        },
+        /must not contain forbidden/,
+        `assertBridgeDtoZeroLeakage must reject ${fixtureLabel}`
+      );
+    }
 
     // 6F: Verify callable options & unregistered release gate
     assert.equal(
