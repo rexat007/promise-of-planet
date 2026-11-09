@@ -59,7 +59,26 @@ import {
   type RequestLibraryIntakePeiaPreparationResponseDto,
   type PeiaTaskEnqueueDisposition,
   type SanitizedLibraryQuarantineReceiptListItemDto,
+  type SanitizedLibraryQuarantineAdminReceiptDto,
 } from '../../services/libraryAdminClient';
+import {
+  LibraryQuarantineReviewWorkbenchClient,
+  WORKBENCH_CLIENT_SAFE_ERRORS,
+  canPrepareLibraryQuarantineReviewDraft,
+  isLibraryQuarantineReviewWorkbenchEnabled,
+  isQuarantineWorkbenchItemEligibleForDraftLink,
+  isWorkbenchNotReleasedError,
+  type LibraryQuarantineReviewDraftCallableBridgeResponseDto,
+  type LibraryQuarantineReviewDraftLinkDisposition,
+  type LibraryQuarantineReviewWorkbenchDisplayStatus,
+  type SanitizedLibraryQuarantineReviewWorkbenchItemDto,
+} from '../../services/libraryQuarantineReviewWorkbenchClient';
+
+export {
+  canPrepareLibraryQuarantineReviewDraft,
+  isLibraryQuarantineReviewWorkbenchEnabled,
+  isQuarantineWorkbenchItemEligibleForDraftLink,
+};
 
 const LIBRARY_INTAKE_PEIA_REQUIRED_ANY_PERMISSIONS: readonly AdminPermission[] = Object.freeze([
   AdminPermission.Create,
@@ -139,30 +158,94 @@ export function canViewLibraryQuarantineReceipts(
   return AdminAccessService.hasPermission(user, AdminPermission.View);
 }
 
+export interface LibraryQuarantineReviewDraftUncertainHoldNotice {
+  readonly receiptId: string;
+  readonly errorCode: string;
+  readonly errorMessage: string;
+  readonly draftCreationOutcome: 'UNKNOWN';
+  readonly draftCreated: null;
+}
+
 export interface LibraryQuarantineReceiptsInboxSnapshot {
   readonly receipts: readonly SanitizedLibraryQuarantineReceiptListItemDto[];
   readonly loading: boolean;
   readonly error: string | null;
   readonly sessionToken: number;
+  readonly workbenchEnabled: boolean;
+  readonly draftStatusByReceiptId: Readonly<
+    Record<string, LibraryQuarantineReviewWorkbenchDisplayStatus>
+  >;
+  readonly linkingReceiptId: string | null;
+  readonly linkErrorByReceiptId: Readonly<Record<string, string>>;
+  readonly uncertainHoldByReceiptId: Readonly<
+    Record<string, LibraryQuarantineReviewDraftUncertainHoldNotice>
+  >;
+  readonly lastLinkDispositionByReceiptId: Readonly<
+    Record<string, LibraryQuarantineReviewDraftLinkDisposition>
+  >;
+}
+
+export interface LibraryQuarantineReceiptsInboxWorkbenchOptions {
+  readonly workbenchEnabled?: boolean;
+  readonly listWorkbenchFn?: () => Promise<
+    readonly SanitizedLibraryQuarantineReviewWorkbenchItemDto[]
+  >;
+  readonly linkDraftFn?: (
+    receiptId: string
+  ) => Promise<LibraryQuarantineReviewDraftCallableBridgeResponseDto>;
+  readonly initialWorkbenchItems?: readonly SanitizedLibraryQuarantineReviewWorkbenchItemDto[];
 }
 
 export function createInitialLibraryQuarantineReceiptsInboxSnapshot(
-  sessionToken = 0
+  sessionToken = 0,
+  workbenchEnabled = false
 ): LibraryQuarantineReceiptsInboxSnapshot {
   return {
     receipts: [],
     loading: false,
     error: null,
     sessionToken,
+    workbenchEnabled,
+    draftStatusByReceiptId: {},
+    linkingReceiptId: null,
+    linkErrorByReceiptId: {},
+    uncertainHoldByReceiptId: {},
+    lastLinkDispositionByReceiptId: {},
   };
 }
 
+function buildUnavailableDraftStatusMap(
+  receipts: readonly SanitizedLibraryQuarantineReceiptListItemDto[]
+): Readonly<Record<string, LibraryQuarantineReviewWorkbenchDisplayStatus>> {
+  const map: Record<string, LibraryQuarantineReviewWorkbenchDisplayStatus> = {};
+  for (const item of receipts) {
+    map[item.adminReceipt.receiptId] = 'UNAVAILABLE';
+  }
+  return Object.freeze(map);
+}
+
+function buildWorkbenchDraftStatusMap(
+  items: readonly SanitizedLibraryQuarantineReviewWorkbenchItemDto[]
+): Readonly<Record<string, LibraryQuarantineReviewWorkbenchDisplayStatus>> {
+  const map: Record<string, LibraryQuarantineReviewWorkbenchDisplayStatus> = {};
+  for (const item of items) {
+    map[item.adminReceipt.receiptId] = item.draftStatus;
+  }
+  return Object.freeze(map);
+}
+
 /**
- * Component-scoped read-only controller for the Private Quarantine Receipts Inbox section.
+ * Component-scoped controller for the Private Quarantine Receipts Inbox & Review Workbench section.
  * - Keeps all state in memory only (no browser storage or global singletons).
- * - Prevents overlapping in-flight requests.
+ * - Prevents overlapping in-flight list reads and duplicate draft-link clicks.
  * - Invalidates stale responses when the active admin user/session changes or on unmount.
  * - Preserves failed-read errors explicitly so failed reads are never misrendered as empty.
+ * - When `workbenchEnabled` is false (default) or server returns `WORKBENCH_NOT_RELEASED`,
+ *   preserves the read-only receipts view with `'UNAVAILABLE'` draft link status and disabled action.
+ * - Post-link `PENDING_HUMAN_REVIEW` status is derived exclusively from a fresh server read
+ *   (`loadReceipts()`), never synthesized from the click response.
+ * - On `UNKNOWN` (`draftCreated: null`), records an explicit uncertainty HOLD notice and stops
+ *   without automatic retry.
  */
 export class LibraryQuarantineReceiptsInboxController {
   private state: LibraryQuarantineReceiptsInboxSnapshot;
@@ -170,6 +253,13 @@ export class LibraryQuarantineReceiptsInboxController {
   private listReceiptsFn: () => Promise<
     readonly SanitizedLibraryQuarantineReceiptListItemDto[]
   >;
+  private workbenchConfiguredEnabled: boolean;
+  private listWorkbenchFn: () => Promise<
+    readonly SanitizedLibraryQuarantineReviewWorkbenchItemDto[]
+  >;
+  private linkDraftFn: (
+    receiptId: string
+  ) => Promise<LibraryQuarantineReviewDraftCallableBridgeResponseDto>;
   private readonly listeners = new Set<
     (snapshot: LibraryQuarantineReceiptsInboxSnapshot) => void
   >();
@@ -179,15 +269,52 @@ export class LibraryQuarantineReceiptsInboxController {
     listReceiptsFn: () => Promise<
       readonly SanitizedLibraryQuarantineReceiptListItemDto[]
     > = () => LibraryAdminClient.listQuarantineReceipts(),
-    initialState?: Partial<LibraryQuarantineReceiptsInboxSnapshot>
+    initialState?: Partial<LibraryQuarantineReceiptsInboxSnapshot>,
+    workbenchOptions?: LibraryQuarantineReceiptsInboxWorkbenchOptions
   ) {
     this.currentUser = currentUser;
     this.listReceiptsFn = listReceiptsFn;
+    this.workbenchConfiguredEnabled =
+      workbenchOptions?.workbenchEnabled ??
+      initialState?.workbenchEnabled ??
+      isLibraryQuarantineReviewWorkbenchEnabled();
+    this.listWorkbenchFn =
+      workbenchOptions?.listWorkbenchFn ??
+      (() =>
+        LibraryQuarantineReviewWorkbenchClient.listQuarantineReviewWorkbench());
+    this.linkDraftFn =
+      workbenchOptions?.linkDraftFn ??
+      ((receiptId: string) =>
+        LibraryQuarantineReviewWorkbenchClient.linkQuarantineReviewDraft(
+          receiptId
+        ));
+
+    const initialWorkbenchItems = workbenchOptions?.initialWorkbenchItems;
+    const resolvedReceipts: readonly SanitizedLibraryQuarantineReceiptListItemDto[] =
+      initialWorkbenchItems !== undefined
+        ? initialWorkbenchItems.map(({ revision, adminReceipt }) => ({
+            revision,
+            adminReceipt,
+          }))
+        : (initialState?.receipts ?? []);
+
+    const resolvedDraftStatusMap: Readonly<
+      Record<string, LibraryQuarantineReviewWorkbenchDisplayStatus>
+    > =
+      initialState?.draftStatusByReceiptId ??
+      (initialWorkbenchItems !== undefined && this.workbenchConfiguredEnabled
+        ? buildWorkbenchDraftStatusMap(initialWorkbenchItems)
+        : buildUnavailableDraftStatusMap(resolvedReceipts));
+
     this.state = {
       ...createInitialLibraryQuarantineReceiptsInboxSnapshot(
-        initialState?.sessionToken ?? 0
+        initialState?.sessionToken ?? 0,
+        this.workbenchConfiguredEnabled
       ),
       ...initialState,
+      receipts: resolvedReceipts,
+      workbenchEnabled: this.workbenchConfiguredEnabled,
+      draftStatusByReceiptId: resolvedDraftStatusMap,
     };
   }
 
@@ -229,9 +356,28 @@ export class LibraryQuarantineReceiptsInboxController {
     this.listReceiptsFn = fn;
   }
 
+  public setWorkbenchOptions(
+    options: LibraryQuarantineReceiptsInboxWorkbenchOptions
+  ): void {
+    if (options.workbenchEnabled !== undefined) {
+      this.workbenchConfiguredEnabled = options.workbenchEnabled;
+    }
+    if (options.listWorkbenchFn !== undefined) {
+      this.listWorkbenchFn = options.listWorkbenchFn;
+    }
+    if (options.linkDraftFn !== undefined) {
+      this.linkDraftFn = options.linkDraftFn;
+    }
+  }
+
   public invalidateSession(): void {
     const nextToken = this.state.sessionToken + 1;
-    this.setState(createInitialLibraryQuarantineReceiptsInboxSnapshot(nextToken));
+    this.setState(
+      createInitialLibraryQuarantineReceiptsInboxSnapshot(
+        nextToken,
+        this.workbenchConfiguredEnabled
+      )
+    );
   }
 
   private setState(
@@ -267,6 +413,104 @@ export class LibraryQuarantineReceiptsInboxController {
       error: null,
     });
 
+    if (this.workbenchConfiguredEnabled) {
+      try {
+        const workbenchItems = await this.listWorkbenchFn();
+        if (
+          this.state.sessionToken !== activeToken ||
+          (this.currentUser?.id ?? null) !== expectedUserId ||
+          !canViewLibraryQuarantineReceipts(this.currentUser)
+        ) {
+          return null;
+        }
+
+        const receipts: readonly SanitizedLibraryQuarantineReceiptListItemDto[] =
+          Object.freeze(
+            workbenchItems.map(({ revision, adminReceipt }) =>
+              Object.freeze({ revision, adminReceipt })
+            )
+          );
+
+        this.setState({
+          receipts,
+          loading: false,
+          error: null,
+          workbenchEnabled: true,
+          draftStatusByReceiptId: buildWorkbenchDraftStatusMap(workbenchItems),
+          uncertainHoldByReceiptId: {},
+          linkErrorByReceiptId: {},
+        });
+        return receipts;
+      } catch (err: unknown) {
+        if (
+          this.state.sessionToken !== activeToken ||
+          (this.currentUser?.id ?? null) !== expectedUserId
+        ) {
+          return null;
+        }
+
+        // If the server release gate is closed (`WORKBENCH_NOT_RELEASED`),
+        // fall back cleanly to the read-only receipts view with `'UNAVAILABLE'`
+        // draft link status so the existing inbox continues to function.
+        if (isWorkbenchNotReleasedError(err)) {
+          try {
+            const fallbackReceipts = await this.listReceiptsFn();
+            if (
+              this.state.sessionToken !== activeToken ||
+              (this.currentUser?.id ?? null) !== expectedUserId ||
+              !canViewLibraryQuarantineReceipts(this.currentUser)
+            ) {
+              return null;
+            }
+            this.setState({
+              receipts: fallbackReceipts,
+              loading: false,
+              error: null,
+              workbenchEnabled: false,
+              draftStatusByReceiptId:
+                buildUnavailableDraftStatusMap(fallbackReceipts),
+              uncertainHoldByReceiptId: {},
+              linkErrorByReceiptId: {},
+            });
+            return fallbackReceipts;
+          } catch (fallbackErr: unknown) {
+            if (
+              this.state.sessionToken !== activeToken ||
+              (this.currentUser?.id ?? null) !== expectedUserId
+            ) {
+              return null;
+            }
+            const fallbackDetail =
+              fallbackErr instanceof Error &&
+              fallbackErr.message.trim().length > 0
+                ? fallbackErr.message
+                : 'QUARANTINE_RECEIPTS_READ_FAILED: Failed to load private quarantine receipts.';
+            this.setState({
+              receipts: [],
+              loading: false,
+              error: fallbackDetail,
+              workbenchEnabled: false,
+              draftStatusByReceiptId: {},
+            });
+            return null;
+          }
+        }
+
+        const detail =
+          err instanceof Error && err.message.trim().length > 0
+            ? err.message
+            : WORKBENCH_CLIENT_SAFE_ERRORS.LIST_CALL_FAILED;
+
+        this.setState({
+          receipts: [],
+          loading: false,
+          error: detail,
+          draftStatusByReceiptId: {},
+        });
+        return null;
+      }
+    }
+
     try {
       const receipts = await this.listReceiptsFn();
       if (
@@ -281,6 +525,8 @@ export class LibraryQuarantineReceiptsInboxController {
         receipts,
         loading: false,
         error: null,
+        workbenchEnabled: false,
+        draftStatusByReceiptId: buildUnavailableDraftStatusMap(receipts),
       });
       return receipts;
     } catch (err: unknown) {
@@ -300,6 +546,148 @@ export class LibraryQuarantineReceiptsInboxController {
         receipts: [],
         loading: false,
         error: detail,
+        draftStatusByReceiptId: {},
+      });
+      return null;
+    }
+  }
+
+  public async prepareReviewDraft(
+    receiptId: string
+  ): Promise<LibraryQuarantineReviewDraftCallableBridgeResponseDto | null> {
+    if (
+      !this.workbenchConfiguredEnabled ||
+      !this.state.workbenchEnabled ||
+      !canPrepareLibraryQuarantineReviewDraft(this.currentUser)
+    ) {
+      return null;
+    }
+
+    if (this.state.loading || this.state.linkingReceiptId !== null) {
+      return null;
+    }
+
+    if (this.state.uncertainHoldByReceiptId[receiptId] !== undefined) {
+      return null;
+    }
+
+    const receiptEntry = this.state.receipts.find(
+      (r) => r.adminReceipt.receiptId === receiptId
+    );
+    const currentDraftStatus =
+      this.state.draftStatusByReceiptId[receiptId] ?? 'UNAVAILABLE';
+
+    if (
+      !receiptEntry ||
+      !isQuarantineWorkbenchItemEligibleForDraftLink({
+        adminReceipt: receiptEntry.adminReceipt,
+        draftStatus: currentDraftStatus,
+      })
+    ) {
+      return null;
+    }
+
+    const activeToken = this.state.sessionToken;
+    const expectedUserId = this.currentUser?.id ?? null;
+
+    const nextErrors = { ...this.state.linkErrorByReceiptId };
+    delete nextErrors[receiptId];
+
+    this.setState({
+      linkingReceiptId: receiptId,
+      linkErrorByReceiptId: Object.freeze(nextErrors),
+    });
+
+    try {
+      const response = await this.linkDraftFn(receiptId);
+
+      if (
+        this.state.sessionToken !== activeToken ||
+        (this.currentUser?.id ?? null) !== expectedUserId ||
+        !canPrepareLibraryQuarantineReviewDraft(this.currentUser)
+      ) {
+        return null;
+      }
+
+      if (response.ok) {
+        // Post-action status MUST come from a fresh server read, never synthesized
+        // locally from the click response.
+        this.setState({
+          linkingReceiptId: null,
+          lastLinkDispositionByReceiptId: Object.freeze({
+            ...this.state.lastLinkDispositionByReceiptId,
+            [receiptId]: response.disposition,
+          }),
+        });
+        await this.loadReceipts();
+        return response;
+      }
+
+      if (
+        response.draftCreationOutcome === 'UNKNOWN' ||
+        response.draftCreated === null
+      ) {
+        this.setState({
+          linkingReceiptId: null,
+          uncertainHoldByReceiptId: Object.freeze({
+            ...this.state.uncertainHoldByReceiptId,
+            [receiptId]: Object.freeze({
+              receiptId,
+              errorCode: response.errorCode,
+              errorMessage: response.errorMessage,
+              draftCreationOutcome: 'UNKNOWN' as const,
+              draftCreated: null,
+            }),
+          }),
+        });
+        return response;
+      }
+
+      this.setState({
+        linkingReceiptId: null,
+        linkErrorByReceiptId: Object.freeze({
+          ...this.state.linkErrorByReceiptId,
+          [receiptId]: `${response.errorCode}: ${response.errorMessage}`,
+        }),
+      });
+      return response;
+    } catch (err: unknown) {
+      if (
+        this.state.sessionToken !== activeToken ||
+        (this.currentUser?.id ?? null) !== expectedUserId
+      ) {
+        return null;
+      }
+
+      if (isWorkbenchNotReleasedError(err)) {
+        this.setState({
+          linkingReceiptId: null,
+          workbenchEnabled: false,
+          draftStatusByReceiptId: buildUnavailableDraftStatusMap(
+            this.state.receipts
+          ),
+          linkErrorByReceiptId: Object.freeze({
+            ...this.state.linkErrorByReceiptId,
+            [receiptId]: WORKBENCH_CLIENT_SAFE_ERRORS.WORKBENCH_NOT_RELEASED,
+          }),
+        });
+        return null;
+      }
+
+      const safeDetail =
+        err instanceof Error &&
+        (err.message === WORKBENCH_CLIENT_SAFE_ERRORS.LINK_CONTRACT_INVALID ||
+          err.message === WORKBENCH_CLIENT_SAFE_ERRORS.INVALID_RECEIPT_ID ||
+          err.message === WORKBENCH_CLIENT_SAFE_ERRORS.BACKEND_UNAVAILABLE)
+          ? err.message
+          : WORKBENCH_CLIENT_SAFE_ERRORS.LINK_CALL_FAILED;
+
+      this.setState({
+        linkingReceiptId: null,
+        linkErrorByReceiptId: Object.freeze({
+          ...this.state.linkErrorByReceiptId,
+          [receiptId]: safeDetail,
+        }),
       });
       return null;
     }
@@ -679,12 +1067,20 @@ export interface AdminLibraryManagementProps {
   quarantineUploadRuntimeDeps?: LibraryQuarantineUploadRuntimeDependencies;
   quarantineUploadController?: LibraryQuarantineUploadSessionController;
   initialQuarantineReceipts?: readonly SanitizedLibraryQuarantineReceiptListItemDto[];
+  initialQuarantineWorkbenchItems?: readonly SanitizedLibraryQuarantineReviewWorkbenchItemDto[];
   initialQuarantineReceiptsLoading?: boolean;
   initialQuarantineReceiptsError?: string | null;
   quarantineReceiptsInboxController?: LibraryQuarantineReceiptsInboxController;
   listQuarantineReceiptsFn?: () => Promise<
     readonly SanitizedLibraryQuarantineReceiptListItemDto[]
   >;
+  listQuarantineWorkbenchFn?: () => Promise<
+    readonly SanitizedLibraryQuarantineReviewWorkbenchItemDto[]
+  >;
+  linkQuarantineReviewDraftFn?: (
+    receiptId: string
+  ) => Promise<LibraryQuarantineReviewDraftCallableBridgeResponseDto>;
+  quarantineWorkbenchEnabledOverride?: boolean;
   languageOverride?: 'ar' | 'en';
 }
 
@@ -701,10 +1097,14 @@ export function AdminLibraryManagement({
   quarantineUploadRuntimeDeps,
   quarantineUploadController,
   initialQuarantineReceipts,
+  initialQuarantineWorkbenchItems,
   initialQuarantineReceiptsLoading = false,
   initialQuarantineReceiptsError = null,
   quarantineReceiptsInboxController,
   listQuarantineReceiptsFn,
+  listQuarantineWorkbenchFn,
+  linkQuarantineReviewDraftFn,
+  quarantineWorkbenchEnabledOverride,
   languageOverride,
 }: AdminLibraryManagementProps) {
   const { i18n } = useTranslation();
@@ -832,12 +1232,15 @@ export function AdminLibraryManagement({
   const canSubmitIntake = canCreate || canEdit;
   const canUploadQuarantine = canUploadToLibraryQuarantine(currentUser);
   const canViewQuarantineReceipts = canViewLibraryQuarantineReceipts(currentUser);
+  const canPrepareQuarantineReviewDraft =
+    canPrepareLibraryQuarantineReviewDraft(currentUser);
   const canReviewIntake = canReview || canApprove || canManageRights;
   const canPrepareAiIntake = canAccessLibraryIntakePeiaPreparation(currentUser);
 
-  // Component-Scoped State & Controller for Read-Only Private Quarantine Receipts Inbox
+  // Component-Scoped State & Controller for Read-Only Private Quarantine Receipts Inbox + Workbench
   const hasExplicitInitialQuarantineState =
     initialQuarantineReceipts !== undefined ||
+    initialQuarantineWorkbenchItems !== undefined ||
     initialQuarantineReceiptsLoading === true ||
     initialQuarantineReceiptsError !== null ||
     quarantineReceiptsInboxController !== undefined;
@@ -855,6 +1258,12 @@ export function AdminLibraryManagement({
           receipts: initialQuarantineReceipts ?? [],
           loading: initialQuarantineReceiptsLoading,
           error: initialQuarantineReceiptsError,
+        },
+        {
+          workbenchEnabled: quarantineWorkbenchEnabledOverride,
+          listWorkbenchFn: listQuarantineWorkbenchFn,
+          linkDraftFn: linkQuarantineReviewDraftFn,
+          initialWorkbenchItems: initialQuarantineWorkbenchItems,
         }
       );
   }
@@ -863,6 +1272,17 @@ export function AdminLibraryManagement({
   activeQuarantineInboxController.setCurrentUser(currentUser);
   if (listQuarantineReceiptsFn) {
     activeQuarantineInboxController.setListReceiptsFn(listQuarantineReceiptsFn);
+  }
+  if (
+    quarantineWorkbenchEnabledOverride !== undefined ||
+    listQuarantineWorkbenchFn !== undefined ||
+    linkQuarantineReviewDraftFn !== undefined
+  ) {
+    activeQuarantineInboxController.setWorkbenchOptions({
+      workbenchEnabled: quarantineWorkbenchEnabledOverride,
+      listWorkbenchFn: listQuarantineWorkbenchFn,
+      linkDraftFn: linkQuarantineReviewDraftFn,
+    });
   }
 
   const [quarantineInboxState, setQuarantineInboxState] =
@@ -891,6 +1311,7 @@ export function AdminLibraryManagement({
     ) {
       if (
         !listQuarantineReceiptsFn &&
+        !listQuarantineWorkbenchFn &&
         (!LibraryAdminClient.isBackendAvailable() ||
           !LibraryAdminClient.isAuthenticated())
       ) {
@@ -904,6 +1325,7 @@ export function AdminLibraryManagement({
     currentUser?.id,
     hasExplicitInitialQuarantineState,
     listQuarantineReceiptsFn,
+    listQuarantineWorkbenchFn,
     activeQuarantineInboxController,
   ]);
 
@@ -912,9 +1334,260 @@ export function AdminLibraryManagement({
     await activeQuarantineInboxController.loadReceipts();
   }, [canViewQuarantineReceipts, activeQuarantineInboxController]);
 
+  const handlePrepareQuarantineReviewDraft = useCallback(
+    async (receiptId: string) => {
+      if (!canPrepareQuarantineReviewDraft) return;
+      await activeQuarantineInboxController.prepareReviewDraft(receiptId);
+    },
+    [canPrepareQuarantineReviewDraft, activeQuarantineInboxController]
+  );
+
   const quarantineReceipts = quarantineInboxState.receipts;
   const quarantineReceiptsLoading = quarantineInboxState.loading;
   const quarantineReceiptsError = quarantineInboxState.error;
+  const quarantineWorkbenchEnabled = quarantineInboxState.workbenchEnabled;
+  const quarantineDraftStatusByReceiptId =
+    quarantineInboxState.draftStatusByReceiptId;
+  const quarantineLinkingReceiptId = quarantineInboxState.linkingReceiptId;
+  const quarantineLinkErrorByReceiptId =
+    quarantineInboxState.linkErrorByReceiptId;
+  const quarantineUncertainHoldByReceiptId =
+    quarantineInboxState.uncertainHoldByReceiptId;
+
+  const renderQuarantineWorkbenchDraftControl = (
+    adminReceipt: SanitizedLibraryQuarantineAdminReceiptDto,
+    layout: 'desktop' | 'mobile'
+  ) => {
+    const receiptId = adminReceipt.receiptId;
+    const draftStatus: LibraryQuarantineReviewWorkbenchDisplayStatus =
+      quarantineDraftStatusByReceiptId[receiptId] ??
+      (quarantineWorkbenchEnabled
+        ? adminReceipt.state === 'NeedsReconciliation'
+          ? 'NEEDS_RECONCILIATION_HOLD'
+          : adminReceipt.state === 'Quarantined'
+            ? 'NOT_LINKED'
+            : 'NOT_ELIGIBLE'
+        : 'UNAVAILABLE');
+
+    const uncertainHold = quarantineUncertainHoldByReceiptId[receiptId];
+    const linkError = quarantineLinkErrorByReceiptId[receiptId];
+    const isLinkingThisReceipt = quarantineLinkingReceiptId === receiptId;
+    const isAnyOperationPending =
+      quarantineReceiptsLoading || quarantineLinkingReceiptId !== null;
+    const isEligibleRow = isQuarantineWorkbenchItemEligibleForDraftLink({
+      adminReceipt,
+      draftStatus,
+    });
+
+    const statusTestId =
+      layout === 'desktop'
+        ? `quarantine-draft-status-${receiptId}`
+        : `quarantine-draft-status-mobile-${receiptId}`;
+    const prepareBtnTestId =
+      layout === 'desktop'
+        ? `prepare-quarantine-review-draft-btn-${receiptId}`
+        : `prepare-quarantine-review-draft-mobile-btn-${receiptId}`;
+
+    return (
+      <div className="space-y-2 text-xs">
+        {draftStatus === 'PENDING_HUMAN_REVIEW' && (
+          <div className="space-y-1.5">
+            <span
+              data-testid={statusTestId}
+              className="px-2.5 py-1 rounded-md text-[11px] font-extrabold bg-indigo-100 text-indigo-900 dark:bg-indigo-950/80 dark:text-indigo-200 border border-indigo-300 dark:border-indigo-800 inline-flex items-center gap-1.5"
+            >
+              <Clock className="h-3 w-3 shrink-0" />
+              <span>
+                {isAr
+                  ? 'بانتظار المراجعة البشرية (PENDING_HUMAN_REVIEW)'
+                  : 'Pending Human Review (PENDING_HUMAN_REVIEW)'}
+              </span>
+            </span>
+            <p
+              data-testid={
+                layout === 'desktop'
+                  ? `quarantine-draft-non-approval-note-${receiptId}`
+                  : `quarantine-draft-non-approval-note-mobile-${receiptId}`
+              }
+              className="text-[11px] text-gray-600 dark:text-gray-400 leading-snug"
+            >
+              {isAr
+                ? 'مسودة مرتبطة للمراجعة البشرية فقط — غير مطهّرة (isSanitized: false) • غير معتمدة أمنياً أو حقوقياً • غير منشورة'
+                : 'Linked review draft only — Not sanitized (isSanitized: false) • Not safety/rights approved • Not published'}
+            </p>
+          </div>
+        )}
+
+        {draftStatus === 'NOT_LINKED' && (
+          <div className="space-y-2">
+            <div>
+              <span
+                data-testid={statusTestId}
+                className="px-2.5 py-1 rounded-md text-[11px] font-extrabold bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200 border border-gray-300 dark:border-gray-700 inline-flex items-center gap-1.5"
+              >
+                <FileText className="h-3 w-3 shrink-0" />
+                <span>
+                  {isAr
+                    ? 'غير مرتبط بمسودة مراجعة (NOT_LINKED)'
+                    : 'Not linked to review draft (NOT_LINKED)'}
+                </span>
+              </span>
+            </div>
+
+            {uncertainHold ? (
+              <div
+                data-testid={
+                  layout === 'desktop'
+                    ? `quarantine-draft-uncertain-hold-${receiptId}`
+                    : `quarantine-draft-uncertain-hold-mobile-${receiptId}`
+                }
+                role="alert"
+                className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 space-y-1 text-[11px]"
+              >
+                <div className="font-extrabold flex items-center gap-1.5">
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <span>
+                    {isAr
+                      ? 'تعليق احترازي: نتيجة التزام المعاملة غير مؤكدة (UNKNOWN / draftCreated: null)'
+                      : 'Ambiguous Commit Hold: Transaction outcome is uncertain (UNKNOWN / draftCreated: null)'}
+                  </span>
+                </div>
+                <p className="font-mono text-[10px] break-words">
+                  {uncertainHold.errorCode}: {uncertainHold.errorMessage}
+                </p>
+                <p className="leading-snug font-semibold">
+                  {isAr
+                    ? 'تم إيقاف إعادة المحاولة التلقائية. يرجى استخدام زر «تحديث إيصالات الحجر» للتحقق من حالة الخادم.'
+                    : 'Automatic retry is disabled. Use "Refresh Quarantine Receipts" to verify server state.'}
+                </p>
+              </div>
+            ) : isEligibleRow &&
+              quarantineWorkbenchEnabled &&
+              canPrepareQuarantineReviewDraft ? (
+              <div>
+                <button
+                  type="button"
+                  data-testid={prepareBtnTestId}
+                  disabled={isAnyOperationPending}
+                  onClick={() => {
+                    void handlePrepareQuarantineReviewDraft(receiptId);
+                  }}
+                  className="w-full sm:w-auto px-3 py-1.5 rounded-lg bg-teal-700 hover:bg-teal-800 text-white font-extrabold text-xs transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 shadow-2xs"
+                >
+                  {isLinkingThisReceipt ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                  ) : (
+                    <FileText className="h-3.5 w-3.5 shrink-0" />
+                  )}
+                  <span>
+                    {isLinkingThisReceipt
+                      ? isAr
+                        ? 'جاري إنشاء مسودة المراجعة...'
+                        : 'Preparing review draft...'
+                      : isAr
+                        ? 'إنشاء مسودة للمراجعة'
+                        : 'Prepare review draft'}
+                  </span>
+                </button>
+              </div>
+            ) : (
+              <div
+                data-testid={
+                  layout === 'desktop'
+                    ? `quarantine-draft-action-disabled-reason-${receiptId}`
+                    : `quarantine-draft-action-disabled-reason-mobile-${receiptId}`
+                }
+                className="text-[11px] text-gray-500 dark:text-gray-400 font-semibold"
+              >
+                {isAr
+                  ? 'للعرض فقط — يتطلب صلاحية المراجعة (Review) لإنشاء مسودة مراجعة'
+                  : 'View only — Review permission required to prepare review draft'}
+              </div>
+            )}
+
+            {linkError && !uncertainHold && (
+              <div
+                data-testid={
+                  layout === 'desktop'
+                    ? `quarantine-draft-link-error-${receiptId}`
+                    : `quarantine-draft-link-error-mobile-${receiptId}`
+                }
+                role="alert"
+                className="p-2 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200 text-[11px] space-y-0.5"
+              >
+                <div className="font-extrabold">
+                  {isAr
+                    ? 'تعذر إنشاء مسودة المراجعة (NOT_CREATED / draftCreated: false)'
+                    : 'Review draft not created (NOT_CREATED / draftCreated: false)'}
+                </div>
+                <div className="font-mono text-[10px] break-words">
+                  {linkError}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {draftStatus === 'NEEDS_RECONCILIATION_HOLD' && (
+          <div className="space-y-1">
+            <span
+              data-testid={statusTestId}
+              className="px-2.5 py-1 rounded-md text-[11px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-300 dark:border-amber-800 inline-flex items-center gap-1.5"
+            >
+              <AlertTriangle className="h-3 w-3 shrink-0" />
+              <span>
+                {isAr
+                  ? 'موقوف للمطابقة — لا يمكن إنشاء مسودة (NEEDS_RECONCILIATION_HOLD)'
+                  : 'Held for Reconciliation — Not eligible for draft (NEEDS_RECONCILIATION_HOLD)'}
+              </span>
+            </span>
+          </div>
+        )}
+
+        {draftStatus === 'NOT_ELIGIBLE' && (
+          <div>
+            <span
+              data-testid={statusTestId}
+              className="px-2.5 py-1 rounded-md text-[11px] font-extrabold bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 border border-gray-200 dark:border-gray-700 inline-flex items-center gap-1.5"
+            >
+              <span>
+                {isAr
+                  ? 'غير مؤهل لمسودة المراجعة (NOT_ELIGIBLE)'
+                  : 'Not eligible for review draft (NOT_ELIGIBLE)'}
+              </span>
+            </span>
+          </div>
+        )}
+
+        {draftStatus === 'UNAVAILABLE' && (
+          <div className="space-y-1">
+            <span
+              data-testid={statusTestId}
+              className="px-2.5 py-1 rounded-md text-[11px] font-bold bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 border border-gray-200 dark:border-gray-700 inline-flex items-center gap-1.5"
+            >
+              <span>
+                {isAr
+                  ? 'حالة مسودة المراجعة غير متاحة حالياً'
+                  : 'Review link status unavailable'}
+              </span>
+            </span>
+            <p
+              data-testid={
+                layout === 'desktop'
+                  ? `quarantine-draft-action-disabled-reason-${receiptId}`
+                  : `quarantine-draft-action-disabled-reason-mobile-${receiptId}`
+              }
+              className="text-[11px] text-gray-500 dark:text-gray-400"
+            >
+              {isAr
+                ? 'ربط مسودات المراجعة غير مفعّل في هذه البيئة حالياً'
+                : 'Review draft linking is not enabled in this environment'}
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const loadAllData = useCallback(async () => {
     setLoading(true);
@@ -2696,6 +3369,11 @@ export function AdminLibraryManagement({
                             <th className="p-3.5 text-start">
                               {isAr ? 'تاريخ الإنشاء' : 'Created At'}
                             </th>
+                            <th className="p-3.5 text-start">
+                              {isAr
+                                ? 'حالة مسودة المراجعة والإجراء'
+                                : 'Review Draft Status & Action'}
+                            </th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-200 dark:divide-gray-800">
@@ -2844,6 +3522,16 @@ export function AdminLibraryManagement({
                                     )}
                                   </div>
                                 </td>
+
+                                <td
+                                  className="p-3.5 max-w-xs"
+                                  data-testid={`quarantine-receipt-workbench-cell-${adminReceipt.receiptId}`}
+                                >
+                                  {renderQuarantineWorkbenchDraftControl(
+                                    adminReceipt,
+                                    'desktop'
+                                  )}
+                                </td>
                               </tr>
                             );
                           })}
@@ -2956,6 +3644,16 @@ export function AdminLibraryManagement({
                                 {adminReceipt.rejectionReasonCode}
                               </div>
                             )}
+
+                            <div
+                              data-testid={`quarantine-receipt-workbench-mobile-${adminReceipt.receiptId}`}
+                              className="pt-2.5 border-t border-gray-100 dark:border-gray-800"
+                            >
+                              {renderQuarantineWorkbenchDraftControl(
+                                adminReceipt,
+                                'mobile'
+                              )}
+                            </div>
                           </div>
                         );
                       })}

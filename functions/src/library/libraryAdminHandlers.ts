@@ -43,14 +43,48 @@ import {
 import {
   listLatestSanitizedLibraryQuarantineReceipts,
   type LibraryQuarantineAdminReadFirestoreDatabase,
+  type LibraryQuarantineAdminReadResult,
   type ListLibraryQuarantineReceiptsResponseDto,
   type SanitizedLibraryQuarantineReceiptListItemDto,
 } from './libraryQuarantineAdminReadService';
+import { isValidLibraryQuarantineReceiptId } from './libraryQuarantineReceiptContract';
+import type {
+  LibraryQuarantineReviewDraftFirestoreDatabase,
+} from './firestoreLibraryQuarantineReviewDraftStore';
+import type {
+  LibraryQuarantineReviewDraftCallableBridgeDependencies,
+  LibraryQuarantineReviewDraftCallableBridgeResponseDto,
+  ProductionLibraryQuarantineReviewDraftBridgeRuntimeOverrides,
+} from './libraryQuarantineReviewDraftCallableBridge';
+import {
+  listLatestLibraryQuarantineReviewWorkbenchItems,
+  type LibraryQuarantineReviewDraftReadOnlyLookupPort,
+  type LibraryQuarantineReviewWorkbenchDraftStatus,
+  type ListLibraryQuarantineReviewWorkbenchResponseDto,
+  type SanitizedLibraryQuarantineReviewWorkbenchItemDto,
+} from './libraryQuarantineReviewWorkbenchService';
 
 export type {
   ListLibraryQuarantineReceiptsResponseDto,
   SanitizedLibraryQuarantineReceiptListItemDto,
+  LibraryQuarantineReviewWorkbenchDraftStatus,
+  ListLibraryQuarantineReviewWorkbenchResponseDto,
+  SanitizedLibraryQuarantineReviewWorkbenchItemDto,
+  LibraryQuarantineReviewDraftCallableBridgeResponseDto,
 };
+
+export const LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR =
+  'POP_LIBRARY_REVIEW_WORKBENCH_ENABLED' as const;
+
+export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
+  readonly workbenchEnabled?: boolean;
+  readonly receiptReadDatabase?: LibraryQuarantineAdminReadFirestoreDatabase;
+  readonly draftDatabase?: LibraryQuarantineReviewDraftFirestoreDatabase;
+  readonly listReceiptsFn?: () => Promise<LibraryQuarantineAdminReadResult>;
+  readonly draftStore?: LibraryQuarantineReviewDraftReadOnlyLookupPort;
+  readonly bridgeDependencies?: LibraryQuarantineReviewDraftCallableBridgeDependencies;
+  readonly productionRuntimeOverrides?: ProductionLibraryQuarantineReviewDraftBridgeRuntimeOverrides;
+}
 
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
 
@@ -81,6 +115,32 @@ const GET_INTAKE_PEIA_PREPARATION_STATUS_ALLOWED_KEYS: ReadonlySet<string> = new
 
 const LIST_QUARANTINE_RECEIPTS_ALLOWED_KEYS: ReadonlySet<string> = new Set([
   'action',
+]);
+
+const LIST_QUARANTINE_REVIEW_WORKBENCH_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set(['action']);
+
+const LINK_QUARANTINE_REVIEW_DRAFT_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  'action',
+  'receiptId',
+]);
+
+const WORKBENCH_ALLOWED_AUTH_ENVELOPE_KEYS: ReadonlySet<string> = new Set([
+  'uid',
+  'token',
+  'rawToken',
+]);
+
+const WORKBENCH_FORBIDDEN_TOKEN_OVERRIDE_KEYS: ReadonlySet<string> = new Set([
+  'isAuthorized',
+  'authorized',
+  'bypassAuth',
+  'bypassRbac',
+  'adminOverride',
+  'overrideRole',
+  'permissions',
+  'isSuperAdmin',
+  'forceAllow',
 ]);
 
 const LIBRARY_EDITORIAL_CURATION_PERMISSIONS: readonly AdminPermission[] = Object.freeze([
@@ -811,6 +871,105 @@ function mapLibraryPeiaTaskQueueErrorToHttpsError(err: unknown): HttpsError {
   );
 }
 
+function assertWorkbenchReleaseGateEnabled(
+  options?: LibraryQuarantineReviewWorkbenchHandlerOptions
+): void {
+  const isEnabled =
+    options?.workbenchEnabled !== undefined
+      ? options.workbenchEnabled === true
+      : process.env[LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR] === 'true';
+
+  if (!isEnabled) {
+    throw new HttpsError(
+      'failed-precondition',
+      'WORKBENCH_NOT_RELEASED: Library quarantine review workbench is not enabled on the server.'
+    );
+  }
+}
+
+function assertStrictWorkbenchAuthEnvelope(
+  requestContext: LibraryAdminRequestContext
+): void {
+  if (!requestContext || typeof requestContext !== 'object') {
+    return;
+  }
+  const rawAuth = requestContext.auth as unknown;
+  if (rawAuth === undefined || rawAuth === null) {
+    return;
+  }
+  if (typeof rawAuth !== 'object' || Array.isArray(rawAuth)) {
+    throw new HttpsError(
+      'unauthenticated',
+      'UNAUTHENTICATED: Request missing valid Firebase Authentication token'
+    );
+  }
+  const authProto = Object.getPrototypeOf(rawAuth);
+  if (
+    (authProto !== Object.prototype && authProto !== null) ||
+    Object.getOwnPropertySymbols(rawAuth).length > 0
+  ) {
+    throw new HttpsError(
+      'permission-denied',
+      'UNTRUSTED_AUTH_CONTEXT: Request auth envelope contains untrusted properties.'
+    );
+  }
+  for (const key of Object.keys(rawAuth as Record<string, unknown>)) {
+    if (!WORKBENCH_ALLOWED_AUTH_ENVELOPE_KEYS.has(key)) {
+      throw new HttpsError(
+        'permission-denied',
+        'UNTRUSTED_AUTH_CONTEXT: Request auth envelope contains untrusted properties.'
+      );
+    }
+  }
+  const rawToken = (rawAuth as Record<string, unknown>).token;
+  if (rawToken !== undefined) {
+    if (
+      typeof rawToken !== 'object' ||
+      rawToken === null ||
+      Array.isArray(rawToken)
+    ) {
+      throw new HttpsError(
+        'permission-denied',
+        'UNTRUSTED_AUTH_CONTEXT: Request auth token must be a plain object.'
+      );
+    }
+    const tokenProto = Object.getPrototypeOf(rawToken);
+    if (
+      (tokenProto !== Object.prototype && tokenProto !== null) ||
+      Object.getOwnPropertySymbols(rawToken).length > 0
+    ) {
+      throw new HttpsError(
+        'permission-denied',
+        'UNTRUSTED_AUTH_CONTEXT: Request auth token contains untrusted properties.'
+      );
+    }
+    for (const tokenKey of Object.keys(rawToken as Record<string, unknown>)) {
+      if (WORKBENCH_FORBIDDEN_TOKEN_OVERRIDE_KEYS.has(tokenKey)) {
+        throw new HttpsError(
+          'permission-denied',
+          'UNTRUSTED_AUTH_CONTEXT: Request auth token contains forbidden override claims.'
+        );
+      }
+    }
+  }
+}
+
+function assertStrictNoSymbolCallerKeys(
+  rawData: unknown,
+  actionName: string
+): void {
+  if (
+    typeof rawData === 'object' &&
+    rawData !== null &&
+    Object.getOwnPropertySymbols(rawData).length > 0
+  ) {
+    throw new HttpsError(
+      'invalid-argument',
+      `UNTRUSTED_OR_UNKNOWN_INPUT_FIELD: Symbol properties are not permitted in ${actionName}`
+    );
+  }
+}
+
 export async function executeManageLibraryDocumentsRequest(
   requestContext: LibraryAdminRequestContext,
   adminRepo: AdminRepository = new FirestoreAdminRepository(),
@@ -824,7 +983,8 @@ export async function executeManageLibraryDocumentsRequest(
     readonly fetchImpl?: typeof fetch;
     readonly timeoutMs?: number;
   },
-  quarantineReadDatabase?: LibraryQuarantineAdminReadFirestoreDatabase
+  quarantineReadDatabase?: LibraryQuarantineAdminReadFirestoreDatabase,
+  quarantineWorkbenchOptions?: LibraryQuarantineReviewWorkbenchHandlerOptions
 ): Promise<any> {
   const data =
     requestContext &&
@@ -863,6 +1023,198 @@ export async function executeManageLibraryDocumentsRequest(
     }
 
     return readResult.response;
+  }
+
+  if (action === 'listQuarantineReviewWorkbench') {
+    assertWorkbenchReleaseGateEnabled(quarantineWorkbenchOptions);
+    assertStrictNoSymbolCallerKeys(
+      requestContext?.data,
+      'listQuarantineReviewWorkbench'
+    );
+    assertStrictAllowedCallerKeys(
+      requestContext?.data,
+      LIST_QUARANTINE_REVIEW_WORKBENCH_ALLOWED_KEYS,
+      'listQuarantineReviewWorkbench'
+    );
+    assertStrictWorkbenchAuthEnvelope(requestContext);
+
+    await authenticateHumanAdminForLibraryPeiaAction(
+      requestContext,
+      [AdminPermission.View],
+      adminRepo
+    );
+
+    const hasInjectedListFn =
+      typeof quarantineWorkbenchOptions?.listReceiptsFn === 'function';
+    const hasInjectedDraftStore =
+      quarantineWorkbenchOptions?.draftStore !== undefined;
+
+    const effectiveReceiptReadDb =
+      quarantineWorkbenchOptions?.receiptReadDatabase ??
+      quarantineReadDatabase ??
+      (!hasInjectedListFn
+        ? (getFirestore() as unknown as LibraryQuarantineAdminReadFirestoreDatabase)
+        : undefined);
+
+    const effectiveDraftDb =
+      quarantineWorkbenchOptions?.draftDatabase ??
+      (!hasInjectedDraftStore
+        ? (getFirestore() as unknown as LibraryQuarantineReviewDraftFirestoreDatabase)
+        : undefined);
+
+    const workbenchResult =
+      await listLatestLibraryQuarantineReviewWorkbenchItems({
+        ...(effectiveReceiptReadDb !== undefined
+          ? { receiptReadDatabase: effectiveReceiptReadDb }
+          : {}),
+        ...(effectiveDraftDb !== undefined
+          ? { draftDatabase: effectiveDraftDb }
+          : {}),
+        ...(quarantineWorkbenchOptions?.listReceiptsFn !== undefined
+          ? { listReceiptsFn: quarantineWorkbenchOptions.listReceiptsFn }
+          : {}),
+        ...(quarantineWorkbenchOptions?.draftStore !== undefined
+          ? { draftStore: quarantineWorkbenchOptions.draftStore }
+          : {}),
+      });
+
+    if (!workbenchResult.ok) {
+      throw new HttpsError(
+        'failed-precondition',
+        `${workbenchResult.errorCode}: ${workbenchResult.errorMessage}`
+      );
+    }
+
+    const response: ListLibraryQuarantineReviewWorkbenchResponseDto =
+      Object.freeze({
+        receipts: workbenchResult.receipts,
+      });
+    return response;
+  }
+
+  if (action === 'linkQuarantineReviewDraft') {
+    assertWorkbenchReleaseGateEnabled(quarantineWorkbenchOptions);
+    assertStrictNoSymbolCallerKeys(
+      requestContext?.data,
+      'linkQuarantineReviewDraft'
+    );
+    const validatedPayload = assertStrictAllowedCallerKeys(
+      requestContext?.data,
+      LINK_QUARANTINE_REVIEW_DRAFT_ALLOWED_KEYS,
+      'linkQuarantineReviewDraft'
+    );
+    if (
+      !Object.prototype.hasOwnProperty.call(validatedPayload, 'receiptId') ||
+      !isValidLibraryQuarantineReceiptId(validatedPayload.receiptId)
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'INVALID_RECEIPT_ID: receiptId must be a 32-character lowercase hexadecimal string.'
+      );
+    }
+    assertStrictWorkbenchAuthEnvelope(requestContext);
+
+    const baseAdminRepo: Pick<AdminRepository, 'getAdminByUid'> =
+      quarantineWorkbenchOptions?.bridgeDependencies?.adminRepository ??
+      adminRepo;
+
+    let cachedLookupDone = false;
+    let cachedLookupUid = '';
+    let cachedAdminUser: AdminUser | null = null;
+
+    const requestScopedAdminRepo: AdminRepository = {
+      async getAdminByUid(uid: string): Promise<AdminUser | null> {
+        if (cachedLookupDone && cachedLookupUid === uid) {
+          return cachedAdminUser;
+        }
+        const resolved = await baseAdminRepo.getAdminByUid(uid);
+        cachedLookupDone = true;
+        cachedLookupUid = uid;
+        cachedAdminUser = resolved;
+        return resolved;
+      },
+      async saveAdmin(admin: AdminUser): Promise<AdminUser> {
+        if (
+          typeof (baseAdminRepo as AdminRepository).saveAdmin === 'function'
+        ) {
+          return (baseAdminRepo as AdminRepository).saveAdmin(admin);
+        }
+        throw new Error(
+          'UNSAFE_DIRECT_WRITE_FORBIDDEN: saveAdmin is forbidden in linkQuarantineReviewDraft.'
+        );
+      },
+      async listAdmins(): Promise<AdminUser[]> {
+        return typeof (baseAdminRepo as AdminRepository).listAdmins ===
+          'function'
+          ? (baseAdminRepo as AdminRepository).listAdmins!()
+          : [];
+      },
+    };
+
+    const authorizedReviewer = await authenticateHumanAdminForLibraryPeiaAction(
+      requestContext,
+      [AdminPermission.Review],
+      requestScopedAdminRepo
+    );
+    const explicitPermissions = (
+      authorizedReviewer as { readonly permissions?: unknown }
+    ).permissions;
+    if (
+      Array.isArray(explicitPermissions) &&
+      !explicitPermissions.includes(AdminPermission.Review)
+    ) {
+      throw new HttpsError(
+        'permission-denied',
+        `INSUFFICIENT_PERMISSION: Role ${authorizedReviewer.role} lacks required permission ${AdminPermission.Review}`
+      );
+    }
+
+    const validatedReceiptId = validatedPayload.receiptId;
+    const verifiedUid = requestContext.auth!.uid.trim();
+
+    const {
+      createProductionLibraryQuarantineReviewDraftBridgeRuntime,
+      executeLibraryQuarantineReviewDraftCallableBridge,
+    } = await import('./libraryQuarantineReviewDraftCallableBridge');
+
+    let effectiveBridgeDeps: LibraryQuarantineReviewDraftCallableBridgeDependencies;
+    if (quarantineWorkbenchOptions?.bridgeDependencies !== undefined) {
+      effectiveBridgeDeps = {
+        ...quarantineWorkbenchOptions.bridgeDependencies,
+        adminRepository: requestScopedAdminRepo,
+      };
+    } else {
+      try {
+        effectiveBridgeDeps =
+          createProductionLibraryQuarantineReviewDraftBridgeRuntime({
+            ...quarantineWorkbenchOptions?.productionRuntimeOverrides,
+            adminRepository: requestScopedAdminRepo,
+          });
+      } catch {
+        throw new HttpsError(
+          'failed-precondition',
+          'UNSAFE_BUCKET_BINDING_HOLD: Dedicated quarantine bucket runtime initialization failed.'
+        );
+      }
+    }
+
+    const bridgeResult =
+      await executeLibraryQuarantineReviewDraftCallableBridge(
+        {
+          auth: {
+            uid: verifiedUid,
+            ...(requestContext.auth?.token !== undefined
+              ? { token: requestContext.auth.token }
+              : {}),
+          },
+          data: {
+            receiptId: validatedReceiptId,
+          },
+        },
+        effectiveBridgeDeps
+      );
+
+    return bridgeResult;
   }
 
   if (typeof action === 'string' && LIBRARY_PEIA_PREPARATION_ACTIONS.has(action)) {
