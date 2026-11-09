@@ -71,6 +71,18 @@ export interface UpdateLibraryMetadataInput {
   authorMetadataEn?: string;
 }
 
+export const QUARANTINE_CATALOG_DOCUMENT_ID_PREFIX = 'qcat-';
+export const QUARANTINE_CATALOG_DOCUMENT_ID_REGEX = /^qcat-[0-9a-f]{32}$/;
+
+export function isQuarantineCatalogDocumentId(id: unknown): boolean {
+  if (typeof id !== 'string') return false;
+  const trimmed = id.trim();
+  return (
+    QUARANTINE_CATALOG_DOCUMENT_ID_REGEX.test(trimmed) ||
+    trimmed.toLowerCase().startsWith(QUARANTINE_CATALOG_DOCUMENT_ID_PREFIX)
+  );
+}
+
 export class LibraryApplicationService {
   private repo: LibraryRepository;
   private inMemoryOrgs: Map<string, LibraryOrganization> = new Map();
@@ -94,6 +106,12 @@ export class LibraryApplicationService {
 
   async create(input: CreateLibraryDocumentInput, actor: AdminUser): Promise<LibraryDocument> {
     this.validateCreateInput(input);
+
+    if (input.id !== undefined && isQuarantineCatalogDocumentId(input.id)) {
+      throw new Error(
+        "VALIDATION_ERROR: Document ID prefix 'qcat-' is reserved for quarantine catalog handoff drafts"
+      );
+    }
 
     const now = new Date().toISOString();
     const id = input.id && input.id.trim() !== '' ? input.id.trim() : `doc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
@@ -173,18 +191,36 @@ export class LibraryApplicationService {
     };
 
     // Ensure metadata update cannot mutate rights or workflow fields
-    updated.rightsStatus = doc.rightsStatus;
-    updated.rightsNotesAr = doc.rightsNotesAr;
-    updated.rightsNotesEn = doc.rightsNotesEn;
-    updated.workflowState = doc.workflowState;
-    updated.workflowHistory = doc.workflowHistory;
-    updated.versions = doc.versions;
+    if (isQuarantineCatalogDocumentId(doc.id)) {
+      updated.rightsStatus = LibraryRightsStatus.ReviewRequired;
+      updated.rightsNotesAr = doc.rightsNotesAr;
+      updated.rightsNotesEn = doc.rightsNotesEn;
+      updated.workflowState = WorkflowState.Draft;
+      updated.workflowHistory = [];
+      updated.versions = (doc.versions || []).map(v => {
+        const { referenceUrl: _omitted, ...safeVersion } = v;
+        return safeVersion;
+      });
+    } else {
+      updated.rightsStatus = doc.rightsStatus;
+      updated.rightsNotesAr = doc.rightsNotesAr;
+      updated.rightsNotesEn = doc.rightsNotesEn;
+      updated.workflowState = doc.workflowState;
+      updated.workflowHistory = doc.workflowHistory;
+      updated.versions = doc.versions;
+    }
 
     LibraryValidator.validateDocument(updated);
     return this.repo.update(updated);
   }
 
   async updateRights(id: string, rightsStatus: LibraryRightsStatus, notesAr?: string, notesEn?: string, actor?: AdminUser): Promise<LibraryDocument> {
+    if (isQuarantineCatalogDocumentId(id)) {
+      throw new Error(
+        `INVALID_ARGUMENT: Quarantine catalog draft ${id.trim()} rights status is locked to ReviewRequired until dedicated rights clearance gate is released`
+      );
+    }
+
     if (!Object.values(LibraryRightsStatus).includes(rightsStatus)) {
       throw new Error(`INVALID_ARGUMENT: Invalid rights status: ${rightsStatus}`);
     }
@@ -192,6 +228,12 @@ export class LibraryApplicationService {
     const doc = await this.getById(id);
     if (!doc) {
       throw new Error(`NOT_FOUND: Document ${id} not found`);
+    }
+
+    if (isQuarantineCatalogDocumentId(doc.id)) {
+      throw new Error(
+        `INVALID_ARGUMENT: Quarantine catalog draft ${doc.id} rights status is locked to ReviewRequired until dedicated rights clearance gate is released`
+      );
     }
 
     const updated: LibraryDocument = {
@@ -211,6 +253,12 @@ export class LibraryApplicationService {
   }
 
   async transitionWorkflow(id: string, targetState: WorkflowState, comment: string | undefined, actor: AdminUser): Promise<LibraryDocument> {
+    if (isQuarantineCatalogDocumentId(id)) {
+      throw new Error(
+        `INVALID_TRANSITION: Quarantine catalog draft ${id.trim()} is locked in Draft until dedicated binary safety and rights clearance gates are released.`
+      );
+    }
+
     if (!Object.values(WorkflowState).includes(targetState)) {
       throw new Error(`INVALID_ARGUMENT: Invalid target workflow state: ${targetState}`);
     }
@@ -218,6 +266,12 @@ export class LibraryApplicationService {
     const doc = await this.getById(id);
     if (!doc) {
       throw new Error(`NOT_FOUND: Document ${id} not found`);
+    }
+
+    if (isQuarantineCatalogDocumentId(doc.id)) {
+      throw new Error(
+        `INVALID_TRANSITION: Quarantine catalog draft ${doc.id} is locked in Draft until dedicated binary safety and rights clearance gates are released.`
+      );
     }
 
     const currentState = doc.workflowState;
@@ -256,9 +310,21 @@ export class LibraryApplicationService {
   }
 
   async addVersion(id: string, versionInput: Omit<LibraryDocumentVersion, 'id' | 'documentId'>, actor: AdminUser): Promise<LibraryDocument> {
+    if (isQuarantineCatalogDocumentId(id)) {
+      throw new Error(
+        `VALIDATION_ERROR: Cannot add versions to quarantine catalog draft ${id.trim()} before binary safety and rights clearance`
+      );
+    }
+
     const doc = await this.getById(id);
     if (!doc) {
       throw new Error(`NOT_FOUND: Document ${id} not found`);
+    }
+
+    if (isQuarantineCatalogDocumentId(doc.id)) {
+      throw new Error(
+        `VALIDATION_ERROR: Cannot add versions to quarantine catalog draft ${doc.id} before binary safety and rights clearance`
+      );
     }
 
     if (!versionInput.versionNumber || versionInput.versionNumber.trim() === '') {

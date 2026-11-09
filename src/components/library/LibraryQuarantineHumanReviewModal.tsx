@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import type { AdminUser } from '../../types/admin';
+import type { LibraryOrganization, LibrarySource } from '../../types/library';
 import type { SanitizedLibraryQuarantineAdminReceiptDto } from '../../services/libraryAdminClient';
 import {
   HUMAN_REVIEW_CLIENT_SAFE_ERRORS,
@@ -30,6 +31,10 @@ import {
   type SaveLibraryQuarantineHumanReviewCaseEditorialInput,
   type SaveLibraryQuarantineHumanReviewCaseResponseDto,
 } from '../../services/libraryQuarantineHumanReviewClient';
+import {
+  LibraryQuarantineCatalogHandoffPanel,
+  type LibraryQuarantineCatalogHandoffPanelController,
+} from './LibraryQuarantineCatalogHandoffPanel';
 
 /**
  * LIB-FILE-HUMAN-CASEWORK-01 — Human Review Case Modal & State Controller
@@ -627,6 +632,10 @@ export class LibraryQuarantineHumanReviewModalController {
 export interface LibraryQuarantineHumanReviewModalProps {
   readonly controller: LibraryQuarantineHumanReviewModalController;
   readonly isAr: boolean;
+  readonly currentUser?: AdminUser | null;
+  readonly organizations?: readonly LibraryOrganization[];
+  readonly sources?: readonly LibrarySource[];
+  readonly catalogHandoffController?: LibraryQuarantineCatalogHandoffPanelController;
 }
 
 export function getHumanReviewCaseStatusLabel(
@@ -656,6 +665,10 @@ export function getHumanReviewCaseStatusLabel(
 export function LibraryQuarantineHumanReviewModal({
   controller,
   isAr,
+  currentUser = null,
+  organizations = [],
+  sources = [],
+  catalogHandoffController,
 }: LibraryQuarantineHumanReviewModalProps) {
   const [snapshot, setSnapshot] =
     useState<LibraryQuarantineHumanReviewModalSnapshot>(() =>
@@ -1374,6 +1387,33 @@ export function LibraryQuarantineHumanReviewModal({
               </div>
             </div>
           </form>
+        )}
+
+        {/* Inline Catalog Draft Handoff Panel (Only rendered when savedReviewCase is METADATA_RECORDED and flags/RBAC pass) */}
+        {!loading && !loadError && catalogHandoffController && (
+          <LibraryQuarantineCatalogHandoffPanel
+            controller={catalogHandoffController}
+            currentUser={currentUser}
+            savedReviewCase={reviewCase}
+            hasUnsavedCaseEdits={Boolean(
+              reviewCase &&
+                (form.status !== reviewCase.status ||
+                  form.titleAr !== reviewCase.titleAr ||
+                  form.titleEn !== reviewCase.titleEn ||
+                  form.issuingOrganization !== reviewCase.issuingOrganization ||
+                  form.summaryAr !== reviewCase.summaryAr ||
+                  form.summaryEn !== reviewCase.summaryEn ||
+                  form.sourceEvidenceNotes !== reviewCase.sourceEvidenceNotes ||
+                  form.rightsEvidenceNotes !== reviewCase.rightsEvidenceNotes ||
+                  form.editorialNotes !== reviewCase.editorialNotes)
+            )}
+            organizations={organizations}
+            sources={sources}
+            isAr={isAr}
+            onReloadHumanReviewCase={() => {
+              void controller.reloadCase();
+            }}
+          />
         )}
       </div>
     </div>

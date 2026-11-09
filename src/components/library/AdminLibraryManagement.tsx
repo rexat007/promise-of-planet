@@ -85,6 +85,18 @@ import {
   LibraryQuarantineHumanReviewModal,
   LibraryQuarantineHumanReviewModalController,
 } from './LibraryQuarantineHumanReviewModal';
+import {
+  canCreateLibraryQuarantineCatalogDraft,
+  isHumanReviewCaseEligibleForCatalogHandoff,
+  isLibraryQuarantineCatalogHandoffEnabled,
+  type CreateLibraryQuarantineCatalogDraftClassificationInput,
+  type CreateLibraryQuarantineCatalogDraftResponseDto,
+  type GetLibraryQuarantineCatalogHandoffResponseDto,
+  type SanitizedLibraryQuarantineCatalogDocumentDto,
+} from '../../services/libraryQuarantineCatalogHandoffClient';
+import {
+  LibraryQuarantineCatalogHandoffPanelController,
+} from './LibraryQuarantineCatalogHandoffPanel';
 
 export {
   canPrepareLibraryQuarantineReviewDraft,
@@ -93,6 +105,10 @@ export {
   canOpenLibraryQuarantineHumanReviewCase,
   isLibraryQuarantineHumanReviewEnabled,
   isQuarantineWorkbenchItemEligibleForHumanReviewCase,
+  canCreateLibraryQuarantineCatalogDraft,
+  isHumanReviewCaseEligibleForCatalogHandoff,
+  isLibraryQuarantineCatalogHandoffEnabled,
+  LibraryQuarantineCatalogHandoffPanelController,
 };
 
 const LIBRARY_INTAKE_PEIA_REQUIRED_ANY_PERMISSIONS: readonly AdminPermission[] = Object.freeze([
@@ -1106,6 +1122,16 @@ export interface AdminLibraryManagementProps {
     readonly expectedRevision: number;
     readonly input: SaveLibraryQuarantineHumanReviewCaseEditorialInput;
   }) => Promise<SaveLibraryQuarantineHumanReviewCaseResponseDto>;
+  quarantineCatalogHandoffEnabledOverride?: boolean;
+  quarantineCatalogHandoffController?: LibraryQuarantineCatalogHandoffPanelController;
+  getQuarantineCatalogHandoffFn?: (
+    receiptId: string
+  ) => Promise<GetLibraryQuarantineCatalogHandoffResponseDto>;
+  createQuarantineCatalogDraftFn?: (params: {
+    readonly receiptId: string;
+    readonly expectedCaseRevision: number;
+    readonly input: CreateLibraryQuarantineCatalogDraftClassificationInput;
+  }) => Promise<CreateLibraryQuarantineCatalogDraftResponseDto>;
   languageOverride?: 'ar' | 'en';
 }
 
@@ -1134,6 +1160,10 @@ export function AdminLibraryManagement({
   quarantineHumanReviewController,
   getQuarantineHumanReviewCaseFn,
   saveQuarantineHumanReviewCaseFn,
+  quarantineCatalogHandoffEnabledOverride,
+  quarantineCatalogHandoffController,
+  getQuarantineCatalogHandoffFn,
+  createQuarantineCatalogDraftFn,
   languageOverride,
 }: AdminLibraryManagementProps) {
   const { i18n } = useTranslation();
@@ -1276,6 +1306,82 @@ export function AdminLibraryManagement({
           : isLibraryQuarantineReviewWorkbenchEnabled())
       : isLibraryQuarantineHumanReviewEnabled();
 
+  const resolvedCatalogHandoffEnabled =
+    quarantineCatalogHandoffEnabledOverride !== undefined
+      ? quarantineCatalogHandoffEnabledOverride === true &&
+        resolvedHumanReviewEnabled
+      : isLibraryQuarantineCatalogHandoffEnabled() && resolvedHumanReviewEnabled;
+
+  const handleCatalogDraftReady = useCallback(
+    (catalogDoc: SanitizedLibraryQuarantineCatalogDocumentDto) => {
+      const asLibDoc: LibraryDocument = {
+        id: catalogDoc.id,
+        titleAr: catalogDoc.titleAr,
+        titleEn: catalogDoc.titleEn,
+        ...(catalogDoc.originalTitle !== undefined
+          ? { originalTitle: catalogDoc.originalTitle }
+          : {}),
+        documentType: catalogDoc.documentType,
+        organizationId: catalogDoc.organizationId,
+        sourceId: catalogDoc.sourceId,
+        geographyAr: catalogDoc.geographyAr,
+        geographyEn: catalogDoc.geographyEn,
+        publicationDate: catalogDoc.publicationDate,
+        language: catalogDoc.language,
+        summaryAr: catalogDoc.summaryAr,
+        summaryEn: catalogDoc.summaryEn,
+        topicsAr: [...catalogDoc.topicsAr],
+        topicsEn: [...catalogDoc.topicsEn],
+        environmentalDomains: [...catalogDoc.environmentalDomains],
+        rightsStatus: catalogDoc.rightsStatus,
+        workflowState: catalogDoc.workflowState,
+        workflowHistory: [],
+        legalStatusDescriptionAr: catalogDoc.legalStatusDescriptionAr,
+        legalStatusDescriptionEn: catalogDoc.legalStatusDescriptionEn,
+        createdAt: catalogDoc.createdAt,
+        updatedAt: catalogDoc.updatedAt,
+        versions: catalogDoc.versions.map((v) => ({
+          id: v.id,
+          documentId: v.documentId,
+          versionNumber: v.versionNumber,
+          publishedDate: v.publishedDate,
+          changeDescriptionAr: v.changeDescriptionAr,
+          changeDescriptionEn: v.changeDescriptionEn,
+        })),
+      };
+      setDocuments((prev) => {
+        const exists = prev.some((d) => d.id === asLibDoc.id);
+        return exists
+          ? prev.map((d) => (d.id === asLibDoc.id ? asLibDoc : d))
+          : [asLibDoc, ...prev];
+      });
+    },
+    []
+  );
+
+  const quarantineCatalogHandoffControllerRef =
+    useRef<LibraryQuarantineCatalogHandoffPanelController | null>(null);
+  if (!quarantineCatalogHandoffControllerRef.current) {
+    quarantineCatalogHandoffControllerRef.current =
+      quarantineCatalogHandoffController ??
+      new LibraryQuarantineCatalogHandoffPanelController(currentUser, {
+        catalogHandoffEnabled: resolvedCatalogHandoffEnabled,
+        getHandoffFn: getQuarantineCatalogHandoffFn,
+        createDraftFn: createQuarantineCatalogDraftFn,
+        onCatalogDraftReady: handleCatalogDraftReady,
+      });
+  }
+  const activeQuarantineCatalogHandoffController =
+    quarantineCatalogHandoffController ??
+    quarantineCatalogHandoffControllerRef.current;
+  activeQuarantineCatalogHandoffController.setCurrentUser(currentUser);
+  activeQuarantineCatalogHandoffController.setOptions({
+    catalogHandoffEnabled: resolvedCatalogHandoffEnabled,
+    getHandoffFn: getQuarantineCatalogHandoffFn,
+    createDraftFn: createQuarantineCatalogDraftFn,
+    onCatalogDraftReady: handleCatalogDraftReady,
+  });
+
   const quarantineHumanReviewControllerRef =
     useRef<LibraryQuarantineHumanReviewModalController | null>(null);
   if (!quarantineHumanReviewControllerRef.current) {
@@ -1306,14 +1412,25 @@ export function AdminLibraryManagement({
     );
     const unsub = activeQuarantineHumanReviewController.subscribe((snap) => {
       setQuarantineHumanReviewSnapshot(snap);
+      if (!snap.isOpen) {
+        activeQuarantineCatalogHandoffController.resetPanel();
+      }
     });
     return () => {
       unsub();
       if (!quarantineHumanReviewController) {
         activeQuarantineHumanReviewController.invalidateSession();
       }
+      if (!quarantineCatalogHandoffController) {
+        activeQuarantineCatalogHandoffController.resetPanel();
+      }
     };
-  }, [activeQuarantineHumanReviewController, quarantineHumanReviewController]);
+  }, [
+    activeQuarantineHumanReviewController,
+    quarantineHumanReviewController,
+    activeQuarantineCatalogHandoffController,
+    quarantineCatalogHandoffController,
+  ]);
 
   // Component-Scoped State & Controller for Read-Only Private Quarantine Receipts Inbox + Workbench
   const hasExplicitInitialQuarantineState =
@@ -5063,6 +5180,10 @@ export function AdminLibraryManagement({
       <LibraryQuarantineHumanReviewModal
         controller={activeQuarantineHumanReviewController}
         isAr={isAr}
+        currentUser={currentUser}
+        organizations={organizations}
+        sources={sources}
+        catalogHandoffController={activeQuarantineCatalogHandoffController}
       />
 
       {/* Editor & Detail Modal */}

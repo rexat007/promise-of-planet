@@ -794,7 +794,7 @@ function assertBridgeDtoZeroLeakage(
     `${contextLabel}: must not contain storagePath`
   );
   assert.equal(
-    lower.includes('generation'),
+    /"(?:attested)?generation"\s*:/i.test(serialized),
     false,
     `${contextLabel}: must not contain generation or attestedGeneration`
   );

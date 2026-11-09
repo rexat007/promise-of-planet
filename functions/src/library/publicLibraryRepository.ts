@@ -4,6 +4,7 @@ import {
   LibraryRightsStatus,
   type PublicLibraryDocument,
 } from '../shared/libraryContract';
+import { isQuarantineCatalogDocumentId } from './libraryApplicationService';
 
 function sanitizePublicReferenceUrl(rawUrl?: string): string | undefined {
   if (typeof rawUrl !== 'string') return undefined;
@@ -34,8 +35,12 @@ export class PublicLibraryRepository {
 
   async listPublicDocuments(): Promise<PublicLibraryDocument[]> {
     const all = await this.repo.listAll();
-    // Server-enforced publication policy
-    const published = all.filter(doc => doc.workflowState === WorkflowState.Published);
+    // Server-enforced publication policy + quarantine catalog draft exclusion guard
+    const published = all.filter(
+      doc =>
+        doc.workflowState === WorkflowState.Published &&
+        !isQuarantineCatalogDocumentId(doc.id)
+    );
     return published.map((doc): PublicLibraryDocument => {
       const canExposeReferenceUrl =
         doc.rightsStatus === LibraryRightsStatus.OpenPubliclyAvailable ||
