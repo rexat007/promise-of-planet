@@ -12,6 +12,7 @@ import type { LibraryQuarantineReviewDraftFirestoreDatabase } from './firestoreL
 import {
   FirestoreLibraryQuarantineRightsDecisionStore,
   RIGHTS_DECISION_STORE_SAFE_MESSAGES,
+  toAlignmentAwareSanitizedRightsDecisionDto,
   type LibraryQuarantineRightsDecisionStore,
   type LibraryQuarantineRightsDecisionStoreErrorCode,
 } from './firestoreLibraryQuarantineRightsDecisionStore';
@@ -19,7 +20,6 @@ import {
   LIBRARY_QUARANTINE_RIGHTS_SCOPE,
   QUARANTINE_RIGHTS_READINESS_INDICATORS,
   deriveQuarantineCatalogDocumentIdFromReceipt,
-  toSanitizedLibraryQuarantineRightsDecisionDto,
   validateRightsDecisionInput,
   type LibraryQuarantineReadinessIndicatorsDto,
   type SanitizedLibraryQuarantineRightsDecisionDto,
@@ -35,30 +35,12 @@ import type {
   TrustedQuarantineReviewerPrincipalProvider,
 } from './libraryQuarantineReviewDraftPersistenceService';
 
-/**
- * LIB-FILE-RIGHTS-AND-READINESS-01 — Server-Side Human Rights Review Decision Service
- *
- * ARCHITECTURAL & SECURITY BOUNDARY:
- * - Enforces server-derived principal authentication (`request.auth.uid`) and
- *   active human RBAC requiring BOTH `AdminPermission.Review` AND
- *   `AdminPermission.ManageRights` (`Owner` and `RightsReviewer` qualify by default;
- *   `LibraryCurator` without `ManageRights`, `Viewer`, `ContentEditor`,
- *   `TrainingManager`, `AIAssistant`, and inactive accounts are rejected).
- * - Never trusts caller-supplied `uid`, `role`, `permissions`, `rightsScope`,
- *   `isRightsApproved`, `isPublished`, `storagePath`, `generation`, or URLs.
- * - Preserves constant non-assurance readiness indicators
- *   (`binarySafety: 'NOT_VERIFIED'`, `fileSanitization: 'NOT_PERFORMED'`,
- *   `publication: 'BLOCKED'`, `catalogWorkflow: 'Draft'`) and all 5 security
- *   posture flags (`false`) across every response DTO.
- * - Redacts raw exceptions and never leaks internal secrets, SHA-256 digests,
- *   actor UIDs, or storage paths.
- */
-
 const ALLOWED_GET_INPUT_KEYS: ReadonlySet<string> = new Set(['receiptId']);
 
 const ALLOWED_SAVE_INPUT_KEYS: ReadonlySet<string> = new Set([
   'receiptId',
   'expectedRevision',
+  'acknowledgedHumanCaseRevision',
   'input',
 ]);
 
@@ -115,6 +97,7 @@ export interface GetLibraryQuarantineRightsDecisionInput {
 export interface SaveLibraryQuarantineRightsDecisionServiceInput {
   readonly receiptId: string;
   readonly expectedRevision: number;
+  readonly acknowledgedHumanCaseRevision?: number;
   readonly input: SaveLibraryQuarantineRightsDecisionInput;
 }
 
@@ -126,9 +109,12 @@ export interface GetLibraryQuarantineRightsDecisionSuccessDto {
   readonly sourceRevision: number;
   readonly catalogHandoffCaseRevision: number;
   readonly currentHumanCaseRevision: number;
+  readonly effectiveCaseRevision: number;
   readonly currentRevision: number;
   readonly rightsScope: typeof LIBRARY_QUARANTINE_RIGHTS_SCOPE;
   readonly rightsDecision: SanitizedLibraryQuarantineRightsDecisionDto | null;
+  readonly rightsDecisionIsCurrent: boolean;
+  readonly requiresFreshHumanRightsReview: boolean;
   readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
   readonly isSanitized: false;
   readonly isVerifiedSafe: false;
@@ -167,9 +153,12 @@ export interface SaveLibraryQuarantineRightsDecisionSuccessDto {
   readonly sourceRevision: number;
   readonly catalogHandoffCaseRevision: number;
   readonly currentHumanCaseRevision: number;
+  readonly effectiveCaseRevision: number;
   readonly currentRevision: number;
   readonly rightsScope: typeof LIBRARY_QUARANTINE_RIGHTS_SCOPE;
   readonly rightsDecision: SanitizedLibraryQuarantineRightsDecisionDto;
+  readonly rightsDecisionIsCurrent: true;
+  readonly requiresFreshHumanRightsReview: false;
   readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
   readonly isSanitized: false;
   readonly isVerifiedSafe: false;
@@ -615,13 +604,27 @@ export class LibraryQuarantineRightsDecisionService {
       null;
     if (snapshot.rightsDecision !== null) {
       try {
-        sanitizedDecision = toSanitizedLibraryQuarantineRightsDecisionDto(
+        sanitizedDecision = toAlignmentAwareSanitizedRightsDecisionDto(
           snapshot.rightsDecision
         );
       } catch {
         return makeGetHoldDto('CORRUPTED_EXISTING_RIGHTS_DECISION', receiptId);
       }
     }
+
+    const effectiveCaseRevision =
+      typeof snapshot.effectiveCaseRevision === 'number'
+        ? snapshot.effectiveCaseRevision
+        : snapshot.humanReviewCase.revision;
+    const rightsDecisionIsCurrent =
+      typeof snapshot.rightsDecisionIsCurrent === 'boolean'
+        ? snapshot.rightsDecisionIsCurrent
+        : sanitizedDecision !== null &&
+          sanitizedDecision.currentHumanCaseRevision === effectiveCaseRevision;
+    const requiresFreshHumanRightsReview =
+      typeof snapshot.requiresFreshHumanRightsReview === 'boolean'
+        ? snapshot.requiresFreshHumanRightsReview
+        : !rightsDecisionIsCurrent;
 
     return Object.freeze({
       ok: true as const,
@@ -631,9 +634,12 @@ export class LibraryQuarantineRightsDecisionService {
       sourceRevision: snapshot.receiptEnvelope.revision,
       catalogHandoffCaseRevision: snapshot.catalogHandoff.caseRevision,
       currentHumanCaseRevision: snapshot.humanReviewCase.revision,
+      effectiveCaseRevision,
       currentRevision: sanitizedDecision ? sanitizedDecision.revision : 0,
       rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
       rightsDecision: sanitizedDecision,
+      rightsDecisionIsCurrent,
+      requiresFreshHumanRightsReview,
       readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
       isSanitized: false as const,
       isVerifiedSafe: false as const,
@@ -687,6 +693,19 @@ export class LibraryQuarantineRightsDecisionService {
       return makeSaveHoldDto('INVALID_EXPECTED_REVISION', receiptId);
     }
 
+    const rawAckCaseRevision = rawInput.acknowledgedHumanCaseRevision;
+    let acknowledgedHumanCaseRevision: number | undefined;
+    if (rawAckCaseRevision !== undefined) {
+      if (
+        typeof rawAckCaseRevision !== 'number' ||
+        !Number.isSafeInteger(rawAckCaseRevision) ||
+        rawAckCaseRevision < 1
+      ) {
+        return makeSaveHoldDto('UNACKNOWLEDGED_CASE_REVISION_HOLD', receiptId);
+      }
+      acknowledgedHumanCaseRevision = rawAckCaseRevision;
+    }
+
     const editorialCheck = validateRightsDecisionInput(rawInput.input);
     if (!editorialCheck.ok) {
       return makeSaveHoldDto(editorialCheck.errorCode, receiptId);
@@ -717,6 +736,9 @@ export class LibraryQuarantineRightsDecisionService {
       storeResult = await this.decisionStore.saveRightsDecisionTransactional({
         receiptId,
         expectedRevision,
+        ...(acknowledgedHumanCaseRevision !== undefined
+          ? { acknowledgedHumanCaseRevision }
+          : {}),
         actorUid: authResult.actorUid,
         nowIso,
         input: editorialCheck.value,
@@ -728,12 +750,19 @@ export class LibraryQuarantineRightsDecisionService {
     if (storeResult.status === 'SAVED') {
       let sanitizedDecision: SanitizedLibraryQuarantineRightsDecisionDto;
       try {
-        sanitizedDecision = toSanitizedLibraryQuarantineRightsDecisionDto(
+        sanitizedDecision = toAlignmentAwareSanitizedRightsDecisionDto(
           storeResult.rightsDecision
         );
       } catch {
-        return makeSaveHoldDto('CORRUPTED_EXISTING_RIGHTS_DECISION', receiptId);
+        // CRITICAL: The transaction has ALREADY committed in the store (`status === 'SAVED'`).
+        // Never misclassify a post-commit DTO sanitization error as HOLD / NOT_SAVED!
+        return makeSaveUnknownDto(receiptId);
       }
+
+      const effectiveCaseRevision =
+        typeof storeResult.chainSnapshot.effectiveCaseRevision === 'number'
+          ? storeResult.chainSnapshot.effectiveCaseRevision
+          : storeResult.chainSnapshot.humanReviewCase.revision;
 
       return Object.freeze({
         ok: true as const,
@@ -747,9 +776,12 @@ export class LibraryQuarantineRightsDecisionService {
           storeResult.chainSnapshot.catalogHandoff.caseRevision,
         currentHumanCaseRevision:
           storeResult.chainSnapshot.humanReviewCase.revision,
+        effectiveCaseRevision,
         currentRevision: storeResult.currentRevision,
         rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
         rightsDecision: sanitizedDecision,
+        rightsDecisionIsCurrent: true as const,
+        requiresFreshHumanRightsReview: false as const,
         readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
         isSanitized: false as const,
         isVerifiedSafe: false as const,
@@ -764,7 +796,7 @@ export class LibraryQuarantineRightsDecisionService {
         null;
       if (storeResult.currentDecision !== null) {
         try {
-          currentSanitized = toSanitizedLibraryQuarantineRightsDecisionDto(
+          currentSanitized = toAlignmentAwareSanitizedRightsDecisionDto(
             storeResult.currentDecision
           );
         } catch {

@@ -109,6 +109,14 @@ import {
   type GetLibraryQuarantineRightsDecisionResponseDto,
   type SaveLibraryQuarantineRightsDecisionResponseDto,
 } from './libraryQuarantineRightsDecisionService';
+import {
+  LibraryQuarantineCatalogCaseAlignmentService,
+  LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+  type AlignLibraryQuarantineCatalogCaseResponseDto,
+  type GetLibraryQuarantineCatalogCaseAlignmentResponseDto,
+  type LibraryQuarantineCatalogCaseFourFieldDiffDto,
+  type SanitizedLibraryQuarantineCatalogCaseAlignmentDto,
+} from './libraryQuarantineCatalogCaseAlignmentService';
 
 export type {
   ListLibraryQuarantineReceiptsResponseDto,
@@ -134,6 +142,10 @@ export type {
   SaveLibraryQuarantineRightsDecisionInput,
   GetLibraryQuarantineRightsDecisionResponseDto,
   SaveLibraryQuarantineRightsDecisionResponseDto,
+  AlignLibraryQuarantineCatalogCaseResponseDto,
+  GetLibraryQuarantineCatalogCaseAlignmentResponseDto,
+  LibraryQuarantineCatalogCaseFourFieldDiffDto,
+  SanitizedLibraryQuarantineCatalogCaseAlignmentDto,
 };
 
 export const LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR =
@@ -148,11 +160,15 @@ export const LIBRARY_CATALOG_HANDOFF_RELEASE_ENV_VAR =
 export const LIBRARY_RIGHTS_DECISION_RELEASE_ENV_VAR =
   'POP_LIBRARY_RIGHTS_DECISION_ENABLED' as const;
 
+export const LIBRARY_CASE_ALIGNMENT_RELEASE_ENV_VAR =
+  'POP_LIBRARY_CASE_ALIGNMENT_ENABLED' as const;
+
 export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly workbenchEnabled?: boolean;
   readonly humanCaseReviewEnabled?: boolean;
   readonly catalogHandoffEnabled?: boolean;
   readonly rightsDecisionEnabled?: boolean;
+  readonly caseAlignmentEnabled?: boolean;
   readonly receiptReadDatabase?: LibraryQuarantineAdminReadFirestoreDatabase;
   readonly draftDatabase?: LibraryQuarantineReviewDraftFirestoreDatabase;
   readonly listReceiptsFn?: () => Promise<LibraryQuarantineAdminReadResult>;
@@ -165,6 +181,7 @@ export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly humanReviewClock?: () => string;
   readonly catalogHandoffClock?: () => string;
   readonly rightsDecisionClock?: () => string;
+  readonly caseAlignmentClock?: () => string;
 }
 
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
@@ -222,7 +239,26 @@ const GET_QUARANTINE_RIGHTS_DECISION_ALLOWED_KEYS: ReadonlySet<string> =
   new Set(['action', 'receiptId']);
 
 const SAVE_QUARANTINE_RIGHTS_DECISION_ALLOWED_KEYS: ReadonlySet<string> =
-  new Set(['action', 'receiptId', 'expectedRevision', 'input']);
+  new Set([
+    'action',
+    'receiptId',
+    'expectedRevision',
+    'acknowledgedHumanCaseRevision',
+    'input',
+  ]);
+
+const GET_QUARANTINE_CATALOG_CASE_ALIGNMENT_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set(['action', 'receiptId']);
+
+const ALIGN_QUARANTINE_CATALOG_CASE_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set([
+    'action',
+    'receiptId',
+    'expectedCaseRevision',
+    'expectedCatalogUpdatedAt',
+    'expectedAlignmentRevision',
+    'confirmation',
+  ]);
 
 const WORKBENCH_ALLOWED_AUTH_ENVELOPE_KEYS: ReadonlySet<string> = new Set([
   'uid',
@@ -1058,6 +1094,42 @@ function assertRightsDecisionReleaseGatesEnabled(
   }
 }
 
+function assertCaseAlignmentReleaseGatesEnabled(
+  options?: LibraryQuarantineReviewWorkbenchHandlerOptions
+): void {
+  const isWorkbenchEnabled =
+    options?.workbenchEnabled !== undefined
+      ? options.workbenchEnabled === true
+      : process.env[LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR] === 'true';
+
+  const isHumanCaseEnabled =
+    options?.humanCaseReviewEnabled !== undefined
+      ? options.humanCaseReviewEnabled === true
+      : process.env[LIBRARY_HUMAN_CASE_REVIEW_RELEASE_ENV_VAR] === 'true';
+
+  const isCatalogHandoffEnabled =
+    options?.catalogHandoffEnabled !== undefined
+      ? options.catalogHandoffEnabled === true
+      : process.env[LIBRARY_CATALOG_HANDOFF_RELEASE_ENV_VAR] === 'true';
+
+  const isCaseAlignmentEnabled =
+    options?.caseAlignmentEnabled !== undefined
+      ? options.caseAlignmentEnabled === true
+      : process.env[LIBRARY_CASE_ALIGNMENT_RELEASE_ENV_VAR] === 'true';
+
+  if (
+    !isWorkbenchEnabled ||
+    !isHumanCaseEnabled ||
+    !isCatalogHandoffEnabled ||
+    !isCaseAlignmentEnabled
+  ) {
+    throw new HttpsError(
+      'failed-precondition',
+      'CASE_ALIGNMENT_NOT_RELEASED: Library quarantine catalog case alignment is not enabled on the server.'
+    );
+  }
+}
+
 function assertStrictWorkbenchAuthEnvelope(
   requestContext: LibraryAdminRequestContext
 ): void {
@@ -1799,6 +1871,25 @@ export async function executeManageLibraryDocumentsRequest(
       }
 
       if (
+        Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'acknowledgedHumanCaseRevision'
+        ) &&
+        validatedPayload.acknowledgedHumanCaseRevision !== undefined
+      ) {
+        if (
+          typeof validatedPayload.acknowledgedHumanCaseRevision !== 'number' ||
+          !Number.isSafeInteger(validatedPayload.acknowledgedHumanCaseRevision) ||
+          validatedPayload.acknowledgedHumanCaseRevision < 1
+        ) {
+          throw new HttpsError(
+            'invalid-argument',
+            'INVALID_ACKNOWLEDGED_CASE_REVISION: acknowledgedHumanCaseRevision must be a positive safe integer (>= 1).'
+          );
+        }
+      }
+
+      if (
         !Object.prototype.hasOwnProperty.call(validatedPayload, 'input') ||
         typeof validatedPayload.input !== 'object' ||
         validatedPayload.input === null ||
@@ -1928,8 +2019,226 @@ export async function executeManageLibraryDocumentsRequest(
       Object.freeze({
         receiptId: validatedPayload.receiptId,
         expectedRevision: validatedPayload.expectedRevision as number,
+        ...(validatedPayload.acknowledgedHumanCaseRevision !== undefined
+          ? {
+              acknowledgedHumanCaseRevision:
+                validatedPayload.acknowledgedHumanCaseRevision as number,
+            }
+          : {}),
         input:
           validatedPayload.input as SaveLibraryQuarantineRightsDecisionInput,
+      })
+    );
+  }
+
+  if (
+    action === 'getQuarantineCatalogCaseAlignment' ||
+    action === 'alignQuarantineCatalogCase'
+  ) {
+    assertCaseAlignmentReleaseGatesEnabled(quarantineWorkbenchOptions);
+    assertStrictNoSymbolCallerKeys(requestContext?.data, action);
+
+    const allowedKeys =
+      action === 'getQuarantineCatalogCaseAlignment'
+        ? GET_QUARANTINE_CATALOG_CASE_ALIGNMENT_ALLOWED_KEYS
+        : ALIGN_QUARANTINE_CATALOG_CASE_ALLOWED_KEYS;
+
+    const validatedPayload = assertStrictAllowedCallerKeys(
+      requestContext?.data,
+      allowedKeys,
+      action
+    );
+
+    if (
+      !Object.prototype.hasOwnProperty.call(validatedPayload, 'receiptId') ||
+      !isValidLibraryQuarantineReceiptId(validatedPayload.receiptId)
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'INVALID_RECEIPT_ID: receiptId must be a 32-character lowercase hexadecimal string.'
+      );
+    }
+
+    if (action === 'alignQuarantineCatalogCase') {
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedCaseRevision'
+        ) ||
+        typeof validatedPayload.expectedCaseRevision !== 'number' ||
+        !Number.isSafeInteger(validatedPayload.expectedCaseRevision) ||
+        validatedPayload.expectedCaseRevision < 1
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_CASE_REVISION: expectedCaseRevision must be a positive safe integer (>= 1).'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedCatalogUpdatedAt'
+        ) ||
+        typeof validatedPayload.expectedCatalogUpdatedAt !== 'string' ||
+        validatedPayload.expectedCatalogUpdatedAt.trim().length === 0
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_CATALOG_UPDATED_AT: expectedCatalogUpdatedAt must be a non-empty ISO timestamp string.'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedAlignmentRevision'
+        ) ||
+        typeof validatedPayload.expectedAlignmentRevision !== 'number' ||
+        !Number.isSafeInteger(validatedPayload.expectedAlignmentRevision) ||
+        validatedPayload.expectedAlignmentRevision < 0
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_ALIGNMENT_REVISION: expectedAlignmentRevision must be a non-negative safe integer (>= 0).'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'confirmation'
+        ) ||
+        validatedPayload.confirmation !==
+          LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'CONFIRMATION_REQUIRED: confirmation must equal APPLY_CASE_METADATA.'
+        );
+      }
+    }
+
+    assertStrictWorkbenchAuthEnvelope(requestContext);
+
+    const baseAdminRepo: Pick<AdminRepository, 'getAdminByUid'> =
+      quarantineWorkbenchOptions?.bridgeDependencies?.adminRepository ??
+      adminRepo;
+
+    let cachedLookupDone = false;
+    let cachedLookupUid = '';
+    let cachedAdminUser: AdminUser | null = null;
+
+    const requestScopedAdminRepo: AdminRepository = {
+      async getAdminByUid(uid: string): Promise<AdminUser | null> {
+        if (cachedLookupDone && cachedLookupUid === uid) {
+          return cachedAdminUser;
+        }
+        const resolved = await baseAdminRepo.getAdminByUid(uid);
+        cachedLookupDone = true;
+        cachedLookupUid = uid;
+        cachedAdminUser = resolved;
+        return resolved;
+      },
+      async saveAdmin(admin: AdminUser): Promise<AdminUser> {
+        if (
+          typeof (baseAdminRepo as AdminRepository).saveAdmin === 'function'
+        ) {
+          return (baseAdminRepo as AdminRepository).saveAdmin(admin);
+        }
+        throw new Error(
+          `UNSAFE_DIRECT_WRITE_FORBIDDEN: saveAdmin is forbidden in ${action}.`
+        );
+      },
+      async listAdmins(): Promise<AdminUser[]> {
+        return typeof (baseAdminRepo as AdminRepository).listAdmins ===
+          'function'
+          ? (baseAdminRepo as AdminRepository).listAdmins!()
+          : [];
+      },
+    };
+
+    const authorizedActor = await authenticateHumanAdminForLibraryPeiaAction(
+      requestContext,
+      [AdminPermission.Review],
+      requestScopedAdminRepo
+    );
+
+    if (
+      !AdminAuthorizationService.hasPermission(
+        authorizedActor,
+        AdminPermission.Review
+      ) ||
+      !AdminAuthorizationService.hasPermission(
+        authorizedActor,
+        AdminPermission.Create
+      )
+    ) {
+      throw new HttpsError(
+        'permission-denied',
+        `INSUFFICIENT_PERMISSION: Role ${authorizedActor.role} requires both ${AdminPermission.Review} and ${AdminPermission.Create} permissions for catalog case alignment`
+      );
+    }
+
+    const explicitPermissions = (
+      authorizedActor as { readonly permissions?: unknown }
+    ).permissions;
+    if (
+      Array.isArray(explicitPermissions) &&
+      (!explicitPermissions.includes(AdminPermission.Review) ||
+        !explicitPermissions.includes(AdminPermission.Create))
+    ) {
+      throw new HttpsError(
+        'permission-denied',
+        `INSUFFICIENT_PERMISSION: Role ${authorizedActor.role} lacks required permissions ${AdminPermission.Review} and ${AdminPermission.Create}`
+      );
+    }
+
+    const verifiedUid = requestContext.auth!.uid.trim();
+    const verifiedToken = requestContext.auth?.token;
+
+    const effectiveDb: LibraryQuarantineReviewDraftFirestoreDatabase =
+      quarantineWorkbenchOptions?.draftDatabase ??
+      (getFirestore() as unknown as LibraryQuarantineReviewDraftFirestoreDatabase);
+
+    const effectiveClock =
+      quarantineWorkbenchOptions?.caseAlignmentClock ??
+      quarantineWorkbenchOptions?.catalogHandoffClock ??
+      quarantineWorkbenchOptions?.humanReviewClock ??
+      quarantineWorkbenchOptions?.bridgeDependencies?.clock;
+
+    const caseAlignmentService =
+      new LibraryQuarantineCatalogCaseAlignmentService({
+        trustedPrincipalProvider: Object.freeze({
+          resolveAuthenticatedPrincipal: () =>
+            Object.freeze({
+              uid: verifiedUid,
+              ...(verifiedToken !== undefined ? { token: verifiedToken } : {}),
+            }),
+        }),
+        adminRepository: requestScopedAdminRepo,
+        db: effectiveDb,
+        ...(effectiveClock !== undefined ? { clock: effectiveClock } : {}),
+      });
+
+    if (action === 'getQuarantineCatalogCaseAlignment') {
+      return caseAlignmentService.getQuarantineCatalogCaseAlignment(
+        Object.freeze({
+          receiptId: validatedPayload.receiptId,
+        })
+      );
+    }
+
+    return caseAlignmentService.alignQuarantineCatalogCase(
+      Object.freeze({
+        receiptId: validatedPayload.receiptId,
+        expectedCaseRevision: validatedPayload.expectedCaseRevision as number,
+        expectedCatalogUpdatedAt:
+          validatedPayload.expectedCatalogUpdatedAt as string,
+        expectedAlignmentRevision:
+          validatedPayload.expectedAlignmentRevision as number,
+        confirmation:
+          validatedPayload.confirmation as typeof LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
       })
     );
   }

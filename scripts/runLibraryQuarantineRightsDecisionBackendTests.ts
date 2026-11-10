@@ -1409,7 +1409,7 @@ async function runTests(): Promise<void> {
       getRev0.readiness,
       QUARANTINE_RIGHTS_READINESS_INDICATORS
     );
-    assert.equal(db.pointGetCalls, 6, 'get must perform exactly 6 point reads');
+    assert.equal(db.pointGetCalls, 7, 'get must perform exactly 7 point reads');
     assert.equal(db.transactionCount, 0);
 
     // 5B: Save revision 1 (expectedRevision: 0 -> CREATED)
@@ -1455,8 +1455,8 @@ async function runTests(): Promise<void> {
     assert.equal(db.transactionCount, 1);
     assert.equal(
       db.txGetCalls,
-      7,
-      'save transaction must perform exactly 7 point reads before writes'
+      8,
+      'save transaction must perform exactly 8 point reads before writes'
     );
     assert.equal(
       db.txCreateCalls,
@@ -1524,7 +1524,7 @@ async function runTests(): Promise<void> {
     assert.equal(saveRev2.isReadyForPeia, false);
 
     assert.equal(db.transactionCount, 1);
-    assert.equal(db.txGetCalls, 7);
+    assert.equal(db.txGetCalls, 8);
     assert.equal(
       db.txUpdateCalls,
       1,
@@ -1638,8 +1638,153 @@ async function runTests(): Promise<void> {
       'qcat- document must remain excluded from PublicLibraryRepository even after METADATA_USE_CLEARED'
     );
 
+    // 5E: Aligned case revision drift -> Stale rights decision & renewal with acknowledgedHumanCaseRevision
+    // Update case to rev 3, update catalog document, and seed catalog case alignment to rev 3
+    const alignmentTimestamp = '2026-11-10T10:30:00.000Z';
+    currentClock = '2026-11-10T10:45:00.000Z';
+    const updatedReviewCase: LibraryQuarantinePersistedHumanReviewCase = {
+      ...seeded.reviewCase,
+      revision: 3,
+      updatedAt: alignmentTimestamp,
+      titleAr: 'حماية البيئات البحرية والساحلية - مراجعة 3',
+      titleEn: 'Marine and Coastal Habitat Protection - Rev 3',
+      summaryAr: 'ملخص تحريري مراجع ومحدث للنسخة 3.',
+      summaryEn: 'Reviewed editorial summary updated for rev 3.',
+    };
+    db.seedDoc(
+      LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+      seeded.receiptId,
+      updatedReviewCase
+    );
+
+    const updatedCatalogDoc: LibraryDocument = {
+      ...seeded.catalogDoc,
+      titleAr: updatedReviewCase.titleAr,
+      titleEn: updatedReviewCase.titleEn,
+      summaryAr: updatedReviewCase.summaryAr,
+      summaryEn: updatedReviewCase.summaryEn,
+      updatedAt: alignmentTimestamp,
+    };
+    db.seedDoc(
+      LIBRARY_DOCUMENTS_COLLECTION,
+      seeded.documentId,
+      updatedCatalogDoc
+    );
+
+    const alignmentDoc: LibraryQuarantinePersistedCatalogCaseAlignment = {
+      schemaVersion: 1,
+      receiptId: seeded.receiptId,
+      documentId: seeded.documentId,
+      sourceRevision: seeded.envelope.revision,
+      sourceUpdatedAt: seeded.receipt.updatedAt,
+      sourceSha256: seeded.receipt.sha256,
+      originalHandoffCaseRevision: seeded.handoff.caseRevision,
+      alignmentRevision: 1,
+      alignedHumanCaseRevision: 3,
+      alignedHumanCaseUpdatedAt: alignmentTimestamp,
+      documentUpdatedAt: alignmentTimestamp,
+      createdBy: 'admin_owner_01',
+      createdAt: alignmentTimestamp,
+      updatedBy: 'admin_owner_01',
+      updatedAt: alignmentTimestamp,
+      isSanitized: false,
+      isVerifiedSafe: false,
+      isRightsApproved: false,
+      isPublished: false,
+      isReadyForPeia: false,
+    };
+    db.seedDoc(
+      'library_quarantine_catalog_case_alignments',
+      seeded.receiptId,
+      alignmentDoc
+    );
+
+    // GET should return stale decision flags
+    const staleGet = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: 'admin_rights_01' },
+        data: {
+          action: 'getQuarantineRightsDecision',
+          receiptId: seeded.receiptId,
+        },
+      },
+      adminRepo,
+      dummyService,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      handlerOptions
+    )) as GetLibraryQuarantineRightsDecisionResponseDto;
+
+    assert.equal(staleGet.ok, true);
+    assert.equal(staleGet.effectiveCaseRevision, 3);
+    assert.equal(staleGet.rightsDecisionIsCurrent, false);
+    assert.equal(staleGet.requiresFreshHumanRightsReview, true);
+
+    // Save attempt without acknowledgedHumanCaseRevision fails with UNACKNOWLEDGED_CASE_REVISION_HOLD
+    const unacknowledgedSave = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: 'admin_rights_01' },
+        data: {
+          action: 'saveQuarantineRightsDecision',
+          receiptId: seeded.receiptId,
+          expectedRevision: 2,
+          input: {
+            decision: 'METADATA_USE_CLEARED',
+            basis: 'OPEN_LICENSE',
+            evidenceReference: 'Gazette 4215',
+            evidenceNotes: 'Re-reviewed for case revision 3.',
+          },
+        },
+      },
+      adminRepo,
+      dummyService,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      handlerOptions
+    )) as SaveLibraryQuarantineRightsDecisionResponseDto;
+
+    assert.equal(unacknowledgedSave.ok, false);
+    assert.equal(unacknowledgedSave.status, 'HOLD');
+    assert.equal(unacknowledgedSave.errorCode, 'UNACKNOWLEDGED_CASE_REVISION_HOLD');
+
+    // Save with acknowledgedHumanCaseRevision succeeds as revision 3
+    const renewedSave = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: 'admin_rights_01' },
+        data: {
+          action: 'saveQuarantineRightsDecision',
+          receiptId: seeded.receiptId,
+          expectedRevision: 2,
+          acknowledgedHumanCaseRevision: 3,
+          input: {
+            decision: 'METADATA_USE_CLEARED',
+            basis: 'OPEN_LICENSE',
+            evidenceReference: 'Gazette 4215',
+            evidenceNotes: 'Re-reviewed for case revision 3 with explicit acknowledgment.',
+          },
+        },
+      },
+      adminRepo,
+      dummyService,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      handlerOptions
+    )) as SaveLibraryQuarantineRightsDecisionResponseDto;
+
+    assert.equal(renewedSave.ok, true);
+    assert.equal(renewedSave.currentRevision, 3);
+    assert.equal(renewedSave.currentHumanCaseRevision, 3);
+    assert.equal(renewedSave.rightsDecisionIsCurrent, true);
+    assert.equal(renewedSave.requiresFreshHumanRightsReview, false);
+
     console.log(
-      'PASS 5: Revision lifecycle (0 -> 1 -> 2), atomic read/write budgets, append-only audit events, and zero publication/rightsStatus escalation verified.'
+      'PASS 5: Revision lifecycle (0 -> 1 -> 2 -> 3), stale decision invalidation, renewal with acknowledgedHumanCaseRevision, atomic read/write budgets, append-only audit events, and zero publication/rightsStatus escalation verified.'
     );
   }
 
@@ -1846,8 +1991,8 @@ async function runTests(): Promise<void> {
         '55a1d359c7b43768a69c7458fb7c2e24c41e929b',
       ],
       [
-        'src/components/library/LibraryQuarantineCatalogHandoffPanel.tsx',
-        '59f41cfd7c7e5b9227c2a26c65b9972811c12110',
+        'functions/src/library/libraryQuarantineRightsDecisionContract.ts',
+        'b96652303ae516c2ba01f7f9d52e3c8875860f1f',
       ],
       [
         'src/components/library/AdminLibraryManagement.tsx',

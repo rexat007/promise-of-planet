@@ -173,8 +173,11 @@ export interface GetLibraryQuarantineRightsDecisionSuccessDto {
   readonly documentId: string;
   readonly sourceRevision: number;
   readonly catalogHandoffCaseRevision: number;
+  readonly effectiveCaseRevision?: number;
   readonly currentHumanCaseRevision: number;
   readonly currentRevision: number;
+  readonly rightsDecisionIsCurrent?: boolean;
+  readonly requiresFreshHumanRightsReview?: boolean;
   readonly rightsScope: typeof LIBRARY_QUARANTINE_RIGHTS_SCOPE;
   readonly rightsDecision: SanitizedLibraryQuarantineRightsDecisionDto | null;
   readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
@@ -214,8 +217,11 @@ export interface SaveLibraryQuarantineRightsDecisionSuccessDto {
   readonly documentId: string;
   readonly sourceRevision: number;
   readonly catalogHandoffCaseRevision: number;
+  readonly effectiveCaseRevision?: number;
   readonly currentHumanCaseRevision: number;
   readonly currentRevision: number;
+  readonly rightsDecisionIsCurrent?: true;
+  readonly requiresFreshHumanRightsReview?: false;
   readonly rightsScope: typeof LIBRARY_QUARANTINE_RIGHTS_SCOPE;
   readonly rightsDecision: SanitizedLibraryQuarantineRightsDecisionDto;
   readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
@@ -297,6 +303,7 @@ export interface SaveQuarantineRightsDecisionActionPayload {
   readonly action: 'saveQuarantineRightsDecision';
   readonly receiptId: string;
   readonly expectedRevision: number;
+  readonly acknowledgedHumanCaseRevision?: number;
   readonly input: LibraryQuarantineRightsDecisionEditorialFields;
 }
 
@@ -321,6 +328,10 @@ export const RIGHTS_DECISION_CLIENT_SAFE_ERRORS = Object.freeze({
     'RIGHTS_DECISION_INVALID_RECEIPT_ID: receiptId must be a 32-character lowercase hexadecimal string.',
   INVALID_EXPECTED_REVISION:
     'RIGHTS_DECISION_INVALID_EXPECTED_REVISION: expectedRevision must be a non-negative safe integer.',
+  INVALID_ACKNOWLEDGED_CASE_REVISION:
+    'RIGHTS_DECISION_INVALID_ACKNOWLEDGED_CASE_REVISION: acknowledgedHumanCaseRevision must be a positive safe integer (>= 1).',
+  UNACKNOWLEDGED_CASE_REVISION:
+    'UNACKNOWLEDGED_CASE_REVISION_HOLD: Explicit acknowledgement of the current aligned human review case revision is required before saving a rights decision.',
   INVALID_RIGHTS_INPUT:
     'RIGHTS_DECISION_INVALID_INPUT: Rights decision fields failed client-side plain-text or completeness validation.',
   GET_RESPONSE_CONTRACT_INVALID:
@@ -375,7 +386,7 @@ const ALLOWED_READINESS_KEYS: ReadonlySet<string> = new Set([
   'catalogWorkflow',
 ]);
 
-const ALLOWED_GET_SUCCESS_KEYS: ReadonlySet<string> = new Set([
+const ALLOWED_GET_SUCCESS_BASE_KEYS: ReadonlySet<string> = new Set([
   'ok',
   'status',
   'receiptId',
@@ -392,6 +403,12 @@ const ALLOWED_GET_SUCCESS_KEYS: ReadonlySet<string> = new Set([
   'isRightsApproved',
   'isPublished',
   'isReadyForPeia',
+]);
+
+const ALLOWED_GET_SUCCESS_OPTIONAL_ALIGNMENT_KEYS: ReadonlySet<string> = new Set([
+  'effectiveCaseRevision',
+  'rightsDecisionIsCurrent',
+  'requiresFreshHumanRightsReview',
 ]);
 
 const ALLOWED_GET_HOLD_KEYS: ReadonlySet<string> = new Set([
@@ -410,7 +427,7 @@ const ALLOWED_GET_HOLD_KEYS: ReadonlySet<string> = new Set([
   'isReadyForPeia',
 ]);
 
-const ALLOWED_SAVE_SUCCESS_KEYS: ReadonlySet<string> = new Set([
+const ALLOWED_SAVE_SUCCESS_BASE_KEYS: ReadonlySet<string> = new Set([
   'ok',
   'status',
   'decisionSaveOutcome',
@@ -429,6 +446,12 @@ const ALLOWED_SAVE_SUCCESS_KEYS: ReadonlySet<string> = new Set([
   'isRightsApproved',
   'isPublished',
   'isReadyForPeia',
+]);
+
+const ALLOWED_SAVE_SUCCESS_OPTIONAL_ALIGNMENT_KEYS: ReadonlySet<string> = new Set([
+  'effectiveCaseRevision',
+  'rightsDecisionIsCurrent',
+  'requiresFreshHumanRightsReview',
 ]);
 
 const ALLOWED_SAVE_CONFLICT_KEYS: ReadonlySet<string> = new Set([
@@ -518,6 +541,31 @@ function hasExactAllowedKeys(
   }
   for (const key of keys) {
     if (FORBIDDEN_SECRET_DTO_KEYS.has(key) || !allowedKeys.has(key)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasExactRequiredAndOptionalAllowedKeys(
+  obj: Record<string, unknown>,
+  requiredKeys: ReadonlySet<string>,
+  optionalKeys: ReadonlySet<string>
+): boolean {
+  if (Object.getOwnPropertySymbols(obj).length > 0) {
+    return false;
+  }
+  const keys = Object.keys(obj);
+  for (const reqKey of requiredKeys) {
+    if (!Object.prototype.hasOwnProperty.call(obj, reqKey)) {
+      return false;
+    }
+  }
+  for (const key of keys) {
+    if (
+      FORBIDDEN_SECRET_DTO_KEYS.has(key) ||
+      (!requiredKeys.has(key) && !optionalKeys.has(key))
+    ) {
       return false;
     }
   }
@@ -780,6 +828,7 @@ export function buildGetQuarantineRightsDecisionActionPayload(
 export function buildSaveQuarantineRightsDecisionActionPayload(params: {
   readonly receiptId: string;
   readonly expectedRevision: number;
+  readonly acknowledgedHumanCaseRevision?: number;
   readonly input: SaveLibraryQuarantineRightsDecisionInput;
 }): SaveQuarantineRightsDecisionActionPayload {
   if (
@@ -799,6 +848,17 @@ export function buildSaveQuarantineRightsDecisionActionPayload(params: {
       RIGHTS_DECISION_CLIENT_SAFE_ERRORS.INVALID_EXPECTED_REVISION
     );
   }
+  if (params.acknowledgedHumanCaseRevision !== undefined) {
+    if (
+      typeof params.acknowledgedHumanCaseRevision !== 'number' ||
+      !Number.isSafeInteger(params.acknowledgedHumanCaseRevision) ||
+      params.acknowledgedHumanCaseRevision < 1
+    ) {
+      throw new Error(
+        RIGHTS_DECISION_CLIENT_SAFE_ERRORS.INVALID_ACKNOWLEDGED_CASE_REVISION
+      );
+    }
+  }
 
   const validatedInput = validateClientRightsDecisionInput(params.input);
 
@@ -806,6 +866,11 @@ export function buildSaveQuarantineRightsDecisionActionPayload(params: {
     action: 'saveQuarantineRightsDecision' as const,
     receiptId: params.receiptId,
     expectedRevision: params.expectedRevision,
+    ...(params.acknowledgedHumanCaseRevision !== undefined
+      ? {
+          acknowledgedHumanCaseRevision: params.acknowledgedHumanCaseRevision,
+        }
+      : {}),
     input: validatedInput,
   });
 }
@@ -979,7 +1044,11 @@ export function validateGetQuarantineRightsDecisionResponseDto(
 
   if (raw.ok === true) {
     if (
-      !hasExactAllowedKeys(raw, ALLOWED_GET_SUCCESS_KEYS) ||
+      !hasExactRequiredAndOptionalAllowedKeys(
+        raw,
+        ALLOWED_GET_SUCCESS_BASE_KEYS,
+        ALLOWED_GET_SUCCESS_OPTIONAL_ALIGNMENT_KEYS
+      ) ||
       raw.status !== 'READY' ||
       typeof raw.receiptId !== 'string' ||
       !QUARANTINE_RECEIPT_ID_REGEX.test(raw.receiptId)
@@ -999,10 +1068,24 @@ export function validateGetQuarantineRightsDecisionResponseDto(
       raw.catalogHandoffCaseRevision < 1 ||
       typeof raw.currentHumanCaseRevision !== 'number' ||
       !Number.isSafeInteger(raw.currentHumanCaseRevision) ||
-      raw.currentHumanCaseRevision !== raw.catalogHandoffCaseRevision ||
+      raw.currentHumanCaseRevision < raw.catalogHandoffCaseRevision ||
       typeof raw.currentRevision !== 'number' ||
       !Number.isSafeInteger(raw.currentRevision) ||
       raw.currentRevision < 0
+    ) {
+      throw new Error(errMsg);
+    }
+
+    const effectiveCaseRevision =
+      raw.effectiveCaseRevision !== undefined
+        ? raw.effectiveCaseRevision
+        : raw.currentHumanCaseRevision;
+
+    if (
+      typeof effectiveCaseRevision !== 'number' ||
+      !Number.isSafeInteger(effectiveCaseRevision) ||
+      effectiveCaseRevision < raw.catalogHandoffCaseRevision ||
+      effectiveCaseRevision !== raw.currentHumanCaseRevision
     ) {
       throw new Error(errMsg);
     }
@@ -1018,11 +1101,30 @@ export function validateGetQuarantineRightsDecisionResponseDto(
         raw.currentRevision !== validatedDecision.revision ||
         raw.sourceRevision !== validatedDecision.sourceRevision ||
         raw.catalogHandoffCaseRevision !==
-          validatedDecision.catalogHandoffCaseRevision
+          validatedDecision.catalogHandoffCaseRevision ||
+        validatedDecision.currentHumanCaseRevision > effectiveCaseRevision
       ) {
         throw new Error(errMsg);
       }
     } else if (raw.currentRevision !== 0) {
+      throw new Error(errMsg);
+    }
+
+    const expectedDecisionIsCurrent =
+      validatedDecision !== null &&
+      validatedDecision.currentHumanCaseRevision === effectiveCaseRevision;
+    const expectedRequiresFreshReview = !expectedDecisionIsCurrent;
+
+    if (
+      raw.rightsDecisionIsCurrent !== undefined &&
+      raw.rightsDecisionIsCurrent !== expectedDecisionIsCurrent
+    ) {
+      throw new Error(errMsg);
+    }
+    if (
+      raw.requiresFreshHumanRightsReview !== undefined &&
+      raw.requiresFreshHumanRightsReview !== expectedRequiresFreshReview
+    ) {
       throw new Error(errMsg);
     }
 
@@ -1033,8 +1135,17 @@ export function validateGetQuarantineRightsDecisionResponseDto(
       documentId: raw.documentId,
       sourceRevision: raw.sourceRevision,
       catalogHandoffCaseRevision: raw.catalogHandoffCaseRevision,
+      ...(raw.effectiveCaseRevision !== undefined
+        ? { effectiveCaseRevision }
+        : {}),
       currentHumanCaseRevision: raw.currentHumanCaseRevision,
       currentRevision: raw.currentRevision,
+      ...(raw.rightsDecisionIsCurrent !== undefined
+        ? { rightsDecisionIsCurrent: expectedDecisionIsCurrent }
+        : {}),
+      ...(raw.requiresFreshHumanRightsReview !== undefined
+        ? { requiresFreshHumanRightsReview: expectedRequiresFreshReview }
+        : {}),
       rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
       rightsDecision: validatedDecision,
       readiness,
@@ -1110,7 +1221,11 @@ export function validateSaveQuarantineRightsDecisionResponseDto(
 
   if (raw.ok === true) {
     if (
-      !hasExactAllowedKeys(raw, ALLOWED_SAVE_SUCCESS_KEYS) ||
+      !hasExactRequiredAndOptionalAllowedKeys(
+        raw,
+        ALLOWED_SAVE_SUCCESS_BASE_KEYS,
+        ALLOWED_SAVE_SUCCESS_OPTIONAL_ALIGNMENT_KEYS
+      ) ||
       raw.status !== 'SAVED' ||
       (raw.decisionSaveOutcome !== 'CREATED' &&
         raw.decisionSaveOutcome !== 'UPDATED') ||
@@ -1133,10 +1248,29 @@ export function validateSaveQuarantineRightsDecisionResponseDto(
       raw.catalogHandoffCaseRevision < 1 ||
       typeof raw.currentHumanCaseRevision !== 'number' ||
       !Number.isSafeInteger(raw.currentHumanCaseRevision) ||
-      raw.currentHumanCaseRevision !== raw.catalogHandoffCaseRevision ||
+      raw.currentHumanCaseRevision < raw.catalogHandoffCaseRevision ||
       typeof raw.currentRevision !== 'number' ||
       !Number.isSafeInteger(raw.currentRevision) ||
       raw.currentRevision < 1
+    ) {
+      throw new Error(errMsg);
+    }
+
+    if (
+      raw.effectiveCaseRevision !== undefined &&
+      raw.effectiveCaseRevision !== raw.currentHumanCaseRevision
+    ) {
+      throw new Error(errMsg);
+    }
+    if (
+      raw.rightsDecisionIsCurrent !== undefined &&
+      raw.rightsDecisionIsCurrent !== true
+    ) {
+      throw new Error(errMsg);
+    }
+    if (
+      raw.requiresFreshHumanRightsReview !== undefined &&
+      raw.requiresFreshHumanRightsReview !== false
     ) {
       throw new Error(errMsg);
     }
@@ -1150,6 +1284,8 @@ export function validateSaveQuarantineRightsDecisionResponseDto(
       validatedDecision.sourceRevision !== raw.sourceRevision ||
       validatedDecision.catalogHandoffCaseRevision !==
         raw.catalogHandoffCaseRevision ||
+      validatedDecision.currentHumanCaseRevision !==
+        raw.currentHumanCaseRevision ||
       (raw.decisionSaveOutcome === 'CREATED' && raw.currentRevision !== 1) ||
       (raw.decisionSaveOutcome === 'UPDATED' && raw.currentRevision < 2)
     ) {
@@ -1165,8 +1301,17 @@ export function validateSaveQuarantineRightsDecisionResponseDto(
       documentId: raw.documentId,
       sourceRevision: raw.sourceRevision,
       catalogHandoffCaseRevision: raw.catalogHandoffCaseRevision,
+      ...(raw.effectiveCaseRevision !== undefined
+        ? { effectiveCaseRevision: raw.currentHumanCaseRevision }
+        : {}),
       currentHumanCaseRevision: raw.currentHumanCaseRevision,
       currentRevision: raw.currentRevision,
+      ...(raw.rightsDecisionIsCurrent !== undefined
+        ? { rightsDecisionIsCurrent: true as const }
+        : {}),
+      ...(raw.requiresFreshHumanRightsReview !== undefined
+        ? { requiresFreshHumanRightsReview: false as const }
+        : {}),
       rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
       rightsDecision: validatedDecision,
       readiness,
@@ -1345,6 +1490,29 @@ export function validateSaveQuarantineRightsDecisionResponseDto(
   throw new Error(errMsg);
 }
 
+export function makeClientSaveUnknownResponseDto(
+  receiptId: string,
+  errorMessage: string = 'Transactional rights decision commit outcome is uncertain; verify current decision status before retrying.'
+): SaveLibraryQuarantineRightsDecisionUnknownDto {
+  return Object.freeze({
+    ok: false as const,
+    status: 'UNKNOWN' as const,
+    decisionSaveOutcome: 'UNKNOWN' as const,
+    decisionSaved: null,
+    errorCode: 'TRANSACTION_COMMIT_UNCERTAIN' as const,
+    errorMessage,
+    receiptId,
+    documentId: deriveQuarantineCatalogDocumentId(receiptId),
+    rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+    readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+  });
+}
+
 function getDefaultRightsDecisionCallableInvoker(
   options?: LibraryQuarantineRightsDecisionClientOptions
 ): RightsDecisionCallableInvoker {
@@ -1399,6 +1567,7 @@ export class LibraryQuarantineRightsDecisionClient {
     params: {
       readonly receiptId: string;
       readonly expectedRevision: number;
+      readonly acknowledgedHumanCaseRevision?: number;
       readonly input: SaveLibraryQuarantineRightsDecisionInput;
     },
     options?: LibraryQuarantineRightsDecisionClientOptions
@@ -1406,6 +1575,10 @@ export class LibraryQuarantineRightsDecisionClient {
     const payload = buildSaveQuarantineRightsDecisionActionPayload(params);
     const invoker = getDefaultRightsDecisionCallableInvoker(options);
 
+    // Once the save request leaves the client (`await invoker(payload)`), any
+    // network/transport rejection (except explicit preflight FEATURE_NOT_RELEASED)
+    // or malformed response validation failure MUST be classified as UNKNOWN
+    // (`decisionSaved: null`) rather than NOT_SAVED, requiring GET-only verification.
     let rawResult: { readonly data: unknown };
     try {
       rawResult = await invoker(payload);
@@ -1415,9 +1588,29 @@ export class LibraryQuarantineRightsDecisionClient {
           RIGHTS_DECISION_CLIENT_SAFE_ERRORS.FEATURE_NOT_RELEASED
         );
       }
-      throw new Error(RIGHTS_DECISION_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED);
+      return makeClientSaveUnknownResponseDto(
+        payload.receiptId,
+        RIGHTS_DECISION_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED
+      );
     }
 
-    return validateSaveQuarantineRightsDecisionResponseDto(rawResult?.data);
+    try {
+      return validateSaveQuarantineRightsDecisionResponseDto(rawResult?.data);
+    } catch {
+      return makeClientSaveUnknownResponseDto(
+        payload.receiptId,
+        RIGHTS_DECISION_CLIENT_SAFE_ERRORS.SAVE_RESPONSE_CONTRACT_INVALID
+      );
+    }
   }
 }
+
+export const getQuarantineRightsDecisionClient =
+  LibraryQuarantineRightsDecisionClient.getQuarantineRightsDecision.bind(
+    LibraryQuarantineRightsDecisionClient
+  );
+
+export const saveQuarantineRightsDecisionClient =
+  LibraryQuarantineRightsDecisionClient.saveQuarantineRightsDecision.bind(
+    LibraryQuarantineRightsDecisionClient
+  );

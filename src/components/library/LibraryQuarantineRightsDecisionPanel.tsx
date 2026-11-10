@@ -86,9 +86,14 @@ export interface LibraryQuarantineRightsDecisionPanelSnapshot {
   readonly documentId: string | null;
   readonly sourceRevision: number | null;
   readonly catalogHandoffCaseRevision: number | null;
+  readonly effectiveCaseRevision: number | null;
   readonly currentHumanCaseRevision: number | null;
   readonly currentRevision: number;
   readonly rightsDecision: SanitizedLibraryQuarantineRightsDecisionDto | null;
+  readonly rightsDecisionIsCurrent: boolean;
+  readonly requiresFreshHumanRightsReview: boolean;
+  readonly stalePreviousDecision: SanitizedLibraryQuarantineRightsDecisionDto | null;
+  readonly acknowledgedCurrentCaseRevision: boolean;
   readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
   readonly form: LibraryQuarantineRightsDecisionEditorialFields;
   readonly loading: boolean;
@@ -150,6 +155,7 @@ export interface LibraryQuarantineRightsDecisionControllerOptions {
   readonly saveDecisionFn?: (params: {
     readonly receiptId: string;
     readonly expectedRevision: number;
+    readonly acknowledgedHumanCaseRevision?: number;
     readonly input: SaveLibraryQuarantineRightsDecisionInput;
   }) => Promise<SaveLibraryQuarantineRightsDecisionResponseDto>;
   readonly onDecisionSaved?: (
@@ -165,6 +171,7 @@ export class LibraryQuarantineRightsDecisionPanelController {
   private saveDecisionFn: (params: {
     readonly receiptId: string;
     readonly expectedRevision: number;
+    readonly acknowledgedHumanCaseRevision?: number;
     readonly input: SaveLibraryQuarantineRightsDecisionInput;
   }) => Promise<SaveLibraryQuarantineRightsDecisionResponseDto>;
   private onDecisionSaved?: (
@@ -206,9 +213,14 @@ export class LibraryQuarantineRightsDecisionPanelController {
       documentId: null,
       sourceRevision: null,
       catalogHandoffCaseRevision: null,
+      effectiveCaseRevision: null,
       currentHumanCaseRevision: null,
       currentRevision: 0,
       rightsDecision: null,
+      rightsDecisionIsCurrent: false,
+      requiresFreshHumanRightsReview: true,
+      stalePreviousDecision: null,
+      acknowledgedCurrentCaseRevision: false,
       readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
       form: createEmptyRightsDecisionForm(),
       loading: false,
@@ -292,9 +304,14 @@ export class LibraryQuarantineRightsDecisionPanelController {
       documentId: null,
       sourceRevision: null,
       catalogHandoffCaseRevision: null,
+      effectiveCaseRevision: null,
       currentHumanCaseRevision: null,
       currentRevision: 0,
       rightsDecision: null,
+      rightsDecisionIsCurrent: false,
+      requiresFreshHumanRightsReview: true,
+      stalePreviousDecision: null,
+      acknowledgedCurrentCaseRevision: false,
       readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
       form: createEmptyRightsDecisionForm(),
       loading: false,
@@ -306,6 +323,25 @@ export class LibraryQuarantineRightsDecisionPanelController {
       conflictState: null,
       uncertainState: null,
       sessionToken: nextToken,
+    });
+  }
+
+  public setAcknowledgedCurrentCaseRevision(acknowledged: boolean): void {
+    if (
+      !this.state.isExpanded ||
+      this.state.loading ||
+      this.state.saving ||
+      this.state.holdCode !== null ||
+      this.state.uncertainState !== null
+    ) {
+      return;
+    }
+    this.setState({
+      acknowledgedCurrentCaseRevision: acknowledged === true,
+      ...(this.state.saveError ===
+      RIGHTS_DECISION_CLIENT_SAFE_ERRORS.UNACKNOWLEDGED_CASE_REVISION
+        ? { saveError: null }
+        : {}),
     });
   }
 
@@ -335,18 +371,20 @@ export class LibraryQuarantineRightsDecisionPanelController {
     }
 
     // If the human review case revision changed while the rights panel is open,
-    // detect version drift relative to the loaded catalogHandoffCaseRevision
+    // detect version drift relative to the loaded effectiveCaseRevision (or catalogHandoffCaseRevision)
+    const expectedAlignedCaseRevision =
+      this.state.effectiveCaseRevision ?? this.state.catalogHandoffCaseRevision;
     if (
       this.state.isExpanded &&
       this.state.receiptId === reviewCase.receiptId &&
-      this.state.catalogHandoffCaseRevision !== null &&
-      reviewCase.revision !== this.state.catalogHandoffCaseRevision
+      expectedAlignedCaseRevision !== null &&
+      reviewCase.revision !== expectedAlignedCaseRevision
     ) {
       this.setState({
         currentHumanCaseRevision: reviewCase.revision,
         holdCode: 'SOURCE_CASE_VERSION_DRIFT_HOLD',
         loadError:
-          'SOURCE_CASE_VERSION_DRIFT_HOLD: Current human review case revision has drifted from the revision linked at catalog handoff; rights decision is held until future human case/catalog realignment.',
+          'SOURCE_CASE_VERSION_DRIFT_HOLD: Current human review case revision has drifted from the revision linked at catalog handoff; rights decision is held until human case/catalog realignment.',
       });
     }
   }
@@ -399,8 +437,13 @@ export class LibraryQuarantineRightsDecisionPanelController {
         ? {
             sourceRevision: reviewCase.sourceRevision,
             catalogHandoffCaseRevision: null,
+            effectiveCaseRevision: null,
             currentRevision: 0,
             rightsDecision: null,
+            rightsDecisionIsCurrent: false,
+            requiresFreshHumanRightsReview: true,
+            stalePreviousDecision: null,
+            acknowledgedCurrentCaseRevision: false,
             form: createEmptyRightsDecisionForm(),
             lastSaveOutcome: null,
           }
@@ -486,22 +529,51 @@ export class LibraryQuarantineRightsDecisionPanelController {
         return response;
       }
 
+      const effectiveCaseRevision =
+        response.effectiveCaseRevision ?? response.currentHumanCaseRevision;
+      const isDecisionCurrent =
+        response.rightsDecision !== null
+          ? (response.rightsDecisionIsCurrent ??
+            response.rightsDecision.currentHumanCaseRevision ===
+              effectiveCaseRevision)
+          : false;
+      const requiresFreshReview =
+        response.requiresFreshHumanRightsReview ?? !isDecisionCurrent;
+      const stalePreviousDecision =
+        response.rightsDecision !== null && !isDecisionCurrent
+          ? response.rightsDecision
+          : null;
+
+      // Critical invariant: when a stored rights decision is stale for the current
+      // aligned case revision (`!isDecisionCurrent`), the renewal form MUST open blank
+      // (`createEmptyRightsDecisionForm()`) and NEVER prefill from the stale decision!
+      const nextForm = isDecisionCurrent
+        ? createFormFromSanitizedRightsDecision(response.rightsDecision)
+        : createEmptyRightsDecisionForm();
+
       this.setState({
         documentId: response.documentId,
         sourceRevision: response.sourceRevision,
         catalogHandoffCaseRevision: response.catalogHandoffCaseRevision,
+        effectiveCaseRevision,
         currentHumanCaseRevision: response.currentHumanCaseRevision,
         currentRevision: response.currentRevision,
         rightsDecision: response.rightsDecision,
+        rightsDecisionIsCurrent: isDecisionCurrent,
+        requiresFreshHumanRightsReview: requiresFreshReview,
+        stalePreviousDecision,
+        acknowledgedCurrentCaseRevision: false,
         readiness: response.readiness,
-        form: createFormFromSanitizedRightsDecision(response.rightsDecision),
+        form: nextForm,
         loading: false,
         holdCode: null,
         loadError: null,
         saveError: null,
         conflictState: null,
         uncertainState: null,
-        ...(options.preserveSaveOutcome ? {} : { lastSaveOutcome: null }),
+        ...(options.preserveSaveOutcome && isDecisionCurrent
+          ? {}
+          : { lastSaveOutcome: null }),
       });
 
       return response;
@@ -550,10 +622,27 @@ export class LibraryQuarantineRightsDecisionPanelController {
       return;
     }
     const { serverRevision, serverDecision } = this.state.conflictState;
+    const effectiveCaseRev =
+      this.state.effectiveCaseRevision ??
+      this.state.currentHumanCaseRevision ??
+      this.state.catalogHandoffCaseRevision;
+    const isCurrent =
+      serverDecision !== null &&
+      effectiveCaseRev !== null &&
+      serverDecision.currentHumanCaseRevision === effectiveCaseRev;
+    const stalePrev =
+      serverDecision !== null && !isCurrent ? serverDecision : null;
+
     this.setState({
       currentRevision: serverRevision,
       rightsDecision: serverDecision,
-      form: createFormFromSanitizedRightsDecision(serverDecision),
+      rightsDecisionIsCurrent: isCurrent,
+      requiresFreshHumanRightsReview: !isCurrent,
+      stalePreviousDecision: stalePrev,
+      acknowledgedCurrentCaseRevision: false,
+      form: isCurrent
+        ? createFormFromSanitizedRightsDecision(serverDecision)
+        : createEmptyRightsDecisionForm(),
       conflictState: null,
       saveError: null,
       lastSaveOutcome: null,
@@ -577,6 +666,27 @@ export class LibraryQuarantineRightsDecisionPanelController {
       !canReviewLibraryQuarantineRights(this.currentUser)
     ) {
       this.resetPanel();
+      return null;
+    }
+
+    const effectiveCaseRev =
+      this.state.effectiveCaseRevision ??
+      this.state.currentHumanCaseRevision ??
+      this.state.catalogHandoffCaseRevision;
+    const requiresCaseRevisionAck =
+      (effectiveCaseRev !== null &&
+        this.state.catalogHandoffCaseRevision !== null &&
+        effectiveCaseRev > this.state.catalogHandoffCaseRevision) ||
+      this.state.stalePreviousDecision !== null;
+
+    if (
+      requiresCaseRevisionAck &&
+      this.state.acknowledgedCurrentCaseRevision !== true
+    ) {
+      this.setState({
+        saveError: RIGHTS_DECISION_CLIENT_SAFE_ERRORS.UNACKNOWLEDGED_CASE_REVISION,
+        lastSaveOutcome: null,
+      });
       return null;
     }
 
@@ -611,6 +721,11 @@ export class LibraryQuarantineRightsDecisionPanelController {
       const response = await this.saveDecisionFn({
         receiptId,
         expectedRevision,
+        ...((requiresCaseRevisionAck ||
+          this.state.acknowledgedCurrentCaseRevision) &&
+        effectiveCaseRev !== null
+          ? { acknowledgedHumanCaseRevision: effectiveCaseRev }
+          : {}),
         input: validatedEditorial,
       });
 
@@ -625,14 +740,21 @@ export class LibraryQuarantineRightsDecisionPanelController {
       }
 
       if (response.ok && response.status === 'SAVED') {
+        const nextEffectiveCaseRev =
+          response.effectiveCaseRevision ?? response.currentHumanCaseRevision;
         this.setState({
           saving: false,
           documentId: response.documentId,
           sourceRevision: response.sourceRevision,
           catalogHandoffCaseRevision: response.catalogHandoffCaseRevision,
+          effectiveCaseRevision: nextEffectiveCaseRev,
           currentHumanCaseRevision: response.currentHumanCaseRevision,
           currentRevision: response.currentRevision,
           rightsDecision: response.rightsDecision,
+          rightsDecisionIsCurrent: true,
+          requiresFreshHumanRightsReview: false,
+          stalePreviousDecision: null,
+          acknowledgedCurrentCaseRevision: false,
           readiness: response.readiness,
           form: createFormFromSanitizedRightsDecision(response.rightsDecision),
           saveError: null,
@@ -722,21 +844,39 @@ export class LibraryQuarantineRightsDecisionPanelController {
         return null;
       }
 
+      if (
+        err instanceof Error &&
+        err.message === RIGHTS_DECISION_CLIENT_SAFE_ERRORS.BACKEND_UNAVAILABLE
+      ) {
+        this.setState({
+          saving: false,
+          lastSaveOutcome: null,
+          saveError: RIGHTS_DECISION_CLIENT_SAFE_ERRORS.BACKEND_UNAVAILABLE,
+        });
+        return null;
+      }
+
+      // Any post-dispatch callable rejection or malformed response validation error
+      // transitions to UNKNOWN (commit uncertain) requiring GET-only verification.
       const safeMessage =
         err instanceof Error &&
         (err.message ===
           RIGHTS_DECISION_CLIENT_SAFE_ERRORS.SAVE_RESPONSE_CONTRACT_INVALID ||
           err.message ===
-            RIGHTS_DECISION_CLIENT_SAFE_ERRORS.DECISION_DTO_CONTRACT_INVALID ||
-          err.message ===
-            RIGHTS_DECISION_CLIENT_SAFE_ERRORS.BACKEND_UNAVAILABLE)
+            RIGHTS_DECISION_CLIENT_SAFE_ERRORS.DECISION_DTO_CONTRACT_INVALID)
           ? err.message
           : RIGHTS_DECISION_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED;
 
       this.setState({
         saving: false,
         lastSaveOutcome: null,
-        saveError: safeMessage,
+        saveError: null,
+        uncertainState: Object.freeze({
+          errorCode: 'TRANSACTION_COMMIT_UNCERTAIN' as const,
+          errorMessage: safeMessage,
+          decisionSaveOutcome: 'UNKNOWN' as const,
+          decisionSaved: null,
+        }),
       });
       return null;
     }
@@ -871,6 +1011,23 @@ export function LibraryQuarantineRightsDecisionPanel({
   const targetDocumentId =
     snapshot.documentId ??
     deriveQuarantineCatalogDocumentId(savedReviewCase.receiptId);
+
+  const effectiveCaseRev =
+    snapshot.effectiveCaseRevision ??
+    snapshot.currentHumanCaseRevision ??
+    snapshot.catalogHandoffCaseRevision ??
+    savedReviewCase.revision;
+
+  const isStaleDecision = Boolean(
+    snapshot.stalePreviousDecision !== null ||
+      (!snapshot.rightsDecisionIsCurrent && snapshot.rightsDecision !== null)
+  );
+
+  const requiresCaseRevisionAck =
+    (effectiveCaseRev !== null &&
+      snapshot.catalogHandoffCaseRevision !== null &&
+      effectiveCaseRev > snapshot.catalogHandoffCaseRevision) ||
+    isStaleDecision;
 
   const isSaveBlocked =
     snapshot.loading ||
@@ -1253,6 +1410,41 @@ export function LibraryQuarantineRightsDecisionPanel({
           </div>
         )}
 
+      {/* Stale Previous Decision Banner (When case was aligned to a newer revision) */}
+      {snapshot.isExpanded &&
+        !snapshot.loading &&
+        snapshot.holdCode === null &&
+        isStaleDecision && (
+          <div
+            role="status"
+            data-testid="quarantine-rights-decision-stale-previous-banner"
+            className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 text-amber-950 dark:text-amber-200 space-y-2"
+          >
+            <div className="flex items-center gap-2 font-extrabold text-amber-900 dark:text-amber-200">
+              <AlertTriangle className="h-4 w-4 text-amber-700 dark:text-amber-400 shrink-0" />
+              <span>
+                {isAr
+                  ? 'قرار حقوق سابق — غير سارٍ للنسخة الحالية من ملف المراجعة'
+                  : 'Previous rights decision — not effective for current case'}
+              </span>
+              <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-200 dark:bg-amber-800 text-amber-900 dark:text-amber-100 font-bold">
+                Previous / Not Effective
+              </span>
+            </div>
+            <p className="text-[11px] leading-relaxed">
+              {isAr
+                ? `صدر القرار الحقوقي السابق للنسخة #${(snapshot.stalePreviousDecision ?? snapshot.rightsDecision)?.currentHumanCaseRevision}، بينما مسودة الفهرس المعتمدة الحالية مواءمة مع النسخة #${effectiveCaseRev}. يتطلب النظام إقراراً بالنسخة الحالية وإعادة تقييم حقوقي مستقل وكتابة الحقول من جديد دون تعبئة تلقائية.`
+                : `The previous rights decision was recorded for review case revision #${(snapshot.stalePreviousDecision ?? snapshot.rightsDecision)?.currentHumanCaseRevision}, whereas the current catalog draft is aligned with review case revision #${effectiveCaseRev}. A fresh independent evaluation must be entered manually with explicit acknowledgment of the current case revision.`}
+            </p>
+            <div className="text-[10px] font-mono text-amber-800 dark:text-amber-300">
+              {isAr ? 'القرار المحفوظ السابق: ' : 'Previous saved decision: '}
+              {(snapshot.stalePreviousDecision ?? snapshot.rightsDecision)?.decision} | {isAr ? 'الأساس: ' : 'Basis: '}
+              {(snapshot.stalePreviousDecision ?? snapshot.rightsDecision)?.basis} | {isAr ? 'المرجع: ' : 'Ref: '}
+              {(snapshot.stalePreviousDecision ?? snapshot.rightsDecision)?.evidenceReference}
+            </div>
+          </div>
+        )}
+
       {/* Editable Rights Decision & Evidence Form (Only when expanded, loaded, and not held) */}
       {snapshot.isExpanded &&
         !snapshot.loading &&
@@ -1274,16 +1466,20 @@ export function LibraryQuarantineRightsDecisionPanel({
                     ? isAr
                       ? 'لا يوجد قرار حقوقي محفوظ بعد (سيتم إنشاء النسخة 1)'
                       : 'No rights decision saved yet (will create revision 1)'
-                    : isAr
-                      ? `النسخة المحفوظة الحالية: ${snapshot.currentRevision} (${snapshot.rightsDecision?.decision ?? ''})`
-                      : `Current saved revision: ${snapshot.currentRevision} (${snapshot.rightsDecision?.decision ?? ''})`}
+                    : isStaleDecision
+                      ? isAr
+                        ? `النسخة السابقة: ${snapshot.currentRevision} (غير سارية — يتطلب مراجعة جديدة للنسخة #${effectiveCaseRev})`
+                        : `Previous revision: ${snapshot.currentRevision} (Not effective — renewal required for case #${effectiveCaseRev})`
+                      : isAr
+                        ? `النسخة المحفوظة الحالية: ${snapshot.currentRevision} (${snapshot.rightsDecision?.decision ?? ''})`
+                        : `Current saved revision: ${snapshot.currentRevision} (${snapshot.rightsDecision?.decision ?? ''})`}
                 </span>
               </div>
 
               <div className="font-mono text-gray-500 dark:text-gray-400">
                 {isAr
-                  ? `مراجعة المصدر: #${snapshot.sourceRevision ?? savedReviewCase.sourceRevision} | نسخة المراجعة البشرية المرتبطة: #${snapshot.catalogHandoffCaseRevision ?? savedReviewCase.revision}`
-                  : `Source rev: #${snapshot.sourceRevision ?? savedReviewCase.sourceRevision} | Linked case rev: #${snapshot.catalogHandoffCaseRevision ?? savedReviewCase.revision}`}
+                  ? `مراجعة المصدر: #${snapshot.sourceRevision ?? savedReviewCase.sourceRevision} | نسخة المراجعة البشرية المرتبطة: #${snapshot.catalogHandoffCaseRevision ?? savedReviewCase.revision} | النسخة الفعالة: #${effectiveCaseRev}`
+                  : `Source rev: #${snapshot.sourceRevision ?? savedReviewCase.sourceRevision} | Linked case rev: #${snapshot.catalogHandoffCaseRevision ?? savedReviewCase.revision} | Effective rev: #${effectiveCaseRev}`}
               </div>
             </div>
 
@@ -1440,6 +1636,36 @@ export function LibraryQuarantineRightsDecisionPanel({
                 />
               </div>
             </div>
+
+            {/* Case Revision Acknowledgment Checkbox (When aligned to a newer case revision or when stale decision exists) */}
+            {requiresCaseRevisionAck && (
+              <div
+                data-testid="quarantine-rights-acknowledge-case-revision-box"
+                className="p-3 rounded-xl bg-indigo-50/80 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 space-y-1.5"
+              >
+                <label
+                  htmlFor="acknowledge-current-case-revision-checkbox"
+                  className="flex items-start gap-2.5 cursor-pointer text-[12px] font-bold text-indigo-950 dark:text-indigo-200"
+                >
+                  <input
+                    type="checkbox"
+                    id="acknowledge-current-case-revision-checkbox"
+                    data-testid="acknowledge-current-case-revision-checkbox"
+                    disabled={isSaveBlocked}
+                    checked={snapshot.acknowledgedCurrentCaseRevision}
+                    onChange={(e) =>
+                      controller.setAcknowledgedCurrentCaseRevision(e.target.checked)
+                    }
+                    className="mt-0.5 h-4 w-4 rounded border-indigo-400 text-indigo-600 focus:ring-indigo-500 cursor-pointer shrink-0"
+                  />
+                  <span>
+                    {isAr
+                      ? `أقر بأنني راجعت التعديلات المعتمدة في ملف المراجعة البشرية للنسخة #${effectiveCaseRev}، وأن هذا القرار الحقوقي يصدر كتقييم جديد ومستقل لهذه النسخة تحديداً.`
+                      : `I acknowledge that I have reviewed the human review case metadata for effective revision #${effectiveCaseRev}, and that this rights decision is submitted as a fresh, independent evaluation for this revision.`}
+                  </span>
+                </label>
+              </div>
+            )}
 
             {/* Single Save Button */}
             <div className="flex items-center justify-between gap-3 pt-2">

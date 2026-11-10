@@ -35,15 +35,23 @@ import {
   LIBRARY_QUARANTINE_RIGHTS_SCOPE,
   RIGHTS_DECISION_CONTRACT_SAFE_MESSAGES,
   deriveLibraryQuarantineRightsDecisionEventId,
-  validatePersistedLibraryQuarantineRightsDecision,
+  toSanitizedLibraryQuarantineRightsDecisionDto,
   validatePersistedLibraryQuarantineRightsDecisionEvent,
   validateRightsDecisionInput,
   type LibraryQuarantinePersistedRightsDecision,
   type LibraryQuarantinePersistedRightsDecisionEvent,
   type LibraryQuarantineRightsDecisionAuditEventType,
   type LibraryQuarantineRightsDecisionContractErrorCode,
+  type SanitizedLibraryQuarantineRightsDecisionDto,
   type SaveLibraryQuarantineRightsDecisionInput,
 } from './libraryQuarantineRightsDecisionContract';
+import {
+  LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
+  computeLibraryQuarantineCatalogCaseFourFieldDiff,
+  validateAlignmentAwarePersistedRightsDecision,
+  validatePersistedLibraryQuarantineCatalogCaseAlignment,
+  type LibraryQuarantinePersistedCatalogCaseAlignment,
+} from './libraryQuarantineCatalogCaseAlignmentService';
 import {
   isValidIsoUtcTimestamp,
   isValidLibraryQuarantineReceiptId,
@@ -51,31 +59,8 @@ import {
 } from './libraryQuarantineReceiptContract';
 
 /**
- * LIB-FILE-RIGHTS-AND-READINESS-01 — Private Firestore Store for Human Rights
- * Review Decisions & Append-Only Audit Events
- *
- * ARCHITECTURAL & SECURITY BOUNDARY:
- * - Persists the current human rights decision for an internal `qcat-<receiptId>`
- *   catalog draft in `library_quarantine_rights_decisions/<receiptId>` and
- *   append-only, non-replaceable audit events in
- *   `library_quarantine_rights_decision_events/<receiptId>_<revision>`.
- * - Performs point lookups ONLY (`.doc(id)`); never executes collection scans.
- * - Verifies full provenance chain before any read readiness or save:
- *     1. `library_quarantine_receipts/<receiptId>` (`Quarantined` + verified attestation)
- *     2. `library_quarantine_review_drafts/<receiptId>` (`PENDING_HUMAN_REVIEW` + matching source)
- *     3. `library_quarantine_human_review_cases/<receiptId>` (`METADATA_RECORDED` + matching source)
- *     4. `library_quarantine_catalog_handoffs/<receiptId>` (matching source + matching case revision/timestamp)
- *     5. `library_documents/qcat-<receiptId>` (`Draft` + `ReviewRequired` + zero `referenceUrl`)
- *     6. `library_quarantine_rights_decisions/<receiptId>` (if present, valid 25-field schema + matching revisions)
- * - Enforces fail-closed `SOURCE_CASE_VERSION_DRIFT_HOLD` whenever
- *   `humanCase.revision !== handoff.caseRevision` or
- *   `humanCase.updatedAt !== handoff.caseUpdatedAt` (never auto-reconciles or mutates handoff).
- * - Executes decision creation/update and audit event creation inside ONE atomic
- *   Firestore transaction (`runTransaction`), reading all 7 document references
- *   BEFORE staging any write (`tx.create` on decision when `expectedRevision === 0`,
- *   `tx.update` on decision when `expectedRevision > 0`, and `tx.create` on audit event).
- * - Never calls `tx.set` and never writes to any collection other than
- *   `library_quarantine_rights_decisions` and `library_quarantine_rights_decision_events`.
+ * LIB-FILE-RIGHTS-AND-READINESS-01 + LIB-FILE-CASE-ALIGNMENT-01 — Private
+ * Firestore Store for Human Rights Review Decisions & Append-Only Audit Events
  */
 
 export const LIBRARY_QUARANTINE_RIGHTS_DECISIONS_COLLECTION =
@@ -99,6 +84,7 @@ export type LibraryQuarantineRightsDecisionStoreErrorCode =
   | 'INVALID_PERSISTED_HANDOFF_SCHEMA'
   | 'HANDOFF_SOURCE_MISMATCH'
   | 'SOURCE_CASE_VERSION_DRIFT_HOLD'
+  | 'UNACKNOWLEDGED_CASE_REVISION_HOLD'
   | 'CORRUPTED_EXISTING_RIGHTS_DECISION'
   | 'RIGHTS_DECISION_SOURCE_MISMATCH'
   | 'RIGHTS_DECISION_REVISION_CONFLICT';
@@ -164,7 +150,9 @@ export const RIGHTS_DECISION_STORE_SAFE_MESSAGES: Readonly<
   HANDOFF_SOURCE_MISMATCH:
     'Existing catalog handoff record does not match the current quarantine receipt or review draft revision.',
   SOURCE_CASE_VERSION_DRIFT_HOLD:
-    'Current human review case revision or timestamp has drifted from the revision linked at catalog handoff; rights decision is held until future human case/catalog realignment.',
+    'Current human review case revision or timestamp has drifted from the effective aligned catalog draft revision; align the catalog draft with the saved human review case before recording a rights decision.',
+  UNACKNOWLEDGED_CASE_REVISION_HOLD:
+    'Explicit acknowledgement of the current effective aligned human review case revision (acknowledgedHumanCaseRevision) is required before recording or renewing a rights decision.',
   CORRUPTED_EXISTING_RIGHTS_DECISION:
     'Existing persisted rights decision record failed strict 25-field schema validation.',
   RIGHTS_DECISION_SOURCE_MISMATCH:
@@ -183,6 +171,79 @@ export const RIGHTS_DECISION_STORE_SAFE_MESSAGES: Readonly<
     'Point lookup of quarantine rights decision records failed in Firestore.',
 });
 
+export function validateAlignmentAwarePersistedRightsDecisionEvent(
+  raw: unknown,
+  expectedReceiptId?: string,
+  expectedRevision?: number
+): ReturnType<typeof validatePersistedLibraryQuarantineRightsDecisionEvent> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return validatePersistedLibraryQuarantineRightsDecisionEvent(
+      raw,
+      expectedReceiptId,
+      expectedRevision
+    );
+  }
+  const record = raw as Record<string, unknown>;
+  const handoffRev = record.catalogHandoffCaseRevision;
+  const currentCaseRev = record.currentHumanCaseRevision;
+  if (
+    typeof handoffRev !== 'number' ||
+    !Number.isSafeInteger(handoffRev) ||
+    handoffRev < 1 ||
+    typeof currentCaseRev !== 'number' ||
+    !Number.isSafeInteger(currentCaseRev) ||
+    currentCaseRev < handoffRev
+  ) {
+    return {
+      ok: false,
+      errorCode: 'INVALID_PERSISTED_RIGHTS_EVENT_SCHEMA',
+      errorMessage: 'Persisted rights decision event schema revision or alignment revision is invalid.',
+    };
+  }
+  const normalizedForBaseContract: Record<string, unknown> = {
+    ...record,
+    currentHumanCaseRevision: handoffRev,
+  };
+  const baseResult = validatePersistedLibraryQuarantineRightsDecisionEvent(
+    normalizedForBaseContract,
+    expectedReceiptId,
+    expectedRevision
+  );
+  if (!baseResult.ok) {
+    return baseResult;
+  }
+  const hydrated: LibraryQuarantinePersistedRightsDecisionEvent = Object.freeze({
+    ...baseResult.rightsEvent,
+    currentHumanCaseRevision: currentCaseRev,
+  });
+  return {
+    ok: true,
+    rightsEvent: hydrated,
+  };
+}
+
+export function toAlignmentAwareSanitizedRightsDecisionDto(
+  persisted: LibraryQuarantinePersistedRightsDecision
+): SanitizedLibraryQuarantineRightsDecisionDto {
+  const checked = validateAlignmentAwarePersistedRightsDecision(
+    persisted,
+    persisted?.receiptId
+  );
+  if (!checked.ok) {
+    throw new Error(RIGHTS_DECISION_CONTRACT_SAFE_MESSAGES[checked.errorCode]);
+  }
+  const d = checked.rightsDecision;
+  const baseNormalized: LibraryQuarantinePersistedRightsDecision = Object.freeze({
+    ...d,
+    currentHumanCaseRevision: d.catalogHandoffCaseRevision,
+  });
+  const baseDto = toSanitizedLibraryQuarantineRightsDecisionDto(baseNormalized);
+  return Object.freeze({
+    ...baseDto,
+    currentHumanCaseRevision: d.currentHumanCaseRevision,
+  });
+}
+
 export interface VerifiedQuarantineRightsChainSnapshot {
   readonly receiptId: string;
   readonly documentId: string;
@@ -191,7 +252,12 @@ export interface VerifiedQuarantineRightsChainSnapshot {
   readonly humanReviewCase: LibraryQuarantinePersistedHumanReviewCase;
   readonly catalogHandoff: LibraryQuarantinePersistedCatalogHandoff;
   readonly catalogDocument: SanitizedLibraryQuarantineCatalogDocumentDto;
+  readonly alignment: LibraryQuarantinePersistedCatalogCaseAlignment | null;
+  readonly effectiveCaseRevision: number;
+  readonly effectiveCaseUpdatedAt: string;
   readonly rightsDecision: LibraryQuarantinePersistedRightsDecision | null;
+  readonly rightsDecisionIsCurrent: boolean;
+  readonly requiresFreshHumanRightsReview: boolean;
 }
 
 export interface GetLibraryQuarantineRightsDecisionSnapshotSuccess {
@@ -221,6 +287,7 @@ export type GetLibraryQuarantineRightsDecisionEventStoreResult =
 export interface SaveLibraryQuarantineRightsDecisionStoreInput {
   readonly receiptId: string;
   readonly expectedRevision: number;
+  readonly acknowledgedHumanCaseRevision?: number;
   readonly actorUid: string;
   readonly nowIso: string;
   readonly input: SaveLibraryQuarantineRightsDecisionInput;
@@ -321,7 +388,9 @@ class PreWriteRightsRevisionConflictError extends Error {
 }
 
 function toFirestoreDocumentData(
-  record: LibraryQuarantinePersistedRightsDecision | LibraryQuarantinePersistedRightsDecisionEvent
+  record:
+    | LibraryQuarantinePersistedRightsDecision
+    | LibraryQuarantinePersistedRightsDecisionEvent
 ): LibraryQuarantineFirestoreDocumentData {
   const clone: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
@@ -331,8 +400,9 @@ function toFirestoreDocumentData(
 }
 
 /**
- * Verifies the full 6-document chain (`receipt`, `reviewDraft`, `humanReviewCase`,
- * `catalogHandoff`, `qcatDocument`, and optional `rightsDecision`) for a given `receiptId`.
+ * Verifies the full 7-document chain (`receipt`, `reviewDraft`, `humanReviewCase`,
+ * `catalogHandoff`, `qcatDocument`, optional `alignmentOverlay`, and optional
+ * `rightsDecision`) for a given `receiptId`.
  */
 export function verifyQuarantineRightsChainSnapshots(
   receiptId: string,
@@ -342,6 +412,7 @@ export function verifyQuarantineRightsChainSnapshots(
     readonly caseSnap: LibraryQuarantineFirestoreDocumentSnapshot;
     readonly handoffSnap: LibraryQuarantineFirestoreDocumentSnapshot;
     readonly docSnap: LibraryQuarantineFirestoreDocumentSnapshot;
+    readonly alignmentSnap?: LibraryQuarantineFirestoreDocumentSnapshot;
     readonly decisionSnap: LibraryQuarantineFirestoreDocumentSnapshot;
   }
 ): GetLibraryQuarantineRightsDecisionSnapshotResult {
@@ -476,20 +547,6 @@ export function verifyQuarantineRightsChainSnapshots(
     });
   }
 
-  // Source/case version drift guard: human review case may have been edited after
-  // catalog handoff was created. Rights decision must NEVER silently endorse drifted versions.
-  if (
-    humanReviewCase.revision !== catalogHandoff.caseRevision ||
-    humanReviewCase.updatedAt !== catalogHandoff.caseUpdatedAt
-  ) {
-    return Object.freeze({
-      ok: false as const,
-      errorCode: 'SOURCE_CASE_VERSION_DRIFT_HOLD' as const,
-      errorMessage:
-        RIGHTS_DECISION_STORE_SAFE_MESSAGES.SOURCE_CASE_VERSION_DRIFT_HOLD,
-    });
-  }
-
   const docCheck = validatePersistedCatalogDraftDocument(
     snapshots.docSnap.data(),
     documentId
@@ -505,7 +562,9 @@ export function verifyQuarantineRightsChainSnapshots(
   const catalogDocument = docCheck.catalogDocument;
   if (
     catalogDocument.organizationId !== catalogHandoff.organizationId ||
-    catalogDocument.sourceId !== catalogHandoff.sourceId
+    catalogDocument.sourceId !== catalogHandoff.sourceId ||
+    catalogDocument.createdAt !== catalogHandoff.createdAt ||
+    Date.parse(catalogDocument.updatedAt) < Date.parse(catalogHandoff.createdAt)
   ) {
     return Object.freeze({
       ok: false as const,
@@ -515,7 +574,102 @@ export function verifyQuarantineRightsChainSnapshots(
     });
   }
 
+  let alignment: LibraryQuarantinePersistedCatalogCaseAlignment | null = null;
+  let effectiveCaseRevision = catalogHandoff.caseRevision;
+  let effectiveCaseUpdatedAt = catalogHandoff.caseUpdatedAt;
+
+  if (snapshots.alignmentSnap && snapshots.alignmentSnap.exists) {
+    if (snapshots.alignmentSnap.id !== receiptId) {
+      return Object.freeze({
+        ok: false as const,
+        errorCode: 'DOCUMENT_ID_MISMATCH' as const,
+        errorMessage: RIGHTS_DECISION_STORE_SAFE_MESSAGES.DOCUMENT_ID_MISMATCH,
+      });
+    }
+
+    const alignmentCheck = validatePersistedLibraryQuarantineCatalogCaseAlignment(
+      snapshots.alignmentSnap.data(),
+      receiptId
+    );
+    if (!alignmentCheck.ok) {
+      const code =
+        alignmentCheck.errorCode === 'SECURITY_POSTURE_VIOLATION'
+          ? 'SECURITY_POSTURE_VIOLATION'
+          : 'SOURCE_CASE_VERSION_DRIFT_HOLD';
+      return Object.freeze({
+        ok: false as const,
+        errorCode: code,
+        errorMessage: RIGHTS_DECISION_STORE_SAFE_MESSAGES[code],
+      });
+    }
+
+    alignment = alignmentCheck.alignment;
+    if (
+      alignment.documentId !== documentId ||
+      alignment.sourceRevision !== receiptEnvelope.revision ||
+      alignment.sourceUpdatedAt !== receipt.updatedAt ||
+      alignment.sourceSha256 !== receipt.sha256 ||
+      alignment.originalHandoffCaseRevision !== catalogHandoff.caseRevision ||
+      alignment.alignedHumanCaseRevision < catalogHandoff.caseRevision ||
+      Date.parse(alignment.alignedHumanCaseUpdatedAt) <
+        Date.parse(catalogHandoff.caseUpdatedAt) ||
+      alignment.documentUpdatedAt !== catalogDocument.updatedAt
+    ) {
+      return Object.freeze({
+        ok: false as const,
+        errorCode: 'SOURCE_CASE_VERSION_DRIFT_HOLD' as const,
+        errorMessage:
+          RIGHTS_DECISION_STORE_SAFE_MESSAGES.SOURCE_CASE_VERSION_DRIFT_HOLD,
+      });
+    }
+
+    effectiveCaseRevision = alignment.alignedHumanCaseRevision;
+    effectiveCaseUpdatedAt = alignment.alignedHumanCaseUpdatedAt;
+
+    const fourFieldDiff = computeLibraryQuarantineCatalogCaseFourFieldDiff(
+      humanReviewCase,
+      catalogDocument
+    );
+    if (
+      humanReviewCase.revision === effectiveCaseRevision &&
+      fourFieldDiff.hasAnyDifference
+    ) {
+      return Object.freeze({
+        ok: false as const,
+        errorCode: 'SOURCE_CASE_VERSION_DRIFT_HOLD' as const,
+        errorMessage:
+          RIGHTS_DECISION_STORE_SAFE_MESSAGES.SOURCE_CASE_VERSION_DRIFT_HOLD,
+      });
+    }
+  } else {
+    if (catalogDocument.updatedAt !== catalogHandoff.createdAt) {
+      return Object.freeze({
+        ok: false as const,
+        errorCode: 'SOURCE_CASE_VERSION_DRIFT_HOLD' as const,
+        errorMessage:
+          RIGHTS_DECISION_STORE_SAFE_MESSAGES.SOURCE_CASE_VERSION_DRIFT_HOLD,
+      });
+    }
+  }
+
+  // Source/case version drift guard: human review case must match the effective
+  // aligned case revision and timestamp (either original handoff or verified alignment overlay).
+  if (
+    humanReviewCase.revision !== effectiveCaseRevision ||
+    humanReviewCase.updatedAt !== effectiveCaseUpdatedAt
+  ) {
+    return Object.freeze({
+      ok: false as const,
+      errorCode: 'SOURCE_CASE_VERSION_DRIFT_HOLD' as const,
+      errorMessage:
+        RIGHTS_DECISION_STORE_SAFE_MESSAGES.SOURCE_CASE_VERSION_DRIFT_HOLD,
+    });
+  }
+
   let rightsDecision: LibraryQuarantinePersistedRightsDecision | null = null;
+  let rightsDecisionIsCurrent = false;
+  let requiresFreshHumanRightsReview = true;
+
   if (snapshots.decisionSnap.exists) {
     if (snapshots.decisionSnap.id !== receiptId) {
       return Object.freeze({
@@ -525,7 +679,7 @@ export function verifyQuarantineRightsChainSnapshots(
       });
     }
 
-    const decisionCheck = validatePersistedLibraryQuarantineRightsDecision(
+    const decisionCheck = validateAlignmentAwarePersistedRightsDecision(
       snapshots.decisionSnap.data(),
       receiptId
     );
@@ -558,7 +712,8 @@ export function verifyQuarantineRightsChainSnapshots(
 
     if (
       rightsDecision.catalogHandoffCaseRevision !== catalogHandoff.caseRevision ||
-      rightsDecision.currentHumanCaseRevision !== humanReviewCase.revision
+      rightsDecision.currentHumanCaseRevision < catalogHandoff.caseRevision ||
+      rightsDecision.currentHumanCaseRevision > effectiveCaseRevision
     ) {
       return Object.freeze({
         ok: false as const,
@@ -566,6 +721,16 @@ export function verifyQuarantineRightsChainSnapshots(
         errorMessage:
           RIGHTS_DECISION_STORE_SAFE_MESSAGES.SOURCE_CASE_VERSION_DRIFT_HOLD,
       });
+    }
+
+    if (rightsDecision.currentHumanCaseRevision === effectiveCaseRevision) {
+      rightsDecisionIsCurrent = true;
+      requiresFreshHumanRightsReview = false;
+    } else {
+      // Stale prior rights decision recorded for an older case revision before realignment.
+      // Retained for audit history only; not effective for the current aligned case.
+      rightsDecisionIsCurrent = false;
+      requiresFreshHumanRightsReview = true;
     }
   }
 
@@ -579,7 +744,12 @@ export function verifyQuarantineRightsChainSnapshots(
       humanReviewCase,
       catalogHandoff,
       catalogDocument,
+      alignment,
+      effectiveCaseRevision,
+      effectiveCaseUpdatedAt,
       rightsDecision,
+      rightsDecisionIsCurrent,
+      requiresFreshHumanRightsReview,
     }),
   });
 }
@@ -634,8 +804,8 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
   }
 
   /**
-   * Performs 6 point reads (`receipt`, `reviewDraft`, `humanReviewCase`,
-   * `catalogHandoff`, `qcatDocument`, `rightsDecision`) and 0 writes.
+   * Performs 7 point reads (`receipt`, `reviewDraft`, `humanReviewCase`,
+   * `catalogHandoff`, `qcatDocument`, `alignmentOverlay`, `rightsDecision`) and 0 writes.
    */
   public async getRightsDecisionSnapshot(
     receiptId: string
@@ -671,6 +841,10 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
         LIBRARY_DOCUMENTS_COLLECTION,
         documentId
       ).get();
+      const alignmentSnap = await this.getPointDocRef(
+        LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
+        receiptId
+      ).get();
       const decisionSnap = await this.getPointDocRef(
         LIBRARY_QUARANTINE_RIGHTS_DECISIONS_COLLECTION,
         receiptId
@@ -682,6 +856,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
         caseSnap,
         handoffSnap,
         docSnap,
+        alignmentSnap,
         decisionSnap,
       });
     } catch {
@@ -748,7 +923,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
         });
       }
 
-      const validated = validatePersistedLibraryQuarantineRightsDecisionEvent(
+      const validated = validateAlignmentAwarePersistedRightsDecisionEvent(
         snap.data(),
         receiptId,
         revision
@@ -778,7 +953,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
   /**
    * Atomically creates or updates `library_quarantine_rights_decisions/<receiptId>`
    * and appends `library_quarantine_rights_decision_events/<receiptId>_<revision>`
-   * inside ONE Firestore transaction after reading all 7 point references.
+   * inside ONE Firestore transaction after reading all 8 point references.
    */
   public async saveRightsDecisionTransactional(
     params: SaveLibraryQuarantineRightsDecisionStoreInput
@@ -818,6 +993,15 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
       return makeHold('INVALID_EXPECTED_REVISION');
     }
 
+    if (
+      params.acknowledgedHumanCaseRevision !== undefined &&
+      (typeof params.acknowledgedHumanCaseRevision !== 'number' ||
+        !Number.isSafeInteger(params.acknowledgedHumanCaseRevision) ||
+        params.acknowledgedHumanCaseRevision < 1)
+    ) {
+      return makeHold('UNACKNOWLEDGED_CASE_REVISION_HOLD');
+    }
+
     if (!isValidUploaderUid(params.actorUid)) {
       return makeHold('INVALID_ACTOR_UID');
     }
@@ -835,6 +1019,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
     const receiptId = params.receiptId;
     const documentId = deriveQuarantineCatalogDocumentId(receiptId);
     const expectedRevision = params.expectedRevision;
+    const acknowledgedHumanCaseRevision = params.acknowledgedHumanCaseRevision;
     const targetRevision = expectedRevision + 1;
     const targetEventId = deriveLibraryQuarantineRightsDecisionEventId(
       receiptId,
@@ -843,13 +1028,12 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
     const actorUid = params.actorUid;
     const nowIso = params.nowIso;
 
-    let writeStagedInTransaction = false;
+    // Track whether ANY transaction attempt staged writes (never reset inside callback)
+    let writeStagedInAnyAttempt = false;
 
     try {
       return await this.db.runTransaction(
         async (tx: LibraryQuarantineReviewDraftFirestoreTransaction) => {
-          writeStagedInTransaction = false;
-
           const receiptRef = this.getPointDocRef(
             LIBRARY_QUARANTINE_RECEIPT_COLLECTION,
             receiptId
@@ -870,6 +1054,10 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
             LIBRARY_DOCUMENTS_COLLECTION,
             documentId
           );
+          const alignmentRef = this.getPointDocRef(
+            LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
+            receiptId
+          );
           const decisionRef = this.getPointDocRef(
             LIBRARY_QUARANTINE_RIGHTS_DECISIONS_COLLECTION,
             receiptId
@@ -879,22 +1067,24 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
             targetEventId
           );
 
-          // Step 1: Read all 7 point references BEFORE staging any write
+          // Step 1: Read all 8 point references BEFORE staging any write
           const receiptSnap = await tx.get(receiptRef);
           const draftSnap = await tx.get(draftRef);
           const caseSnap = await tx.get(caseRef);
           const handoffSnap = await tx.get(handoffRef);
           const docSnap = await tx.get(docRef);
+          const alignmentSnap = await tx.get(alignmentRef);
           const decisionSnap = await tx.get(decisionRef);
           const eventSnap = await tx.get(eventRef);
 
-          // Step 2: Verify the 6-document provenance chain and drift invariants
+          // Step 2: Verify the 7-document provenance chain and drift invariants
           const chainResult = verifyQuarantineRightsChainSnapshots(receiptId, {
             receiptSnap,
             draftSnap,
             caseSnap,
             handoffSnap,
             docSnap,
+            alignmentSnap,
             decisionSnap,
           });
           if (!chainResult.ok) {
@@ -916,6 +1106,30 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
             );
           }
 
+          // Step 3b: Enforce acknowledgedHumanCaseRevision matching effectiveCaseRevision
+          const requiresExplicitCaseRevisionAck =
+            chainSnapshot.effectiveCaseRevision !==
+              chainSnapshot.catalogHandoff.caseRevision ||
+            (existingDecision !== null && !chainSnapshot.rightsDecisionIsCurrent);
+
+          if (
+            acknowledgedHumanCaseRevision !== undefined &&
+            acknowledgedHumanCaseRevision !== chainSnapshot.effectiveCaseRevision
+          ) {
+            throw new PreWriteRightsTransactionAbortError(
+              'UNACKNOWLEDGED_CASE_REVISION_HOLD'
+            );
+          }
+
+          if (
+            requiresExplicitCaseRevisionAck &&
+            acknowledgedHumanCaseRevision !== chainSnapshot.effectiveCaseRevision
+          ) {
+            throw new PreWriteRightsTransactionAbortError(
+              'UNACKNOWLEDGED_CASE_REVISION_HOLD'
+            );
+          }
+
           // Step 4: Verify append-only audit event slot is unoccupied
           if (eventSnap.exists) {
             throw new PreWriteRightsTransactionAbortError(
@@ -931,6 +1145,9 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
           const draftMs = Date.parse(chainSnapshot.reviewDraft.createdAt);
           const caseMs = Date.parse(chainSnapshot.humanReviewCase.updatedAt);
           const handoffMs = Date.parse(chainSnapshot.catalogHandoff.createdAt);
+          const alignmentMs = chainSnapshot.alignment
+            ? Date.parse(chainSnapshot.alignment.updatedAt)
+            : 0;
           const priorDecisionMs = existingDecision
             ? Date.parse(existingDecision.updatedAt)
             : 0;
@@ -940,6 +1157,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
             nowMs < draftMs ||
             nowMs < caseMs ||
             nowMs < handoffMs ||
+            (chainSnapshot.alignment !== null && nowMs < alignmentMs) ||
             (existingDecision !== null && nowMs < priorDecisionMs)
           ) {
             throw new PreWriteRightsTransactionAbortError(
@@ -968,7 +1186,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
               draftSourceRevision: chainSnapshot.reviewDraft.sourceRevision,
               catalogHandoffCaseRevision:
                 chainSnapshot.catalogHandoff.caseRevision,
-              currentHumanCaseRevision: chainSnapshot.humanReviewCase.revision,
+              currentHumanCaseRevision: chainSnapshot.effectiveCaseRevision,
               rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
               decision: normalizedEditorial.decision,
               basis: normalizedEditorial.basis,
@@ -987,7 +1205,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
             });
 
           const validatedNextDecision =
-            validatePersistedLibraryQuarantineRightsDecision(
+            validateAlignmentAwarePersistedRightsDecision(
               candidateDecision,
               receiptId
             );
@@ -1013,7 +1231,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
               draftSourceRevision: chainSnapshot.reviewDraft.sourceRevision,
               catalogHandoffCaseRevision:
                 chainSnapshot.catalogHandoff.caseRevision,
-              currentHumanCaseRevision: chainSnapshot.humanReviewCase.revision,
+              currentHumanCaseRevision: chainSnapshot.effectiveCaseRevision,
               rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
               decision: normalizedEditorial.decision,
               basis: normalizedEditorial.basis,
@@ -1030,7 +1248,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
             });
 
           const validatedNextEvent =
-            validatePersistedLibraryQuarantineRightsDecisionEvent(
+            validateAlignmentAwarePersistedRightsDecisionEvent(
               candidateEvent,
               receiptId,
               targetRevision
@@ -1054,6 +1272,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
               decisionRef,
               toFirestoreDocumentData(validatedNextDecision.rightsDecision)
             );
+            writeStagedInAnyAttempt = true;
           } else {
             const txWithUpdate =
               tx as LibraryQuarantineReviewDraftFirestoreTransaction & {
@@ -1071,9 +1290,8 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
               decisionRef,
               toFirestoreDocumentData(validatedNextDecision.rightsDecision)
             );
+            writeStagedInAnyAttempt = true;
           }
-
-          writeStagedInTransaction = true;
 
           tx.create(
             eventRef,
@@ -1084,6 +1302,8 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
             Object.freeze({
               ...chainSnapshot,
               rightsDecision: validatedNextDecision.rightsDecision,
+              rightsDecisionIsCurrent: true,
+              requiresFreshHumanRightsReview: false,
             });
 
           return Object.freeze({
@@ -1100,6 +1320,22 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
         }
       );
     } catch (err: unknown) {
+      // CRITICAL: If any transaction attempt staged a write before failing or retrying,
+      // commit status is uncertain and MUST be reported as UNKNOWN (decisionSaved: null),
+      // even if a subsequent retry attempt aborted pre-write.
+      if (writeStagedInAnyAttempt) {
+        return Object.freeze({
+          status: 'UNKNOWN' as const,
+          decisionSaveOutcome: 'UNKNOWN' as const,
+          decisionSaved: null,
+          receiptId,
+          documentId,
+          reasonCode: 'TRANSACTION_COMMIT_UNCERTAIN' as const,
+          errorMessage:
+            RIGHTS_DECISION_STORE_SAFE_MESSAGES.TRANSACTION_COMMIT_UNCERTAIN,
+        });
+      }
+
       if (err instanceof PreWriteRightsRevisionConflictError) {
         return Object.freeze({
           status: 'CONFLICT' as const,
@@ -1120,20 +1356,7 @@ export class FirestoreLibraryQuarantineRightsDecisionStore
         return makeHold(err.reasonCode);
       }
 
-      if (!writeStagedInTransaction) {
-        return makeHold('TRANSACTION_ABORTED_NO_WRITE');
-      }
-
-      return Object.freeze({
-        status: 'UNKNOWN' as const,
-        decisionSaveOutcome: 'UNKNOWN' as const,
-        decisionSaved: null,
-        receiptId,
-        documentId,
-        reasonCode: 'TRANSACTION_COMMIT_UNCERTAIN' as const,
-        errorMessage:
-          RIGHTS_DECISION_STORE_SAFE_MESSAGES.TRANSACTION_COMMIT_UNCERTAIN,
-      });
+      return makeHold('TRANSACTION_ABORTED_NO_WRITE');
     }
   }
 }

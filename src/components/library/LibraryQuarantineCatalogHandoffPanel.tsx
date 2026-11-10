@@ -35,6 +35,10 @@ import {
   type SanitizedLibraryQuarantineCatalogDocumentDto,
   type SanitizedLibraryQuarantineCatalogHandoffDto,
 } from '../../services/libraryQuarantineCatalogHandoffClient';
+import {
+  LibraryQuarantineCatalogCaseAlignmentPanelController,
+} from '../../services/libraryQuarantineCatalogCaseAlignmentClient';
+import { LibraryQuarantineCatalogCaseAlignmentPanel } from './LibraryQuarantineCatalogCaseAlignmentPanel';
 
 /**
  * LIB-FILE-CATALOG-HANDOFF-01 — Inline Catalog Draft Handoff Panel & Controller
@@ -747,6 +751,22 @@ export class LibraryQuarantineCatalogHandoffPanelController {
       return null;
     }
   }
+
+  public applyReconciledCatalogDocument(
+    catalogDocument: SanitizedLibraryQuarantineCatalogDocumentDto,
+    currentCaseRevision?: number | null
+  ): void {
+    if (!this.state.isExpanded || !this.state.handoffExists) {
+      return;
+    }
+    this.setState({
+      catalogDocument,
+      ...(typeof currentCaseRevision === 'number' && currentCaseRevision >= 1
+        ? { expectedCaseRevision: currentCaseRevision }
+        : {}),
+    });
+    this.onCatalogDraftReady?.(catalogDocument);
+  }
 }
 
 export interface LibraryQuarantineCatalogHandoffPanelProps {
@@ -758,6 +778,8 @@ export interface LibraryQuarantineCatalogHandoffPanelProps {
   readonly sources: readonly LibrarySource[];
   readonly isAr: boolean;
   readonly onReloadHumanReviewCase?: () => void;
+  readonly alignmentController?: LibraryQuarantineCatalogCaseAlignmentPanelController;
+  readonly envOverride?: Record<string, unknown>;
 }
 
 export function LibraryQuarantineCatalogHandoffPanel({
@@ -769,11 +791,22 @@ export function LibraryQuarantineCatalogHandoffPanel({
   sources,
   isAr,
   onReloadHumanReviewCase,
+  alignmentController,
+  envOverride,
 }: LibraryQuarantineCatalogHandoffPanelProps) {
   const [snapshot, setSnapshot] =
     useState<LibraryQuarantineCatalogHandoffPanelSnapshot>(() =>
       controller.getSnapshot()
     );
+  const [internalAlignmentController] = useState(
+    () =>
+      new LibraryQuarantineCatalogCaseAlignmentPanelController({
+        currentUser,
+        envOverride,
+      })
+  );
+  const effectiveAlignmentController =
+    alignmentController ?? internalAlignmentController;
 
   useEffect(() => {
     setSnapshot(controller.getSnapshot());
@@ -1095,6 +1128,23 @@ export function LibraryQuarantineCatalogHandoffPanel({
                       : 'This catalog record is locked in internal Draft / ReviewRequired posture with zero attached files or referenceUrl, and cannot transition or publish until binary safety and rights clearance gates are released.'}
                   </span>
                 </div>
+
+                {/* Inline Case-to-Catalog Metadata Alignment Panel */}
+                <LibraryQuarantineCatalogCaseAlignmentPanel
+                  controller={effectiveAlignmentController}
+                  currentUser={currentUser}
+                  savedReviewCase={savedReviewCase}
+                  hasUnsavedCaseEdits={hasUnsavedCaseEdits}
+                  envOverride={envOverride}
+                  onAlignmentReconciled={(alignedSnapshot) => {
+                    if (alignedSnapshot.catalogDocument) {
+                      controller.applyReconciledCatalogDocument(
+                        alignedSnapshot.catalogDocument,
+                        alignedSnapshot.currentHumanCaseRevision
+                      );
+                    }
+                  }}
+                />
               </div>
             )}
 

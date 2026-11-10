@@ -140,6 +140,10 @@ export interface LibraryQuarantineReviewDraftFirestoreTransaction {
     docRef: LibraryQuarantineFirestoreDocumentRef,
     data: Record<string, unknown>
   ): LibraryQuarantineReviewDraftFirestoreTransaction | void;
+  update(
+    docRef: LibraryQuarantineFirestoreDocumentRef,
+    data: Record<string, unknown>
+  ): LibraryQuarantineReviewDraftFirestoreTransaction | void;
 }
 
 export interface LibraryQuarantineReviewDraftFirestoreDatabase {
