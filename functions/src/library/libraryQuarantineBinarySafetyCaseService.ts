@@ -1,147 +1,246 @@
 import type { AdminRepository } from '../admin/adminRepository';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
-import { AdminRole, AdminPermission } from '../types/admin';
 import {
-  LIBRARY_QUARANTINE_RECEIPT_COLLECTION,
-  type LibraryQuarantinePersistedReceiptEnvelope,
-} from './firestoreLibraryQuarantineReceiptStore';
+  AdminDomain,
+  AdminPermission,
+  AdminRole,
+  hasDomainResponsibility,
+  isValidAdminRole,
+  type AdminUser,
+} from '../types/admin';
+import type { LibraryQuarantineReviewDraftFirestoreDatabase } from './firestoreLibraryQuarantineReviewDraftStore';
 import {
-  LIBRARY_QUARANTINE_REVIEW_DRAFT_COLLECTION,
-  type LibraryQuarantinePersistedReviewDraft,
-} from './firestoreLibraryQuarantineReviewDraftStore';
-import {
-  LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
-  type LibraryQuarantinePersistedHumanReviewCase,
-} from './firestoreLibraryQuarantineHumanReviewCaseStore';
-import {
-  LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION,
-  type LibraryQuarantinePersistedCatalogHandoff,
-} from './libraryQuarantineCatalogHandoffService';
-import {
-  LIBRARY_DOCUMENTS_COLLECTION,
-} from './libraryQuarantineCatalogHandoffService';
-import {
-  LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
-  type LibraryQuarantinePersistedCatalogCaseAlignment,
-} from './libraryQuarantineCatalogCaseAlignmentService';
-import {
-  LIBRARY_QUARANTINE_BINARY_SAFETY_CASES_COLLECTION,
-  LIBRARY_QUARANTINE_BINARY_SAFETY_CASE_EVENTS_COLLECTION,
-  type LibraryQuarantineBinarySafetyCaseStorePort,
-  type LibraryQuarantineBinarySafetyCaseFirestoreDatabase,
+  BINARY_SAFETY_STORE_SAFE_MESSAGES,
+  FirestoreLibraryQuarantineBinarySafetyCaseStore,
+  type LibraryQuarantineBinarySafetyCaseStore,
+  type LibraryQuarantineBinarySafetyCaseStoreErrorCode,
 } from './firestoreLibraryQuarantineBinarySafetyCaseStore';
 import {
-  LibraryQuarantinePersistedBinarySafetyCase,
-  LibraryQuarantinePersistedBinarySafetyCaseEvent,
-  SanitizedLibraryQuarantineBinarySafetyCaseDto,
-  LibraryQuarantineReadinessIndicatorsDto,
   QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS,
-  LIBRARY_QUARANTINE_BINARY_SAFETY_CASE_SCHEMA_VERSION,
-  LIBRARY_QUARANTINE_BINARY_SAFETY_CASE_EVENT_SCHEMA_VERSION,
+  deriveQuarantineCatalogDocumentIdFromReceipt,
+  toSanitizedLibraryQuarantineBinarySafetyCaseDto,
   validateSaveLibraryQuarantineBinarySafetyCaseInput,
+  type LibraryQuarantineBinarySafetyDeepInspectionStatus,
+  type LibraryQuarantineBinarySafetySourceFormat,
+  type LibraryQuarantineReadinessIndicatorsDto,
+  type SanitizedLibraryQuarantineBinarySafetyCaseDto,
+  type SaveLibraryQuarantineBinarySafetyCaseInput,
 } from './libraryQuarantineBinarySafetyCaseContract';
 import {
+  isValidIsoUtcTimestamp,
   isValidLibraryQuarantineReceiptId,
   isValidUploaderUid,
 } from './libraryQuarantineReceiptContract';
+import type {
+  TrustedQuarantineAuthenticatedPrincipal,
+  TrustedQuarantineReviewerPrincipalProvider,
+} from './libraryQuarantineReviewDraftPersistenceService';
 
-class ServiceError extends Error {
-  readonly code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = 'ServiceError';
-    this.code = code;
-    Object.setPrototypeOf(this, new.target.prototype);
-  }
+const ALLOWED_GET_INPUT_KEYS: ReadonlySet<string> = new Set(['receiptId']);
+
+const ALLOWED_SAVE_INPUT_KEYS: ReadonlySet<string> = new Set([
+  'receiptId',
+  'expectedRevision',
+  'acknowledgedHumanCaseRevision',
+  'input',
+]);
+
+const ALLOWED_PRINCIPAL_KEYS: ReadonlySet<string> = new Set(['uid', 'token']);
+
+const FORBIDDEN_TOKEN_OVERRIDE_KEYS: ReadonlySet<string> = new Set([
+  'role',
+  'roles',
+  'adminRole',
+  'permissions',
+  'permission',
+  'adminPermissions',
+  'isActive',
+  'adminActive',
+  'isAuthorized',
+  'authorized',
+  'bypassAuth',
+  'forceAuthorize',
+  'allow',
+  'adminUser',
+  'createdBy',
+  'updatedBy',
+  'storagePath',
+  'generation',
+  'attestation',
+  'candidate',
+  'receipt',
+  'adminReceipt',
+  'url',
+  'signedUrl',
+  'downloadUrl',
+  'bytes',
+  'rawBytes',
+  'buffer',
+]);
+
+export type LibraryQuarantineBinarySafetyErrorCode =
+  | LibraryQuarantineBinarySafetyCaseStoreErrorCode
+  | 'INVALID_SERVICE_INPUT_HOLD'
+  | 'UNTRUSTED_CALLER_FIELD_HOLD'
+  | 'UNAUTHENTICATED_CALLER_HOLD'
+  | 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD';
+
+export const BINARY_SAFETY_SERVICE_SAFE_MESSAGES: Readonly<
+  Record<LibraryQuarantineBinarySafetyErrorCode, string>
+> = Object.freeze({
+  ...BINARY_SAFETY_STORE_SAFE_MESSAGES,
+  INVALID_SERVICE_INPUT_HOLD:
+    'Binary safety case request payload must be a plain object with required fields.',
+  UNTRUSTED_CALLER_FIELD_HOLD:
+    'Binary safety case request payload contains an unexpected, privileged, or forbidden property.',
+  UNAUTHENTICATED_CALLER_HOLD:
+    'Request is missing a valid server-authenticated Firebase user principal.',
+  UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD:
+    'Authenticated caller is not an active authorized human Library Owner with Review permission.',
+});
+
+export interface GetLibraryQuarantineBinarySafetyCaseInput {
+  readonly receiptId: string;
 }
 
-export interface LibraryQuarantineBinarySafetyCaseServiceDependencies {
-  readonly trustedPrincipalProvider: {
-    readonly resolveAuthenticatedPrincipal: () => {
-      readonly uid: string;
-      readonly token?: Record<string, unknown>;
-    };
-  };
-  readonly adminRepository: AdminRepository;
-  readonly db: LibraryQuarantineBinarySafetyCaseFirestoreDatabase;
-  readonly clock?: () => string;
+export interface SaveLibraryQuarantineBinarySafetyCaseServiceInput {
+  readonly receiptId: string;
+  readonly expectedRevision: number;
+  readonly acknowledgedHumanCaseRevision?: number;
+  readonly input: SaveLibraryQuarantineBinarySafetyCaseInput;
 }
-
-export type GetLibraryQuarantineBinarySafetyCaseOutcome =
-  | 'READY'
-  | 'NOT_FOUND'
-  | 'HOLD';
-
-export type SaveLibraryQuarantineBinarySafetyCaseOutcome =
-  | 'SAVED'
-  | 'CONFLICT'
-  | 'HOLD'
-  | 'UNKNOWN';
 
 export interface GetLibraryQuarantineBinarySafetyCaseSuccessDto {
   readonly ok: true;
+  readonly status: 'READY';
   readonly outcome: 'READY';
   readonly receiptId: string;
   readonly documentId: string;
+  readonly sourceRevision: number;
+  readonly sourceUpdatedAt: string;
+  readonly sourceFormat: LibraryQuarantineBinarySafetySourceFormat;
+  readonly deepInspectionStatus: LibraryQuarantineBinarySafetyDeepInspectionStatus;
+  readonly catalogHandoffCaseRevision: number;
+  readonly currentHumanCaseRevision: number;
+  readonly effectiveHumanCaseRevision: number;
+  readonly effectiveHumanCaseUpdatedAt: string;
+  readonly catalogUpdatedAt: string;
   readonly currentRevision: number;
   readonly isCaseCurrent: boolean;
   readonly requiresFreshEvidence: boolean;
-  readonly sourceFormat: string;
-  readonly deepInspectionStatus: string;
   readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
   readonly binarySafetyCase: SanitizedLibraryQuarantineBinarySafetyCaseDto | null;
+  readonly isSanitized: false;
+  readonly isVerifiedSafe: false;
+  readonly isRightsApproved: false;
+  readonly isPublished: false;
+  readonly isReadyForPeia: false;
 }
 
 export interface GetLibraryQuarantineBinarySafetyCaseHoldDto {
   readonly ok: false;
+  readonly status: 'HOLD';
   readonly outcome: 'HOLD';
-  readonly errorCode: string;
+  readonly errorCode: LibraryQuarantineBinarySafetyErrorCode;
   readonly errorMessage: string;
-}
-
-export interface GetLibraryQuarantineBinarySafetyCaseNotFoundDto {
-  readonly ok: false;
-  readonly outcome: 'NOT_FOUND';
-  readonly errorCode: 'QUARANTINE_RECEIPT_NOT_FOUND';
-  readonly errorMessage: string;
+  readonly receiptId: string | null;
+  readonly documentId: string | null;
+  readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
+  readonly isSanitized: false;
+  readonly isVerifiedSafe: false;
+  readonly isRightsApproved: false;
+  readonly isPublished: false;
+  readonly isReadyForPeia: false;
 }
 
 export type GetLibraryQuarantineBinarySafetyCaseResponseDto =
   | GetLibraryQuarantineBinarySafetyCaseSuccessDto
-  | GetLibraryQuarantineBinarySafetyCaseHoldDto
-  | GetLibraryQuarantineBinarySafetyCaseNotFoundDto;
+  | GetLibraryQuarantineBinarySafetyCaseHoldDto;
 
 export interface SaveLibraryQuarantineBinarySafetyCaseSuccessDto {
   readonly ok: true;
+  readonly status: 'SAVED';
   readonly outcome: 'SAVED';
+  readonly caseSaveOutcome: 'CREATED' | 'UPDATED';
+  readonly caseSaved: true;
   readonly receiptId: string;
   readonly documentId: string;
   readonly revision: number;
+  readonly currentRevision: number;
+  readonly sourceRevision: number;
+  readonly sourceUpdatedAt: string;
+  readonly sourceFormat: LibraryQuarantineBinarySafetySourceFormat;
+  readonly deepInspectionStatus: LibraryQuarantineBinarySafetyDeepInspectionStatus;
+  readonly catalogHandoffCaseRevision: number;
+  readonly currentHumanCaseRevision: number;
+  readonly effectiveHumanCaseRevision: number;
+  readonly effectiveHumanCaseUpdatedAt: string;
+  readonly catalogUpdatedAt: string;
+  readonly isCaseCurrent: true;
+  readonly requiresFreshEvidence: false;
+  readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
   readonly binarySafetyCase: SanitizedLibraryQuarantineBinarySafetyCaseDto;
+  readonly isSanitized: false;
+  readonly isVerifiedSafe: false;
+  readonly isRightsApproved: false;
+  readonly isPublished: false;
+  readonly isReadyForPeia: false;
 }
 
 export interface SaveLibraryQuarantineBinarySafetyCaseConflictDto {
   readonly ok: false;
+  readonly status: 'CONFLICT';
   readonly outcome: 'CONFLICT';
+  readonly caseSaveOutcome: 'NOT_SAVED';
+  readonly caseSaved: false;
   readonly errorCode: 'BINARY_SAFETY_REVISION_CONFLICT';
   readonly errorMessage: string;
+  readonly receiptId: string;
+  readonly documentId: string;
   readonly currentRevision: number;
   readonly currentBinarySafetyCase: SanitizedLibraryQuarantineBinarySafetyCaseDto | null;
+  readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
+  readonly isSanitized: false;
+  readonly isVerifiedSafe: false;
+  readonly isRightsApproved: false;
+  readonly isPublished: false;
+  readonly isReadyForPeia: false;
 }
 
 export interface SaveLibraryQuarantineBinarySafetyCaseHoldDto {
   readonly ok: false;
+  readonly status: 'HOLD';
   readonly outcome: 'HOLD';
-  readonly errorCode: string;
+  readonly caseSaveOutcome: 'NOT_SAVED';
+  readonly caseSaved: false;
+  readonly errorCode: LibraryQuarantineBinarySafetyErrorCode;
   readonly errorMessage: string;
+  readonly receiptId: string | null;
+  readonly documentId: string | null;
+  readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
+  readonly isSanitized: false;
+  readonly isVerifiedSafe: false;
+  readonly isRightsApproved: false;
+  readonly isPublished: false;
+  readonly isReadyForPeia: false;
 }
 
 export interface SaveLibraryQuarantineBinarySafetyCaseUnknownDto {
   readonly ok: false;
+  readonly status: 'UNKNOWN';
   readonly outcome: 'UNKNOWN';
+  readonly caseSaveOutcome: 'UNKNOWN';
+  readonly caseSaved: null;
   readonly errorCode: 'TRANSACTION_COMMIT_UNCERTAIN';
   readonly errorMessage: string;
-  readonly caseSaved: null;
+  readonly receiptId: string;
+  readonly documentId: string;
+  readonly readiness: LibraryQuarantineReadinessIndicatorsDto;
+  readonly isSanitized: false;
+  readonly isVerifiedSafe: false;
+  readonly isRightsApproved: false;
+  readonly isPublished: false;
+  readonly isReadyForPeia: false;
 }
 
 export type SaveLibraryQuarantineBinarySafetyCaseResponseDto =
@@ -150,459 +249,607 @@ export type SaveLibraryQuarantineBinarySafetyCaseResponseDto =
   | SaveLibraryQuarantineBinarySafetyCaseHoldDto
   | SaveLibraryQuarantineBinarySafetyCaseUnknownDto;
 
-export class LibraryQuarantineBinarySafetyCaseService {
-  constructor(private readonly deps: LibraryQuarantineBinarySafetyCaseServiceDependencies) {}
+export interface LibraryQuarantineBinarySafetyCaseServiceOptions {
+  readonly trustedPrincipalProvider: TrustedQuarantineReviewerPrincipalProvider;
+  readonly adminRepository: Pick<AdminRepository, 'getAdminByUid'>;
+  readonly safetyCaseStore?: LibraryQuarantineBinarySafetyCaseStore;
+  readonly db?: LibraryQuarantineReviewDraftFirestoreDatabase;
+  readonly clock?: () => string;
+}
 
-  private nowIso(): string {
-    return this.deps.clock ? this.deps.clock() : new Date().toISOString();
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function hasUnexpectedPropertyOrSymbol(
+  obj: Record<string, unknown>,
+  allowedKeys: ReadonlySet<string>
+): boolean {
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    if (!allowedKeys.has(key)) {
+      return true;
+    }
+  }
+  return Object.getOwnPropertySymbols(obj).length > 0;
+}
+
+function hasAutomatedOrAiTokenClaim(
+  token: Readonly<Record<string, unknown>>
+): boolean {
+  const principalTypeLower =
+    typeof token.principalType === 'string'
+      ? token.principalType.trim().toLowerCase()
+      : '';
+  const actorTypeLower =
+    typeof token.actorType === 'string'
+      ? token.actorType.trim().toLowerCase()
+      : '';
+  const roleLower =
+    typeof token.role === 'string' ? token.role.trim().toLowerCase() : '';
+
+  return (
+    token.role === AdminRole.AIAssistant ||
+    roleLower === 'ai_assistant' ||
+    roleLower === 'aiassistant' ||
+    token.isAIAssistant === true ||
+    token.isAiAssistant === true ||
+    token.aiAssistant === true ||
+    token.ai === true ||
+    token.automated === true ||
+    token.isBot === true ||
+    principalTypeLower === 'ai' ||
+    principalTypeLower === 'machine' ||
+    principalTypeLower === 'bot' ||
+    actorTypeLower === 'ai' ||
+    actorTypeLower === 'machine' ||
+    actorTypeLower === 'bot'
+  );
+}
+
+/**
+ * Verifies that the authenticated caller is an active human Library Owner
+ * (`AdminRole.Owner` ONLY) who possesses `AdminPermission.Review`.
+ */
+export function isAuthorizedHumanBinarySafetyOwner(
+  user: AdminUser | null | undefined
+): user is AdminUser {
+  if (!user || typeof user !== 'object') {
+    return false;
+  }
+  if (user.isActive !== true) {
+    return false;
+  }
+  if (!isValidAdminRole(user.role) || user.role !== AdminRole.Owner) {
+    return false;
+  }
+  if (!hasDomainResponsibility(user.role, AdminDomain.Library)) {
+    return false;
+  }
+  if (!AdminAuthorizationService.hasPermission(user, AdminPermission.Review)) {
+    return false;
   }
 
-  private async assertOwnerPrincipal(): Promise<string> {
-    const principal = this.deps.trustedPrincipalProvider.resolveAuthenticatedPrincipal();
-    const uid = typeof principal?.uid === 'string' ? principal.uid.trim() : '';
-    if (!isValidUploaderUid(uid)) {
-      throw new ServiceError('unauthenticated', 'UNAUTHENTICATED: Valid authenticated principal required.');
+  const explicitPermissions = (
+    user as AdminUser & { readonly permissions?: unknown }
+  ).permissions;
+  if (explicitPermissions !== undefined) {
+    if (
+      !Array.isArray(explicitPermissions) ||
+      !explicitPermissions.includes(AdminPermission.Review)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function makeGetHoldDto(
+  errorCode: LibraryQuarantineBinarySafetyErrorCode,
+  receiptId: string | null
+): GetLibraryQuarantineBinarySafetyCaseHoldDto {
+  const safeReceiptId =
+    typeof receiptId === 'string' && isValidLibraryQuarantineReceiptId(receiptId)
+      ? receiptId
+      : null;
+
+  return Object.freeze({
+    ok: false as const,
+    status: 'HOLD' as const,
+    outcome: 'HOLD' as const,
+    errorCode,
+    errorMessage: BINARY_SAFETY_SERVICE_SAFE_MESSAGES[errorCode],
+    receiptId: safeReceiptId,
+    documentId: safeReceiptId
+      ? deriveQuarantineCatalogDocumentIdFromReceipt(safeReceiptId)
+      : null,
+    readiness: QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+  });
+}
+
+function makeSaveHoldDto(
+  errorCode: LibraryQuarantineBinarySafetyErrorCode,
+  receiptId: string | null
+): SaveLibraryQuarantineBinarySafetyCaseHoldDto {
+  const safeReceiptId =
+    typeof receiptId === 'string' && isValidLibraryQuarantineReceiptId(receiptId)
+      ? receiptId
+      : null;
+
+  return Object.freeze({
+    ok: false as const,
+    status: 'HOLD' as const,
+    outcome: 'HOLD' as const,
+    caseSaveOutcome: 'NOT_SAVED' as const,
+    caseSaved: false as const,
+    errorCode,
+    errorMessage: BINARY_SAFETY_SERVICE_SAFE_MESSAGES[errorCode],
+    receiptId: safeReceiptId,
+    documentId: safeReceiptId
+      ? deriveQuarantineCatalogDocumentIdFromReceipt(safeReceiptId)
+      : null,
+    readiness: QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+  });
+}
+
+function makeSaveUnknownDto(
+  receiptId: string
+): SaveLibraryQuarantineBinarySafetyCaseUnknownDto {
+  return Object.freeze({
+    ok: false as const,
+    status: 'UNKNOWN' as const,
+    outcome: 'UNKNOWN' as const,
+    caseSaveOutcome: 'UNKNOWN' as const,
+    caseSaved: null,
+    errorCode: 'TRANSACTION_COMMIT_UNCERTAIN' as const,
+    errorMessage:
+      BINARY_SAFETY_SERVICE_SAFE_MESSAGES.TRANSACTION_COMMIT_UNCERTAIN,
+    receiptId,
+    documentId: deriveQuarantineCatalogDocumentIdFromReceipt(receiptId),
+    readiness: QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+  });
+}
+
+export class LibraryQuarantineBinarySafetyCaseService {
+  private readonly trustedPrincipalProvider: TrustedQuarantineReviewerPrincipalProvider;
+  private readonly adminRepository: Pick<AdminRepository, 'getAdminByUid'>;
+  private readonly safetyCaseStore: LibraryQuarantineBinarySafetyCaseStore;
+  private readonly clock: () => string;
+
+  constructor(options: LibraryQuarantineBinarySafetyCaseServiceOptions) {
+    if (
+      !options ||
+      typeof options !== 'object' ||
+      !options.trustedPrincipalProvider ||
+      typeof options.trustedPrincipalProvider.resolveAuthenticatedPrincipal !==
+        'function' ||
+      !options.adminRepository ||
+      typeof options.adminRepository.getAdminByUid !== 'function'
+    ) {
+      throw new Error(
+        'INVALID_SERVICE_DEPENDENCY: LibraryQuarantineBinarySafetyCaseService requires valid trustedPrincipalProvider and adminRepository.'
+      );
     }
 
-    const adminUser = await this.deps.adminRepository.getAdminByUid(uid);
-    if (!adminUser || !adminUser.isActive) {
-      throw new ServiceError('permission-denied', 'UNAUTHORIZED_BINARY_SAFETY_ACTOR: Admin user not found or inactive.');
+    const resolvedStore =
+      options.safetyCaseStore ??
+      (options.db
+        ? new FirestoreLibraryQuarantineBinarySafetyCaseStore(options.db)
+        : null);
+
+    if (
+      !resolvedStore ||
+      typeof resolvedStore.getBinarySafetyCaseSnapshot !== 'function' ||
+      typeof resolvedStore.saveBinarySafetyCaseTransactional !== 'function'
+    ) {
+      throw new Error(
+        'INVALID_SERVICE_DEPENDENCY: LibraryQuarantineBinarySafetyCaseService requires either safetyCaseStore or Firestore db.'
+      );
+    }
+
+    if (options.clock !== undefined && typeof options.clock !== 'function') {
+      throw new Error(
+        'INVALID_SERVICE_DEPENDENCY: Optional clock must be a function returning an ISO-8601 UTC timestamp.'
+      );
+    }
+
+    const underlyingPrincipalProvider = options.trustedPrincipalProvider;
+    this.trustedPrincipalProvider = Object.freeze({
+      resolveAuthenticatedPrincipal: () =>
+        underlyingPrincipalProvider.resolveAuthenticatedPrincipal(),
+    });
+
+    const underlyingAdminRepo = options.adminRepository;
+    this.adminRepository = Object.freeze({
+      getAdminByUid: (uid: string) => underlyingAdminRepo.getAdminByUid(uid),
+    });
+
+    this.safetyCaseStore = resolvedStore;
+    this.clock = options.clock ?? (() => new Date().toISOString());
+  }
+
+  private async resolveAndAuthorizeBinarySafetyOwner(): Promise<
+    | { readonly ok: true; readonly actorUid: string }
+    | {
+        readonly ok: false;
+        readonly errorCode:
+          | 'UNAUTHENTICATED_CALLER_HOLD'
+          | 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD';
+      }
+  > {
+    let rawPrincipal: TrustedQuarantineAuthenticatedPrincipal | null;
+    try {
+      rawPrincipal =
+        await this.trustedPrincipalProvider.resolveAuthenticatedPrincipal();
+    } catch {
+      return { ok: false, errorCode: 'UNAUTHENTICATED_CALLER_HOLD' };
+    }
+
+    if (!isPlainRecord(rawPrincipal)) {
+      return { ok: false, errorCode: 'UNAUTHENTICATED_CALLER_HOLD' };
+    }
+
+    if (hasUnexpectedPropertyOrSymbol(rawPrincipal, ALLOWED_PRINCIPAL_KEYS)) {
+      return { ok: false, errorCode: 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD' };
+    }
+
+    const uid = rawPrincipal.uid;
+    if (
+      typeof uid !== 'string' ||
+      uid.trim() !== uid ||
+      !isValidUploaderUid(uid)
+    ) {
+      return { ok: false, errorCode: 'UNAUTHENTICATED_CALLER_HOLD' };
+    }
+
+    if (rawPrincipal.token !== undefined) {
+      if (
+        !isPlainRecord(rawPrincipal.token) ||
+        Object.getOwnPropertySymbols(rawPrincipal.token).length > 0
+      ) {
+        return { ok: false, errorCode: 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD' };
+      }
+
+      for (const key of Object.getOwnPropertyNames(rawPrincipal.token)) {
+        if (FORBIDDEN_TOKEN_OVERRIDE_KEYS.has(key)) {
+          return {
+            ok: false,
+            errorCode: 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD',
+          };
+        }
+      }
+
+      if (hasAutomatedOrAiTokenClaim(rawPrincipal.token)) {
+        return { ok: false, errorCode: 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD' };
+      }
+    }
+
+    let adminUser: AdminUser | null;
+    try {
+      adminUser = await this.adminRepository.getAdminByUid(uid);
+    } catch {
+      return { ok: false, errorCode: 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD' };
+    }
+
+    if (!adminUser || typeof adminUser !== 'object') {
+      return { ok: false, errorCode: 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD' };
+    }
+
+    const adminId =
+      typeof adminUser.id === 'string' ? adminUser.id.trim() : '';
+    const adminUid =
+      typeof (adminUser as { readonly uid?: unknown }).uid === 'string'
+        ? ((adminUser as { readonly uid: string }).uid).trim()
+        : '';
+
+    if (adminId !== uid && adminUid !== uid) {
+      return { ok: false, errorCode: 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD' };
+    }
+
+    if (!isAuthorizedHumanBinarySafetyOwner(adminUser)) {
+      return { ok: false, errorCode: 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD' };
+    }
+
+    return { ok: true, actorUid: uid };
+  }
+
+  /**
+   * Reads the current human binary safety case and readiness indicators for an
+   * internal `qcat-<receiptId>` catalog draft (7 point reads, 0 writes).
+   */
+  public async getQuarantineBinarySafetyCase(
+    rawInput: unknown
+  ): Promise<GetLibraryQuarantineBinarySafetyCaseResponseDto> {
+    if (!isPlainRecord(rawInput)) {
+      return makeGetHoldDto('INVALID_SERVICE_INPUT_HOLD', null);
+    }
+
+    if (hasUnexpectedPropertyOrSymbol(rawInput, ALLOWED_GET_INPUT_KEYS)) {
+      const candidateId = isValidLibraryQuarantineReceiptId(rawInput.receiptId)
+        ? rawInput.receiptId
+        : null;
+      return makeGetHoldDto('UNTRUSTED_CALLER_FIELD_HOLD', candidateId);
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(rawInput, 'receiptId')) {
+      return makeGetHoldDto('INVALID_SERVICE_INPUT_HOLD', null);
+    }
+
+    const receiptId = rawInput.receiptId;
+    if (!isValidLibraryQuarantineReceiptId(receiptId)) {
+      return makeGetHoldDto('INVALID_RECEIPT_ID', null);
+    }
+
+    const authResult = await this.resolveAndAuthorizeBinarySafetyOwner();
+    if (!authResult.ok) {
+      return makeGetHoldDto(authResult.errorCode, receiptId);
+    }
+
+    let snapshotRes: Awaited<
+      ReturnType<
+        LibraryQuarantineBinarySafetyCaseStore['getBinarySafetyCaseSnapshot']
+      >
+    >;
+    try {
+      snapshotRes =
+        await this.safetyCaseStore.getBinarySafetyCaseSnapshot(receiptId);
+    } catch {
+      return makeGetHoldDto('STORE_READ_FAILED', receiptId);
+    }
+
+    if (!snapshotRes.ok) {
+      return makeGetHoldDto(snapshotRes.errorCode, receiptId);
+    }
+
+    const { snapshot } = snapshotRes;
+    let sanitizedCase: SanitizedLibraryQuarantineBinarySafetyCaseDto | null =
+      null;
+    if (snapshot.binarySafetyCase !== null) {
+      try {
+        sanitizedCase = toSanitizedLibraryQuarantineBinarySafetyCaseDto(
+          snapshot.binarySafetyCase
+        );
+      } catch {
+        return makeGetHoldDto(
+          'CORRUPTED_EXISTING_BINARY_SAFETY_CASE',
+          receiptId
+        );
+      }
+    }
+
+    return Object.freeze({
+      ok: true as const,
+      status: 'READY' as const,
+      outcome: 'READY' as const,
+      receiptId,
+      documentId: snapshot.documentId,
+      sourceRevision: snapshot.receiptEnvelope.revision,
+      sourceUpdatedAt: snapshot.receiptEnvelope.receipt.updatedAt,
+      sourceFormat: snapshot.sourceFormat,
+      deepInspectionStatus: snapshot.deepInspectionStatus,
+      catalogHandoffCaseRevision: snapshot.catalogHandoff.caseRevision,
+      currentHumanCaseRevision: snapshot.humanReviewCase.revision,
+      effectiveHumanCaseRevision: snapshot.effectiveHumanCaseRevision,
+      effectiveHumanCaseUpdatedAt: snapshot.effectiveHumanCaseUpdatedAt,
+      catalogUpdatedAt: snapshot.catalogUpdatedAt,
+      currentRevision: sanitizedCase ? sanitizedCase.revision : 0,
+      isCaseCurrent: snapshot.isCaseCurrent,
+      requiresFreshEvidence: snapshot.requiresFreshEvidence,
+      readiness: QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS,
+      binarySafetyCase: sanitizedCase,
+      isSanitized: false as const,
+      isVerifiedSafe: false as const,
+      isRightsApproved: false as const,
+      isPublished: false as const,
+      isReadyForPeia: false as const,
+    });
+  }
+
+  /**
+   * Atomically creates or updates the human binary safety case for an internal
+   * `qcat-<receiptId>` catalog draft inside a single 8-read, 2-write transaction.
+   */
+  public async saveQuarantineBinarySafetyCase(
+    rawInput: unknown
+  ): Promise<SaveLibraryQuarantineBinarySafetyCaseResponseDto> {
+    if (!isPlainRecord(rawInput)) {
+      return makeSaveHoldDto('INVALID_SERVICE_INPUT_HOLD', null);
+    }
+
+    if (hasUnexpectedPropertyOrSymbol(rawInput, ALLOWED_SAVE_INPUT_KEYS)) {
+      const candidateId = isValidLibraryQuarantineReceiptId(rawInput.receiptId)
+        ? rawInput.receiptId
+        : null;
+      return makeSaveHoldDto('UNTRUSTED_CALLER_FIELD_HOLD', candidateId);
     }
 
     if (
-      adminUser.role !== AdminRole.Owner ||
-      !AdminAuthorizationService.hasPermission(adminUser, AdminPermission.Review)
+      !Object.prototype.hasOwnProperty.call(rawInput, 'receiptId') ||
+      !Object.prototype.hasOwnProperty.call(rawInput, 'expectedRevision') ||
+      !Object.prototype.hasOwnProperty.call(rawInput, 'input')
     ) {
-      throw new ServiceError(
-        'permission-denied',
-        `INSUFFICIENT_PERMISSION: Role ${adminUser.role} lacks Owner role and Review permission required for binary safety cases.`
-      );
+      const candidateId = isValidLibraryQuarantineReceiptId(rawInput.receiptId)
+        ? rawInput.receiptId
+        : null;
+      return makeSaveHoldDto('INVALID_SERVICE_INPUT_HOLD', candidateId);
     }
 
-    return uid;
-  }
-
-  private async perform7PointReads(receiptId: string): Promise<{
-    readonly envelope: LibraryQuarantinePersistedReceiptEnvelope;
-    readonly draft: LibraryQuarantinePersistedReviewDraft;
-    readonly humanCase: LibraryQuarantinePersistedHumanReviewCase;
-    readonly handoff: LibraryQuarantinePersistedCatalogHandoff;
-    readonly catalogDoc: any;
-    readonly alignment: LibraryQuarantinePersistedCatalogCaseAlignment | null;
-    readonly safetyCase: LibraryQuarantinePersistedBinarySafetyCase | null;
-  }> {
-    const db = this.deps.db;
-    const receiptRef = db.collection(LIBRARY_QUARANTINE_RECEIPT_COLLECTION).doc(receiptId);
-    const draftRef = db.collection(LIBRARY_QUARANTINE_REVIEW_DRAFT_COLLECTION).doc(receiptId);
-    const caseRef = db.collection(LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION).doc(receiptId);
-    const handoffRef = db.collection(LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION).doc(receiptId);
-    const documentId = `qcat-${receiptId}`;
-    const docRef = db.collection(LIBRARY_DOCUMENTS_COLLECTION).doc(documentId);
-    const alignmentRef = db.collection(LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION).doc(receiptId);
-    const safetyRef = db.collection(LIBRARY_QUARANTINE_BINARY_SAFETY_CASES_COLLECTION).doc(receiptId);
-
-    const [receiptSnap, draftSnap, caseSnap, handoffSnap, docSnap, alignmentSnap, safetySnap] = await Promise.all([
-      receiptRef.get(),
-      draftRef.get(),
-      caseRef.get(),
-      handoffRef.get(),
-      docRef.get(),
-      alignmentRef.get(),
-      safetyRef.get(),
-    ]);
-
-    if (!receiptSnap.exists) {
-      throw new ServiceError('not-found', `QUARANTINE_RECEIPT_NOT_FOUND: Receipt ${receiptId} not found.`);
-    }
-    const envelope = receiptSnap.data() as LibraryQuarantinePersistedReceiptEnvelope;
-
-    if (!draftSnap.exists) {
-      throw new ServiceError('failed-precondition', `REVIEW_DRAFT_NOT_FOUND: Review draft for ${receiptId} not found.`);
-    }
-    const draft = draftSnap.data() as LibraryQuarantinePersistedReviewDraft;
-
-    if (!caseSnap.exists) {
-      throw new ServiceError('failed-precondition', `HUMAN_REVIEW_CASE_NOT_FOUND: Human review case for ${receiptId} not found.`);
-    }
-    const humanCase = caseSnap.data() as LibraryQuarantinePersistedHumanReviewCase;
-
-    if (!handoffSnap.exists) {
-      throw new ServiceError('failed-precondition', `CATALOG_HANDOFF_NOT_CREATED: Catalog handoff for ${receiptId} not found.`);
-    }
-    const handoff = handoffSnap.data() as LibraryQuarantinePersistedCatalogHandoff;
-
-    if (!docSnap.exists) {
-      throw new ServiceError('failed-precondition', `CATALOG_DOCUMENT_MISSING: Catalog document for ${receiptId} not found.`);
-    }
-    const catalogDoc = docSnap.data();
-
-    const alignment = alignmentSnap.exists ? (alignmentSnap.data() as LibraryQuarantinePersistedCatalogCaseAlignment) : null;
-    const safetyCase = safetySnap.exists ? (safetySnap.data() as LibraryQuarantinePersistedBinarySafetyCase) : null;
-
-    return { envelope, draft, humanCase, handoff, catalogDoc, alignment, safetyCase };
-  }
-
-  public async getQuarantineBinarySafetyCase(
-    input: { readonly receiptId: string }
-  ): Promise<GetLibraryQuarantineBinarySafetyCaseResponseDto> {
-    await this.assertOwnerPrincipal();
-
-    const receiptId = typeof input?.receiptId === 'string' ? input.receiptId.trim() : '';
+    const receiptId = rawInput.receiptId;
     if (!isValidLibraryQuarantineReceiptId(receiptId)) {
-      throw new ServiceError('invalid-argument', 'INVALID_RECEIPT_ID: receiptId must be a 32-character lowercase hex string.');
+      return makeSaveHoldDto('INVALID_RECEIPT_ID', null);
     }
 
+    const expectedRevision = rawInput.expectedRevision;
+    if (
+      typeof expectedRevision !== 'number' ||
+      !Number.isSafeInteger(expectedRevision) ||
+      expectedRevision < 0
+    ) {
+      return makeSaveHoldDto('INVALID_EXPECTED_REVISION', receiptId);
+    }
+
+    const rawAckCaseRevision = rawInput.acknowledgedHumanCaseRevision;
+    if (
+      rawAckCaseRevision === undefined ||
+      typeof rawAckCaseRevision !== 'number' ||
+      !Number.isSafeInteger(rawAckCaseRevision) ||
+      rawAckCaseRevision < 1
+    ) {
+      return makeSaveHoldDto('UNACKNOWLEDGED_CASE_REVISION_HOLD', receiptId);
+    }
+    const acknowledgedHumanCaseRevision = rawAckCaseRevision;
+
+    const editorialCheck = validateSaveLibraryQuarantineBinarySafetyCaseInput(
+      rawInput.input
+    );
+    if (!editorialCheck.ok) {
+      return makeSaveHoldDto(editorialCheck.errorCode, receiptId);
+    }
+
+    const authResult = await this.resolveAndAuthorizeBinarySafetyOwner();
+    if (!authResult.ok) {
+      return makeSaveHoldDto(authResult.errorCode, receiptId);
+    }
+
+    let nowIso: string;
     try {
-      const records = await this.perform7PointReads(receiptId);
-      const { envelope, humanCase, handoff, safetyCase } = records;
+      nowIso = this.clock();
+    } catch {
+      return makeSaveHoldDto('INVALID_TIMESTAMP', receiptId);
+    }
 
-      const sourceFormat = envelope.receipt.sourceFormat || 'unknown';
-      const deepInspectionStatus = envelope.receipt.deepInspectionStatus || 'PENDING';
+    if (!isValidIsoUtcTimestamp(nowIso)) {
+      return makeSaveHoldDto('INVALID_TIMESTAMP', receiptId);
+    }
 
-      if (humanCase.status !== 'METADATA_RECORDED') {
-        return {
-          ok: false,
-          outcome: 'HOLD',
-          errorCode: 'CASE_NOT_METADATA_RECORDED',
-          errorMessage: 'Human review case is not in METADATA_RECORDED status.',
-        };
-      }
-
-      if (envelope.revision !== handoff.sourceRevision || envelope.updatedAt !== handoff.sourceUpdatedAt) {
-        return {
-          ok: false,
-          outcome: 'HOLD',
-          errorCode: 'HANDOFF_SOURCE_MISMATCH',
-          errorMessage: 'Catalog handoff source revision or updated timestamp does not match receipt.',
-        };
-      }
-
-      const currentRevision = safetyCase ? safetyCase.revision : 0;
-      const isCaseCurrent = safetyCase
-        ? safetyCase.sourceRevision === envelope.revision &&
-          safetyCase.sourceUpdatedAt === envelope.updatedAt &&
-          safetyCase.effectiveHumanCaseRevision === humanCase.revision
-        : true;
-
-      const requiresFreshEvidence = safetyCase ? !isCaseCurrent : false;
-
-      return {
-        ok: true,
-        outcome: 'READY',
-        receiptId,
-        documentId: `qcat-${receiptId}`,
-        currentRevision,
-        isCaseCurrent,
-        requiresFreshEvidence,
-        sourceFormat,
-        deepInspectionStatus,
-        readiness: QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS,
-        binarySafetyCase: safetyCase ? Object.freeze({
-          schemaVersion: safetyCase.schemaVersion,
-          receiptId: safetyCase.receiptId,
-          documentId: safetyCase.documentId,
-          revision: safetyCase.revision,
-          sourceRevision: safetyCase.sourceRevision,
-          sourceUpdatedAt: safetyCase.sourceUpdatedAt,
-          sourceFormat: safetyCase.sourceFormat,
-          deepInspectionStatus: safetyCase.deepInspectionStatus,
-          effectiveHumanCaseRevision: safetyCase.effectiveHumanCaseRevision,
-          effectiveHumanCaseUpdatedAt: safetyCase.effectiveHumanCaseUpdatedAt,
-          catalogUpdatedAt: safetyCase.catalogUpdatedAt,
-          disposition: safetyCase.disposition,
-          evidenceReference: safetyCase.evidenceReference,
-          evidenceNotes: safetyCase.evidenceNotes,
-          reviewNotes: safetyCase.reviewNotes,
-          createdAt: safetyCase.createdAt,
-          updatedAt: safetyCase.updatedAt,
-          isSanitized: false,
-          isVerifiedSafe: false,
-          isRightsApproved: false,
-          isPublished: false,
-          isReadyForPeia: false,
-        }) : null,
-      };
-    } catch (err: any) {
-      if (err instanceof ServiceError) {
-        if (err.code === 'not-found') {
-          return {
-            ok: false,
-            outcome: 'NOT_FOUND',
-            errorCode: 'QUARANTINE_RECEIPT_NOT_FOUND',
-            errorMessage: err.message,
-          };
+    let storeResult: Awaited<
+      ReturnType<
+        LibraryQuarantineBinarySafetyCaseStore['saveBinarySafetyCaseTransactional']
+      >
+    >;
+    try {
+      storeResult = await this.safetyCaseStore.saveBinarySafetyCaseTransactional(
+        {
+          receiptId,
+          expectedRevision,
+          acknowledgedHumanCaseRevision,
+          actorUid: authResult.actorUid,
+          nowIso,
+          input: editorialCheck.value,
         }
-        return {
-          ok: false,
-          outcome: 'HOLD',
-          errorCode: err.code.toUpperCase(),
-          errorMessage: err.message,
-        };
-      }
-      throw err;
-    }
-  }
-
-  public async saveQuarantineBinarySafetyCase(input: {
-    readonly receiptId: string;
-    readonly expectedRevision: number;
-    readonly acknowledgedHumanCaseRevision?: number;
-    readonly input: unknown;
-  }): Promise<SaveLibraryQuarantineBinarySafetyCaseResponseDto> {
-    const actorUid = await this.assertOwnerPrincipal();
-
-    const receiptId = typeof input?.receiptId === 'string' ? input.receiptId.trim() : '';
-    if (!isValidLibraryQuarantineReceiptId(receiptId)) {
-      throw new ServiceError('invalid-argument', 'INVALID_RECEIPT_ID: receiptId must be a 32-character lowercase hex string.');
-    }
-
-    const expectedRevision = input.expectedRevision;
-    if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
-      throw new ServiceError('invalid-argument', 'INVALID_EXPECTED_REVISION: expectedRevision must be a non-negative integer.');
-    }
-
-    const validationResult = validateSaveLibraryQuarantineBinarySafetyCaseInput(input.input);
-    if (!validationResult.ok) {
-      throw new ServiceError('invalid-argument', `${validationResult.errorCode}: ${validationResult.errorMessage}`);
-    }
-
-    const editorialInput = validationResult.value;
-    const documentId = `qcat-${receiptId}`;
-
-    let records: Awaited<ReturnType<typeof this.perform7PointReads>>;
-    try {
-      records = await this.perform7PointReads(receiptId);
-    } catch (err: any) {
-      if (err instanceof ServiceError && err.code === 'not-found') {
-        return {
-          ok: false,
-          outcome: 'HOLD',
-          errorCode: 'QUARANTINE_RECEIPT_NOT_FOUND',
-          errorMessage: err.message,
-        };
-      }
-      if (err instanceof ServiceError) {
-        return {
-          ok: false,
-          outcome: 'HOLD',
-          errorCode: err.code.toUpperCase(),
-          errorMessage: err.message,
-        };
-      }
-      throw err;
-    }
-
-    const { envelope, humanCase, handoff, safetyCase } = records;
-
-    if (humanCase.status !== 'METADATA_RECORDED') {
-      return {
-        ok: false,
-        outcome: 'HOLD',
-        errorCode: 'CASE_NOT_METADATA_RECORDED',
-        errorMessage: 'Human review case is not in METADATA_RECORDED status.',
-      };
-    }
-
-    if (envelope.revision !== handoff.sourceRevision || envelope.updatedAt !== handoff.sourceUpdatedAt) {
-      return {
-        ok: false,
-        outcome: 'HOLD',
-        errorCode: 'HANDOFF_SOURCE_MISMATCH',
-        errorMessage: 'Catalog handoff source revision or updated timestamp does not match receipt.',
-      };
-    }
-
-    const currentRevision = safetyCase ? safetyCase.revision : 0;
-    if (currentRevision !== expectedRevision) {
-      return {
-        ok: false,
-        outcome: 'CONFLICT',
-        errorCode: 'BINARY_SAFETY_REVISION_CONFLICT',
-        errorMessage: `Revision conflict: expected revision ${expectedRevision}, actual current revision is ${currentRevision}.`,
-        currentRevision,
-        currentBinarySafetyCase: safetyCase
-          ? Object.freeze({
-              schemaVersion: safetyCase.schemaVersion,
-              receiptId: safetyCase.receiptId,
-              documentId: safetyCase.documentId,
-              revision: safetyCase.revision,
-              sourceRevision: safetyCase.sourceRevision,
-              sourceUpdatedAt: safetyCase.sourceUpdatedAt,
-              sourceFormat: safetyCase.sourceFormat,
-              deepInspectionStatus: safetyCase.deepInspectionStatus,
-              effectiveHumanCaseRevision: safetyCase.effectiveHumanCaseRevision,
-              effectiveHumanCaseUpdatedAt: safetyCase.effectiveHumanCaseUpdatedAt,
-              catalogUpdatedAt: safetyCase.catalogUpdatedAt,
-              disposition: safetyCase.disposition,
-              evidenceReference: safetyCase.evidenceReference,
-              evidenceNotes: safetyCase.evidenceNotes,
-              reviewNotes: safetyCase.reviewNotes,
-              createdAt: safetyCase.createdAt,
-              updatedAt: safetyCase.updatedAt,
-              isSanitized: false,
-              isVerifiedSafe: false,
-              isRightsApproved: false,
-              isPublished: false,
-              isReadyForPeia: false,
-            })
-          : null,
-      };
-    }
-
-    const nextRevision = currentRevision + 1;
-    const timestamp = this.nowIso();
-    const sourceFormat = envelope.receipt.sourceFormat || 'unknown';
-    const deepInspectionStatus = envelope.receipt.deepInspectionStatus || 'PENDING';
-
-    const caseRecord: LibraryQuarantinePersistedBinarySafetyCase = Object.freeze({
-      schemaVersion: LIBRARY_QUARANTINE_BINARY_SAFETY_CASE_SCHEMA_VERSION,
-      receiptId,
-      documentId,
-      revision: nextRevision,
-      sourceRevision: envelope.revision,
-      sourceUpdatedAt: envelope.updatedAt,
-      sourceSha256: envelope.sha256,
-      sourceFormat,
-      deepInspectionStatus,
-      effectiveHumanCaseRevision: humanCase.revision,
-      effectiveHumanCaseUpdatedAt: humanCase.updatedAt,
-      catalogUpdatedAt: handoff.createdAt,
-      disposition: editorialInput.disposition,
-      evidenceReference: editorialInput.evidenceReference,
-      evidenceNotes: editorialInput.evidenceNotes,
-      reviewNotes: editorialInput.reviewNotes,
-      createdBy: safetyCase ? safetyCase.createdBy : actorUid,
-      createdAt: safetyCase ? safetyCase.createdAt : timestamp,
-      updatedBy: actorUid,
-      updatedAt: timestamp,
-      isSanitized: false,
-      isVerifiedSafe: false,
-      isRightsApproved: false,
-      isPublished: false,
-      isReadyForPeia: false,
-    });
-
-    const eventRecord: LibraryQuarantinePersistedBinarySafetyCaseEvent = Object.freeze({
-      schemaVersion: LIBRARY_QUARANTINE_BINARY_SAFETY_CASE_EVENT_SCHEMA_VERSION,
-      eventId: `bs-evt-${receiptId}-${nextRevision}-${Date.now()}`,
-      receiptId,
-      documentId,
-      revision: nextRevision,
-      previousRevision: currentRevision,
-      eventType: currentRevision === 0 ? 'CREATED' : 'UPDATED',
-      sourceRevision: envelope.revision,
-      sourceUpdatedAt: envelope.updatedAt,
-      sourceSha256: envelope.sha256,
-      sourceFormat,
-      deepInspectionStatus,
-      effectiveHumanCaseRevision: humanCase.revision,
-      effectiveHumanCaseUpdatedAt: humanCase.updatedAt,
-      catalogUpdatedAt: handoff.createdAt,
-      disposition: editorialInput.disposition,
-      evidenceReference: editorialInput.evidenceReference,
-      evidenceNotes: editorialInput.evidenceNotes,
-      reviewNotes: editorialInput.reviewNotes,
-      actorUid,
-      recordedAt: timestamp,
-      isSanitized: false,
-      isVerifiedSafe: false,
-      isRightsApproved: false,
-      isPublished: false,
-      isReadyForPeia: false,
-    });
-
-    let writeStagedInAnyAttempt = false;
-    try {
-      writeStagedInAnyAttempt = true;
-      const store = new (await import('./firestoreLibraryQuarantineBinarySafetyCaseStore')).FirestoreLibraryQuarantineBinarySafetyCaseStore(
-        this.deps.db
       );
-
-      const result = await store.saveBinarySafetyCaseAtomic(
-        receiptId,
-        expectedRevision,
-        caseRecord,
-        eventRecord
-      );
-
-      if (!result.saved) {
-        const refreshed = await store.getBinarySafetyCase(receiptId);
-        const actualCurrentRevision = refreshed ? refreshed.revision : 0;
-        return {
-          ok: false,
-          outcome: 'CONFLICT',
-          errorCode: 'BINARY_SAFETY_REVISION_CONFLICT',
-          errorMessage: `Revision conflict detected during atomic commit. Expected ${expectedRevision}, current is ${actualCurrentRevision}.`,
-          currentRevision: actualCurrentRevision,
-          currentBinarySafetyCase: refreshed ? Object.freeze({
-            schemaVersion: refreshed.schemaVersion,
-            receiptId: refreshed.receiptId,
-            documentId: refreshed.documentId,
-            revision: refreshed.revision,
-            sourceRevision: refreshed.sourceRevision,
-            sourceUpdatedAt: refreshed.sourceUpdatedAt,
-            sourceFormat: refreshed.sourceFormat,
-            deepInspectionStatus: refreshed.deepInspectionStatus,
-            effectiveHumanCaseRevision: refreshed.effectiveHumanCaseRevision,
-            effectiveHumanCaseUpdatedAt: refreshed.effectiveHumanCaseUpdatedAt,
-            catalogUpdatedAt: refreshed.catalogUpdatedAt,
-            disposition: refreshed.disposition,
-            evidenceReference: refreshed.evidenceReference,
-            evidenceNotes: refreshed.evidenceNotes,
-            reviewNotes: refreshed.reviewNotes,
-            createdAt: refreshed.createdAt,
-            updatedAt: refreshed.updatedAt,
-            isSanitized: false,
-            isVerifiedSafe: false,
-            isRightsApproved: false,
-            isPublished: false,
-            isReadyForPeia: false,
-          }) : null,
-        };
-      }
-
-      return {
-        ok: true,
-        outcome: 'SAVED',
-        receiptId,
-        documentId,
-        revision: nextRevision,
-        binarySafetyCase: Object.freeze({
-          schemaVersion: caseRecord.schemaVersion,
-          receiptId: caseRecord.receiptId,
-          documentId: caseRecord.documentId,
-          revision: caseRecord.revision,
-          sourceRevision: caseRecord.sourceRevision,
-          sourceUpdatedAt: caseRecord.sourceUpdatedAt,
-          sourceFormat: caseRecord.sourceFormat,
-          deepInspectionStatus: caseRecord.deepInspectionStatus,
-          effectiveHumanCaseRevision: caseRecord.effectiveHumanCaseRevision,
-          effectiveHumanCaseUpdatedAt: caseRecord.effectiveHumanCaseUpdatedAt,
-          catalogUpdatedAt: caseRecord.catalogUpdatedAt,
-          disposition: caseRecord.disposition,
-          evidenceReference: caseRecord.evidenceReference,
-          evidenceNotes: caseRecord.evidenceNotes,
-          reviewNotes: caseRecord.reviewNotes,
-          createdAt: caseRecord.createdAt,
-          updatedAt: caseRecord.updatedAt,
-          isSanitized: false,
-          isVerifiedSafe: false,
-          isRightsApproved: false,
-          isPublished: false,
-          isReadyForPeia: false,
-        }),
-      };
-    } catch (err: any) {
-      if (writeStagedInAnyAttempt) {
-        return {
-          ok: false,
-          outcome: 'UNKNOWN',
-          errorCode: 'TRANSACTION_COMMIT_UNCERTAIN',
-          errorMessage: `Commit uncertainty: transaction threw error after writes were staged: ${err?.message || String(err)}`,
-          caseSaved: null,
-        };
-      }
-      throw err;
+    } catch {
+      return makeSaveUnknownDto(receiptId);
     }
+
+    if (storeResult.status === 'SAVED') {
+      let sanitizedCase: SanitizedLibraryQuarantineBinarySafetyCaseDto;
+      try {
+        sanitizedCase = toSanitizedLibraryQuarantineBinarySafetyCaseDto(
+          storeResult.binarySafetyCase
+        );
+      } catch {
+        // CRITICAL: The transaction has ALREADY committed in the store (`status === 'SAVED'`).
+        // Never misclassify a post-commit DTO sanitization error as HOLD / NOT_SAVED!
+        return makeSaveUnknownDto(receiptId);
+      }
+
+      return Object.freeze({
+        ok: true as const,
+        status: 'SAVED' as const,
+        outcome: 'SAVED' as const,
+        caseSaveOutcome: storeResult.caseSaveOutcome,
+        caseSaved: true as const,
+        receiptId,
+        documentId: storeResult.documentId,
+        revision: storeResult.currentRevision,
+        currentRevision: storeResult.currentRevision,
+        sourceRevision: storeResult.chainSnapshot.receiptEnvelope.revision,
+        sourceUpdatedAt:
+          storeResult.chainSnapshot.receiptEnvelope.receipt.updatedAt,
+        sourceFormat: storeResult.chainSnapshot.sourceFormat,
+        deepInspectionStatus: storeResult.chainSnapshot.deepInspectionStatus,
+        catalogHandoffCaseRevision:
+          storeResult.chainSnapshot.catalogHandoff.caseRevision,
+        currentHumanCaseRevision:
+          storeResult.chainSnapshot.humanReviewCase.revision,
+        effectiveHumanCaseRevision:
+          storeResult.chainSnapshot.effectiveHumanCaseRevision,
+        effectiveHumanCaseUpdatedAt:
+          storeResult.chainSnapshot.effectiveHumanCaseUpdatedAt,
+        catalogUpdatedAt: storeResult.chainSnapshot.catalogUpdatedAt,
+        isCaseCurrent: true as const,
+        requiresFreshEvidence: false as const,
+        readiness: QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS,
+        binarySafetyCase: sanitizedCase,
+        isSanitized: false as const,
+        isVerifiedSafe: false as const,
+        isRightsApproved: false as const,
+        isPublished: false as const,
+        isReadyForPeia: false as const,
+      });
+    }
+
+    if (storeResult.status === 'CONFLICT') {
+      let currentSanitized: SanitizedLibraryQuarantineBinarySafetyCaseDto | null =
+        null;
+      if (storeResult.currentBinarySafetyCase !== null) {
+        try {
+          currentSanitized = toSanitizedLibraryQuarantineBinarySafetyCaseDto(
+            storeResult.currentBinarySafetyCase
+          );
+        } catch {
+          return makeSaveHoldDto(
+            'CORRUPTED_EXISTING_BINARY_SAFETY_CASE',
+            receiptId
+          );
+        }
+      }
+
+      return Object.freeze({
+        ok: false as const,
+        status: 'CONFLICT' as const,
+        outcome: 'CONFLICT' as const,
+        caseSaveOutcome: 'NOT_SAVED' as const,
+        caseSaved: false as const,
+        errorCode: 'BINARY_SAFETY_REVISION_CONFLICT' as const,
+        errorMessage: storeResult.errorMessage,
+        receiptId,
+        documentId: storeResult.documentId,
+        currentRevision: storeResult.currentRevision,
+        currentBinarySafetyCase: currentSanitized,
+        readiness: QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS,
+        isSanitized: false as const,
+        isVerifiedSafe: false as const,
+        isRightsApproved: false as const,
+        isPublished: false as const,
+        isReadyForPeia: false as const,
+      });
+    }
+
+    if (storeResult.status === 'UNKNOWN') {
+      return makeSaveUnknownDto(receiptId);
+    }
+
+    return makeSaveHoldDto(storeResult.reasonCode, receiptId);
   }
 }

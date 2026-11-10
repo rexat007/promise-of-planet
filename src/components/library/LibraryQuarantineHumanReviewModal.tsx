@@ -1466,9 +1466,23 @@ export function LibraryQuarantineHumanReviewModal({
         {/* Inline Binary Safety Casework Panel (Owner only) */}
         {!loading && !loadError && receipt && (
           <LibraryQuarantineBinarySafetyCasePanel
+            key={receipt.receiptId}
             receiptId={receipt.receiptId}
             currentUser={currentUser}
             lang={isAr ? 'ar' : 'en'}
+            savedReviewCase={reviewCase}
+            hasUnsavedCaseEdits={Boolean(
+              reviewCase &&
+                (form.status !== reviewCase.status ||
+                  form.titleAr !== reviewCase.titleAr ||
+                  form.titleEn !== reviewCase.titleEn ||
+                  form.issuingOrganization !== reviewCase.issuingOrganization ||
+                  form.summaryAr !== reviewCase.summaryAr ||
+                  form.summaryEn !== reviewCase.summaryEn ||
+                  form.sourceEvidenceNotes !== reviewCase.sourceEvidenceNotes ||
+                  form.rightsEvidenceNotes !== reviewCase.rightsEvidenceNotes ||
+                  form.editorialNotes !== reviewCase.editorialNotes)
+            )}
           />
         )}
       </div>

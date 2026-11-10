@@ -1,14 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  LibraryQuarantineBinarySafetyCaseController,
-  type LibraryQuarantineBinarySafetyCaseControllerState,
-  isLibraryQuarantineBinarySafetyCaseEnabled,
-  canUserManageBinarySafetyCases,
-} from '../../services/libraryQuarantineBinarySafetyCaseClient';
-import {
-  type LibraryQuarantineBinarySafetyDisposition,
+  BINARY_SAFETY_EVIDENCE_REFERENCE_MAX_LENGTH,
+  BINARY_SAFETY_NOTES_MAX_LENGTH,
   LIBRARY_QUARANTINE_BINARY_SAFETY_DISPOSITIONS,
-} from '../../../functions/src/library/libraryQuarantineBinarySafetyCaseContract';
+  LibraryQuarantineBinarySafetyCaseController,
+  QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS,
+  canUserManageBinarySafetyCases,
+  isLibraryQuarantineBinarySafetyCaseEnabled,
+  type LibraryQuarantineBinarySafetyCaseControllerState,
+  type LibraryQuarantineBinarySafetyDisposition,
+} from '../../services/libraryQuarantineBinarySafetyCaseClient';
+import type { SanitizedLibraryQuarantineHumanReviewCaseDto } from '../../services/libraryQuarantineHumanReviewClient';
 import type { AdminUser } from '../../types/admin';
 
 export interface LibraryQuarantineBinarySafetyCasePanelProps {
@@ -16,76 +18,202 @@ export interface LibraryQuarantineBinarySafetyCasePanelProps {
   readonly currentUser: AdminUser | null;
   readonly lang?: 'ar' | 'en';
   readonly controllerOverride?: LibraryQuarantineBinarySafetyCaseController;
+  readonly savedReviewCase?: SanitizedLibraryQuarantineHumanReviewCaseDto | null;
+  readonly hasUnsavedCaseEdits?: boolean;
+  readonly envOverride?: Record<string, unknown>;
 }
 
-export const LibraryQuarantineBinarySafetyCasePanel: React.FC<LibraryQuarantineBinarySafetyCasePanelProps> = ({
+export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
+  LibraryQuarantineBinarySafetyCasePanelProps
+> = ({
   receiptId,
   currentUser,
   lang = 'ar',
   controllerOverride,
+  savedReviewCase,
+  hasUnsavedCaseEdits = false,
+  envOverride,
 }) => {
+  const isEnabled = isLibraryQuarantineBinarySafetyCaseEnabled(envOverride);
+  const isOwner = canUserManageBinarySafetyCases(currentUser);
+
   const [controller] = useState(
-    () => controllerOverride || new LibraryQuarantineBinarySafetyCaseController(receiptId)
-  );
-  const [state, setState] = useState<LibraryQuarantineBinarySafetyCaseControllerState>(
-    controller.getState()
+    () =>
+      controllerOverride ||
+      new LibraryQuarantineBinarySafetyCaseController(receiptId, {
+        ...(envOverride !== undefined ? { envOverride } : {}),
+        currentUser,
+      })
   );
 
-  const [disposition, setDisposition] = useState<LibraryQuarantineBinarySafetyDisposition>(
-    'ISOLATED_ASSESSMENT_REQUIRED'
-  );
+  const [state, setState] =
+    useState<LibraryQuarantineBinarySafetyCaseControllerState>(() =>
+      controller.getState()
+    );
+
+  const [disposition, setDisposition] =
+    useState<LibraryQuarantineBinarySafetyDisposition>(
+      'ISOLATED_ASSESSMENT_REQUIRED'
+    );
   const [evidenceReference, setEvidenceReference] = useState('');
   const [evidenceNotes, setEvidenceNotes] = useState('');
   const [reviewNotes, setReviewNotes] = useState('');
+  const [acknowledgedCurrentCaseRevision, setAcknowledgedCurrentCaseRevision] =
+    useState(false);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
+
+  const lastHydratedKeyRef = useRef<string>('');
+  const previousReceiptIdRef = useRef<string>(receiptId);
+
+  useEffect(() => {
+    controller.setCurrentUser(currentUser);
+  }, [controller, currentUser]);
+
+  useEffect(() => {
+    if (previousReceiptIdRef.current !== receiptId) {
+      previousReceiptIdRef.current = receiptId;
+      lastHydratedKeyRef.current = '';
+      setDisposition('ISOLATED_ASSESSMENT_REQUIRED');
+      setEvidenceReference('');
+      setEvidenceNotes('');
+      setReviewNotes('');
+      setAcknowledgedCurrentCaseRevision(false);
+      setSuccessNotice(null);
+      controller.switchReceipt(receiptId);
+      if (isEnabled && isOwner) {
+        void controller.loadCase();
+      }
+    }
+  }, [controller, receiptId, isEnabled, isOwner]);
 
   useEffect(() => {
     const unsubscribe = controller.subscribe((newState) => {
       setState(newState);
-      if (newState.snapshot?.binarySafetyCase) {
-        const c = newState.snapshot.binarySafetyCase;
+      const snap = newState.snapshot;
+      if (!snap) {
+        return;
+      }
+      const hydrationKey = `${newState.receiptId}:${snap.currentRevision}:${snap.effectiveHumanCaseRevision}:${snap.isCaseCurrent}:${snap.requiresFreshEvidence}`;
+      if (lastHydratedKeyRef.current === hydrationKey) {
+        return;
+      }
+      lastHydratedKeyRef.current = hydrationKey;
+
+      if (
+        snap.binarySafetyCase &&
+        snap.isCaseCurrent &&
+        !snap.requiresFreshEvidence
+      ) {
+        const c = snap.binarySafetyCase;
         setDisposition(c.disposition);
         setEvidenceReference(c.evidenceReference || '');
         setEvidenceNotes(c.evidenceNotes || '');
         setReviewNotes(c.reviewNotes || '');
+        setAcknowledgedCurrentCaseRevision(false);
+      } else {
+        // Stale or new record: never auto-populate stale evidence into editable form
+        setDisposition('ISOLATED_ASSESSMENT_REQUIRED');
+        setEvidenceReference('');
+        setEvidenceNotes('');
+        setReviewNotes('');
+        setAcknowledgedCurrentCaseRevision(false);
       }
     });
-    controller.loadCase();
+
+    if (isEnabled && isOwner) {
+      void controller.loadCase();
+    }
+
     return () => {
       unsubscribe();
     };
-  }, [controller]);
+  }, [controller, isEnabled, isOwner]);
 
-  if (!isLibraryQuarantineBinarySafetyCaseEnabled()) {
+  if (!isEnabled) {
     return null;
   }
 
-  const isOwner = canUserManageBinarySafetyCases(currentUser);
+  const isAr = lang === 'ar';
+
   if (!isOwner) {
     return (
-      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-800 dark:text-amber-200">
-        {lang === 'ar'
-          ? 'سجل سلامة الملفات الثنائية محصور بمسؤولي النظام (Owner) مع صلاحية المراجعة.'
-          : 'Binary safety casework is restricted to system Owners with review permissions.'}
+      <div
+        dir={isAr ? 'rtl' : 'ltr'}
+        data-testid="binary-safety-owner-restricted-notice"
+        className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-800 dark:text-amber-200"
+      >
+        {isAr
+          ? 'سجل سلامة الملفات الثنائية محصور بمسؤولي النظام (Owner) النشطين مع صلاحية المراجعة.'
+          : 'Binary safety casework is restricted to active system Owners with review permissions.'}
       </div>
     );
   }
 
+  const readiness =
+    state.snapshot?.readiness ?? QUARANTINE_BINARY_SAFETY_READINESS_INDICATORS;
+
+  const isCaseNotMetadataRecorded =
+    savedReviewCase !== undefined &&
+    (savedReviewCase === null || savedReviewCase.status !== 'METADATA_RECORDED');
+
+  const isStaleCaseDriftWithParent =
+    savedReviewCase !== undefined &&
+    savedReviewCase !== null &&
+    state.snapshot !== null &&
+    savedReviewCase.revision !== state.snapshot.effectiveHumanCaseRevision;
+
+  const isSaveLockedByCaseState =
+    hasUnsavedCaseEdits ||
+    isCaseNotMetadataRecorded ||
+    isStaleCaseDriftWithParent;
+
+  const canSubmitSave =
+    state.phase === 'ready' &&
+    !state.inFlight &&
+    !isSaveLockedByCaseState &&
+    acknowledgedCurrentCaseRevision &&
+    (state.snapshot?.effectiveHumanCaseRevision ?? 0) >= 1;
+
+  const handleAcknowledgeChange = (checked: boolean) => {
+    setAcknowledgedCurrentCaseRevision(checked);
+    controller.setAcknowledgedCurrentCaseRevision(checked);
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSuccessNotice(null);
+
+    if (isSaveLockedByCaseState || !acknowledgedCurrentCaseRevision) {
+      return;
+    }
+
     const currentRev = state.snapshot?.currentRevision ?? 0;
-    const result = await controller.saveCase(currentRev, {
-      disposition,
-      evidenceReference,
-      evidenceNotes,
-      reviewNotes,
-    });
+    const effectiveCaseRev = state.snapshot?.effectiveHumanCaseRevision;
+
+    const result = (await controller.saveCase(
+      currentRev,
+      {
+        disposition,
+        evidenceReference,
+        evidenceNotes,
+        reviewNotes,
+      },
+      {
+        ...(effectiveCaseRev !== undefined
+          ? { acknowledgedHumanCaseRevision: effectiveCaseRev }
+          : {}),
+        hasUnsavedCaseEdits,
+        ...(savedReviewCase !== undefined && savedReviewCase !== null
+          ? { savedCaseStatus: savedReviewCase.status }
+          : {}),
+      }
+    )) as { readonly ok?: boolean } | undefined;
+
     if (result && result.ok === true) {
       setSuccessNotice(
-        lang === 'ar'
-          ? 'تم حفظ سجل سلامة الملف الثنائي بنجاح.'
-          : 'Binary safety case saved successfully.'
+        isAr
+          ? 'تم حفظ سجل سلامة الملف الثنائي ذريًا بنجاح.'
+          : 'Binary safety case saved atomically.'
       );
     }
   };
@@ -95,89 +223,239 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<LibraryQuarantineB
     await controller.loadCase();
   };
 
-  const isAr = lang === 'ar';
+  const staleCase = state.snapshot?.stalePreviousCase ?? null;
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-slate-800">
+    <div
+      dir={isAr ? 'rtl' : 'ltr'}
+      data-testid="library-quarantine-binary-safety-case-panel"
+      className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
         <div>
           <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-            {isAr ? 'سجل إحالة السلامة الثنائية (PDF/DOCX)' : 'Binary Safety Casework (PDF/DOCX)'}
+            {isAr
+              ? 'سجل إحالة السلامة الثنائية (PDF/DOCX)'
+              : 'Binary Safety Casework (PDF/DOCX)'}
           </h3>
           <p className="text-xs text-slate-500 dark:text-slate-400">
             {isAr
-              ? 'متابعة بوابات الفحص المعزول وتقارير الأدلة الخارجية غير المعتمدة.'
+              ? 'متابعة بوابات الفحص المعزول وتقارير الأدلة الخارجية غير المعتمدة تقنيًا.'
               : 'Isolated inspection pipeline and unverified external report casework.'}
           </p>
         </div>
         <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-          {isAr ? 'مراجعة المالك' : 'Owner Casework'}
+          {isAr ? 'مراجعة المالك (Owner)' : 'Owner Casework'}
         </span>
       </div>
 
-      {/* Safety Notice & Posture */}
-      <div className="mt-4 rounded-lg bg-blue-500/5 border border-blue-500/20 p-3 text-xs text-blue-900 dark:text-blue-200">
-        <p className="font-semibold mb-1">
+      {/* Constant Readiness Indicators */}
+      <div
+        data-testid="binary-safety-readiness-indicators"
+        className="mt-4 grid grid-cols-2 gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs sm:grid-cols-4 dark:border-slate-800 dark:bg-slate-950/60"
+      >
+        <div>
+          <span className="block text-slate-500 dark:text-slate-400">
+            {isAr ? 'السلامة الثنائية' : 'Binary Safety'}
+          </span>
+          <span className="font-mono font-bold text-amber-700 dark:text-amber-400">
+            {readiness.binarySafety}
+          </span>
+        </div>
+        <div>
+          <span className="block text-slate-500 dark:text-slate-400">
+            {isAr ? 'تطهير الملف (CDR)' : 'File Sanitization'}
+          </span>
+          <span className="font-mono font-bold text-amber-700 dark:text-amber-400">
+            {readiness.fileSanitization}
+          </span>
+        </div>
+        <div>
+          <span className="block text-slate-500 dark:text-slate-400">
+            {isAr ? 'النشر العام' : 'Publication'}
+          </span>
+          <span className="font-mono font-bold text-rose-700 dark:text-rose-400">
+            {readiness.publication}
+          </span>
+        </div>
+        <div>
+          <span className="block text-slate-500 dark:text-slate-400">
+            {isAr ? 'حالة الفهرس' : 'Catalog Workflow'}
+          </span>
+          <span className="font-mono font-bold text-slate-700 dark:text-slate-300">
+            {readiness.catalogWorkflow}
+          </span>
+        </div>
+      </div>
+
+      {/* Safety Notice & Provenance Snapshot */}
+      <div className="mt-3 rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-blue-900 dark:text-blue-200">
+        <p className="mb-1 font-semibold">
           {isAr ? 'تنبيه أمني تشغيلي:' : 'Operational Security Notice:'}
         </p>
         <p>
           {isAr
-            ? 'لا يتم تشغيل فحص برمجيات خبيثة (AV) أو تطهير هيكلي (CDR) تلقائيًا في هذه الوحدة. الملف محجور ولا يمكن تنزيله أو نشره.'
-            : 'No automated AV scan or structural CDR sanitization is executed in this unit. File is quarantined and cannot be downloaded or published.'}
+            ? 'لا يتم تشغيل فحص برمجيات خبيثة (AV) أو محلل PDF معزول أو تطهير هيكلي (CDR) تلقائيًا في هذه الوحدة. الملف محجور ولا يمكن تنزيله أو نشره.'
+            : 'No automated AV scan, isolated PDF parser, or structural CDR sanitization is executed in this unit. File is quarantined and cannot be downloaded or published.'}
         </p>
         {state.snapshot && (
-          <div className="mt-2 flex flex-wrap gap-3 font-mono text-[11px]">
+          <div
+            data-testid="binary-safety-provenance-summary"
+            className="mt-2 flex flex-wrap gap-3 font-mono text-[11px]"
+          >
             <span>Format: {state.snapshot.sourceFormat}</span>
             <span>Inspection: {state.snapshot.deepInspectionStatus}</span>
-            <span>Revision: {state.snapshot.currentRevision}</span>
+            <span>Source Rev: v{state.snapshot.sourceRevision}</span>
+            <span>
+              Effective Case Rev: v{state.snapshot.effectiveHumanCaseRevision}
+            </span>
+            <span>Safety Rev: v{state.snapshot.currentRevision}</span>
           </div>
         )}
       </div>
 
+      {/* Dirty / Unsaved Human Review Case Lock Banner */}
+      {hasUnsavedCaseEdits && (
+        <div
+          data-testid="binary-safety-dirty-case-lock-banner"
+          className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-200"
+        >
+          {isAr
+            ? 'يوجد تعديل غير محفوظ في نموذج المراجعة البشرية أعلاه. احفظ سجل المراجعة البشرية ومواءمة الفهرس أولًا قبل تسجيل أدلة السلامة الثنائية.'
+            : 'Unsaved edits detected in the human review case form above. Save the human review case and align the catalog draft before saving binary safety evidence.'}
+        </div>
+      )}
+
+      {!hasUnsavedCaseEdits && isCaseNotMetadataRecorded && (
+        <div
+          data-testid="binary-safety-case-status-lock-banner"
+          className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-200"
+        >
+          {isAr
+            ? 'يتطلب تسجيل السلامة الثنائية أن يكون سجل المراجعة البشرية محفوظًا بحالة METADATA_RECORDED.'
+            : 'Binary safety casework requires the human review case to be saved in METADATA_RECORDED status.'}
+        </div>
+      )}
+
+      {!hasUnsavedCaseEdits &&
+        !isCaseNotMetadataRecorded &&
+        isStaleCaseDriftWithParent && (
+          <div
+            data-testid="binary-safety-case-drift-lock-banner"
+            className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-200"
+          >
+            {isAr
+              ? 'تغيرت نسخة سجل المراجعة البشرية بعد آخر مواءمة للفهرس. نفّذ مواءمة مسودة الفهرس وأعد تحميل السجل قبل الحفظ.'
+              : 'Human review case revision changed since the last catalog alignment. Align the catalog draft and refresh before saving.'}
+          </div>
+        )}
+
+      {/* Stale Evidence Historical Notice */}
+      {state.snapshot?.requiresFreshEvidence && staleCase && (
+        <div
+          data-testid="binary-safety-stale-evidence-banner"
+          className="mt-3 rounded-lg border border-orange-500/40 bg-orange-500/10 p-3 text-xs text-orange-900 dark:text-orange-200"
+        >
+          <p className="font-semibold">
+            {isAr
+              ? `سجل السلامة السابق (v${staleCase.revision}) مرتبط بنسخة مراجعة بشرية سابقة (v${staleCase.effectiveHumanCaseRevision}) ويُعامل كأثر تاريخي فقط (STALE). يلزم إدخال أدلة جديدة للنسخة الحالية (v${state.snapshot.effectiveHumanCaseRevision}).`
+              : `Previous binary safety record (v${staleCase.revision}) was recorded for human case v${staleCase.effectiveHumanCaseRevision} and is retained as historical STALE evidence only. Fresh evidence is required for current human case v${state.snapshot.effectiveHumanCaseRevision}.`}
+          </p>
+          <div className="mt-1.5 font-mono text-[11px] opacity-90">
+            Prior: {staleCase.disposition} | Ref:{' '}
+            {staleCase.evidenceReference || '—'}
+          </div>
+        </div>
+      )}
+
       {state.phase === 'loading' && (
-        <div className="py-6 text-center text-sm text-slate-500">
-          {isAr ? 'جاري تحميل سجل السلامة الثنائية...' : 'Loading binary safety case...'}
+        <div
+          data-testid="binary-safety-loading"
+          className="py-6 text-center text-sm text-slate-500"
+        >
+          {isAr
+            ? 'جاري تحميل سجل السلامة الثنائية...'
+            : 'Loading binary safety case...'}
         </div>
       )}
 
       {state.holdState && (
-        <div className="mt-4 rounded-lg bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
-          <strong>HOLD:</strong> {state.holdState.errorMessage}
+        <div
+          data-testid="binary-safety-hold-banner"
+          className="mt-4 rounded-lg bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200"
+        >
+          <strong>HOLD ({state.holdState.errorCode}):</strong>{' '}
+          {state.holdState.errorMessage}
+          <div className="mt-2">
+            <button
+              type="button"
+              data-testid="binary-safety-reload-hold-btn"
+              onClick={handleVerifyOnly}
+              className="rounded bg-amber-600 px-3 py-1 text-xs text-white hover:bg-amber-700"
+            >
+              {isAr ? 'إعادة التحقق (GET-only)' : 'Reload State (GET-only)'}
+            </button>
+          </div>
         </div>
       )}
 
       {state.conflictState && (
-        <div className="mt-4 rounded-lg bg-red-500/10 p-3 text-xs text-red-800 dark:text-red-200">
+        <div
+          data-testid="binary-safety-conflict-banner"
+          className="mt-4 rounded-lg bg-red-500/10 p-3 text-xs text-red-800 dark:text-red-200"
+        >
           <strong>CONFLICT:</strong> {state.conflictState.errorMessage}
           <div className="mt-2">
             <button
               type="button"
+              data-testid="binary-safety-refresh-conflict-btn"
               onClick={handleVerifyOnly}
-              className="rounded bg-red-600 px-3 py-1 text-white hover:bg-red-700 text-xs"
+              className="rounded bg-red-600 px-3 py-1 text-xs text-white hover:bg-red-700"
             >
-              {isAr ? 'تحديث السجل (قراءة فقط)' : 'Refresh Record (Verify Only)'}
+              {isAr
+                ? 'تحديث السجل (قراءة فقط)'
+                : 'Refresh Record (Verify Only)'}
             </button>
           </div>
         </div>
       )}
 
       {state.uncertainState && (
-        <div className="mt-4 rounded-lg bg-purple-500/10 p-3 text-xs text-purple-800 dark:text-purple-200">
-          <strong>UNKNOWN (Commit Uncertain):</strong> {state.uncertainState.errorMessage}
+        <div
+          data-testid="binary-safety-unknown-banner"
+          className="mt-4 rounded-lg bg-purple-500/10 p-3 text-xs text-purple-800 dark:text-purple-200"
+        >
+          <strong>UNKNOWN (Commit Uncertain):</strong>{' '}
+          {state.uncertainState.errorMessage}
           <div className="mt-2">
             <button
               type="button"
+              data-testid="binary-safety-verify-unknown-btn"
               onClick={handleVerifyOnly}
-              className="rounded bg-purple-600 px-3 py-1 text-white hover:bg-purple-700 text-xs"
+              className="rounded bg-purple-600 px-3 py-1 text-xs text-white hover:bg-purple-700"
             >
-              {isAr ? 'التحقق من حالة السجل (GET-only)' : 'Verify Record State (GET-only)'}
+              {isAr
+                ? 'التحقق من حالة السجل (GET-only)'
+                : 'Verify Record State (GET-only)'}
             </button>
           </div>
         </div>
       )}
 
+      {state.errorMessage && (
+        <div
+          data-testid="binary-safety-error-banner"
+          className="mt-4 rounded-lg bg-rose-500/10 p-3 text-xs text-rose-800 dark:text-rose-200"
+        >
+          {state.errorMessage}
+        </div>
+      )}
+
       {successNotice && (
-        <div className="mt-4 rounded-lg bg-emerald-500/10 p-3 text-xs text-emerald-800 dark:text-emerald-200">
+        <div
+          data-testid="binary-safety-success-banner"
+          className="mt-4 rounded-lg bg-emerald-500/10 p-3 text-xs text-emerald-800 dark:text-emerald-200"
+        >
           {successNotice}
         </div>
       )}
@@ -185,14 +463,19 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<LibraryQuarantineB
       {(state.phase === 'ready' || state.phase === 'saving') && (
         <form onSubmit={handleSave} className="mt-4 space-y-4">
           <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+            <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-slate-300">
               {isAr ? 'قرار الإحالة والتصنيف (Disposition)' : 'Case Disposition'}
             </label>
             <select
+              data-testid="binary-safety-disposition-select"
               value={disposition}
-              onChange={(e) => setDisposition(e.target.value as LibraryQuarantineBinarySafetyDisposition)}
+              onChange={(e) =>
+                setDisposition(
+                  e.target.value as LibraryQuarantineBinarySafetyDisposition
+                )
+              }
               className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-              disabled={state.inFlight}
+              disabled={state.inFlight || isSaveLockedByCaseState}
             >
               {LIBRARY_QUARANTINE_BINARY_SAFETY_DISPOSITIONS.map((d) => (
                 <option key={d} value={d}>
@@ -213,60 +496,107 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<LibraryQuarantineB
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-              {isAr ? 'مرجع الأدلة / رقم التذكرة (Evidence Reference)' : 'Evidence Reference / Ticket ID'}
+            <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-slate-300">
+              {isAr
+                ? 'مرجع الأدلة / رقم التذكرة (Evidence Reference)'
+                : 'Evidence Reference / Ticket ID'}
             </label>
             <input
               type="text"
+              data-testid="binary-safety-evidence-reference-input"
               value={evidenceReference}
               onChange={(e) => setEvidenceReference(e.target.value)}
-              placeholder={isAr ? 'مثال: TICKET-99201 أو تقرير داخلي' : 'e.g. TICKET-99201'}
-              maxLength={500}
+              placeholder={
+                isAr ? 'مثال: TICKET-99201 أو تقرير داخلي' : 'e.g. TICKET-99201'
+              }
+              maxLength={BINARY_SAFETY_EVIDENCE_REFERENCE_MAX_LENGTH}
               className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-              disabled={state.inFlight}
+              disabled={state.inFlight || isSaveLockedByCaseState}
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+            <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-slate-300">
               {isAr ? 'ملاحظات الأدلة (Evidence Notes)' : 'Evidence Notes'}
             </label>
             <textarea
+              data-testid="binary-safety-evidence-notes-input"
               value={evidenceNotes}
               onChange={(e) => setEvidenceNotes(e.target.value)}
               rows={3}
-              maxLength={2000}
-              placeholder={isAr ? 'تفاصيل الأدلة الخارجية أو ملاحظات الفحص...' : 'External evidence details or inspection notes...'}
+              maxLength={BINARY_SAFETY_NOTES_MAX_LENGTH}
+              placeholder={
+                isAr
+                  ? 'تفاصيل الأدلة الخارجية أو ملاحظات الفحص...'
+                  : 'External evidence details or inspection notes...'
+              }
               className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-              disabled={state.inFlight}
+              disabled={state.inFlight || isSaveLockedByCaseState}
             />
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-              {isAr ? 'ملاحظات المراجعة والقرار (Review Notes)' : 'Review Notes & Justification'}
+            <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-slate-300">
+              {isAr
+                ? 'ملاحظات المراجعة والقرار (Review Notes)'
+                : 'Review Notes & Justification'}
             </label>
             <textarea
+              data-testid="binary-safety-review-notes-input"
               value={reviewNotes}
               onChange={(e) => setReviewNotes(e.target.value)}
               rows={3}
-              maxLength={2000}
-              placeholder={isAr ? 'مبررات القرار التشغيلي...' : 'Operational decision justification...'}
+              maxLength={BINARY_SAFETY_NOTES_MAX_LENGTH}
+              placeholder={
+                isAr
+                  ? 'مبررات القرار التشغيلي...'
+                  : 'Operational decision justification...'
+              }
               className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-              disabled={state.inFlight}
+              disabled={state.inFlight || isSaveLockedByCaseState}
             />
           </div>
+
+          {/* Mandatory Checkbox to Acknowledge Current Effective Human Case Revision */}
+          <label className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700 dark:border-slate-800 dark:bg-slate-950/50 dark:text-slate-300">
+            <input
+              type="checkbox"
+              data-testid="binary-safety-acknowledge-case-revision-checkbox"
+              checked={acknowledgedCurrentCaseRevision}
+              onChange={(e) => handleAcknowledgeChange(e.target.checked)}
+              disabled={state.inFlight || isSaveLockedByCaseState}
+              className="mt-0.5"
+            />
+            <span>
+              {isAr
+                ? `أقرّ بأن أدلة السلامة الثنائية المسجلة أعلاه تتطابق مع النسخة الفعالة الحالية لسجل المراجعة البشرية (v${
+                    state.snapshot?.effectiveHumanCaseRevision ?? 0
+                  }) ونسخة المصدر (v${
+                    state.snapshot?.sourceRevision ?? 0
+                  })، مع بقاء الملف محجورًا وغير معتمد للنشر.`
+                : `I acknowledge that this binary safety evidence applies to current effective human review case revision v${
+                    state.snapshot?.effectiveHumanCaseRevision ?? 0
+                  } (source v${
+                    state.snapshot?.sourceRevision ?? 0
+                  }) and that the binary file remains quarantined and unapproved for release.`}
+            </span>
+          </label>
 
           <div className="flex justify-end pt-2">
             <button
               type="submit"
-              disabled={state.inFlight}
-              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              data-testid="save-quarantine-binary-safety-case-btn"
+              disabled={!canSubmitSave}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {state.inFlight
                 ? isAr
                   ? 'جاري الحفظ الذري...'
                   : 'Saving Atomic Casework...'
+                : state.snapshot?.requiresFreshEvidence
+                ? isAr
+                  ? 'تجديد سجل السلامة الثنائية'
+                  : 'Renew Binary Safety Casework'
                 : isAr
                 ? 'حفظ سجل السلامة الثنائية'
                 : 'Save Binary Safety Casework'}
