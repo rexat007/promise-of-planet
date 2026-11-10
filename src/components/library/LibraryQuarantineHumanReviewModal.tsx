@@ -39,6 +39,9 @@ import {
   LibraryQuarantineRightsDecisionPanel,
   LibraryQuarantineRightsDecisionPanelController,
 } from './LibraryQuarantineRightsDecisionPanel';
+import {
+  LibraryQuarantineBinarySafetyCasePanel,
+} from './LibraryQuarantineBinarySafetyCasePanel';
 
 /**
  * LIB-FILE-HUMAN-CASEWORK-01 — Human Review Case Modal & State Controller
@@ -1457,6 +1460,15 @@ export function LibraryQuarantineHumanReviewModal({
                   form.editorialNotes !== reviewCase.editorialNotes)
             )}
             isAr={isAr}
+          />
+        )}
+
+        {/* Inline Binary Safety Casework Panel (Owner only) */}
+        {!loading && !loadError && receipt && (
+          <LibraryQuarantineBinarySafetyCasePanel
+            receiptId={receipt.receiptId}
+            currentUser={currentUser}
+            lang={isAr ? 'ar' : 'en'}
           />
         )}
       </div>

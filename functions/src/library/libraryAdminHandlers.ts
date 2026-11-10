@@ -117,6 +117,15 @@ import {
   type LibraryQuarantineCatalogCaseFourFieldDiffDto,
   type SanitizedLibraryQuarantineCatalogCaseAlignmentDto,
 } from './libraryQuarantineCatalogCaseAlignmentService';
+import {
+  LibraryQuarantineBinarySafetyCaseService,
+  type GetLibraryQuarantineBinarySafetyCaseResponseDto,
+  type SaveLibraryQuarantineBinarySafetyCaseResponseDto,
+} from './libraryQuarantineBinarySafetyCaseService';
+import type {
+  SaveLibraryQuarantineBinarySafetyCaseInput,
+  SanitizedLibraryQuarantineBinarySafetyCaseDto,
+} from './libraryQuarantineBinarySafetyCaseContract';
 
 export type {
   ListLibraryQuarantineReceiptsResponseDto,
@@ -146,6 +155,10 @@ export type {
   GetLibraryQuarantineCatalogCaseAlignmentResponseDto,
   LibraryQuarantineCatalogCaseFourFieldDiffDto,
   SanitizedLibraryQuarantineCatalogCaseAlignmentDto,
+  GetLibraryQuarantineBinarySafetyCaseResponseDto,
+  SaveLibraryQuarantineBinarySafetyCaseResponseDto,
+  SanitizedLibraryQuarantineBinarySafetyCaseDto,
+  SaveLibraryQuarantineBinarySafetyCaseInput,
 };
 
 export const LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR =
@@ -163,12 +176,16 @@ export const LIBRARY_RIGHTS_DECISION_RELEASE_ENV_VAR =
 export const LIBRARY_CASE_ALIGNMENT_RELEASE_ENV_VAR =
   'POP_LIBRARY_CASE_ALIGNMENT_ENABLED' as const;
 
+export const LIBRARY_BINARY_SAFETY_CASE_RELEASE_ENV_VAR =
+  'POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED' as const;
+
 export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly workbenchEnabled?: boolean;
   readonly humanCaseReviewEnabled?: boolean;
   readonly catalogHandoffEnabled?: boolean;
   readonly rightsDecisionEnabled?: boolean;
   readonly caseAlignmentEnabled?: boolean;
+  readonly binarySafetyCaseEnabled?: boolean;
   readonly receiptReadDatabase?: LibraryQuarantineAdminReadFirestoreDatabase;
   readonly draftDatabase?: LibraryQuarantineReviewDraftFirestoreDatabase;
   readonly listReceiptsFn?: () => Promise<LibraryQuarantineAdminReadResult>;
@@ -182,6 +199,7 @@ export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly catalogHandoffClock?: () => string;
   readonly rightsDecisionClock?: () => string;
   readonly caseAlignmentClock?: () => string;
+  readonly binarySafetyCaseClock?: () => string;
 }
 
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
@@ -277,6 +295,18 @@ const WORKBENCH_FORBIDDEN_TOKEN_OVERRIDE_KEYS: ReadonlySet<string> = new Set([
   'isSuperAdmin',
   'forceAllow',
 ]);
+
+const GET_QUARANTINE_BINARY_SAFETY_CASE_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set(['action', 'receiptId']);
+
+const SAVE_QUARANTINE_BINARY_SAFETY_CASE_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set([
+    'action',
+    'receiptId',
+    'expectedRevision',
+    'acknowledgedHumanCaseRevision',
+    'input',
+  ]);
 
 const LIBRARY_EDITORIAL_CURATION_PERMISSIONS: readonly AdminPermission[] = Object.freeze([
   AdminPermission.Create,
@@ -1126,6 +1156,42 @@ function assertCaseAlignmentReleaseGatesEnabled(
     throw new HttpsError(
       'failed-precondition',
       'CASE_ALIGNMENT_NOT_RELEASED: Library quarantine catalog case alignment is not enabled on the server.'
+    );
+  }
+}
+
+function assertBinarySafetyCaseReleaseGatesEnabled(
+  options?: LibraryQuarantineReviewWorkbenchHandlerOptions
+): void {
+  const isWorkbenchEnabled =
+    options?.workbenchEnabled !== undefined
+      ? options.workbenchEnabled === true
+      : process.env[LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR] === 'true';
+
+  const isHumanCaseEnabled =
+    options?.humanCaseReviewEnabled !== undefined
+      ? options.humanCaseReviewEnabled === true
+      : process.env[LIBRARY_HUMAN_CASE_REVIEW_RELEASE_ENV_VAR] === 'true';
+
+  const isCatalogHandoffEnabled =
+    options?.catalogHandoffEnabled !== undefined
+      ? options.catalogHandoffEnabled === true
+      : process.env[LIBRARY_CATALOG_HANDOFF_RELEASE_ENV_VAR] === 'true';
+
+  const isBinarySafetyCaseEnabled =
+    options?.binarySafetyCaseEnabled !== undefined
+      ? options.binarySafetyCaseEnabled === true
+      : process.env[LIBRARY_BINARY_SAFETY_CASE_RELEASE_ENV_VAR] === 'true';
+
+  if (
+    !isWorkbenchEnabled ||
+    !isHumanCaseEnabled ||
+    !isCatalogHandoffEnabled ||
+    !isBinarySafetyCaseEnabled
+  ) {
+    throw new HttpsError(
+      'failed-precondition',
+      'BINARY_SAFETY_CASE_NOT_RELEASED: Library binary safety case feature release gates are not enabled on the server.'
     );
   }
 }
@@ -2239,6 +2305,155 @@ export async function executeManageLibraryDocumentsRequest(
           validatedPayload.expectedAlignmentRevision as number,
         confirmation:
           validatedPayload.confirmation as typeof LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+      })
+    );
+  }
+
+  if (
+    action === 'getQuarantineBinarySafetyCase' ||
+    action === 'saveQuarantineBinarySafetyCase'
+  ) {
+    assertBinarySafetyCaseReleaseGatesEnabled(quarantineWorkbenchOptions);
+    assertStrictNoSymbolCallerKeys(requestContext?.data, action);
+
+    const allowedKeys =
+      action === 'getQuarantineBinarySafetyCase'
+        ? GET_QUARANTINE_BINARY_SAFETY_CASE_ALLOWED_KEYS
+        : SAVE_QUARANTINE_BINARY_SAFETY_CASE_ALLOWED_KEYS;
+
+    const validatedPayload = assertStrictAllowedCallerKeys(
+      requestContext?.data,
+      allowedKeys,
+      action
+    );
+
+    if (
+      !Object.prototype.hasOwnProperty.call(validatedPayload, 'receiptId') ||
+      !isValidLibraryQuarantineReceiptId(validatedPayload.receiptId)
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'INVALID_RECEIPT_ID: receiptId must be a 32-character lowercase hexadecimal string.'
+      );
+    }
+
+    if (action === 'saveQuarantineBinarySafetyCase') {
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedRevision'
+        ) ||
+        typeof validatedPayload.expectedRevision !== 'number' ||
+        !Number.isSafeInteger(validatedPayload.expectedRevision) ||
+        validatedPayload.expectedRevision < 0
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_REVISION: expectedRevision must be a non-negative safe integer.'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(validatedPayload, 'input') ||
+        typeof validatedPayload.input !== 'object' ||
+        validatedPayload.input === null ||
+        Array.isArray(validatedPayload.input) ||
+        Object.getOwnPropertySymbols(validatedPayload.input).length > 0
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_BINARY_SAFETY_INPUT_OBJECT: input must be a plain object.'
+        );
+      }
+    }
+
+    assertStrictWorkbenchAuthEnvelope(requestContext);
+
+    const baseAdminRepo: Pick<AdminRepository, 'getAdminByUid'> =
+      quarantineWorkbenchOptions?.bridgeDependencies?.adminRepository ??
+      adminRepo;
+
+    let cachedLookupDone = false;
+    let cachedLookupUid = '';
+    let cachedAdminUser: AdminUser | null = null;
+
+    const requestScopedAdminRepo: AdminRepository = {
+      async getAdminByUid(uid: string): Promise<AdminUser | null> {
+        if (cachedLookupDone && cachedLookupUid === uid) {
+          return cachedAdminUser;
+        }
+        const resolved = await baseAdminRepo.getAdminByUid(uid);
+        cachedLookupDone = true;
+        cachedLookupUid = uid;
+        cachedAdminUser = resolved;
+        return resolved;
+      },
+      async saveAdmin(admin: AdminUser): Promise<AdminUser> {
+        if (
+          typeof (baseAdminRepo as AdminRepository).saveAdmin === 'function'
+        ) {
+          return (baseAdminRepo as AdminRepository).saveAdmin(admin);
+        }
+        throw new Error(
+          `UNSAFE_DIRECT_WRITE_FORBIDDEN: saveAdmin is forbidden in ${action}.`
+        );
+      },
+      async listAdmins(): Promise<AdminUser[]> {
+        return typeof (baseAdminRepo as AdminRepository).listAdmins ===
+          'function'
+          ? (baseAdminRepo as AdminRepository).listAdmins!()
+          : [];
+      },
+    };
+
+    const verifiedUid = requestContext.auth!.uid.trim();
+    const verifiedToken = requestContext.auth?.token;
+
+    const effectiveDb: LibraryQuarantineReviewDraftFirestoreDatabase =
+      quarantineWorkbenchOptions?.draftDatabase ??
+      (getFirestore() as unknown as LibraryQuarantineReviewDraftFirestoreDatabase);
+
+    const effectiveClock =
+      quarantineWorkbenchOptions?.binarySafetyCaseClock ??
+      quarantineWorkbenchOptions?.caseAlignmentClock ??
+      quarantineWorkbenchOptions?.catalogHandoffClock ??
+      quarantineWorkbenchOptions?.humanReviewClock ??
+      quarantineWorkbenchOptions?.bridgeDependencies?.clock;
+
+    const safetyCaseService =
+      new LibraryQuarantineBinarySafetyCaseService({
+        trustedPrincipalProvider: Object.freeze({
+          resolveAuthenticatedPrincipal: () =>
+            Object.freeze({
+              uid: verifiedUid,
+              ...(verifiedToken !== undefined ? { token: verifiedToken } : {}),
+            }),
+        }),
+        adminRepository: requestScopedAdminRepo,
+        db: effectiveDb,
+        ...(effectiveClock !== undefined ? { clock: effectiveClock } : {}),
+      });
+
+    if (action === 'getQuarantineBinarySafetyCase') {
+      return safetyCaseService.getQuarantineBinarySafetyCase(
+        Object.freeze({
+          receiptId: validatedPayload.receiptId,
+        })
+      );
+    }
+
+    return safetyCaseService.saveQuarantineBinarySafetyCase(
+      Object.freeze({
+        receiptId: validatedPayload.receiptId,
+        expectedRevision: validatedPayload.expectedRevision as number,
+        ...(validatedPayload.acknowledgedHumanCaseRevision !== undefined
+          ? {
+              acknowledgedHumanCaseRevision:
+                validatedPayload.acknowledgedHumanCaseRevision as number,
+            }
+          : {}),
+        input:
+          validatedPayload.input as SaveLibraryQuarantineBinarySafetyCaseInput,
       })
     );
   }
