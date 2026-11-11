@@ -20,6 +20,34 @@ class FallbackHttpsError extends Error {
   }
 }
 
+const firebaseAdminRuntimeMock: {
+  enabled: boolean;
+  apps: Array<{ readonly name: string }>;
+  throwOnGetApps: Error | null;
+  throwOnInitializeApp: Error | null;
+  firestoreProvider: (() => unknown) | null;
+  storageBucketProvider: ((bucketName: string) => unknown) | null;
+  callOrder: string[];
+  getAppsCalls: number;
+  initializeAppCalls: number;
+  getFirestoreCalls: number;
+  getStorageCalls: number;
+  requestedBucketNames: string[];
+} = {
+  enabled: false,
+  apps: [],
+  throwOnGetApps: null,
+  throwOnInitializeApp: null,
+  firestoreProvider: null,
+  storageBucketProvider: null,
+  callOrder: [],
+  getAppsCalls: 0,
+  initializeAppCalls: 0,
+  getFirestoreCalls: 0,
+  getStorageCalls: 0,
+  requestedBucketNames: [],
+};
+
 const moduleWithLoad = Module as unknown as {
   _load: (request: string, parent: unknown, isMain: boolean) => unknown;
 };
@@ -49,8 +77,34 @@ moduleWithLoad._load = function patchedLoad(
     }
     if (request === 'firebase-admin/app') {
       return {
-        getApps: () => [],
-        initializeApp: () => ({}),
+        getApps: () => {
+          firebaseAdminRuntimeMock.getAppsCalls += 1;
+          firebaseAdminRuntimeMock.callOrder.push('getApps');
+          if (!firebaseAdminRuntimeMock.enabled) {
+            throw new Error(
+              'Uninjected live getApps() must not be called in headless backend tests.'
+            );
+          }
+          if (firebaseAdminRuntimeMock.throwOnGetApps) {
+            throw firebaseAdminRuntimeMock.throwOnGetApps;
+          }
+          return [...firebaseAdminRuntimeMock.apps];
+        },
+        initializeApp: () => {
+          firebaseAdminRuntimeMock.initializeAppCalls += 1;
+          firebaseAdminRuntimeMock.callOrder.push('initializeApp');
+          if (!firebaseAdminRuntimeMock.enabled) {
+            throw new Error(
+              'Uninjected live initializeApp() must not be called in headless backend tests.'
+            );
+          }
+          if (firebaseAdminRuntimeMock.throwOnInitializeApp) {
+            throw firebaseAdminRuntimeMock.throwOnInitializeApp;
+          }
+          const createdApp = Object.freeze({ name: '[DEFAULT]' });
+          firebaseAdminRuntimeMock.apps.push(createdApp);
+          return createdApp;
+        },
       };
     }
     if (request === 'firebase-admin/auth') {
@@ -65,18 +119,49 @@ moduleWithLoad._load = function patchedLoad(
     if (request === 'firebase-admin/firestore') {
       return {
         getFirestore: () => {
-          throw new Error(
-            'Uninjected live getFirestore() must not be called in headless backend tests.'
-          );
+          firebaseAdminRuntimeMock.getFirestoreCalls += 1;
+          firebaseAdminRuntimeMock.callOrder.push('getFirestore');
+          if (
+            !firebaseAdminRuntimeMock.enabled ||
+            !firebaseAdminRuntimeMock.firestoreProvider
+          ) {
+            throw new Error(
+              'Uninjected live getFirestore() must not be called in headless backend tests.'
+            );
+          }
+          if (firebaseAdminRuntimeMock.apps.length === 0) {
+            throw new Error(
+              'The default Firebase app does not exist. Make sure you call initializeApp() before using any of the Firebase services.'
+            );
+          }
+          return firebaseAdminRuntimeMock.firestoreProvider();
         },
       };
     }
     if (request === 'firebase-admin/storage') {
       return {
         getStorage: () => {
-          throw new Error(
-            'Uninjected live getStorage() must not be called in headless backend tests.'
-          );
+          firebaseAdminRuntimeMock.getStorageCalls += 1;
+          firebaseAdminRuntimeMock.callOrder.push('getStorage');
+          if (
+            !firebaseAdminRuntimeMock.enabled ||
+            !firebaseAdminRuntimeMock.storageBucketProvider
+          ) {
+            throw new Error(
+              'Uninjected live getStorage() must not be called in headless backend tests.'
+            );
+          }
+          if (firebaseAdminRuntimeMock.apps.length === 0) {
+            throw new Error(
+              'The default Firebase app does not exist. Make sure you call initializeApp() before using any of the Firebase services.'
+            );
+          }
+          return {
+            bucket: (bucketName: string) => {
+              firebaseAdminRuntimeMock.requestedBucketNames.push(bucketName);
+              return firebaseAdminRuntimeMock.storageBucketProvider!(bucketName);
+            },
+          };
         },
       };
     }
@@ -194,7 +279,10 @@ const {
   '../functions/src/library/libraryAdminHandlers'
 ) as typeof import('../functions/src/library/libraryAdminHandlers');
 
-const { executeLibraryQuarantineAvWorkerTask } = require(
+const {
+  executeLibraryQuarantineAvWorkerTask,
+  runLibraryQuarantineAvWorkerCli,
+} = require(
   '../functions/src/library/libraryQuarantineAvWorker'
 ) as typeof import('../functions/src/library/libraryQuarantineAvWorker');
 
@@ -1113,6 +1201,15 @@ const READ_ONLY_MANIFEST_EXPECTED_BLOBS: ReadonlyArray<
     '8064d1393b6e519f9df4be13ad35ece6d07907c0',
   ],
   ['src/types/admin.ts', '226e5fa017f1123181deb8bee259cb294adb8683'],
+  ['functions/src/index.ts', '5a14cada5dad8e764f8cc3092f40c386f6b09616'],
+  [
+    'functions/library-av-worker.Dockerfile',
+    '7d15c7f825169a7d78d71345e1e1046509b0cd00',
+  ],
+  [
+    '.github/workflows/library-quarantine-av-job.yml',
+    '4ae529cd83e3fa22d9e5616e4b05178626bf7270',
+  ],
 ]);
 
 async function runTests(): Promise<void> {
@@ -1996,10 +2093,360 @@ async function runTests(): Promise<void> {
       'QUARANTINE_BUCKET_MISMATCH'
     );
     assert.equal(forbiddenBucket.streamCalls, 0);
+
+    // Verify that all injected tests (Tests 1-6) never invoked live Firebase Admin SDK functions
+    assert.equal(firebaseAdminRuntimeMock.getAppsCalls, 0);
+    assert.equal(firebaseAdminRuntimeMock.initializeAppCalls, 0);
+    assert.equal(firebaseAdminRuntimeMock.getFirestoreCalls, 0);
+    assert.equal(firebaseAdminRuntimeMock.getStorageCalls, 0);
   }
 
   // =========================================================================
-  // TEST 7: Verify all 17 READ_ONLY files match their pinned Git blob SHA-1s
+  // TEST 7: Standalone CLI Bootstrap & Firebase Admin SDK Initialization
+  //         Lifecycle (Cold Start, Existing Default App, and Fail-Closed Init)
+  // =========================================================================
+  {
+    const cliFixtureDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'pop-qav-cli-test-')
+    );
+    const prevRequestIdEnv = process.env[LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR];
+    const prevClamDbDirEnv = process.env.POP_CLAMAV_DB_DIR;
+    const prevClamScanPathEnv = process.env.POP_CLAMSCAN_PATH;
+    const workerModulePath = require.resolve(
+      '../functions/src/library/libraryQuarantineAvWorker'
+    );
+
+    try {
+      const clamDbDir = path.join(cliFixtureDir, 'clamav-db');
+      fs.mkdirSync(clamDbDir, { recursive: true });
+      fs.writeFileSync(path.join(clamDbDir, 'main.cvd'), 'FAKE_MAIN_CVD_DATA');
+      fs.writeFileSync(path.join(clamDbDir, 'daily.cvd'), 'FAKE_DAILY_CVD_DATA');
+
+      const scanCountFile = path.join(cliFixtureDir, 'scan-count.txt');
+      fs.writeFileSync(scanCountFile, '0', 'utf8');
+
+      const fakeClamScanBin = path.join(cliFixtureDir, 'fake-clamscan.js');
+      fs.writeFileSync(
+        fakeClamScanBin,
+        [
+          '#!/usr/bin/env node',
+          'const fs = require("fs");',
+          'const args = process.argv.slice(2);',
+          'if (args.includes("--version")) {',
+          '  process.stdout.write("ClamAV 1.3.1/27455/Mon Nov 11 08:00:00 2026\\n");',
+          '  process.exit(0);',
+          '}',
+          `const countPath = ${JSON.stringify(scanCountFile)};`,
+          'const current = Number(fs.readFileSync(countPath, "utf8") || "0");',
+          'fs.writeFileSync(countPath, String(current + 1), "utf8");',
+          'const targetFile = args[args.length - 1];',
+          'if (!targetFile || !fs.existsSync(targetFile)) {',
+          '  process.exit(2);',
+          '}',
+          'process.exit(0);',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      fs.chmodSync(fakeClamScanBin, 0o755);
+
+      process.env.POP_CLAMAV_DB_DIR = clamDbDir;
+      process.env.POP_CLAMSCAN_PATH = fakeClamScanBin;
+
+      const createCliDispatchService = (
+        targetDb: InMemoryAvExecutionFirestoreDatabase,
+        adminRepo: InMemoryAdminRepo
+      ) =>
+        new LibraryQuarantineAvExecutionService({
+          trustedPrincipalProvider: {
+            resolveAuthenticatedPrincipal: () => ({
+              uid: ownerAdmin.id,
+              token: {},
+            }),
+          },
+          adminRepository: adminRepo,
+          db: targetDb,
+          avJobInvoker: {
+            validateConfig: () => ({
+              ok: true,
+              config: {
+                projectId: 'promiseofplanet-bb325',
+                region: 'europe-west1',
+                jobName: 'pop-quarantine-av-worker',
+              },
+            }),
+            invokeAvJobForRequest: async (): Promise<InvokeQuarantineAvJobResult> => ({
+              status: 'LAUNCHED',
+              executionName: 'exec-cli-run',
+            }),
+          },
+          clock: () => '2026-11-11T09:40:00.000Z',
+        });
+
+      // 7A: Cold-start standalone CLI execution (`require.main === module`)
+      //     initializes Firebase Admin once BEFORE first getFirestore() and getStorage()
+      const coldDb = new InMemoryAvExecutionFirestoreDatabase();
+      const coldAdminRepo = new InMemoryAdminRepo([ownerAdmin]);
+      const coldSeeded = seedFullEightDocChain(coldDb, 701, { format: 'PDF' });
+      const coldService = createCliDispatchService(coldDb, coldAdminRepo);
+
+      const coldDisp = await coldService.dispatchQuarantineAvInspection({
+        receiptId: coldSeeded.receiptId,
+        expectedRequestId: coldSeeded.requestId,
+        expectedSafetyCaseRevision: 1,
+        acknowledgedHumanCaseRevision: 2,
+        confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+      });
+      assert.equal(coldDisp.ok, true);
+
+      const coldBucket = createFakeGenerationPinnedBucket({
+        expectedStoragePath: coldSeeded.receipt.storagePath,
+        expectedGeneration: coldSeeded.generation!,
+        payloadBytes: coldSeeded.payloadBytes,
+      });
+
+      firebaseAdminRuntimeMock.enabled = true;
+      firebaseAdminRuntimeMock.apps = [];
+      firebaseAdminRuntimeMock.throwOnGetApps = null;
+      firebaseAdminRuntimeMock.throwOnInitializeApp = null;
+      firebaseAdminRuntimeMock.firestoreProvider = () => coldDb;
+      firebaseAdminRuntimeMock.storageBucketProvider = (bucketName: string) => {
+        assert.equal(bucketName, LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME);
+        return coldBucket;
+      };
+      firebaseAdminRuntimeMock.callOrder = [];
+      firebaseAdminRuntimeMock.getAppsCalls = 0;
+      firebaseAdminRuntimeMock.initializeAppCalls = 0;
+      firebaseAdminRuntimeMock.getFirestoreCalls = 0;
+      firebaseAdminRuntimeMock.getStorageCalls = 0;
+      firebaseAdminRuntimeMock.requestedBucketNames = [];
+
+      process.env[LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR] =
+        coldSeeded.requestId;
+
+      // Execute actual `if (require.main === module)` entrypoint by loading module with isMain=true
+      const coldExitCode = await new Promise<number>((resolve, reject) => {
+        const originalExit = process.exit;
+        const timeout = setTimeout(() => {
+          process.exit = originalExit;
+          reject(new Error('Standalone CLI entrypoint timed out'));
+        }, 10_000);
+
+        process.exit = ((code?: number) => {
+          clearTimeout(timeout);
+          process.exit = originalExit;
+          resolve(typeof code === 'number' ? code : 0);
+        }) as typeof process.exit;
+
+        delete require.cache[workerModulePath];
+        moduleWithLoad._load(workerModulePath, null, true);
+      });
+
+      assert.equal(coldExitCode, 0);
+      assert.equal(firebaseAdminRuntimeMock.initializeAppCalls, 1);
+      assert.equal(firebaseAdminRuntimeMock.getFirestoreCalls, 1);
+      assert.equal(firebaseAdminRuntimeMock.getStorageCalls, 1);
+      assert.deepEqual(firebaseAdminRuntimeMock.requestedBucketNames, [
+        LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME,
+      ]);
+
+      const initIdx = firebaseAdminRuntimeMock.callOrder.indexOf('initializeApp');
+      const firstFirestoreIdx =
+        firebaseAdminRuntimeMock.callOrder.indexOf('getFirestore');
+      const firstStorageIdx =
+        firebaseAdminRuntimeMock.callOrder.indexOf('getStorage');
+      assert.equal(firebaseAdminRuntimeMock.callOrder[0], 'getApps');
+      assert.equal(initIdx, 1);
+      assert.equal(initIdx < firstFirestoreIdx, true);
+      assert.equal(initIdx < firstStorageIdx, true);
+      assert.equal(firstFirestoreIdx < firstStorageIdx, true);
+      assert.equal(fs.readFileSync(scanCountFile, 'utf8'), '1');
+
+      const coldSavedExec = coldDb.getRawDoc(
+        LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
+        coldSeeded.requestId
+      );
+      assert.equal(coldSavedExec?.state, 'AV_NO_THREAT_DETECTED');
+      assert.equal(coldSavedExec?.exitCode, 0);
+      assert.equal(coldSavedExec?.isSanitized, false);
+      assert.equal(coldSavedExec?.isVerifiedSafe, false);
+      assert.equal(coldSavedExec?.isRightsApproved, false);
+      assert.equal(coldSavedExec?.isPublished, false);
+      assert.equal(coldSavedExec?.isReadyForPeia, false);
+
+      // 7B: Pre-existing default Firebase app -> zero duplicate initializeApp() calls
+      const warmDb = new InMemoryAvExecutionFirestoreDatabase();
+      const warmSeeded = seedFullEightDocChain(warmDb, 702, { format: 'PDF' });
+      const warmService = createCliDispatchService(warmDb, coldAdminRepo);
+
+      const warmDisp = await warmService.dispatchQuarantineAvInspection({
+        receiptId: warmSeeded.receiptId,
+        expectedRequestId: warmSeeded.requestId,
+        expectedSafetyCaseRevision: 1,
+        acknowledgedHumanCaseRevision: 2,
+        confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+      });
+      assert.equal(warmDisp.ok, true);
+
+      const warmBucket = createFakeGenerationPinnedBucket({
+        expectedStoragePath: warmSeeded.receipt.storagePath,
+        expectedGeneration: warmSeeded.generation!,
+        payloadBytes: warmSeeded.payloadBytes,
+      });
+
+      firebaseAdminRuntimeMock.apps = [Object.freeze({ name: '[DEFAULT]' })];
+      firebaseAdminRuntimeMock.firestoreProvider = () => warmDb;
+      firebaseAdminRuntimeMock.storageBucketProvider = () => warmBucket;
+      firebaseAdminRuntimeMock.callOrder = [];
+      firebaseAdminRuntimeMock.getAppsCalls = 0;
+      firebaseAdminRuntimeMock.initializeAppCalls = 0;
+      firebaseAdminRuntimeMock.getFirestoreCalls = 0;
+      firebaseAdminRuntimeMock.getStorageCalls = 0;
+      firebaseAdminRuntimeMock.requestedBucketNames = [];
+
+      process.env[LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR] =
+        warmSeeded.requestId;
+
+      let recordedWarmExitCode: number | null = null;
+      const warmReturnCode = await runLibraryQuarantineAvWorkerCli({
+        exit: (code: number) => {
+          recordedWarmExitCode = code;
+        },
+      });
+
+      assert.equal(warmReturnCode, 0);
+      assert.equal(recordedWarmExitCode, 0);
+      assert.equal(firebaseAdminRuntimeMock.getAppsCalls >= 1, true);
+      assert.equal(firebaseAdminRuntimeMock.initializeAppCalls, 0);
+      assert.equal(firebaseAdminRuntimeMock.getFirestoreCalls, 1);
+      assert.equal(firebaseAdminRuntimeMock.getStorageCalls, 1);
+      assert.equal(fs.readFileSync(scanCountFile, 'utf8'), '2');
+
+      const warmSavedExec = warmDb.getRawDoc(
+        LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
+        warmSeeded.requestId
+      );
+      assert.equal(warmSavedExec?.state, 'AV_NO_THREAT_DETECTED');
+
+      // 7C: Initialization failure -> fail-closed exit (1), zero scan execution,
+      //     zero Firestore/Storage calls or writes, and zero secret/metadata leakage
+      const failInitDb = new InMemoryAvExecutionFirestoreDatabase();
+      const failInitSeeded = seedFullEightDocChain(failInitDb, 703, {
+        format: 'PDF',
+      });
+      const failInitService = createCliDispatchService(
+        failInitDb,
+        coldAdminRepo
+      );
+
+      const failDisp = await failInitService.dispatchQuarantineAvInspection({
+        receiptId: failInitSeeded.receiptId,
+        expectedRequestId: failInitSeeded.requestId,
+        expectedSafetyCaseRevision: 1,
+        acknowledgedHumanCaseRevision: 2,
+        confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+      });
+      assert.equal(failDisp.ok, true);
+
+      const failInitBucket = createFakeGenerationPinnedBucket({
+        expectedStoragePath: failInitSeeded.receipt.storagePath,
+        expectedGeneration: failInitSeeded.generation!,
+        payloadBytes: failInitSeeded.payloadBytes,
+      });
+
+      const txCountBeforeFailInit = failInitDb.transactionCount;
+      const txUpdateBeforeFailInit = failInitDb.txUpdateCalls;
+      const txSetBeforeFailInit = failInitDb.txSetCalls;
+      const txCreateBeforeFailInit = failInitDb.txCreateCalls;
+
+      const secretInitMessage =
+        'ADC_SECRET_CREDENTIALS_FAILURE:/var/run/secrets/private_sa_key.json';
+      firebaseAdminRuntimeMock.apps = [];
+      firebaseAdminRuntimeMock.throwOnInitializeApp = new Error(
+        secretInitMessage
+      );
+      firebaseAdminRuntimeMock.firestoreProvider = () => failInitDb;
+      firebaseAdminRuntimeMock.storageBucketProvider = () => failInitBucket;
+      firebaseAdminRuntimeMock.callOrder = [];
+      firebaseAdminRuntimeMock.getAppsCalls = 0;
+      firebaseAdminRuntimeMock.initializeAppCalls = 0;
+      firebaseAdminRuntimeMock.getFirestoreCalls = 0;
+      firebaseAdminRuntimeMock.getStorageCalls = 0;
+
+      process.env[LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR] =
+        failInitSeeded.requestId;
+
+      let recordedFailExitCode: number | null = null;
+      const failReturnCode = await runLibraryQuarantineAvWorkerCli({
+        exit: (code: number) => {
+          recordedFailExitCode = code;
+        },
+      });
+
+      assert.equal(failReturnCode, 1);
+      assert.equal(recordedFailExitCode, 1);
+      assert.equal(firebaseAdminRuntimeMock.getAppsCalls, 1);
+      assert.equal(firebaseAdminRuntimeMock.initializeAppCalls, 1);
+      assert.equal(firebaseAdminRuntimeMock.getFirestoreCalls, 0);
+      assert.equal(firebaseAdminRuntimeMock.getStorageCalls, 0);
+      assert.equal(failInitBucket.metadataCalls, 0);
+      assert.equal(failInitBucket.streamCalls, 0);
+      assert.equal(fs.readFileSync(scanCountFile, 'utf8'), '2');
+      assert.equal(failInitDb.transactionCount, txCountBeforeFailInit);
+      assert.equal(failInitDb.txUpdateCalls, txUpdateBeforeFailInit);
+      assert.equal(failInitDb.txSetCalls, txSetBeforeFailInit);
+      assert.equal(failInitDb.txCreateCalls, txCreateBeforeFailInit);
+
+      const directTaskInitFail = await executeLibraryQuarantineAvWorkerTask({
+        requestId: failInitSeeded.requestId,
+      });
+      assert.equal(directTaskInitFail.ok, false);
+      assert.equal(directTaskInitFail.status, 'HOLD');
+      assert.equal(directTaskInitFail.execution, null);
+      assert.equal(
+        JSON.stringify(directTaskInitFail).includes(secretInitMessage),
+        false
+      );
+      assert.equal(
+        JSON.stringify(directTaskInitFail).includes(failInitSeeded.sha256),
+        false
+      );
+      assert.equal(firebaseAdminRuntimeMock.getFirestoreCalls, 0);
+      assert.equal(firebaseAdminRuntimeMock.getStorageCalls, 0);
+
+      const failInitExecAfter = failInitDb.getRawDoc(
+        LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
+        failInitSeeded.requestId
+      );
+      assert.equal(failInitExecAfter?.state, 'DISPATCHED_WAITING_WORKER');
+    } finally {
+      firebaseAdminRuntimeMock.enabled = false;
+      firebaseAdminRuntimeMock.apps = [];
+      firebaseAdminRuntimeMock.throwOnGetApps = null;
+      firebaseAdminRuntimeMock.throwOnInitializeApp = null;
+      firebaseAdminRuntimeMock.firestoreProvider = null;
+      firebaseAdminRuntimeMock.storageBucketProvider = null;
+
+      if (prevRequestIdEnv === undefined) {
+        delete process.env[LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR];
+      } else {
+        process.env[LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR] = prevRequestIdEnv;
+      }
+      if (prevClamDbDirEnv === undefined) {
+        delete process.env.POP_CLAMAV_DB_DIR;
+      } else {
+        process.env.POP_CLAMAV_DB_DIR = prevClamDbDirEnv;
+      }
+      if (prevClamScanPathEnv === undefined) {
+        delete process.env.POP_CLAMSCAN_PATH;
+      } else {
+        process.env.POP_CLAMSCAN_PATH = prevClamScanPathEnv;
+      }
+      fs.rmSync(cliFixtureDir, { recursive: true, force: true });
+    }
+  }
+
+  // =========================================================================
+  // TEST 8: Verify all 20 READ_ONLY files match their pinned Git blob SHA-1s
   // =========================================================================
   {
     for (const [relPath, expectedBlobSha1] of READ_ONLY_MANIFEST_EXPECTED_BLOBS) {
@@ -2018,7 +2465,7 @@ async function runTests(): Promise<void> {
   }
 
   console.log(
-    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 BACKEND TESTS PASSED (7/7).'
+    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 BACKEND TESTS PASSED (8/8).'
   );
 }
 

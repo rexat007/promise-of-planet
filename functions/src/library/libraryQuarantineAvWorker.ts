@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import {
@@ -345,7 +346,7 @@ export async function defaultVerifyClamAvEngineAndSignatures(params: {
       }
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code: number | null) => {
       if (settled) {
         return;
       }
@@ -433,7 +434,7 @@ export async function defaultRunClamScanSubprocess(params: {
       }
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code: number | null) => {
       if (!settled) {
         settled = true;
         clearTimeout(timer);
@@ -624,9 +625,31 @@ export async function executeLibraryQuarantineAvWorkerTask(
     if (options.db) {
       avStore = new FirestoreLibraryQuarantineAvExecutionStore(options.db);
     } else {
-      avStore = new FirestoreLibraryQuarantineAvExecutionStore(
-        getFirestore() as unknown as LibraryQuarantineReviewDraftFirestoreDatabase
-      );
+      if (!ensureQuarantineAvWorkerFirebaseAppInitialized()) {
+        return Object.freeze({
+          ok: false,
+          status: 'HOLD',
+          requestId: parsedId.requestId,
+          execution: null,
+          failureReasonCode: 'JOB_CONFIG_MISSING_OR_INVALID',
+          tempCleanedUp: true,
+        });
+      }
+      let firestoreDb: LibraryQuarantineReviewDraftFirestoreDatabase;
+      try {
+        firestoreDb =
+          getFirestore() as unknown as LibraryQuarantineReviewDraftFirestoreDatabase;
+      } catch {
+        return Object.freeze({
+          ok: false,
+          status: 'HOLD',
+          requestId: parsedId.requestId,
+          execution: null,
+          failureReasonCode: 'JOB_CONFIG_MISSING_OR_INVALID',
+          tempCleanedUp: true,
+        });
+      }
+      avStore = new FirestoreLibraryQuarantineAvExecutionStore(firestoreDb);
     }
   }
 
@@ -670,7 +693,7 @@ export async function executeLibraryQuarantineAvWorkerTask(
     });
   }
 
-  if (claimResult.status === 'HOLD') {
+  if (claimResult.status !== 'CLAIMED') {
     return Object.freeze({
       ok: false,
       status: 'HOLD',
@@ -742,9 +765,26 @@ export async function executeLibraryQuarantineAvWorkerTask(
   // Step 3: Bind strictly to dedicated quarantine bucket (never default bucket)
   let bucket = options.bucket;
   if (!bucket) {
-    bucket = getStorage().bucket(
-      LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME
-    ) as unknown as GenerationPinnedQuarantineBucket;
+    if (!ensureQuarantineAvWorkerFirebaseAppInitialized()) {
+      return recordFailClosed('QUARANTINE_BUCKET_MISMATCH', {
+        engineName: 'ClamAV',
+        engineVersion: sigCheck.engineVersion,
+        signatureVersion: sigCheck.signatureVersion,
+        signatureUpdatedAt: sigCheck.signatureUpdatedAt,
+      });
+    }
+    try {
+      bucket = getStorage().bucket(
+        LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME
+      ) as unknown as GenerationPinnedQuarantineBucket;
+    } catch {
+      return recordFailClosed('QUARANTINE_BUCKET_MISMATCH', {
+        engineName: 'ClamAV',
+        engineVersion: sigCheck.engineVersion,
+        signatureVersion: sigCheck.signatureVersion,
+        signatureUpdatedAt: sigCheck.signatureUpdatedAt,
+      });
+    }
   }
 
   if (
@@ -1027,19 +1067,53 @@ export async function executeLibraryQuarantineAvWorkerTask(
   }
 }
 
+export function ensureQuarantineAvWorkerFirebaseAppInitialized(): boolean {
+  try {
+    const existingApps = getApps();
+    if (!Array.isArray(existingApps)) {
+      return false;
+    }
+    if (existingApps.length === 0) {
+      initializeApp();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface QuarantineAvWorkerCliOptions {
+  readonly workerOptions?: QuarantineAvWorkerOptions;
+  readonly exit?: (code: number) => void;
+}
+
+export async function runLibraryQuarantineAvWorkerCli(
+  cliOptions: QuarantineAvWorkerCliOptions = {}
+): Promise<number> {
+  const exitFn = cliOptions.exit ?? ((code: number) => process.exit(code));
+  if (!ensureQuarantineAvWorkerFirebaseAppInitialized()) {
+    exitFn(1);
+    return 1;
+  }
+
+  try {
+    const result = await executeLibraryQuarantineAvWorkerTask(
+      cliOptions.workerOptions
+    );
+    const exitCode =
+      result.status === 'COMPLETED_CLEAN' ||
+      result.status === 'COMPLETED_THREAT' ||
+      result.status === 'SKIPPED_ALREADY_TERMINAL'
+        ? 0
+        : 1;
+    exitFn(exitCode);
+    return exitCode;
+  } catch {
+    exitFn(1);
+    return 1;
+  }
+}
+
 if (require.main === module) {
-  executeLibraryQuarantineAvWorkerTask()
-    .then((result) => {
-      if (
-        result.status === 'COMPLETED_CLEAN' ||
-        result.status === 'COMPLETED_THREAT' ||
-        result.status === 'SKIPPED_ALREADY_TERMINAL'
-      ) {
-        process.exit(0);
-      }
-      process.exit(1);
-    })
-    .catch(() => {
-      process.exit(1);
-    });
+  void runLibraryQuarantineAvWorkerCli();
 }
