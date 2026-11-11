@@ -122,6 +122,8 @@ export const BINARY_SAFETY_STORE_SAFE_MESSAGES: Readonly<
     'Human review case status must be one of IN_REVIEW, NEEDS_INFORMATION, METADATA_RECORDED, or NOT_SUITABLE.',
   METADATA_RECORDED_REQUIREMENTS_NOT_MET:
     'METADATA_RECORDED requires at least one document title and non-empty source evidence notes.',
+  JUSTIFICATION_NOTES_REQUIRED:
+    'NEEDS_INFORMATION and NOT_SUITABLE statuses require non-empty reviewerNotes justification.',
   EMPTY_REVIEW_CASE_NOT_ALLOWED:
     'Human review case must include at least one non-empty descriptive field or reviewer note.',
   INVALID_PERSISTED_CASE_SCHEMA:

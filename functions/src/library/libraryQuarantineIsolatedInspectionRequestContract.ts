@@ -13,7 +13,7 @@ import {
   isValidUploaderUid,
 } from './libraryQuarantineReceiptContract';
 import { parseCanonicalSafeGcsGeneration } from './gcsLibraryQuarantineStorageAdapter';
-import { LIBRARY_UPLOAD_MAX_BYTES } from './libraryUploadBinaryAdmission';
+import { MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES } from './libraryUploadBinaryAdmission';
 
 export type {
   LibraryQuarantineBinarySafetyDeepInspectionStatus,
@@ -438,7 +438,7 @@ export function validatePersistedLibraryQuarantineIsolatedInspectionRequest(
     typeof raw.sourceByteSize !== 'number' ||
     !Number.isSafeInteger(raw.sourceByteSize) ||
     raw.sourceByteSize < 1 ||
-    raw.sourceByteSize > LIBRARY_UPLOAD_MAX_BYTES
+    raw.sourceByteSize > MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES
   ) {
     return {
       ok: false,

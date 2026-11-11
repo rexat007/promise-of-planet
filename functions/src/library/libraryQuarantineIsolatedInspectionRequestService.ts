@@ -563,12 +563,11 @@ export class LibraryQuarantineIsolatedInspectionRequestService {
 
     const adminId =
       typeof adminUser.id === 'string' ? adminUser.id.trim() : '';
+    const rawOptionalUid = (adminUser as { readonly uid?: unknown }).uid;
     const adminUid =
-      typeof (adminUser as { readonly uid?: unknown }).uid === 'string'
-        ? ((adminUser as { readonly uid: string }).uid).trim()
-        : '';
+      typeof rawOptionalUid === 'string' ? rawOptionalUid.trim() : '';
 
-    if (adminId !== uid && adminUid !== uid) {
+    if (!adminId || adminId !== uid || (adminUid !== '' && adminUid !== uid)) {
       return {
         ok: false,
         errorCode: 'UNAUTHORIZED_ISOLATED_INSPECTION_OWNER_HOLD',
@@ -869,6 +868,10 @@ export class LibraryQuarantineIsolatedInspectionRequestService {
       return makeRecordUnknownDto(receiptId);
     }
 
-    return makeRecordHoldDto(storeResult.reasonCode, receiptId);
+    if (storeResult.status === 'HOLD') {
+      return makeRecordHoldDto(storeResult.reasonCode, receiptId);
+    }
+
+    return makeRecordHoldDto('TRANSACTION_ABORTED_NO_WRITE', receiptId);
   }
 }

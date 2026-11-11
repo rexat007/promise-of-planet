@@ -25,6 +25,7 @@ import {
   verifyQuarantineBinarySafetyChainSnapshots,
 } from './firestoreLibraryQuarantineBinarySafetyCaseStore';
 import {
+  ISOLATED_INSPECTION_STORE_SAFE_MESSAGES,
   LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUESTS_COLLECTION,
   verifyQuarantineIsolatedInspectionChainEligibility,
   type EligibleIsolatedInspectionChainSnapshot,
@@ -141,6 +142,8 @@ export type LibraryQuarantineAvExecutionErrorCode =
   | 'UNAUTHENTICATED_CALLER_HOLD'
   | 'UNAUTHORIZED_AV_EXECUTION_OWNER_HOLD'
   | 'INSPECTION_REQUEST_NOT_RECORDED_HOLD'
+  | 'INSPECTION_REQUEST_INCOMPATIBLE_WITH_SOURCE'
+  | 'TIMESTAMP_BEFORE_SAFETY_CASE_HOLD'
   | 'REQUEST_ID_MISMATCH_HOLD'
   | 'CORRUPTED_EXISTING_AV_EXECUTION'
   | 'AV_EXECUTION_PROVENANCE_MISMATCH'
@@ -150,114 +153,19 @@ export type LibraryQuarantineAvExecutionErrorCode =
 export const AV_EXECUTION_SAFE_MESSAGES: Readonly<
   Record<LibraryQuarantineAvExecutionErrorCode, string>
 > = Object.freeze({
-  INVALID_PERSISTED_INSPECTION_REQUEST_SCHEMA:
-    'Persisted isolated inspection request failed strict 23-field closed schema validation.',
-  INVALID_SANITIZED_INSPECTION_REQUEST_DTO:
-    'Sanitized isolated inspection request DTO failed strict 19-field validation.',
+  ...ISOLATED_INSPECTION_STORE_SAFE_MESSAGES,
   SECURITY_POSTURE_VIOLATION:
     'Isolated AV execution record violated mandatory false security posture locks.',
-  INVALID_BINARY_SAFETY_INPUT_OBJECT:
-    'Binary safety input must be a plain object.',
-  UNTRUSTED_OR_FORBIDDEN_BINARY_SAFETY_FIELD:
-    'Payload contains an unexpected, privileged, or forbidden property.',
-  INVALID_BINARY_SAFETY_DISPOSITION: 'Invalid binary safety disposition.',
-  INVALID_PLAIN_TEXT_FIELD: 'Invalid plain text field.',
-  FIELD_MAX_LENGTH_EXCEEDED: 'Field exceeds maximum character length.',
-  EXTERNAL_REPORT_REQUIREMENTS_NOT_MET:
-    'External report requirements are not met.',
-  DO_NOT_PROCESS_JUSTIFICATION_REQUIRED:
-    'DO_NOT_PROCESS requires reviewNotes justification.',
-  EMPTY_BINARY_SAFETY_CASE_NOT_ALLOWED: 'Binary safety case cannot be empty.',
-  INVALID_PERSISTED_BINARY_SAFETY_SCHEMA:
-    'Persisted binary safety case failed strict schema validation.',
-  INVALID_PERSISTED_BINARY_SAFETY_EVENT_SCHEMA:
-    'Persisted binary safety event failed strict schema validation.',
-  INVALID_CASE_INPUT_OBJECT: 'Invalid human review case input.',
-  UNTRUSTED_OR_FORBIDDEN_CASE_FIELD:
-    'Unexpected or forbidden field in human review case.',
-  INVALID_CASE_STATUS: 'Invalid human review case status.',
-  METADATA_RECORDED_REQUIREMENTS_NOT_MET:
-    'Human review case does not meet METADATA_RECORDED requirements.',
-  EMPTY_REVIEW_CASE_NOT_ALLOWED: 'Human review case cannot be empty.',
-  INVALID_PERSISTED_CASE_SCHEMA:
-    'Persisted human review case failed strict schema validation.',
-  INVALID_PERSISTED_EVENT_SCHEMA:
-    'Persisted human review event failed strict schema validation.',
-  INVALID_RECEIPT_ID:
-    'Quarantine receiptId must be a lowercase 32-character hexadecimal identifier.',
-  INVALID_EXPECTED_REVISION: 'Invalid expected revision integer.',
-  INVALID_ACTOR_UID: 'Invalid authenticated actor UID.',
-  INVALID_TIMESTAMP: 'Timestamp must be a canonical UTC ISO-8601 string.',
-  DOCUMENT_ID_MISMATCH:
-    'Firestore document identifier does not match the expected quarantine key.',
-  SOURCE_RECEIPT_NOT_FOUND:
-    'Authoritative quarantine receipt does not exist in library_quarantine_receipts.',
-  CORRUPTED_SOURCE_RECEIPT:
-    'Authoritative quarantine receipt failed strict envelope schema validation.',
-  RECEIPT_NEEDS_RECONCILIATION:
-    'Quarantine receipt requires storage reconciliation and is held.',
-  RECEIPT_NOT_ELIGIBLE_FOR_HUMAN_REVIEW:
-    'Quarantine receipt is not in an eligible Quarantined state with verified private storage write.',
-  REVIEW_DRAFT_NOT_LINKED:
-    'Quarantine receipt does not have a linked PENDING_HUMAN_REVIEW draft record.',
-  CORRUPTED_REVIEW_DRAFT:
-    'Linked quarantine review draft failed strict schema validation.',
-  DRAFT_SOURCE_MISMATCH:
-    'Linked quarantine review draft does not match the authoritative source receipt.',
-  CORRUPTED_EXISTING_HUMAN_REVIEW_CASE:
-    'Existing persisted human review case failed strict schema validation.',
-  CASE_SOURCE_STALE_OR_MISMATCHED:
-    'Existing human review case does not match the current source receipt or draft revision.',
-  CASE_REVISION_CONFLICT: 'Human review case revision changed concurrently.',
-  HUMAN_REVIEW_CASE_NOT_FOUND:
-    'Human review case has not been recorded yet for this quarantine receipt.',
-  CASE_NOT_METADATA_RECORDED:
-    'Human review case must be saved in METADATA_RECORDED status.',
-  CATALOG_HANDOFF_NOT_CREATED_HOLD:
-    'Internal catalog draft (qcat-) has not been created yet.',
-  INCONSISTENT_EXISTING_HANDOFF_STATE:
-    'Existing catalog handoff or qcat- draft document is incomplete or inconsistent.',
-  INVALID_PERSISTED_HANDOFF_SCHEMA:
-    'Persisted catalog handoff failed strict schema validation.',
-  HANDOFF_SOURCE_MISMATCH:
-    'Existing catalog handoff record does not match the current quarantine receipt.',
-  SOURCE_CASE_VERSION_DRIFT_HOLD:
-    'Current human review case revision has drifted from the aligned catalog draft revision.',
-  UNACKNOWLEDGED_CASE_REVISION_HOLD:
-    'Explicit acknowledgement of the current effective aligned human review case revision is required.',
-  STALE_BINARY_SAFETY_EVIDENCE_HOLD:
-    'Existing binary safety evidence is stale for the current human review case revision.',
-  CORRUPTED_EXISTING_BINARY_SAFETY_CASE:
-    'Existing persisted binary safety case failed strict schema validation.',
-  BINARY_SAFETY_SOURCE_MISMATCH:
-    'Existing persisted binary safety case does not match the authoritative source receipt.',
-  BINARY_SAFETY_REVISION_CONFLICT:
-    'Binary safety case revision changed concurrently.',
-  AUDIT_EVENT_ALREADY_EXISTS: 'Audit event already exists.',
-  TIMESTAMP_BEFORE_SOURCE_OR_PRIOR_REVISION:
-    'Timestamp cannot precede the source chain or prior revision timestamp.',
-  TRANSACTION_ABORTED_NO_WRITE:
-    'Transaction aborted before any write was committed.',
   TRANSACTION_COMMIT_UNCERTAIN:
     'Transaction commit acknowledgement or job dispatch status was uncertain; verify state via GET before retrying.',
   STORE_READ_FAILED:
     'Point lookup of quarantine AV execution records failed in Firestore.',
-  BINARY_SAFETY_CASE_NOT_RECORDED_HOLD:
-    'Binary safety case has not been saved yet for this quarantine receipt.',
-  STALE_BINARY_SAFETY_CASE_HOLD:
-    'Saved binary safety case is stale for the current aligned human review case revision.',
   BINARY_SAFETY_DISPOSITION_NOT_ELIGIBLE_HOLD:
     'Isolated AV execution is only permitted when the current saved binary safety case disposition is ISOLATED_ASSESSMENT_REQUIRED.',
-  INVALID_EXPECTED_SAFETY_CASE_REVISION:
-    'expectedSafetyCaseRevision must be a positive safe integer (>= 1).',
-  UNACKNOWLEDGED_HUMAN_CASE_REVISION_HOLD:
-    'acknowledgedHumanCaseRevision must match the current effective aligned human review case revision.',
   CONFIRMATION_LITERAL_REQUIRED_HOLD:
     'confirmation must equal START_REAL_ISOLATED_AV_SCAN.',
   SAFETY_CASE_REVISION_CONFLICT:
     'Saved binary safety case revision changed concurrently; reload the latest binary safety case before dispatching.',
-  CORRUPTED_EXISTING_INSPECTION_REQUEST:
-    'Existing persisted isolated inspection request failed strict 23-field schema validation.',
   INSPECTION_REQUEST_INCOMPATIBLE_WITH_SOURCE:
     'Existing isolated inspection request record is incompatible with the authoritative source chain.',
   TIMESTAMP_BEFORE_SAFETY_CASE_HOLD:
@@ -627,6 +535,39 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
     }
   }
 
+  private setAvExecutionRecordInTransaction(
+    tx: LibraryQuarantineReviewDraftFirestoreTransaction,
+    execRef: LibraryQuarantineFirestoreDocumentRef,
+    record: LibraryQuarantinePersistedAvExecution
+  ): void {
+    this.assertAllowedWriteCollection(
+      LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION
+    );
+    if (execRef.id !== undefined && execRef.id !== record.requestId) {
+      throw new Error(
+        'DOCUMENT_ID_MISMATCH: AV execution document reference ID does not match record.requestId.'
+      );
+    }
+    const setFn = (
+      tx as Partial<{
+        set(
+          documentRef: LibraryQuarantineFirestoreDocumentRef,
+          data: Record<string, unknown>
+        ): unknown;
+      }>
+    )?.set;
+    if (typeof setFn !== 'function') {
+      throw new Error(
+        'INVALID_AV_EXECUTION_TRANSACTION: Firestore transaction does not expose a set() method for AV execution CAS updates.'
+      );
+    }
+    setFn.call(
+      tx,
+      execRef,
+      toFirestoreDocumentData(record) as Record<string, unknown>
+    );
+  }
+
   private getPointDocRef(
     collectionName: string,
     docId: string
@@ -802,7 +743,7 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
         sourceRevision: eligibleChain.chainSnapshot.receiptEnvelope.revision,
         sourceUpdatedAt: receipt.updatedAt,
         sourceSha256: receipt.sha256,
-        sourceGeneration: receipt.generation,
+        sourceGeneration: eligibleChain.sourceGeneration,
         sourceByteSize: receipt.byteSize,
         sourceFormat: eligibleChain.chainSnapshot.sourceFormat,
         deepInspectionStatus: eligibleChain.chainSnapshot.deepInspectionStatus,
@@ -1078,7 +1019,7 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
             sourceRevision: chainSnapshot.receiptEnvelope.revision,
             sourceUpdatedAt: receipt.updatedAt,
             sourceSha256: receipt.sha256,
-            sourceGeneration: receipt.generation,
+            sourceGeneration: eligibleChain.sourceGeneration,
             sourceByteSize: receipt.byteSize,
             sourceFormat: chainSnapshot.sourceFormat,
             deepInspectionStatus: chainSnapshot.deepInspectionStatus,
@@ -1164,7 +1105,7 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
               sourceRevision: chainSnapshot.receiptEnvelope.revision,
               sourceUpdatedAt: receipt.updatedAt,
               sourceSha256: receipt.sha256,
-              sourceGeneration: receipt.generation,
+              sourceGeneration: eligibleChain.sourceGeneration,
               sourceByteSize: receipt.byteSize,
               sourceFormat: chainSnapshot.sourceFormat,
               deepInspectionStatus: chainSnapshot.deepInspectionStatus,
@@ -1358,13 +1299,7 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
             });
           }
 
-          this.assertAllowedWriteCollection(
-            LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION
-          );
-          tx.set(
-            execRef,
-            toFirestoreDocumentData(updated) as Record<string, unknown>
-          );
+          this.setAvExecutionRecordInTransaction(tx, execRef, updated);
 
           return Object.freeze({
             ok: true as const,
@@ -1546,13 +1481,7 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
                 isPublished: false as const,
                 isReadyForPeia: false as const,
               });
-            this.assertAllowedWriteCollection(
-              LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION
-            );
-            tx.set(
-              execRef,
-              toFirestoreDocumentData(staleRecord) as Record<string, unknown>
-            );
+            this.setAvExecutionRecordInTransaction(tx, execRef, staleRecord);
             return Object.freeze({
               status: 'STALE_HOLD' as const,
               execution: staleRecord,
@@ -1583,7 +1512,7 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
             sourceRevision: eligibleChain.chainSnapshot.receiptEnvelope.revision,
             sourceUpdatedAt: receipt.updatedAt,
             sourceSha256: receipt.sha256,
-            sourceGeneration: receipt.generation,
+            sourceGeneration: eligibleChain.sourceGeneration,
             sourceByteSize: receipt.byteSize,
             sourceFormat: eligibleChain.chainSnapshot.sourceFormat,
             deepInspectionStatus:
@@ -1653,13 +1582,7 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
             });
           }
 
-          this.assertAllowedWriteCollection(
-            LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION
-          );
-          tx.set(
-            execRef,
-            toFirestoreDocumentData(claimedExec) as Record<string, unknown>
-          );
+          this.setAvExecutionRecordInTransaction(tx, execRef, claimedExec);
 
           return Object.freeze({
             status: 'CLAIMED' as const,
@@ -1841,7 +1764,7 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
                   eligibleChain.chainSnapshot.receiptEnvelope.revision,
                 sourceUpdatedAt: receipt.updatedAt,
                 sourceSha256: receipt.sha256,
-                sourceGeneration: receipt.generation,
+                sourceGeneration: eligibleChain.sourceGeneration,
                 sourceByteSize: receipt.byteSize,
                 sourceFormat: eligibleChain.chainSnapshot.sourceFormat,
                 deepInspectionStatus:
@@ -1871,8 +1794,10 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
                 effectiveTargetState = 'STALE_HOLD';
                 effectiveFailureReason = 'SOURCE_CHAIN_DRIFT_DURING_SCAN';
               } else if (
+                receipt.generation !== eligibleChain.sourceGeneration ||
                 (params.observedGcsGeneration !== undefined &&
-                  params.observedGcsGeneration !== receipt.generation) ||
+                  params.observedGcsGeneration !==
+                    eligibleChain.sourceGeneration) ||
                 (params.observedSha256 !== undefined &&
                   params.observedSha256 !== receipt.sha256) ||
                 (params.observedByteSize !== undefined &&
@@ -1932,13 +1857,7 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
             });
           }
 
-          this.assertAllowedWriteCollection(
-            LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION
-          );
-          tx.set(
-            execRef,
-            toFirestoreDocumentData(finalExec) as Record<string, unknown>
-          );
+          this.setAvExecutionRecordInTransaction(tx, execRef, finalExec);
 
           return Object.freeze({
             status: 'RECORDED' as const,
@@ -2190,12 +2109,11 @@ export class LibraryQuarantineAvExecutionService {
 
     const adminId =
       typeof adminUser.id === 'string' ? adminUser.id.trim() : '';
+    const rawOptionalUid = (adminUser as { readonly uid?: unknown }).uid;
     const adminUid =
-      typeof (adminUser as { readonly uid?: unknown }).uid === 'string'
-        ? ((adminUser as { readonly uid: string }).uid).trim()
-        : '';
+      typeof rawOptionalUid === 'string' ? rawOptionalUid.trim() : '';
 
-    if (adminId !== uid && adminUid !== uid) {
+    if (!adminId || adminId !== uid || (adminUid !== '' && adminUid !== uid)) {
       return {
         ok: false,
         errorCode: 'UNAUTHORIZED_AV_EXECUTION_OWNER_HOLD',

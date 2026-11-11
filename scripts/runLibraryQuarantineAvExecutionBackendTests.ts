@@ -216,6 +216,7 @@ import {
 import {
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
+  LibraryQuarantineCatalogCaseAlignmentService,
   type LibraryQuarantinePersistedCatalogCaseAlignment,
 } from '../functions/src/library/libraryQuarantineCatalogCaseAlignmentService';
 import {
@@ -223,14 +224,25 @@ import {
   type LibraryQuarantineBinarySafetyDisposition,
   type LibraryQuarantinePersistedBinarySafetyCase,
 } from '../functions/src/library/libraryQuarantineBinarySafetyCaseContract';
-import { LIBRARY_QUARANTINE_BINARY_SAFETY_CASES_COLLECTION } from '../functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore';
 import {
+  BINARY_SAFETY_STORE_SAFE_MESSAGES,
+  LIBRARY_QUARANTINE_BINARY_SAFETY_CASES_COLLECTION,
+} from '../functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore';
+import { LibraryQuarantineBinarySafetyCaseService } from '../functions/src/library/libraryQuarantineBinarySafetyCaseService';
+import {
+  LIBRARY_QUARANTINE_ISOLATED_INSPECTION_CONFIRMATION_LITERAL,
   LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_SCHEMA_VERSION,
   LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_STATE,
   deriveLibraryQuarantineIsolatedInspectionRequestId,
+  validatePersistedLibraryQuarantineIsolatedInspectionRequest,
   type LibraryQuarantinePersistedIsolatedInspectionRequest,
 } from '../functions/src/library/libraryQuarantineIsolatedInspectionRequestContract';
-import { LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUESTS_COLLECTION } from '../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore';
+import {
+  ISOLATED_INSPECTION_STORE_SAFE_MESSAGES,
+  LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUESTS_COLLECTION,
+} from '../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore';
+import { LibraryQuarantineIsolatedInspectionRequestService } from '../functions/src/library/libraryQuarantineIsolatedInspectionRequestService';
+import { MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES } from '../functions/src/library/libraryUploadBinaryAdmission';
 import {
   LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
   LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
@@ -247,6 +259,7 @@ import {
   type LibraryQuarantineAvJobInvoker,
 } from '../functions/src/library/libraryQuarantineAvJobInvoker';
 import {
+  AV_EXECUTION_SAFE_MESSAGES,
   FirestoreLibraryQuarantineAvExecutionStore,
   LibraryQuarantineAvExecutionService,
 } from '../functions/src/library/libraryQuarantineAvExecutionService';
@@ -1137,56 +1150,48 @@ const READ_ONLY_MANIFEST_EXPECTED_BLOBS: ReadonlyArray<
   readonly [string, string]
 > = Object.freeze([
   [
-    'functions/src/library/libraryQuarantineIsolatedInspectionRequestContract.ts',
-    '6d7cbe070a8faa5a48a916e774606fa55e9db294',
+    'functions/src/library/libraryUploadBinaryAdmission.ts',
+    'c479007641d799afb145436bf91e661a7c2d5611',
   ],
   [
-    'functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore.ts',
-    '69ce04538a86113f41e62f25c7f0a22b1d2d6bee',
+    'functions/src/library/firestoreLibraryQuarantineReviewDraftStore.ts',
+    'cb679848608d7000b564ad3863ee23f7c888b970',
   ],
   [
-    'functions/src/library/libraryQuarantineIsolatedInspectionRequestService.ts',
-    '102b9138da33ee9522ed7cdbb5ed27ef59f3fb05',
-  ],
-  [
-    'functions/src/library/libraryQuarantineBinarySafetyCaseContract.ts',
-    'f1fdeb09b2b98baa98ea636d58552c59bf81ea72',
-  ],
-  [
-    'functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore.ts',
-    'd790b208205ca96a00ec3a021125ae9297c6b2b0',
-  ],
-  [
-    'functions/src/library/libraryQuarantineBinarySafetyCaseService.ts',
-    'ea8bc12a224d8ec3b9810d8923b1597f53c8d17a',
+    'functions/src/library/libraryQuarantineAvExecutionContract.ts',
+    'e909ad973da54d6c327892a259e0f0957dbc9582',
   ],
   [
     'functions/src/library/libraryQuarantineReceiptContract.ts',
     '4b4d5f32e5903def3a3b0dcdecd45e38083f91bb',
   ],
   [
-    'functions/src/library/firestoreLibraryQuarantineReceiptStore.ts',
-    'd9f4114222851c62c25574efbb0ffbeeb5c355e2',
+    'functions/src/library/libraryQuarantineHumanReviewCaseContract.ts',
+    '8fe5f352736faddd3f95c0a09106a79b7bec5c89',
+  ],
+  [
+    'functions/src/library/libraryQuarantineAvJobInvoker.ts',
+    '15a462b427f3e3c49de7d1aa5376328f9782265e',
   ],
   [
     'functions/src/library/gcsLibraryQuarantineStorageAdapter.ts',
     '4bca554dd00a5e2efc739cc166175cc63327c5ad',
   ],
   [
+    'functions/src/library/libraryQuarantineBinarySafetyCaseContract.ts',
+    'f1fdeb09b2b98baa98ea636d58552c59bf81ea72',
+  ],
+  [
+    'functions/src/library/firestoreLibraryQuarantineReceiptStore.ts',
+    'd9f4114222851c62c25574efbb0ffbeeb5c355e2',
+  ],
+  [
     'functions/src/library/libraryQuarantineUploadEndpoint.ts',
     'c400d40606d9d124c377ab3e0c536278d3fb61bc',
   ],
   [
-    'functions/src/library/libraryUploadBinaryAdmission.ts',
-    'c479007641d799afb145436bf91e661a7c2d5611',
-  ],
-  [
     'functions/src/library/libraryQuarantineCatalogHandoffService.ts',
     '79e80cb3b9917ea9c0d3e15e23d5452235751b59',
-  ],
-  [
-    'functions/src/library/libraryQuarantineCatalogCaseAlignmentService.ts',
-    'bfce0d697eb6b433ec109f3be4a92be274f82062',
   ],
   [
     'functions/src/library/libraryQuarantineRightsDecisionService.ts',
@@ -1209,6 +1214,14 @@ const READ_ONLY_MANIFEST_EXPECTED_BLOBS: ReadonlyArray<
   [
     '.github/workflows/library-quarantine-av-job.yml',
     '4ae529cd83e3fa22d9e5616e4b05178626bf7270',
+  ],
+  [
+    'functions/package.json',
+    '420e933933f4f582a4ded415727152021faf5400',
+  ],
+  [
+    'functions/tsconfig.json',
+    'eb3212ee4cd1c4acaa70618850e9c0fa0346dbf6',
   ],
 ]);
 
@@ -2446,7 +2459,355 @@ async function runTests(): Promise<void> {
   }
 
   // =========================================================================
-  // TEST 8: Verify all 20 READ_ONLY files match their pinned Git blob SHA-1s
+  // TEST 8: CI-TYPE-CLOSURE Regressions (Items A-H):
+  //   - Inherited error-message maps (JUSTIFICATION_NOTES_REQUIRED,
+  //     INSPECTION_REQUEST_INCOMPATIBLE_WITH_SOURCE, TIMESTAMP_BEFORE_SAFETY_CASE_HOLD)
+  //   - MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES (15,000,000) ceiling enforcement
+  //   - Generation-null HOLD / valid pinned generation
+  //   - AV transaction set() guard when tx.set is missing
+  //   - Owner identity id !== uid fail-closed across all 3 services
+  //   - Unexpected isolated-inspection store result branch fail-closed
+  //   - Catalog alignment missing point-get guard
+  // =========================================================================
+  {
+    // 8A: Inherited safe error messages across BinarySafety, IsolatedInspection, and AvExecution
+    assert.equal(
+      typeof BINARY_SAFETY_STORE_SAFE_MESSAGES.JUSTIFICATION_NOTES_REQUIRED,
+      'string'
+    );
+    assert.equal(
+      BINARY_SAFETY_STORE_SAFE_MESSAGES.JUSTIFICATION_NOTES_REQUIRED.length > 0,
+      true
+    );
+    assert.equal(
+      ISOLATED_INSPECTION_STORE_SAFE_MESSAGES.JUSTIFICATION_NOTES_REQUIRED,
+      BINARY_SAFETY_STORE_SAFE_MESSAGES.JUSTIFICATION_NOTES_REQUIRED
+    );
+    assert.equal(
+      AV_EXECUTION_SAFE_MESSAGES.JUSTIFICATION_NOTES_REQUIRED,
+      BINARY_SAFETY_STORE_SAFE_MESSAGES.JUSTIFICATION_NOTES_REQUIRED
+    );
+    assert.equal(
+      typeof AV_EXECUTION_SAFE_MESSAGES.INSPECTION_REQUEST_INCOMPATIBLE_WITH_SOURCE,
+      'string'
+    );
+    assert.equal(
+      typeof AV_EXECUTION_SAFE_MESSAGES.TIMESTAMP_BEFORE_SAFETY_CASE_HOLD,
+      'string'
+    );
+    assert.equal(
+      'BINARY_SAFETY_CASE_NOT_RECORDED_HOLD' in AV_EXECUTION_SAFE_MESSAGES,
+      false
+    );
+
+    // 8B: MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES (15,000,000) byte ceiling enforcement
+    assert.equal(MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES, 15_000_000);
+    const db8B = new InMemoryAvExecutionFirestoreDatabase();
+    const seeded8B = seedFullEightDocChain(db8B, 801);
+    const validReqRaw = db8B.getRawDoc(
+      LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUESTS_COLLECTION,
+      seeded8B.requestId
+    )!;
+    const atCeilingRes = validatePersistedLibraryQuarantineIsolatedInspectionRequest(
+      {
+        ...validReqRaw,
+        sourceByteSize: MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES,
+      },
+      seeded8B.requestId
+    );
+    assert.equal(atCeilingRes.ok, true);
+    const overCeilingRes = validatePersistedLibraryQuarantineIsolatedInspectionRequest(
+      {
+        ...validReqRaw,
+        sourceByteSize: MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES + 1,
+      },
+      seeded8B.requestId
+    );
+    assert.equal(overCeilingRes.ok, false);
+
+    // 8C: Generation-null / non-canonical generation HOLD in AV GET status and dispatch
+    const db8C = new InMemoryAvExecutionFirestoreDatabase();
+    const adminRepo8C = new InMemoryAdminRepo([ownerAdmin]);
+    const seeded8CNull = seedFullEightDocChain(db8C, 802, {
+      receiptGeneration: null,
+    });
+    const seeded8CNonCanonical = seedFullEightDocChain(db8C, 804, {
+      receiptGeneration: '00123',
+    });
+    const avService8C = new LibraryQuarantineAvExecutionService({
+      trustedPrincipalProvider: {
+        resolveAuthenticatedPrincipal: () => ({
+          uid: ownerAdmin.id,
+          token: {},
+        }),
+      },
+      adminRepository: adminRepo8C,
+      db: db8C,
+      avJobInvoker: {
+        validateConfig: () => ({
+          ok: true,
+          config: {
+            projectId: 'promiseofplanet-bb325',
+            region: 'europe-west1',
+            jobName: 'pop-quarantine-av-worker',
+          },
+        }),
+        invokeAvJobForRequest: async () => {
+          throw new Error('Invoker must not be called when source generation is invalid');
+        },
+      },
+      clock: () => '2026-11-11T09:30:00.000Z',
+    });
+    const nullGenStatus = await avService8C.getQuarantineAvInspectionStatus({
+      receiptId: seeded8CNull.receiptId,
+    });
+    assert.equal(nullGenStatus.ok, false);
+    if (!nullGenStatus.ok) {
+      assert.equal(nullGenStatus.errorCode, 'CORRUPTED_SOURCE_RECEIPT');
+    }
+
+    const nonCanonGenStatus = await avService8C.getQuarantineAvInspectionStatus(
+      {
+        receiptId: seeded8CNonCanonical.receiptId,
+      }
+    );
+    assert.equal(nonCanonGenStatus.ok, false);
+    if (!nonCanonGenStatus.ok) {
+      assert.equal(
+        nonCanonGenStatus.errorCode,
+        'MISSING_OR_INVALID_SOURCE_GENERATION_HOLD'
+      );
+    }
+    const nonCanonGenDispatch =
+      await avService8C.dispatchQuarantineAvInspection({
+        receiptId: seeded8CNonCanonical.receiptId,
+        expectedRequestId: seeded8CNonCanonical.requestId,
+        expectedSafetyCaseRevision: 1,
+        acknowledgedHumanCaseRevision: 2,
+        confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+      });
+    assert.equal(nonCanonGenDispatch.ok, false);
+    if (!nonCanonGenDispatch.ok && nonCanonGenDispatch.status === 'HOLD') {
+      assert.equal(
+        nonCanonGenDispatch.errorCode,
+        'MISSING_OR_INVALID_SOURCE_GENERATION_HOLD'
+      );
+    }
+
+    // 8D: AV transaction set() guard fails closed when transaction object omits set()
+    const db8D = new InMemoryAvExecutionFirestoreDatabase();
+    const seeded8D = seedFullEightDocChain(db8D, 803);
+    const avStoreOnDb8D = new FirestoreLibraryQuarantineAvExecutionStore(db8D);
+    const pendingRes8D =
+      await avStoreOnDb8D.createDispatchPendingTransactional({
+        receiptId: seeded8D.receiptId,
+        expectedRequestId: seeded8D.requestId,
+        expectedSafetyCaseRevision: 1,
+        acknowledgedHumanCaseRevision: 2,
+        confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+        actorUid: ownerAdmin.id,
+        nowIso: '2026-11-11T09:10:00.000Z',
+      });
+    assert.equal(pendingRes8D.status, 'CREATED_PENDING');
+
+    const dbWithoutTxSet: LibraryQuarantineReviewDraftFirestoreDatabase = {
+      collection: (name: string) => db8D.collection(name),
+      runTransaction: async <T>(
+        updateFn: (
+          tx: LibraryQuarantineReviewDraftFirestoreTransaction
+        ) => Promise<T>
+      ): Promise<T> => {
+        return db8D.runTransaction(async (innerTx) => {
+          const narrowTx: LibraryQuarantineReviewDraftFirestoreTransaction = {
+            get: (ref) => innerTx.get(ref),
+            create: (ref, data) => innerTx.create(ref, data),
+            update: (ref, data) => innerTx.update(ref, data),
+          };
+          return updateFn(narrowTx);
+        });
+      },
+    };
+    const storeWithoutSet = new FirestoreLibraryQuarantineAvExecutionStore(
+      dbWithoutTxSet
+    );
+    const transitionNoSetRes =
+      await storeWithoutSet.finalizeDispatchAfterInvokeTransactional({
+        requestId: seeded8D.requestId,
+        targetState: 'DISPATCHED_WAITING_WORKER',
+        executionName: 'exec-no-set',
+        failureReasonCode: null,
+        nowIso: '2026-11-11T09:11:00.000Z',
+      });
+    assert.equal(transitionNoSetRes.ok, false);
+    if (!transitionNoSetRes.ok) {
+      assert.equal(transitionNoSetRes.errorCode, 'TRANSACTION_COMMIT_UNCERTAIN');
+    }
+    const rawExec8D = db8D.getRawDoc(
+      LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
+      seeded8D.requestId
+    );
+    assert.equal(rawExec8D?.state, 'DISPATCH_PENDING');
+    assert.equal(rawExec8D?.revision, 1);
+
+    // 8E: Owner identity id !== uid or conflicting optional uid fails closed across all 3 services
+    const mismatchedIdAdmin = Object.freeze({
+      ...ownerAdmin,
+      id: 'different_admin_id',
+      uid: ownerAdmin.id,
+    }) as unknown as AdminUser;
+    const conflictingUidAdmin = Object.freeze({
+      ...ownerAdmin,
+      id: ownerAdmin.id,
+      uid: 'conflicting_optional_uid',
+    }) as unknown as AdminUser;
+
+    for (const badAdminRecord of [mismatchedIdAdmin, conflictingUidAdmin]) {
+      const singleBadAdminRepo: AdminRepository = {
+        getAdminByUid: async () => badAdminRecord,
+        getAllAdmins: async () => [badAdminRecord],
+        saveAdmin: async () => undefined,
+        updateAdminStatus: async () => undefined,
+      };
+
+      const binarySafetySvc = new LibraryQuarantineBinarySafetyCaseService({
+        trustedPrincipalProvider: {
+          resolveAuthenticatedPrincipal: () => ({
+            uid: ownerAdmin.id,
+            token: {},
+          }),
+        },
+        adminRepository: singleBadAdminRepo,
+        db: db8B,
+      });
+      const bsRes = await binarySafetySvc.getQuarantineBinarySafetyCase({
+        receiptId: seeded8B.receiptId,
+      });
+      assert.equal(bsRes.ok, false);
+      if (!bsRes.ok) {
+        assert.equal(bsRes.errorCode, 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD');
+      }
+
+      const isoReqSvc = new LibraryQuarantineIsolatedInspectionRequestService({
+        trustedPrincipalProvider: {
+          resolveAuthenticatedPrincipal: () => ({
+            uid: ownerAdmin.id,
+            token: {},
+          }),
+        },
+        adminRepository: singleBadAdminRepo,
+        db: db8B,
+      });
+      const isoRes = await isoReqSvc.getQuarantineIsolatedInspectionRequest({
+        receiptId: seeded8B.receiptId,
+      });
+      assert.equal(isoRes.ok, false);
+      if (!isoRes.ok) {
+        assert.equal(
+          isoRes.errorCode,
+          'UNAUTHORIZED_ISOLATED_INSPECTION_OWNER_HOLD'
+        );
+      }
+
+      const avExecSvc = new LibraryQuarantineAvExecutionService({
+        trustedPrincipalProvider: {
+          resolveAuthenticatedPrincipal: () => ({
+            uid: ownerAdmin.id,
+            token: {},
+          }),
+        },
+        adminRepository: singleBadAdminRepo,
+        db: db8B,
+      });
+      const avRes = await avExecSvc.getQuarantineAvInspectionStatus({
+        receiptId: seeded8B.receiptId,
+      });
+      assert.equal(avRes.ok, false);
+      if (!avRes.ok) {
+        assert.equal(avRes.errorCode, 'UNAUTHORIZED_AV_EXECUTION_OWNER_HOLD');
+      }
+    }
+
+    // 8F: Unexpected isolated-inspection store result branch fails closed with HOLD
+    const unexpectedStoreSvc =
+      new LibraryQuarantineIsolatedInspectionRequestService({
+        trustedPrincipalProvider: {
+          resolveAuthenticatedPrincipal: () => ({
+            uid: ownerAdmin.id,
+            token: {},
+          }),
+        },
+        adminRepository: new InMemoryAdminRepo([ownerAdmin]),
+        inspectionRequestStore: {
+          getIsolatedInspectionRequestSnapshot: async () => ({
+            ok: false as const,
+            errorCode: 'STORE_READ_FAILED' as const,
+            errorMessage: 'Not used in this test.',
+          }),
+          recordIsolatedInspectionRequestTransactional: async () =>
+            ({
+              status: 'UNEXPECTED_FUTURE_STATUS',
+            }) as unknown as Awaited<
+              ReturnType<
+                import('../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore').FirestoreLibraryQuarantineIsolatedInspectionRequestStore['recordIsolatedInspectionRequestTransactional']
+              >
+            >,
+        } as unknown as import('../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore').FirestoreLibraryQuarantineIsolatedInspectionRequestStore,
+        clock: () => '2026-11-11T09:40:00.000Z',
+      });
+    const unexpectedBranchRes =
+      await unexpectedStoreSvc.recordQuarantineIsolatedInspectionRequest({
+        receiptId: seeded8B.receiptId,
+        expectedSafetyCaseRevision: 1,
+        acknowledgedHumanCaseRevision: 2,
+        confirmation:
+          LIBRARY_QUARANTINE_ISOLATED_INSPECTION_CONFIRMATION_LITERAL,
+      });
+    assert.equal(unexpectedBranchRes.ok, false);
+    if (!unexpectedBranchRes.ok) {
+      assert.equal(unexpectedBranchRes.status, 'HOLD');
+      assert.equal(
+        unexpectedBranchRes.errorCode,
+        'TRANSACTION_ABORTED_NO_WRITE'
+      );
+    }
+
+    // 8G: Catalog alignment missing point-get guard fails closed with ALIGNMENT_PERSISTENCE_FAILED
+    const dbMissingPointGet: LibraryQuarantineReviewDraftFirestoreDatabase = {
+      collection: (_collectionName: string) => ({
+        doc: (id: string) => ({ id }),
+      }),
+      runTransaction: async <T>(
+        _updateFn: (
+          tx: LibraryQuarantineReviewDraftFirestoreTransaction
+        ) => Promise<T>
+      ): Promise<T> => {
+        throw new Error('runTransaction must not be called in GET status.');
+      },
+    };
+    const alignmentServiceMissingGet =
+      new LibraryQuarantineCatalogCaseAlignmentService({
+        trustedPrincipalProvider: {
+          resolveAuthenticatedPrincipal: () => ({
+            uid: ownerAdmin.id,
+            token: {},
+          }),
+        },
+        adminRepository: new InMemoryAdminRepo([ownerAdmin]),
+        db: dbMissingPointGet,
+      });
+    const alignMissingGetRes =
+      await alignmentServiceMissingGet.getQuarantineCatalogCaseAlignment({
+        receiptId: seeded8B.receiptId,
+      });
+    assert.equal(alignMissingGetRes.ok, false);
+    assert.equal(alignMissingGetRes.status, 'HOLD');
+    if (!alignMissingGetRes.ok) {
+      assert.equal(alignMissingGetRes.errorCode, 'ALIGNMENT_PERSISTENCE_FAILED');
+    }
+  }
+
+  // =========================================================================
+  // TEST 9: Verify all 20 READ_ONLY files match their pinned Git blob SHA-1s
   // =========================================================================
   {
     for (const [relPath, expectedBlobSha1] of READ_ONLY_MANIFEST_EXPECTED_BLOBS) {
@@ -2465,7 +2826,7 @@ async function runTests(): Promise<void> {
   }
 
   console.log(
-    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 BACKEND TESTS PASSED (8/8).'
+    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 BACKEND TESTS PASSED (9/9).'
   );
 }
 

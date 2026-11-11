@@ -556,12 +556,11 @@ export class LibraryQuarantineBinarySafetyCaseService {
 
     const adminId =
       typeof adminUser.id === 'string' ? adminUser.id.trim() : '';
+    const rawOptionalUid = (adminUser as { readonly uid?: unknown }).uid;
     const adminUid =
-      typeof (adminUser as { readonly uid?: unknown }).uid === 'string'
-        ? ((adminUser as { readonly uid: string }).uid).trim()
-        : '';
+      typeof rawOptionalUid === 'string' ? rawOptionalUid.trim() : '';
 
-    if (adminId !== uid && adminUid !== uid) {
+    if (!adminId || adminId !== uid || (adminUid !== '' && adminUid !== uid)) {
       return { ok: false, errorCode: 'UNAUTHORIZED_BINARY_SAFETY_OWNER_HOLD' };
     }
 

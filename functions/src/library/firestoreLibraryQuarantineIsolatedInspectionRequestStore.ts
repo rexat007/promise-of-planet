@@ -43,7 +43,7 @@ import {
   isValidUploaderUid,
 } from './libraryQuarantineReceiptContract';
 import { parseCanonicalSafeGcsGeneration } from './gcsLibraryQuarantineStorageAdapter';
-import { LIBRARY_UPLOAD_MAX_BYTES } from './libraryUploadBinaryAdmission';
+import { MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES } from './libraryUploadBinaryAdmission';
 import { isValidSha256Hex } from './libraryQuarantineBinarySafetyCaseContract';
 
 export const LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUESTS_COLLECTION =
@@ -279,7 +279,7 @@ export function verifyQuarantineIsolatedInspectionChainEligibility(
     typeof receipt.byteSize !== 'number' ||
     !Number.isSafeInteger(receipt.byteSize) ||
     receipt.byteSize < 1 ||
-    receipt.byteSize > LIBRARY_UPLOAD_MAX_BYTES
+    receipt.byteSize > MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES
   ) {
     return Object.freeze({
       ok: false as const,

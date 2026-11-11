@@ -848,11 +848,11 @@ const READ_ONLY_MANIFEST_EXPECTED_BLOBS: ReadonlyArray<
   ],
   [
     'functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore.ts',
-    'd790b208205ca96a00ec3a021125ae9297c6b2b0',
+    'ab5f129925bc51cfd6dce05a808114174edcc4e8',
   ],
   [
     'functions/src/library/libraryQuarantineBinarySafetyCaseService.ts',
-    'ea8bc12a224d8ec3b9810d8923b1597f53c8d17a',
+    '5c4b360ccc64497c6a30a0f8698b41467e9a6073',
   ],
   [
     'src/services/libraryQuarantineBinarySafetyCaseClient.ts',
@@ -888,7 +888,7 @@ const READ_ONLY_MANIFEST_EXPECTED_BLOBS: ReadonlyArray<
   ],
   [
     'functions/src/library/libraryQuarantineCatalogCaseAlignmentService.ts',
-    'bfce0d697eb6b433ec109f3be4a92be274f82062',
+    'a47f8a753ba9e4a84c68b67b9f1048b116eaf75f',
   ],
   [
     'functions/src/library/libraryQuarantineRightsDecisionService.ts',

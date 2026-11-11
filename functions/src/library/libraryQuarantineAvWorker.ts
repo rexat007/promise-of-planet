@@ -818,9 +818,23 @@ export async function executeLibraryQuarantineAvWorkerTask(
   }
   const canonicalPath = derivedPathRes.parsed.storagePath;
 
+  const sourceGeneration = claimResult.eligibleChain.sourceGeneration;
+  if (
+    !sourceGeneration ||
+    receipt.generation !== sourceGeneration ||
+    inspectionRequest.sourceGeneration !== sourceGeneration
+  ) {
+    return recordFailClosed('QUARANTINE_OBJECT_METADATA_MISMATCH', {
+      engineName: 'ClamAV',
+      engineVersion: sigCheck.engineVersion,
+      signatureVersion: sigCheck.signatureVersion,
+      signatureUpdatedAt: sigCheck.signatureUpdatedAt,
+    });
+  }
+
   // Step 4: Open generation-pinned file handle & verify object metadata before streaming bytes
   const pinnedFile = bucket.file(canonicalPath, {
-    generation: receipt.generation,
+    generation: sourceGeneration,
   });
 
   let existsTuple: readonly [boolean];

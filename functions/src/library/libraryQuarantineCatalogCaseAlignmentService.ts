@@ -16,6 +16,7 @@ import { WorkflowState } from '../shared/workflowContract';
 import { LibraryValidator } from './libraryValidator';
 import {
   LIBRARY_QUARANTINE_RECEIPT_COLLECTION,
+  type LibraryQuarantineFirestoreDocumentRef,
   type LibraryQuarantineFirestoreDocumentSnapshot,
   type LibraryQuarantinePersistedReceiptEnvelope,
 } from './firestoreLibraryQuarantineReceiptStore';
@@ -1743,6 +1744,19 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
         .collection(LIBRARY_QUARANTINE_RIGHTS_DECISIONS_COLLECTION)
         .doc(receiptId);
 
+      const readPointDocSnapshot = (
+        docRef: LibraryQuarantineFirestoreDocumentRef
+      ): Promise<LibraryQuarantineFirestoreDocumentSnapshot> => {
+        if (!docRef || typeof docRef.get !== 'function') {
+          return Promise.reject(
+            new Error(
+              'INVALID_POINT_DOC_REF: Firestore document reference does not expose a point get() method.'
+            )
+          );
+        }
+        return docRef.get();
+      };
+
       // 7 point reads, 0 writes
       const [
         receiptSnap,
@@ -1753,13 +1767,13 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
         alignmentSnap,
         rightsDecisionSnap,
       ] = await Promise.all([
-        receiptRef.get(),
-        draftRef.get(),
-        caseRef.get(),
-        handoffRef.get(),
-        docRef.get(),
-        alignmentRef.get(),
-        rightsDecisionRef.get(),
+        readPointDocSnapshot(receiptRef),
+        readPointDocSnapshot(draftRef),
+        readPointDocSnapshot(caseRef),
+        readPointDocSnapshot(handoffRef),
+        readPointDocSnapshot(docRef),
+        readPointDocSnapshot(alignmentRef),
+        readPointDocSnapshot(rightsDecisionRef),
       ]);
 
       const verified = verifyAlignmentChainSnapshots(
