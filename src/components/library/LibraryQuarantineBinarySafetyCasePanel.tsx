@@ -10,6 +10,11 @@ import {
   type LibraryQuarantineBinarySafetyCaseControllerState,
   type LibraryQuarantineBinarySafetyDisposition,
 } from '../../services/libraryQuarantineBinarySafetyCaseClient';
+import {
+  LibraryQuarantineIsolatedInspectionRequestController,
+  isLibraryQuarantineIsolatedInspectionRequestEnabled,
+  type LibraryQuarantineIsolatedInspectionControllerState,
+} from '../../services/libraryQuarantineIsolatedInspectionRequestClient';
 import type { SanitizedLibraryQuarantineHumanReviewCaseDto } from '../../services/libraryQuarantineHumanReviewClient';
 import type { AdminUser } from '../../types/admin';
 
@@ -18,6 +23,7 @@ export interface LibraryQuarantineBinarySafetyCasePanelProps {
   readonly currentUser: AdminUser | null;
   readonly lang?: 'ar' | 'en';
   readonly controllerOverride?: LibraryQuarantineBinarySafetyCaseController;
+  readonly inspectionControllerOverride?: LibraryQuarantineIsolatedInspectionRequestController;
   readonly savedReviewCase?: SanitizedLibraryQuarantineHumanReviewCaseDto | null;
   readonly hasUnsavedCaseEdits?: boolean;
   readonly envOverride?: Record<string, unknown>;
@@ -30,11 +36,14 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
   currentUser,
   lang = 'ar',
   controllerOverride,
+  inspectionControllerOverride,
   savedReviewCase,
   hasUnsavedCaseEdits = false,
   envOverride,
 }) => {
   const isEnabled = isLibraryQuarantineBinarySafetyCaseEnabled(envOverride);
+  const isIsolatedInspectionEnabled =
+    isLibraryQuarantineIsolatedInspectionRequestEnabled(envOverride);
   const isOwner = canUserManageBinarySafetyCases(currentUser);
 
   const [controller] = useState(
@@ -46,9 +55,23 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
       })
   );
 
+  const [inspectionController] = useState(
+    () =>
+      inspectionControllerOverride ||
+      new LibraryQuarantineIsolatedInspectionRequestController(receiptId, {
+        ...(envOverride !== undefined ? { envOverride } : {}),
+        currentUser,
+      })
+  );
+
   const [state, setState] =
     useState<LibraryQuarantineBinarySafetyCaseControllerState>(() =>
       controller.getState()
+    );
+
+  const [inspectionState, setInspectionState] =
+    useState<LibraryQuarantineIsolatedInspectionControllerState>(() =>
+      inspectionController.getState()
     );
 
   const [disposition, setDisposition] =
@@ -61,30 +84,57 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
   const [acknowledgedCurrentCaseRevision, setAcknowledgedCurrentCaseRevision] =
     useState(false);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
+  const [confirmedInspectionRequestOnly, setConfirmedInspectionRequestOnly] =
+    useState(false);
 
   const lastHydratedKeyRef = useRef<string>('');
+  const lastInspectionVersionKeyRef = useRef<string>('');
   const previousReceiptIdRef = useRef<string>(receiptId);
 
   useEffect(() => {
     controller.setCurrentUser(currentUser);
-  }, [controller, currentUser]);
+    inspectionController.setCurrentUser(currentUser);
+  }, [controller, inspectionController, currentUser]);
+
+  useEffect(() => {
+    const unsubscribeInspection = inspectionController.subscribe(
+      (nextInspectionState) => {
+        setInspectionState(nextInspectionState);
+        setConfirmedInspectionRequestOnly(
+          nextInspectionState.confirmedRequestOnly
+        );
+      }
+    );
+    return () => {
+      unsubscribeInspection();
+    };
+  }, [inspectionController]);
 
   useEffect(() => {
     if (previousReceiptIdRef.current !== receiptId) {
       previousReceiptIdRef.current = receiptId;
       lastHydratedKeyRef.current = '';
+      lastInspectionVersionKeyRef.current = '';
       setDisposition('ISOLATED_ASSESSMENT_REQUIRED');
       setEvidenceReference('');
       setEvidenceNotes('');
       setReviewNotes('');
       setAcknowledgedCurrentCaseRevision(false);
       setSuccessNotice(null);
+      setConfirmedInspectionRequestOnly(false);
       controller.switchReceipt(receiptId);
+      inspectionController.switchReceipt(receiptId);
       if (isEnabled && isOwner) {
         void controller.loadCase();
       }
     }
-  }, [controller, receiptId, isEnabled, isOwner]);
+  }, [
+    controller,
+    inspectionController,
+    receiptId,
+    isEnabled,
+    isOwner,
+  ]);
 
   useEffect(() => {
     const unsubscribe = controller.subscribe((newState) => {
@@ -128,6 +178,45 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
       unsubscribe();
     };
   }, [controller, isEnabled, isOwner]);
+
+  // Synchronize isolated inspection request readback whenever the saved safety case version changes
+  useEffect(() => {
+    if (!isEnabled || !isIsolatedInspectionEnabled || !isOwner) {
+      return;
+    }
+    const snap = state.snapshot;
+    if (!snap) {
+      return;
+    }
+    const savedSafetyCase = snap.binarySafetyCase;
+    const isEligibleSafetyCase =
+      savedSafetyCase !== null &&
+      snap.isCaseCurrent &&
+      !snap.requiresFreshEvidence &&
+      savedSafetyCase.disposition === 'ISOLATED_ASSESSMENT_REQUIRED';
+
+    const versionKey = isEligibleSafetyCase
+      ? `${receiptId}:${snap.sourceRevision}:${savedSafetyCase.revision}:${snap.effectiveHumanCaseRevision}`
+      : `${receiptId}:ineligible:${snap.currentRevision}:${snap.effectiveHumanCaseRevision}:${snap.isCaseCurrent}`;
+
+    if (lastInspectionVersionKeyRef.current === versionKey) {
+      return;
+    }
+    lastInspectionVersionKeyRef.current = versionKey;
+    setConfirmedInspectionRequestOnly(false);
+    inspectionController.resetForSafetyOrCaseChange();
+
+    if (isEligibleSafetyCase) {
+      void inspectionController.loadRequest();
+    }
+  }, [
+    isEnabled,
+    isIsolatedInspectionEnabled,
+    isOwner,
+    receiptId,
+    state.snapshot,
+    inspectionController,
+  ]);
 
   if (!isEnabled) {
     return null;
@@ -221,6 +310,53 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
   const handleVerifyOnly = async () => {
     setSuccessNotice(null);
     await controller.loadCase();
+  };
+
+  const savedSafetyCase = state.snapshot?.binarySafetyCase ?? null;
+  const isSafetyCaseEligibleForInspectionRequest =
+    savedSafetyCase !== null &&
+    state.snapshot?.isCaseCurrent === true &&
+    state.snapshot?.requiresFreshEvidence === false &&
+    savedSafetyCase.disposition === 'ISOLATED_ASSESSMENT_REQUIRED' &&
+    disposition === 'ISOLATED_ASSESSMENT_REQUIRED';
+
+  const isRequestAlreadyRecordedForVersion =
+    inspectionState.snapshot?.status === 'RECORDED' &&
+    inspectionState.snapshot.safetyCaseRevision === savedSafetyCase?.revision &&
+    inspectionState.snapshot.sourceRevision === state.snapshot?.sourceRevision;
+
+  const canRecordIsolatedInspectionRequest =
+    isIsolatedInspectionEnabled &&
+    isSafetyCaseEligibleForInspectionRequest &&
+    !isSaveLockedByCaseState &&
+    !state.inFlight &&
+    !inspectionState.inFlight &&
+    inspectionState.phase !== 'unknown' &&
+    inspectionState.uncertainState === null &&
+    !isRequestAlreadyRecordedForVersion &&
+    confirmedInspectionRequestOnly;
+
+  const handleConfirmInspectionCheckbox = (checked: boolean) => {
+    setConfirmedInspectionRequestOnly(checked);
+    inspectionController.setConfirmedRequestOnly(checked);
+  };
+
+  const handleRecordIsolatedInspectionRequest = async () => {
+    if (!canRecordIsolatedInspectionRequest || !savedSafetyCase || !state.snapshot) {
+      return;
+    }
+    await inspectionController.recordRequest({
+      expectedSafetyCaseRevision: savedSafetyCase.revision,
+      acknowledgedHumanCaseRevision: state.snapshot.effectiveHumanCaseRevision,
+      hasUnsavedCaseEdits: isSaveLockedByCaseState,
+      isSafetyCaseStale:
+        !state.snapshot.isCaseCurrent || state.snapshot.requiresFreshEvidence,
+      safetyCaseDisposition: savedSafetyCase.disposition,
+    });
+  };
+
+  const handleVerifyInspectionRequestOnly = async () => {
+    await inspectionController.loadRequest();
   };
 
   const staleCase = state.snapshot?.stalePreviousCase ?? null;
@@ -604,6 +740,173 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
           </div>
         </form>
       )}
+
+      {/* Secondary Isolated Inspection Request Recording Section (Record Only — Never Dispatched) */}
+      {isIsolatedInspectionEnabled && (
+        <div
+          data-testid="isolated-inspection-request-section"
+          className="mt-5 rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-950/50"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+              {isAr
+                ? 'إحالة إلى فحص معزول — تسجيل فقط'
+                : 'Isolated inspection — record request only'}
+            </h4>
+            <span
+              data-testid="isolated-inspection-status-badge"
+              className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                isRequestAlreadyRecordedForVersion
+                  ? 'bg-amber-500/15 text-amber-800 dark:text-amber-200'
+                  : 'bg-slate-200/80 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+              }`}
+            >
+              {isRequestAlreadyRecordedForVersion
+                ? isAr
+                  ? 'طُلب ولم يُرسل لعامل فحص'
+                  : 'Requested — not dispatched to worker'
+                : isAr
+                ? 'لم يُسجّل طلب لهذه النسخة'
+                : 'No request recorded for this version'}
+            </span>
+          </div>
+
+          <p
+            data-testid="isolated-inspection-explicit-notice"
+            className="mt-2 text-xs text-slate-600 dark:text-slate-300"
+          >
+            {isAr
+              ? 'تم تسجيل طلب الفحص فقط — لم يُرسل إلى عامل فحص ولم يبدأ أي فحص تقني'
+              : 'Inspection request recorded only — not dispatched to any inspection worker and no technical scan has started.'}
+          </p>
+
+          {!isSafetyCaseEligibleForInspectionRequest && (
+            <div
+              data-testid="isolated-inspection-prerequisite-notice"
+              className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
+            >
+              {isAr
+                ? 'يتطلب تسجيل طلب الفحص المعزول حفظ سجل سلامة ثنائية حالي غير متقادم بحالة ISOLATED_ASSESSMENT_REQUIRED أولًا.'
+                : 'Recording an isolated inspection request requires a current saved binary safety case with disposition ISOLATED_ASSESSMENT_REQUIRED.'}
+            </div>
+          )}
+
+          {inspectionState.snapshot?.inspectionRequest &&
+            isRequestAlreadyRecordedForVersion && (
+              <div
+                data-testid="isolated-inspection-recorded-details"
+                className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 font-mono text-[11px] text-amber-900 dark:text-amber-200"
+              >
+                <div>
+                  Request ID:{' '}
+                  {inspectionState.snapshot.inspectionRequest.requestId}
+                </div>
+                <div>
+                  State: {inspectionState.snapshot.inspectionRequest.state} |
+                  Dispatched: false | Scan Performed: false
+                </div>
+              </div>
+            )}
+
+          {inspectionState.uncertainState && (
+            <div
+              data-testid="isolated-inspection-unknown-banner"
+              className="mt-3 rounded-lg bg-purple-500/10 p-3 text-xs text-purple-800 dark:text-purple-200"
+            >
+              <strong>UNKNOWN (Commit Uncertain):</strong>{' '}
+              {inspectionState.uncertainState.errorMessage}
+              <div className="mt-2">
+                <button
+                  type="button"
+                  data-testid="isolated-inspection-verify-unknown-btn"
+                  onClick={handleVerifyInspectionRequestOnly}
+                  className="rounded bg-purple-600 px-3 py-1 text-xs text-white hover:bg-purple-700"
+                >
+                  {isAr
+                    ? 'التحقق من حالة الطلب (GET-only)'
+                    : 'Verify Request State (GET-only)'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {inspectionState.conflictState && (
+            <div
+              data-testid="isolated-inspection-conflict-banner"
+              className="mt-3 rounded-lg bg-red-500/10 p-3 text-xs text-red-800 dark:text-red-200"
+            >
+              <strong>CONFLICT:</strong>{' '}
+              {inspectionState.conflictState.errorMessage}
+              <div className="mt-2">
+                <button
+                  type="button"
+                  data-testid="isolated-inspection-refresh-conflict-btn"
+                  onClick={handleVerifyInspectionRequestOnly}
+                  className="rounded bg-red-600 px-3 py-1 text-xs text-white hover:bg-red-700"
+                >
+                  {isAr
+                    ? 'إعادة التحقق (GET-only)'
+                    : 'Refresh Request State (GET-only)'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {inspectionState.holdState && (
+            <div
+              data-testid="isolated-inspection-hold-banner"
+              className="mt-3 rounded-lg bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-200"
+            >
+              <strong>HOLD ({inspectionState.holdState.errorCode}):</strong>{' '}
+              {inspectionState.holdState.errorMessage}
+            </div>
+          )}
+
+          <label className="mt-3 flex items-start gap-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+            <input
+              type="checkbox"
+              data-testid="isolated-inspection-confirm-checkbox"
+              checked={confirmedInspectionRequestOnly}
+              onChange={(e) =>
+                handleConfirmInspectionCheckbox(e.target.checked)
+              }
+              disabled={
+                !isSafetyCaseEligibleForInspectionRequest ||
+                isSaveLockedByCaseState ||
+                state.inFlight ||
+                inspectionState.inFlight ||
+                inspectionState.phase === 'unknown' ||
+                isRequestAlreadyRecordedForVersion
+              }
+              className="mt-0.5"
+            />
+            <span>
+              {isAr
+                ? 'أؤكد طلب الفحص لهذه النسخة؛ لا يعني هذا تشغيل الفحص أو اعتماده'
+                : 'I confirm requesting isolated inspection for this version; this does not run or approve the scan'}
+            </span>
+          </label>
+
+          <div className="mt-3 flex justify-end">
+            <button
+              type="button"
+              data-testid="record-isolated-inspection-request-btn"
+              onClick={handleRecordIsolatedInspectionRequest}
+              disabled={!canRecordIsolatedInspectionRequest}
+              className="rounded-lg border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
+            >
+              {inspectionState.inFlight
+                ? isAr
+                  ? 'جاري تسجيل الطلب...'
+                  : 'Recording Request...'
+                : isAr
+                ? 'تسجيل الطلب'
+                : 'Record Request'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+
