@@ -12,8 +12,10 @@ import {
 } from '../../services/libraryQuarantineBinarySafetyCaseClient';
 import {
   LibraryQuarantineIsolatedInspectionRequestController,
+  isLibraryQuarantineAvExecutionEnabled,
   isLibraryQuarantineIsolatedInspectionRequestEnabled,
   type LibraryQuarantineIsolatedInspectionControllerState,
+  type QuarantineAvInspectionOverallStatus,
 } from '../../services/libraryQuarantineIsolatedInspectionRequestClient';
 import type { SanitizedLibraryQuarantineHumanReviewCaseDto } from '../../services/libraryQuarantineHumanReviewClient';
 import type { AdminUser } from '../../types/admin';
@@ -27,6 +29,35 @@ export interface LibraryQuarantineBinarySafetyCasePanelProps {
   readonly savedReviewCase?: SanitizedLibraryQuarantineHumanReviewCaseDto | null;
   readonly hasUnsavedCaseEdits?: boolean;
   readonly envOverride?: Record<string, unknown>;
+}
+
+function getAvExecutionStatusLabel(
+  status: QuarantineAvInspectionOverallStatus | null,
+  isUnknownPhase: boolean,
+  isAr: boolean
+): string {
+  if (isUnknownPhase || status === 'DISPATCH_UNKNOWN') {
+    return isAr
+      ? 'إرسال غير مؤكد/قيد الإطلاق'
+      : 'Dispatch uncertain / launching';
+  }
+  switch (status) {
+    case 'DISPATCH_PENDING':
+    case 'DISPATCHED_WAITING_WORKER':
+    case 'RUNNING':
+      return isAr ? 'الفحص يعمل' : 'AV scan running';
+    case 'AV_NO_THREAT_DETECTED':
+      return isAr ? 'لم يُكتشف تهديد بواسطة AV' : 'No threat detected by AV';
+    case 'AV_THREAT_DETECTED':
+      return isAr ? 'رُصد تهديد' : 'Threat detected by AV';
+    case 'AV_SCAN_FAILED':
+    case 'DISPATCH_FAILED':
+    case 'STALE_HOLD':
+      return isAr ? 'تعذر الفحص' : 'AV scan failed / held';
+    case 'NOT_DISPATCHED':
+    default:
+      return isAr ? 'لم يُرسل' : 'Not dispatched';
+  }
 }
 
 export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
@@ -44,6 +75,8 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
   const isEnabled = isLibraryQuarantineBinarySafetyCaseEnabled(envOverride);
   const isIsolatedInspectionEnabled =
     isLibraryQuarantineIsolatedInspectionRequestEnabled(envOverride);
+  const isAvExecutionEnabled =
+    isLibraryQuarantineAvExecutionEnabled(envOverride);
   const isOwner = canUserManageBinarySafetyCases(currentUser);
 
   const [controller] = useState(
@@ -86,6 +119,7 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
   const [confirmedInspectionRequestOnly, setConfirmedInspectionRequestOnly] =
     useState(false);
+  const [confirmedAvDispatch, setConfirmedAvDispatch] = useState(false);
 
   const lastHydratedKeyRef = useRef<string>('');
   const lastInspectionVersionKeyRef = useRef<string>('');
@@ -103,6 +137,7 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
         setConfirmedInspectionRequestOnly(
           nextInspectionState.confirmedRequestOnly
         );
+        setConfirmedAvDispatch(nextInspectionState.confirmedAvDispatch);
       }
     );
     return () => {
@@ -122,6 +157,7 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
       setAcknowledgedCurrentCaseRevision(false);
       setSuccessNotice(null);
       setConfirmedInspectionRequestOnly(false);
+      setConfirmedAvDispatch(false);
       controller.switchReceipt(receiptId);
       inspectionController.switchReceipt(receiptId);
       if (isEnabled && isOwner) {
@@ -204,14 +240,21 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
     }
     lastInspectionVersionKeyRef.current = versionKey;
     setConfirmedInspectionRequestOnly(false);
+    setConfirmedAvDispatch(false);
     inspectionController.resetForSafetyOrCaseChange();
 
     if (isEligibleSafetyCase) {
-      void inspectionController.loadRequest();
+      void (async () => {
+        await inspectionController.loadRequest();
+        if (isAvExecutionEnabled) {
+          await inspectionController.loadAvInspectionStatus();
+        }
+      })();
     }
   }, [
     isEnabled,
     isIsolatedInspectionEnabled,
+    isAvExecutionEnabled,
     isOwner,
     receiptId,
     state.snapshot,
@@ -331,6 +374,7 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
     !isSaveLockedByCaseState &&
     !state.inFlight &&
     !inspectionState.inFlight &&
+    !inspectionState.avInFlight &&
     inspectionState.phase !== 'unknown' &&
     inspectionState.uncertainState === null &&
     !isRequestAlreadyRecordedForVersion &&
@@ -345,7 +389,70 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
     if (!canRecordIsolatedInspectionRequest || !savedSafetyCase || !state.snapshot) {
       return;
     }
-    await inspectionController.recordRequest({
+    const res = await inspectionController.recordRequest({
+      expectedSafetyCaseRevision: savedSafetyCase.revision,
+      acknowledgedHumanCaseRevision: state.snapshot.effectiveHumanCaseRevision,
+      hasUnsavedCaseEdits: isSaveLockedByCaseState,
+      isSafetyCaseStale:
+        !state.snapshot.isCaseCurrent || state.snapshot.requiresFreshEvidence,
+      safetyCaseDisposition: savedSafetyCase.disposition,
+    });
+    if (res.ok && isAvExecutionEnabled) {
+      await inspectionController.loadAvInspectionStatus();
+    }
+  };
+
+  const handleVerifyInspectionRequestOnly = async () => {
+    await inspectionController.loadRequest();
+  };
+
+  const recordedRequestId =
+    isRequestAlreadyRecordedForVersion &&
+    inspectionState.snapshot?.inspectionRequest
+      ? inspectionState.snapshot.inspectionRequest.requestId
+      : null;
+
+  const avStatus = inspectionState.avStatusSnapshot?.status ?? null;
+  const isAvUnknownPhase =
+    inspectionState.avPhase === 'unknown' ||
+    inspectionState.avUncertainState !== null ||
+    avStatus === 'DISPATCH_UNKNOWN';
+
+  const isAvNotDispatchedYet =
+    avStatus === null || avStatus === 'NOT_DISPATCHED';
+
+  const canDispatchAvInspection =
+    isIsolatedInspectionEnabled &&
+    isAvExecutionEnabled &&
+    isSafetyCaseEligibleForInspectionRequest &&
+    isRequestAlreadyRecordedForVersion &&
+    recordedRequestId !== null &&
+    !isSaveLockedByCaseState &&
+    !state.inFlight &&
+    !inspectionState.inFlight &&
+    !inspectionState.avInFlight &&
+    inspectionState.phase !== 'unknown' &&
+    inspectionState.uncertainState === null &&
+    !isAvUnknownPhase &&
+    isAvNotDispatchedYet &&
+    confirmedAvDispatch;
+
+  const handleConfirmAvDispatchCheckbox = (checked: boolean) => {
+    setConfirmedAvDispatch(checked);
+    inspectionController.setConfirmedAvDispatch(checked);
+  };
+
+  const handleDispatchAvInspection = async () => {
+    if (
+      !canDispatchAvInspection ||
+      !savedSafetyCase ||
+      !state.snapshot ||
+      !recordedRequestId
+    ) {
+      return;
+    }
+    await inspectionController.dispatchAvInspection({
+      expectedRequestId: recordedRequestId,
       expectedSafetyCaseRevision: savedSafetyCase.revision,
       acknowledgedHumanCaseRevision: state.snapshot.effectiveHumanCaseRevision,
       hasUnsavedCaseEdits: isSaveLockedByCaseState,
@@ -355,8 +462,8 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
     });
   };
 
-  const handleVerifyInspectionRequestOnly = async () => {
-    await inspectionController.loadRequest();
+  const handleVerifyAvStatusOnly = async () => {
+    await inspectionController.loadAvInspectionStatus();
   };
 
   const staleCase = state.snapshot?.stalePreviousCase ?? null;
@@ -741,7 +848,7 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
         </form>
       )}
 
-      {/* Secondary Isolated Inspection Request Recording Section (Record Only — Never Dispatched) */}
+      {/* Secondary Isolated Inspection Request Recording Section */}
       {isIsolatedInspectionEnabled && (
         <div
           data-testid="isolated-inspection-request-section"
@@ -875,6 +982,7 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
                 isSaveLockedByCaseState ||
                 state.inFlight ||
                 inspectionState.inFlight ||
+                inspectionState.avInFlight ||
                 inspectionState.phase === 'unknown' ||
                 isRequestAlreadyRecordedForVersion
               }
@@ -904,6 +1012,201 @@ export const LibraryQuarantineBinarySafetyCasePanel: React.FC<
                 : 'Record Request'}
             </button>
           </div>
+
+          {/* Bounded Isolated ClamAV Execution Subsection (Gated by VITE_LIBRARY_AV_EXECUTION_ENABLED) */}
+          {isAvExecutionEnabled && (
+            <div
+              data-testid="isolated-av-execution-subsection"
+              className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-800"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h5 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  {isAr
+                    ? 'فحص البرمجيات الخبيثة المعزول (ClamAV)'
+                    : 'Isolated Antivirus Execution (ClamAV)'}
+                </h5>
+                <div className="flex items-center gap-2">
+                  <span
+                    data-testid="isolated-av-execution-status-badge"
+                    className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                      avStatus === 'AV_NO_THREAT_DETECTED'
+                        ? 'bg-emerald-500/15 text-emerald-800 dark:text-emerald-200'
+                        : avStatus === 'AV_THREAT_DETECTED'
+                        ? 'bg-rose-500/20 text-rose-800 dark:text-rose-200'
+                        : avStatus === 'AV_SCAN_FAILED' ||
+                          avStatus === 'DISPATCH_FAILED' ||
+                          avStatus === 'STALE_HOLD'
+                        ? 'bg-amber-500/20 text-amber-900 dark:text-amber-200'
+                        : isAvUnknownPhase
+                        ? 'bg-purple-500/20 text-purple-900 dark:text-purple-200'
+                        : avStatus === 'DISPATCH_PENDING' ||
+                          avStatus === 'DISPATCHED_WAITING_WORKER' ||
+                          avStatus === 'RUNNING'
+                        ? 'bg-blue-500/15 text-blue-800 dark:text-blue-200'
+                        : 'bg-slate-200/80 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                    }`}
+                  >
+                    {getAvExecutionStatusLabel(avStatus, isAvUnknownPhase, isAr)}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="isolated-av-execution-refresh-btn"
+                    onClick={handleVerifyAvStatusOnly}
+                    disabled={
+                      inspectionState.avInFlight ||
+                      inspectionState.inFlight ||
+                      state.inFlight
+                    }
+                    className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                  >
+                    {isAr ? 'تحديث الحالة (GET)' : 'Refresh Status (GET)'}
+                  </button>
+                </div>
+              </div>
+
+              <p
+                data-testid="isolated-av-execution-warning-notice"
+                className="mt-2 text-xs text-slate-600 dark:text-slate-300"
+              >
+                {isAr
+                  ? 'سيتم إرسال الملف إلى فاحص AV معزول؛ نتيجة AV وحدها لا تسمح بنشر الملف'
+                  : 'The file will be sent to an isolated AV scanner; an AV result alone does not permit publishing the file'}
+              </p>
+
+              {inspectionState.avStatusSnapshot?.execution && (
+                <div
+                  data-testid="isolated-av-execution-details"
+                  className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 font-mono text-[11px] text-slate-800 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+                >
+                  <div>
+                    Execution State:{' '}
+                    {inspectionState.avStatusSnapshot.execution.state} | Rev: v
+                    {inspectionState.avStatusSnapshot.execution.revision}
+                  </div>
+                  {inspectionState.avStatusSnapshot.execution.engineName && (
+                    <div>
+                      Engine:{' '}
+                      {inspectionState.avStatusSnapshot.execution.engineName}{' '}
+                      {inspectionState.avStatusSnapshot.execution
+                        .engineVersion ?? ''}{' '}
+                      | Sig:{' '}
+                      {inspectionState.avStatusSnapshot.execution
+                        .signatureVersion ?? '—'}{' '}
+                      | Bytes:{' '}
+                      {inspectionState.avStatusSnapshot.execution
+                        .scannedBytes ?? '—'}{' '}
+                      | Exit:{' '}
+                      {inspectionState.avStatusSnapshot.execution.exitCode ??
+                        '—'}
+                    </div>
+                  )}
+                  {inspectionState.avStatusSnapshot.execution
+                    .failureReasonCode && (
+                    <div>
+                      Reason Code:{' '}
+                      {
+                        inspectionState.avStatusSnapshot.execution
+                          .failureReasonCode
+                      }
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {isAvUnknownPhase && (
+                <div
+                  data-testid="isolated-av-execution-unknown-banner"
+                  className="mt-3 rounded-lg bg-purple-500/10 p-3 text-xs text-purple-800 dark:text-purple-200"
+                >
+                  <strong>UNKNOWN (Dispatch Uncertain):</strong>{' '}
+                  {inspectionState.avUncertainState?.errorMessage ??
+                    (isAr
+                      ? 'حالة إرسال مهمة الفحص غير مؤكدة؛ تحقق عبر القراءة فقط دون إعادة الإرسال.'
+                      : 'AV job dispatch acknowledgement is uncertain; verify via GET-only without retrying.')}
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      data-testid="isolated-av-execution-verify-unknown-btn"
+                      onClick={handleVerifyAvStatusOnly}
+                      className="rounded bg-purple-600 px-3 py-1 text-xs text-white hover:bg-purple-700"
+                    >
+                      {isAr
+                        ? 'التحقق من حالة الفحص (GET-only)'
+                        : 'Verify AV Status (GET-only)'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {inspectionState.avConflictState && (
+                <div
+                  data-testid="isolated-av-execution-conflict-banner"
+                  className="mt-3 rounded-lg bg-red-500/10 p-3 text-xs text-red-800 dark:text-red-200"
+                >
+                  <strong>CONFLICT:</strong>{' '}
+                  {inspectionState.avConflictState.errorMessage}
+                </div>
+              )}
+
+              {inspectionState.avHoldState && (
+                <div
+                  data-testid="isolated-av-execution-hold-banner"
+                  className="mt-3 rounded-lg bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-200"
+                >
+                  <strong>
+                    HOLD ({inspectionState.avHoldState.errorCode}):
+                  </strong>{' '}
+                  {inspectionState.avHoldState.errorMessage}
+                </div>
+              )}
+
+              <label className="mt-3 flex items-start gap-2 rounded-lg border border-slate-200 bg-white p-2.5 text-xs text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+                <input
+                  type="checkbox"
+                  data-testid="isolated-av-execution-confirm-checkbox"
+                  checked={confirmedAvDispatch}
+                  onChange={(e) =>
+                    handleConfirmAvDispatchCheckbox(e.target.checked)
+                  }
+                  disabled={
+                    !isSafetyCaseEligibleForInspectionRequest ||
+                    !isRequestAlreadyRecordedForVersion ||
+                    isSaveLockedByCaseState ||
+                    state.inFlight ||
+                    inspectionState.inFlight ||
+                    inspectionState.avInFlight ||
+                    inspectionState.phase === 'unknown' ||
+                    isAvUnknownPhase ||
+                    !isAvNotDispatchedYet
+                  }
+                  className="mt-0.5"
+                />
+                <span>
+                  {isAr
+                    ? 'سيتم إرسال الملف إلى فاحص AV معزول؛ نتيجة AV وحدها لا تسمح بنشر الملف'
+                    : 'The file will be sent to an isolated AV scanner; an AV result alone does not permit publishing the file'}
+                </span>
+              </label>
+
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  data-testid="dispatch-isolated-av-inspection-btn"
+                  onClick={handleDispatchAvInspection}
+                  disabled={!canDispatchAvInspection}
+                  className="rounded-lg border border-blue-600 bg-blue-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {inspectionState.avInFlight
+                    ? isAr
+                      ? 'جاري إرسال مهمة الفحص...'
+                      : 'Dispatching AV Scan...'
+                    : isAr
+                    ? 'إرسال لفحص AV المعزول'
+                    : 'Dispatch Isolated AV Scan'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

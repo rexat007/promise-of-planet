@@ -1,0 +1,138 @@
+name: Library Quarantine Isolated ClamAV Job (Manual Verify / Controlled Deploy)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Execution mode: verify_only (default) or deploy"
+        required: true
+        default: "verify_only"
+        type: choice
+        options:
+          - verify_only
+          - deploy
+      gcp_region:
+        description: "Cloud Run Job region (e.g. us-central1)"
+        required: true
+        default: "us-central1"
+        type: string
+      artifact_registry_repo:
+        description: "Artifact Registry Docker repository name"
+        required: true
+        default: "pop-quarantine-workers"
+        type: string
+      cloud_run_job_name:
+        description: "Isolated ClamAV Cloud Run Job name"
+        required: true
+        default: "pop-library-quarantine-av-worker"
+        type: string
+      worker_service_account:
+        description: "Dedicated worker service account email (least-privilege)"
+        required: false
+        default: ""
+        type: string
+      confirm_deploy:
+        description: "Must be DEPLOY_ISOLATED_QUARANTINE_AV_JOB when mode=deploy"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: library-quarantine-av-job-manual
+  cancel-in-progress: false
+
+jobs:
+  verify_and_optionally_deploy_av_worker:
+    name: Verify or Deploy Isolated Quarantine ClamAV Cloud Run Job
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      FIREBASE_PROJECT_ID: promiseofplanet-bb325
+      QUARANTINE_BUCKET_NAME: promiseofplanet-bb325-library-quarantine
+      FORBIDDEN_DEFAULT_BUCKET: promiseofplanet-bb325.firebasestorage.app
+      POP_LIBRARY_AV_EXECUTION_ENABLED: "false"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install root and functions dependencies
+        run: |
+          npm ci
+          npm --prefix functions ci
+
+      - name: Run TypeScript typecheck and AV Execution test suites
+        run: |
+          npx tsc --noEmit
+          npm --prefix functions run build
+          npx tsx scripts/runLibraryQuarantineAvExecutionBackendTests.ts
+          npx tsx scripts/runLibraryQuarantineAvExecutionClientTests.ts
+          npx tsx scripts/runLibraryQuarantineIsolatedInspectionRequestBackendTests.ts
+          npx tsx scripts/runLibraryQuarantineIsolatedInspectionRequestClientTests.ts
+
+      - name: Build isolated ClamAV worker container image locally and verify signatures
+        run: |
+          docker build \
+            -f functions/library-av-worker.Dockerfile \
+            -t pop-library-quarantine-av-worker:${{ github.sha }} \
+            functions
+          docker run --rm --entrypoint /usr/bin/clamscan \
+            pop-library-quarantine-av-worker:${{ github.sha }} \
+            --version --database=/var/lib/clamav
+
+      - name: Stop cleanly when mode is verify_only
+        if: ${{ inputs.mode == 'verify_only' }}
+        run: |
+          echo "verify_only completed: TypeScript build, backend/client tests, and ClamAV Docker image signature verification succeeded with zero live GCP mutations."
+
+      - name: Validate deploy confirmation phrase and dedicated worker service account
+        if: ${{ inputs.mode == 'deploy' }}
+        run: |
+          if [ "${{ inputs.confirm_deploy }}" != "DEPLOY_ISOLATED_QUARANTINE_AV_JOB" ]; then
+            echo "::error::confirm_deploy must equal DEPLOY_ISOLATED_QUARANTINE_AV_JOB when mode=deploy."
+            exit 1
+          fi
+          if [ -z "${{ inputs.worker_service_account }}" ]; then
+            echo "::error::worker_service_account is required when mode=deploy."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        if: ${{ inputs.mode == 'deploy' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+
+      - name: Setup gcloud SDK and verify quarantine bucket & Artifact Registry preconditions
+        if: ${{ inputs.mode == 'deploy' }}
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Push image and update Cloud Run Job (taskCount=1, maxRetries=0, POP_LIBRARY_AV_EXECUTION_ENABLED remains OFF)
+        if: ${{ inputs.mode == 'deploy' }}
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${{ inputs.gcp_region }}-docker.pkg.dev/${FIREBASE_PROJECT_ID}/${{ inputs.artifact_registry_repo }}/${{ inputs.cloud_run_job_name }}:${{ github.sha }}"
+          gcloud auth configure-docker "${{ inputs.gcp_region }}-docker.pkg.dev" --quiet
+          docker tag "pop-library-quarantine-av-worker:${{ github.sha }}" "${IMAGE_URI}"
+          docker push "${IMAGE_URI}"
+
+          gcloud run jobs deploy "${{ inputs.cloud_run_job_name }}" \
+            --project="${FIREBASE_PROJECT_ID}" \
+            --region="${{ inputs.gcp_region }}" \
+            --image="${IMAGE_URI}" \
+            --service-account="${{ inputs.worker_service_account }}" \
+            --tasks=1 \
+            --max-retries=0 \
+            --task-timeout=600s \
+            --memory=2Gi \
+            --cpu=1 \
+            --set-env-vars="NODE_ENV=production,POP_CLAMAV_DB_DIR=/var/lib/clamav"

@@ -136,6 +136,18 @@ import {
   type GetLibraryQuarantineIsolatedInspectionRequestResponseDto,
   type RecordLibraryQuarantineIsolatedInspectionRequestResponseDto,
 } from './libraryQuarantineIsolatedInspectionRequestService';
+import {
+  LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+  parseLibraryQuarantineIsolatedInspectionRequestId,
+  type LibraryQuarantineAvDispatchConfirmationLiteral,
+  type SanitizedLibraryQuarantineAvExecutionDto,
+} from './libraryQuarantineAvExecutionContract';
+import {
+  LibraryQuarantineAvExecutionService,
+  type DispatchLibraryQuarantineAvInspectionResponseDto,
+  type GetLibraryQuarantineAvInspectionStatusResponseDto,
+} from './libraryQuarantineAvExecutionService';
+import type { LibraryQuarantineAvJobInvoker } from './libraryQuarantineAvJobInvoker';
 
 export type {
   ListLibraryQuarantineReceiptsResponseDto,
@@ -173,6 +185,10 @@ export type {
   RecordLibraryQuarantineIsolatedInspectionRequestResponseDto,
   SanitizedLibraryQuarantineIsolatedInspectionRequestDto,
   LibraryQuarantineIsolatedInspectionConfirmationLiteral,
+  GetLibraryQuarantineAvInspectionStatusResponseDto,
+  DispatchLibraryQuarantineAvInspectionResponseDto,
+  SanitizedLibraryQuarantineAvExecutionDto,
+  LibraryQuarantineAvDispatchConfirmationLiteral,
 };
 
 export const LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR =
@@ -196,6 +212,9 @@ export const LIBRARY_BINARY_SAFETY_CASE_RELEASE_ENV_VAR =
 export const LIBRARY_ISOLATED_INSPECTION_REQUEST_RELEASE_ENV_VAR =
   'POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED' as const;
 
+export const LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR =
+  'POP_LIBRARY_AV_EXECUTION_ENABLED' as const;
+
 export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly workbenchEnabled?: boolean;
   readonly humanCaseReviewEnabled?: boolean;
@@ -204,6 +223,7 @@ export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly caseAlignmentEnabled?: boolean;
   readonly binarySafetyCaseEnabled?: boolean;
   readonly isolatedInspectionRequestEnabled?: boolean;
+  readonly avExecutionEnabled?: boolean;
   readonly receiptReadDatabase?: LibraryQuarantineAdminReadFirestoreDatabase;
   readonly draftDatabase?: LibraryQuarantineReviewDraftFirestoreDatabase;
   readonly listReceiptsFn?: () => Promise<LibraryQuarantineAdminReadResult>;
@@ -213,12 +233,14 @@ export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly receiptStore?: LibraryQuarantineReceiptReadOnlyPort;
   readonly humanReviewCaseStore?: LibraryQuarantineHumanReviewCaseStorePort;
   readonly rightsDecisionStore?: LibraryQuarantineRightsDecisionStore;
+  readonly avJobInvoker?: LibraryQuarantineAvJobInvoker;
   readonly humanReviewClock?: () => string;
   readonly catalogHandoffClock?: () => string;
   readonly rightsDecisionClock?: () => string;
   readonly caseAlignmentClock?: () => string;
   readonly binarySafetyCaseClock?: () => string;
   readonly isolatedInspectionRequestClock?: () => string;
+  readonly avExecutionClock?: () => string;
 }
 
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
@@ -334,6 +356,19 @@ const RECORD_QUARANTINE_ISOLATED_INSPECTION_REQUEST_ALLOWED_KEYS: ReadonlySet<st
   new Set([
     'action',
     'receiptId',
+    'expectedSafetyCaseRevision',
+    'acknowledgedHumanCaseRevision',
+    'confirmation',
+  ]);
+
+const GET_QUARANTINE_AV_INSPECTION_STATUS_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set(['action', 'receiptId']);
+
+const DISPATCH_QUARANTINE_AV_INSPECTION_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set([
+    'action',
+    'receiptId',
+    'expectedRequestId',
     'expectedSafetyCaseRevision',
     'acknowledgedHumanCaseRevision',
     'confirmation',
@@ -1266,6 +1301,55 @@ function assertIsolatedInspectionRequestReleaseGatesEnabled(
     throw new HttpsError(
       'failed-precondition',
       'ISOLATED_INSPECTION_REQUEST_NOT_RELEASED: Library isolated inspection request feature release gates are not enabled on the server.'
+    );
+  }
+}
+
+function assertAvExecutionReleaseGatesEnabled(
+  options?: LibraryQuarantineReviewWorkbenchHandlerOptions
+): void {
+  const isWorkbenchEnabled =
+    options?.workbenchEnabled !== undefined
+      ? options.workbenchEnabled === true
+      : process.env[LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR] === 'true';
+
+  const isHumanCaseEnabled =
+    options?.humanCaseReviewEnabled !== undefined
+      ? options.humanCaseReviewEnabled === true
+      : process.env[LIBRARY_HUMAN_CASE_REVIEW_RELEASE_ENV_VAR] === 'true';
+
+  const isCatalogHandoffEnabled =
+    options?.catalogHandoffEnabled !== undefined
+      ? options.catalogHandoffEnabled === true
+      : process.env[LIBRARY_CATALOG_HANDOFF_RELEASE_ENV_VAR] === 'true';
+
+  const isBinarySafetyCaseEnabled =
+    options?.binarySafetyCaseEnabled !== undefined
+      ? options.binarySafetyCaseEnabled === true
+      : process.env[LIBRARY_BINARY_SAFETY_CASE_RELEASE_ENV_VAR] === 'true';
+
+  const isIsolatedInspectionRequestEnabled =
+    options?.isolatedInspectionRequestEnabled !== undefined
+      ? options.isolatedInspectionRequestEnabled === true
+      : process.env[LIBRARY_ISOLATED_INSPECTION_REQUEST_RELEASE_ENV_VAR] ===
+        'true';
+
+  const isAvExecutionEnabled =
+    options?.avExecutionEnabled !== undefined
+      ? options.avExecutionEnabled === true
+      : process.env[LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR] === 'true';
+
+  if (
+    !isWorkbenchEnabled ||
+    !isHumanCaseEnabled ||
+    !isCatalogHandoffEnabled ||
+    !isBinarySafetyCaseEnabled ||
+    !isIsolatedInspectionRequestEnabled ||
+    !isAvExecutionEnabled
+  ) {
+    throw new HttpsError(
+      'failed-precondition',
+      'AV_EXECUTION_NOT_RELEASED: Library isolated ClamAV execution feature release gates are not enabled on the server.'
     );
   }
 }
@@ -2699,6 +2783,194 @@ export async function executeManageLibraryDocumentsRequest(
           validatedPayload.acknowledgedHumanCaseRevision as number,
         confirmation:
           validatedPayload.confirmation as LibraryQuarantineIsolatedInspectionConfirmationLiteral,
+      })
+    );
+  }
+
+  if (
+    action === 'getQuarantineAvInspectionStatus' ||
+    action === 'dispatchQuarantineAvInspection'
+  ) {
+    assertAvExecutionReleaseGatesEnabled(quarantineWorkbenchOptions);
+    assertStrictNoSymbolCallerKeys(requestContext?.data, action);
+
+    const allowedKeys =
+      action === 'getQuarantineAvInspectionStatus'
+        ? GET_QUARANTINE_AV_INSPECTION_STATUS_ALLOWED_KEYS
+        : DISPATCH_QUARANTINE_AV_INSPECTION_ALLOWED_KEYS;
+
+    const validatedPayload = assertStrictAllowedCallerKeys(
+      requestContext?.data,
+      allowedKeys,
+      action
+    );
+
+    if (
+      !Object.prototype.hasOwnProperty.call(validatedPayload, 'receiptId') ||
+      !isValidLibraryQuarantineReceiptId(validatedPayload.receiptId)
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'INVALID_RECEIPT_ID: receiptId must be a 32-character lowercase hexadecimal string.'
+      );
+    }
+
+    if (action === 'dispatchQuarantineAvInspection') {
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedRequestId'
+        ) ||
+        !parseLibraryQuarantineIsolatedInspectionRequestId(
+          validatedPayload.expectedRequestId
+        )
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_REQUEST_ID: expectedRequestId must match <receiptId>_<sourceRevision>_<safetyCaseRevision>.'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedSafetyCaseRevision'
+        ) ||
+        typeof validatedPayload.expectedSafetyCaseRevision !== 'number' ||
+        !Number.isSafeInteger(validatedPayload.expectedSafetyCaseRevision) ||
+        validatedPayload.expectedSafetyCaseRevision < 1
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_SAFETY_CASE_REVISION: expectedSafetyCaseRevision must be a positive safe integer (>= 1).'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'acknowledgedHumanCaseRevision'
+        ) ||
+        typeof validatedPayload.acknowledgedHumanCaseRevision !== 'number' ||
+        !Number.isSafeInteger(validatedPayload.acknowledgedHumanCaseRevision) ||
+        validatedPayload.acknowledgedHumanCaseRevision < 1
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_ACKNOWLEDGED_CASE_REVISION: acknowledgedHumanCaseRevision must be a positive safe integer (>= 1).'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'confirmation'
+        ) ||
+        validatedPayload.confirmation !==
+          LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'CONFIRMATION_REQUIRED: confirmation must equal START_REAL_ISOLATED_AV_SCAN.'
+        );
+      }
+    }
+
+    assertStrictWorkbenchAuthEnvelope(requestContext);
+
+    const baseAdminRepo: Pick<AdminRepository, 'getAdminByUid'> =
+      quarantineWorkbenchOptions?.bridgeDependencies?.adminRepository ??
+      adminRepo;
+
+    let cachedLookupDone = false;
+    let cachedLookupUid = '';
+    let cachedAdminUser: AdminUser | null = null;
+
+    const requestScopedAdminRepo: AdminRepository = {
+      async getAdminByUid(uid: string): Promise<AdminUser | null> {
+        if (cachedLookupDone && cachedLookupUid === uid) {
+          return cachedAdminUser;
+        }
+        const resolved = await baseAdminRepo.getAdminByUid(uid);
+        cachedLookupDone = true;
+        cachedLookupUid = uid;
+        cachedAdminUser = resolved;
+        return resolved;
+      },
+      async saveAdmin(admin: AdminUser): Promise<AdminUser> {
+        if (
+          typeof (baseAdminRepo as AdminRepository).saveAdmin === 'function'
+        ) {
+          return (baseAdminRepo as AdminRepository).saveAdmin(admin);
+        }
+        throw new Error(
+          `UNSAFE_DIRECT_WRITE_FORBIDDEN: saveAdmin is forbidden in ${action}.`
+        );
+      },
+      async listAdmins(): Promise<AdminUser[]> {
+        return typeof (baseAdminRepo as AdminRepository).listAdmins ===
+          'function'
+          ? (baseAdminRepo as AdminRepository).listAdmins!()
+          : [];
+      },
+    };
+
+    const verifiedUid = requestContext?.auth?.uid
+      ? String(requestContext.auth.uid)
+      : '';
+    const verifiedToken = requestContext?.auth?.token;
+
+    const effectiveDb: LibraryQuarantineReviewDraftFirestoreDatabase =
+      quarantineWorkbenchOptions?.draftDatabase ??
+      (getFirestore() as unknown as LibraryQuarantineReviewDraftFirestoreDatabase);
+
+    const effectiveClock =
+      quarantineWorkbenchOptions?.avExecutionClock ??
+      quarantineWorkbenchOptions?.isolatedInspectionRequestClock ??
+      quarantineWorkbenchOptions?.binarySafetyCaseClock ??
+      quarantineWorkbenchOptions?.caseAlignmentClock ??
+      quarantineWorkbenchOptions?.catalogHandoffClock ??
+      quarantineWorkbenchOptions?.humanReviewClock ??
+      quarantineWorkbenchOptions?.bridgeDependencies?.clock;
+
+    const avExecutionService = new LibraryQuarantineAvExecutionService({
+      trustedPrincipalProvider: Object.freeze({
+        resolveAuthenticatedPrincipal: () =>
+          requestContext?.auth
+            ? Object.freeze({
+                uid: verifiedUid,
+                ...(verifiedToken !== undefined
+                  ? { token: verifiedToken }
+                  : {}),
+              })
+            : null,
+      }),
+      adminRepository: requestScopedAdminRepo,
+      db: effectiveDb,
+      ...(quarantineWorkbenchOptions?.avJobInvoker !== undefined
+        ? { avJobInvoker: quarantineWorkbenchOptions.avJobInvoker }
+        : {}),
+      ...(effectiveClock !== undefined ? { clock: effectiveClock } : {}),
+    });
+
+    if (action === 'getQuarantineAvInspectionStatus') {
+      return avExecutionService.getQuarantineAvInspectionStatus(
+        Object.freeze({
+          receiptId: validatedPayload.receiptId,
+        })
+      );
+    }
+
+    return avExecutionService.dispatchQuarantineAvInspection(
+      Object.freeze({
+        receiptId: validatedPayload.receiptId,
+        expectedRequestId: validatedPayload.expectedRequestId as string,
+        expectedSafetyCaseRevision:
+          validatedPayload.expectedSafetyCaseRevision as number,
+        acknowledgedHumanCaseRevision:
+          validatedPayload.acknowledgedHumanCaseRevision as number,
+        confirmation:
+          validatedPayload.confirmation as LibraryQuarantineAvDispatchConfirmationLiteral,
       })
     );
   }
