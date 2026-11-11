@@ -33,6 +33,7 @@ const firebaseAdminRuntimeMock: {
   getFirestoreCalls: number;
   getStorageCalls: number;
   requestedBucketNames: string[];
+  interceptedModuleSpecifiers: string[];
 } = {
   enabled: false,
   apps: [],
@@ -46,7 +47,94 @@ const firebaseAdminRuntimeMock: {
   getFirestoreCalls: 0,
   getStorageCalls: 0,
   requestedBucketNames: [],
+  interceptedModuleSpecifiers: [],
 };
+
+const firebaseAdminAppMockModule = Object.freeze({
+  getApps: () => {
+    firebaseAdminRuntimeMock.getAppsCalls += 1;
+    firebaseAdminRuntimeMock.callOrder.push('getApps');
+    if (!firebaseAdminRuntimeMock.enabled) {
+      throw new Error(
+        'Uninjected live getApps() must not be called in headless backend tests.'
+      );
+    }
+    if (firebaseAdminRuntimeMock.throwOnGetApps) {
+      throw firebaseAdminRuntimeMock.throwOnGetApps;
+    }
+    return [...firebaseAdminRuntimeMock.apps];
+  },
+  initializeApp: () => {
+    firebaseAdminRuntimeMock.initializeAppCalls += 1;
+    firebaseAdminRuntimeMock.callOrder.push('initializeApp');
+    if (!firebaseAdminRuntimeMock.enabled) {
+      throw new Error(
+        'Uninjected live initializeApp() must not be called in headless backend tests.'
+      );
+    }
+    if (firebaseAdminRuntimeMock.throwOnInitializeApp) {
+      throw firebaseAdminRuntimeMock.throwOnInitializeApp;
+    }
+    const createdApp = Object.freeze({ name: '[DEFAULT]' });
+    firebaseAdminRuntimeMock.apps.push(createdApp);
+    return createdApp;
+  },
+});
+
+const firebaseAdminAuthMockModule = Object.freeze({
+  getAuth: () => {
+    throw new Error(
+      'Uninjected live getAuth() must not be called in headless backend tests.'
+    );
+  },
+});
+
+const firebaseAdminFirestoreMockModule = Object.freeze({
+  getFirestore: () => {
+    firebaseAdminRuntimeMock.getFirestoreCalls += 1;
+    firebaseAdminRuntimeMock.callOrder.push('getFirestore');
+    if (
+      !firebaseAdminRuntimeMock.enabled ||
+      !firebaseAdminRuntimeMock.firestoreProvider
+    ) {
+      throw new Error(
+        'Uninjected live getFirestore() must not be called in headless backend tests.'
+      );
+    }
+    if (firebaseAdminRuntimeMock.apps.length === 0) {
+      throw new Error(
+        'The default Firebase app does not exist. Make sure you call initializeApp() before using any of the Firebase services.'
+      );
+    }
+    return firebaseAdminRuntimeMock.firestoreProvider();
+  },
+});
+
+const firebaseAdminStorageMockModule = Object.freeze({
+  getStorage: () => {
+    firebaseAdminRuntimeMock.getStorageCalls += 1;
+    firebaseAdminRuntimeMock.callOrder.push('getStorage');
+    if (
+      !firebaseAdminRuntimeMock.enabled ||
+      !firebaseAdminRuntimeMock.storageBucketProvider
+    ) {
+      throw new Error(
+        'Uninjected live getStorage() must not be called in headless backend tests.'
+      );
+    }
+    if (firebaseAdminRuntimeMock.apps.length === 0) {
+      throw new Error(
+        'The default Firebase app does not exist. Make sure you call initializeApp() before using any of the Firebase services.'
+      );
+    }
+    return {
+      bucket: (bucketName: string) => {
+        firebaseAdminRuntimeMock.requestedBucketNames.push(bucketName);
+        return firebaseAdminRuntimeMock.storageBucketProvider!(bucketName);
+      },
+    };
+  },
+});
 
 const moduleWithLoad = Module as unknown as {
   _load: (request: string, parent: unknown, isMain: boolean) => unknown;
@@ -57,6 +145,23 @@ moduleWithLoad._load = function patchedLoad(
   parent: unknown,
   isMain: boolean
 ): unknown {
+  if (request === 'firebase-admin/app') {
+    firebaseAdminRuntimeMock.interceptedModuleSpecifiers.push(request);
+    return firebaseAdminAppMockModule;
+  }
+  if (request === 'firebase-admin/auth') {
+    firebaseAdminRuntimeMock.interceptedModuleSpecifiers.push(request);
+    return firebaseAdminAuthMockModule;
+  }
+  if (request === 'firebase-admin/firestore') {
+    firebaseAdminRuntimeMock.interceptedModuleSpecifiers.push(request);
+    return firebaseAdminFirestoreMockModule;
+  }
+  if (request === 'firebase-admin/storage') {
+    firebaseAdminRuntimeMock.interceptedModuleSpecifiers.push(request);
+    return firebaseAdminStorageMockModule;
+  }
+
   try {
     return originalModuleLoad.call(this, request, parent, isMain);
   } catch (err: unknown) {
@@ -73,96 +178,6 @@ moduleWithLoad._load = function patchedLoad(
           name,
           value: () => process.env[name] || '',
         }),
-      };
-    }
-    if (request === 'firebase-admin/app') {
-      return {
-        getApps: () => {
-          firebaseAdminRuntimeMock.getAppsCalls += 1;
-          firebaseAdminRuntimeMock.callOrder.push('getApps');
-          if (!firebaseAdminRuntimeMock.enabled) {
-            throw new Error(
-              'Uninjected live getApps() must not be called in headless backend tests.'
-            );
-          }
-          if (firebaseAdminRuntimeMock.throwOnGetApps) {
-            throw firebaseAdminRuntimeMock.throwOnGetApps;
-          }
-          return [...firebaseAdminRuntimeMock.apps];
-        },
-        initializeApp: () => {
-          firebaseAdminRuntimeMock.initializeAppCalls += 1;
-          firebaseAdminRuntimeMock.callOrder.push('initializeApp');
-          if (!firebaseAdminRuntimeMock.enabled) {
-            throw new Error(
-              'Uninjected live initializeApp() must not be called in headless backend tests.'
-            );
-          }
-          if (firebaseAdminRuntimeMock.throwOnInitializeApp) {
-            throw firebaseAdminRuntimeMock.throwOnInitializeApp;
-          }
-          const createdApp = Object.freeze({ name: '[DEFAULT]' });
-          firebaseAdminRuntimeMock.apps.push(createdApp);
-          return createdApp;
-        },
-      };
-    }
-    if (request === 'firebase-admin/auth') {
-      return {
-        getAuth: () => {
-          throw new Error(
-            'Uninjected live getAuth() must not be called in headless backend tests.'
-          );
-        },
-      };
-    }
-    if (request === 'firebase-admin/firestore') {
-      return {
-        getFirestore: () => {
-          firebaseAdminRuntimeMock.getFirestoreCalls += 1;
-          firebaseAdminRuntimeMock.callOrder.push('getFirestore');
-          if (
-            !firebaseAdminRuntimeMock.enabled ||
-            !firebaseAdminRuntimeMock.firestoreProvider
-          ) {
-            throw new Error(
-              'Uninjected live getFirestore() must not be called in headless backend tests.'
-            );
-          }
-          if (firebaseAdminRuntimeMock.apps.length === 0) {
-            throw new Error(
-              'The default Firebase app does not exist. Make sure you call initializeApp() before using any of the Firebase services.'
-            );
-          }
-          return firebaseAdminRuntimeMock.firestoreProvider();
-        },
-      };
-    }
-    if (request === 'firebase-admin/storage') {
-      return {
-        getStorage: () => {
-          firebaseAdminRuntimeMock.getStorageCalls += 1;
-          firebaseAdminRuntimeMock.callOrder.push('getStorage');
-          if (
-            !firebaseAdminRuntimeMock.enabled ||
-            !firebaseAdminRuntimeMock.storageBucketProvider
-          ) {
-            throw new Error(
-              'Uninjected live getStorage() must not be called in headless backend tests.'
-            );
-          }
-          if (firebaseAdminRuntimeMock.apps.length === 0) {
-            throw new Error(
-              'The default Firebase app does not exist. Make sure you call initializeApp() before using any of the Firebase services.'
-            );
-          }
-          return {
-            bucket: (bucketName: string) => {
-              firebaseAdminRuntimeMock.requestedBucketNames.push(bucketName);
-              return firebaseAdminRuntimeMock.storageBucketProvider!(bucketName);
-            },
-          };
-        },
       };
     }
     throw err;
@@ -2232,6 +2247,27 @@ async function runTests(): Promise<void> {
       firebaseAdminRuntimeMock.getFirestoreCalls = 0;
       firebaseAdminRuntimeMock.getStorageCalls = 0;
       firebaseAdminRuntimeMock.requestedBucketNames = [];
+      firebaseAdminRuntimeMock.interceptedModuleSpecifiers = [];
+
+      // Verify deterministic mock selection for all 4 firebase-admin/* modules
+      // BEFORE attempting originalModuleLoad, regardless of whether firebase-admin is installed
+      assert.equal(
+        moduleWithLoad._load('firebase-admin/app', null, false),
+        firebaseAdminAppMockModule
+      );
+      assert.equal(
+        moduleWithLoad._load('firebase-admin/auth', null, false),
+        firebaseAdminAuthMockModule
+      );
+      assert.equal(
+        moduleWithLoad._load('firebase-admin/firestore', null, false),
+        firebaseAdminFirestoreMockModule
+      );
+      assert.equal(
+        moduleWithLoad._load('firebase-admin/storage', null, false),
+        firebaseAdminStorageMockModule
+      );
+      firebaseAdminRuntimeMock.interceptedModuleSpecifiers = [];
 
       process.env[LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR] =
         coldSeeded.requestId;
@@ -2255,6 +2291,11 @@ async function runTests(): Promise<void> {
       });
 
       assert.equal(coldExitCode, 0);
+      assert.deepEqual(firebaseAdminRuntimeMock.interceptedModuleSpecifiers, [
+        'firebase-admin/app',
+        'firebase-admin/firestore',
+        'firebase-admin/storage',
+      ]);
       assert.equal(firebaseAdminRuntimeMock.initializeAppCalls, 1);
       assert.equal(firebaseAdminRuntimeMock.getFirestoreCalls, 1);
       assert.equal(firebaseAdminRuntimeMock.getStorageCalls, 1);
