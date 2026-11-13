@@ -29,8 +29,10 @@ import {
   type SaveLibraryQuarantineHumanReviewCaseResponseDto,
 } from '../src/services/libraryQuarantineHumanReviewClient';
 import {
+  HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE,
   LibraryQuarantineHumanReviewModal,
   LibraryQuarantineHumanReviewModalController,
+  doHumanReviewEditorialFieldsExactlyMatch,
 } from '../src/components/library/LibraryQuarantineHumanReviewModal';
 import { AdminLibraryManagement } from '../src/components/library/AdminLibraryManagement';
 
@@ -495,12 +497,19 @@ async function runTests(): Promise<void> {
             isReadyForPeia: false,
           };
         },
-        saveCaseFn: async () => {
+        saveCaseFn: async ({ input }) => {
           saveCalls += 1;
           // Simulate commit confirmation lost after server actually persisted revision 1
           serverCase = buildSanitizedCaseDto(receiptId, 1, {
-            status: 'IN_REVIEW',
-            titleAr: 'سجل محفوظ رغم انقطاع التأكيد',
+            status: input.status,
+            titleAr: input.titleAr ?? '',
+            titleEn: input.titleEn ?? '',
+            issuingOrganization: input.issuingOrganization ?? '',
+            summaryAr: input.summaryAr ?? '',
+            summaryEn: input.summaryEn ?? '',
+            sourceEvidenceNotes: input.sourceEvidenceNotes ?? '',
+            rightsEvidenceNotes: input.rightsEvidenceNotes ?? '',
+            editorialNotes: input.editorialNotes ?? '',
           });
           return {
             ok: false,
@@ -769,8 +778,1041 @@ async function runTests(): Promise<void> {
     );
   }
 
+  // =========================================================================
+  // TEST 7 (Case A): Rejected Callable (`HUMAN_REVIEW_SAVE_CALL_FAILED`) After Server Persistence
+  //                  -> Enters `SAVE_RESULT_UNCONFIRMED` Hold -> Blocks Repeat Save -> Reconciles
+  //                  via `reloadCase()` Without Second Write and Fires `onCaseSaved` Exactly Once
+  // =========================================================================
+  {
+    const receiptId = buildHexReceiptId(70);
+    const adminReceipt = buildSanitizedAdminReceipt(70, { receiptId });
+    let saveCalls = 0;
+    let getCalls = 0;
+    const savedCallbacks: SanitizedLibraryQuarantineHumanReviewCaseDto[] = [];
+    let persistedServerCase: SanitizedLibraryQuarantineHumanReviewCaseDto | null =
+      null;
+
+    const controller = new LibraryQuarantineHumanReviewModalController(
+      curator,
+      {
+        humanReviewEnabled: true,
+        onCaseSaved: (saved) => {
+          savedCallbacks.push(saved);
+        },
+        getCaseFn: async () => {
+          getCalls += 1;
+          return {
+            ok: true,
+            status: 'READY',
+            receiptId,
+            sourceRevision: 2,
+            draftStatus: 'PENDING_HUMAN_REVIEW',
+            adminReceipt,
+            currentRevision: persistedServerCase
+              ? persistedServerCase.revision
+              : 0,
+            reviewCase: persistedServerCase,
+            isSanitized: false,
+            isVerifiedSafe: false,
+            isRightsApproved: false,
+            isPublished: false,
+            isReadyForPeia: false,
+          };
+        },
+        saveCaseFn: async ({ expectedRevision, input }) => {
+          saveCalls += 1;
+          persistedServerCase = buildSanitizedCaseDto(
+            receiptId,
+            expectedRevision + 1,
+            {
+              status: input.status,
+              titleAr: input.titleAr ?? '',
+              titleEn: input.titleEn ?? '',
+              issuingOrganization: input.issuingOrganization ?? '',
+              summaryAr: input.summaryAr ?? '',
+              summaryEn: input.summaryEn ?? '',
+              sourceEvidenceNotes: input.sourceEvidenceNotes ?? '',
+              rightsEvidenceNotes: input.rightsEvidenceNotes ?? '',
+              editorialNotes: input.editorialNotes ?? '',
+            }
+          );
+          throw new Error(HUMAN_REVIEW_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED);
+        },
+      }
+    );
+
+    await controller.openCase(adminReceipt, 2);
+    controller.updateFormField('status', 'METADATA_RECORDED');
+    controller.updateFormField('titleAr', '  التقرير الوطني للانبعاثات 2026  ');
+    controller.updateFormField('titleEn', '  National Emissions Report 2026  ');
+    controller.updateFormField('issuingOrganization', '  وزارة البيئة والمناخ  ');
+    controller.updateFormField('summaryAr', '  ملخص عربي شامل  ');
+    controller.updateFormField('summaryEn', '  Comprehensive English summary  ');
+    controller.updateFormField('sourceEvidenceNotes', '  قرار وزاري رقم 14  ');
+    controller.updateFormField('rightsEvidenceNotes', '  وثيقة حكومية عامة  ');
+    controller.updateFormField('editorialNotes', '  ملاحظة المراجع البشري  ');
+
+    const failedSaveRes = await controller.saveCase();
+    assert.equal(failedSaveRes, null);
+    assert.equal(saveCalls, 1);
+    assert.equal(savedCallbacks.length, 0);
+
+    const snapDuringHold = controller.getSnapshot();
+    assert.equal(snapDuringHold.saving, false);
+    assert.equal(snapDuringHold.saveError, null);
+    assert.notEqual(snapDuringHold.uncertainState, null);
+    assert.equal(
+      snapDuringHold.uncertainState?.errorCode,
+      HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE
+    );
+    assert.equal(snapDuringHold.uncertainState?.caseSaveOutcome, 'UNKNOWN');
+    assert.equal(snapDuringHold.uncertainState?.caseSaved, null);
+    assert.equal(
+      snapDuringHold.uncertainState?.origin,
+      'CLIENT_SAVE_UNCONFIRMED'
+    );
+    assert.equal(snapDuringHold.uncertainState?.expectedRevision, 0);
+    assert.equal(snapDuringHold.uncertainState?.verificationStatus, 'UNVERIFIED');
+
+    // All 9 normalized fields are preserved in form during hold
+    assert.equal(snapDuringHold.form.status, 'METADATA_RECORDED');
+    assert.equal(snapDuringHold.form.titleAr, 'التقرير الوطني للانبعاثات 2026');
+    assert.equal(snapDuringHold.form.titleEn, 'National Emissions Report 2026');
+    assert.equal(snapDuringHold.form.issuingOrganization, 'وزارة البيئة والمناخ');
+    assert.equal(snapDuringHold.form.summaryAr, 'ملخص عربي شامل');
+    assert.equal(snapDuringHold.form.summaryEn, 'Comprehensive English summary');
+    assert.equal(snapDuringHold.form.sourceEvidenceNotes, 'قرار وزاري رقم 14');
+    assert.equal(snapDuringHold.form.rightsEvidenceNotes, 'وثيقة حكومية عامة');
+    assert.equal(snapDuringHold.form.editorialNotes, 'ملاحظة المراجع البشري');
+
+    // Blind repeat save or field edit while uncertain is blocked
+    controller.updateFormField('titleAr', 'محاولة تعديل أثناء القفل');
+    assert.equal(
+      controller.getSnapshot().form.titleAr,
+      'التقرير الوطني للانبعاثات 2026'
+    );
+    const blockedSave = await controller.saveCase();
+    assert.equal(blockedSave, null);
+    assert.equal(saveCalls, 1);
+
+    // Clicking "Verify case record" (`reloadCase`) reads back revision 1 and reconciles all 9 fields without a second write
+    const verifyRes = await controller.reloadCase();
+    assert.equal(verifyRes?.ok, true);
+    assert.equal(saveCalls, 1);
+    assert.equal(getCalls, 2);
+    assert.equal(savedCallbacks.length, 1);
+    assert.equal(savedCallbacks[0].revision, 1);
+
+    const snapAfterVerify = controller.getSnapshot();
+    assert.equal(snapAfterVerify.uncertainState, null);
+    assert.equal(snapAfterVerify.currentRevision, 1);
+    assert.equal(snapAfterVerify.lastSaveOutcome, 'CREATED');
+    assert.equal(
+      doHumanReviewEditorialFieldsExactlyMatch(
+        snapAfterVerify.reviewCase,
+        snapAfterVerify.form
+      ),
+      true
+    );
+
+    passed += 1;
+    console.log(
+      'PASS [7/15] (Case A): Rejected callable after server persistence reconciles cleanly via Verify case record without second write'
+    );
+  }
+
+  // =========================================================================
+  // TEST 8 (Case B): Rejected Callable (`HUMAN_REVIEW_SAVE_CALL_FAILED`) Without Server Persistence
+  //                  -> `reloadCase()` Sees `expectedRevision`, Preserves All 9 Attempted Fields,
+  //                  Keeps Hold Active Until Explicit Human Acknowledgment, Zero Auto-Save
+  // =========================================================================
+  {
+    const receiptId = buildHexReceiptId(80);
+    const adminReceipt = buildSanitizedAdminReceipt(80, { receiptId });
+    let saveCalls = 0;
+    let getCalls = 0;
+    let shouldFailSave = true;
+    let serverCase: SanitizedLibraryQuarantineHumanReviewCaseDto | null =
+      buildSanitizedCaseDto(receiptId, 1, {
+        status: 'IN_REVIEW',
+        titleAr: 'عنوان قديم على الخادم',
+        titleEn: 'Old Server Title',
+        issuingOrganization: 'Old Org',
+        summaryAr: 'ملخص قديم',
+        summaryEn: 'Old summary',
+        sourceEvidenceNotes: 'مصدر قديم',
+        rightsEvidenceNotes: 'حقوق قديمة',
+        editorialNotes: 'ملاحظات قديمة',
+      });
+
+    const controller = new LibraryQuarantineHumanReviewModalController(
+      curator,
+      {
+        humanReviewEnabled: true,
+        getCaseFn: async () => {
+          getCalls += 1;
+          return {
+            ok: true,
+            status: 'READY',
+            receiptId,
+            sourceRevision: 2,
+            draftStatus: 'PENDING_HUMAN_REVIEW',
+            adminReceipt,
+            currentRevision: serverCase ? serverCase.revision : 0,
+            reviewCase: serverCase,
+            isSanitized: false,
+            isVerifiedSafe: false,
+            isRightsApproved: false,
+            isPublished: false,
+            isReadyForPeia: false,
+          };
+        },
+        saveCaseFn: async ({ expectedRevision, input }) => {
+          saveCalls += 1;
+          if (shouldFailSave) {
+            throw new Error(HUMAN_REVIEW_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED);
+          }
+          serverCase = buildSanitizedCaseDto(receiptId, expectedRevision + 1, {
+            status: input.status,
+            titleAr: input.titleAr ?? '',
+            titleEn: input.titleEn ?? '',
+            issuingOrganization: input.issuingOrganization ?? '',
+            summaryAr: input.summaryAr ?? '',
+            summaryEn: input.summaryEn ?? '',
+            sourceEvidenceNotes: input.sourceEvidenceNotes ?? '',
+            rightsEvidenceNotes: input.rightsEvidenceNotes ?? '',
+            editorialNotes: input.editorialNotes ?? '',
+          });
+          return {
+            ok: true,
+            status: 'SAVED',
+            caseSaveOutcome: 'UPDATED',
+            caseSaved: true,
+            receiptId,
+            sourceRevision: 2,
+            currentRevision: expectedRevision + 1,
+            reviewCase: serverCase,
+            isSanitized: false,
+            isVerifiedSafe: false,
+            isRightsApproved: false,
+            isPublished: false,
+            isReadyForPeia: false,
+          };
+        },
+      }
+    );
+
+    await controller.openCase(adminReceipt, 2);
+    assert.equal(controller.getSnapshot().currentRevision, 1);
+
+    const attemptedNineFields = {
+      status: 'METADATA_RECORDED' as const,
+      titleAr: 'عنوان محدّث لم يُحفظ بعد',
+      titleEn: 'Updated Unsaved English Title',
+      issuingOrganization: 'الهيئة الإقليمية لحماية البيئة',
+      summaryAr: 'ملخص تحريري جديد بالعربية',
+      summaryEn: 'New editorial summary in English',
+      sourceEvidenceNotes: 'الجريدة الرسمية ملحق 7',
+      rightsEvidenceNotes: 'مشاع إبداعي حكومي',
+      editorialNotes: 'استيفاء جميع الحقول التسعة',
+    };
+    controller.updateFormField('status', attemptedNineFields.status);
+    controller.updateFormField('titleAr', attemptedNineFields.titleAr);
+    controller.updateFormField('titleEn', attemptedNineFields.titleEn);
+    controller.updateFormField(
+      'issuingOrganization',
+      attemptedNineFields.issuingOrganization
+    );
+    controller.updateFormField('summaryAr', attemptedNineFields.summaryAr);
+    controller.updateFormField('summaryEn', attemptedNineFields.summaryEn);
+    controller.updateFormField(
+      'sourceEvidenceNotes',
+      attemptedNineFields.sourceEvidenceNotes
+    );
+    controller.updateFormField(
+      'rightsEvidenceNotes',
+      attemptedNineFields.rightsEvidenceNotes
+    );
+    controller.updateFormField(
+      'editorialNotes',
+      attemptedNineFields.editorialNotes
+    );
+
+    await controller.saveCase();
+    assert.equal(saveCalls, 1);
+    assert.equal(
+      controller.getSnapshot().uncertainState?.errorCode,
+      HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE
+    );
+
+    assert.equal(controller.acknowledgeUncommittedSaveAfterVerify(), false);
+
+    await controller.reloadCase();
+    assert.equal(getCalls, 2);
+    assert.equal(saveCalls, 1);
+
+    const snapAfterVerify = controller.getSnapshot();
+    assert.notEqual(snapAfterVerify.uncertainState, null);
+    assert.equal(
+      snapAfterVerify.uncertainState?.verificationStatus,
+      'STILL_AT_EXPECTED_REVISION'
+    );
+    assert.equal(snapAfterVerify.uncertainState?.verifiedServerRevision, 1);
+    assert.equal(snapAfterVerify.currentRevision, 1);
+
+    // All 9 attempted fields in `form` were NOT overwritten by the old server case
+    assert.equal(
+      doHumanReviewEditorialFieldsExactlyMatch(
+        snapAfterVerify.form,
+        attemptedNineFields
+      ),
+      true
+    );
+
+    assert.equal(controller.acknowledgeUncommittedSaveAfterVerify(), true);
+    assert.equal(controller.getSnapshot().uncertainState, null);
+    assert.equal(controller.getSnapshot().currentRevision, 1);
+    assert.equal(saveCalls, 1);
+    assert.equal(
+      doHumanReviewEditorialFieldsExactlyMatch(
+        controller.getSnapshot().form,
+        attemptedNineFields
+      ),
+      true
+    );
+
+    shouldFailSave = false;
+    const manualRetryRes = await controller.saveCase();
+    assert.equal(manualRetryRes?.status, 'SAVED');
+    assert.equal(saveCalls, 2);
+    assert.equal(controller.getSnapshot().currentRevision, 2);
+    assert.equal(controller.getSnapshot().lastSaveOutcome, 'UPDATED');
+
+    passed += 1;
+    console.log(
+      'PASS [8/15] (Case B): Unchanged server revision preserves all 9 attempted fields and requires explicit acknowledgment before CAS-protected manual save'
+    );
+  }
+
+  // =========================================================================
+  // TEST 9 (Case C): `GET` Failure or Server `HOLD` During Uncertainty
+  //                  -> Fails Closed, `uncertainState` and All 9 Attempted Fields Remain Intact
+  // =========================================================================
+  {
+    const receiptId = buildHexReceiptId(90);
+    const adminReceipt = buildSanitizedAdminReceipt(90, { receiptId });
+    let saveCalls = 0;
+    let getMode: 'READY' | 'THROW' | 'HOLD' = 'READY';
+
+    const controller = new LibraryQuarantineHumanReviewModalController(
+      curator,
+      {
+        humanReviewEnabled: true,
+        getCaseFn: async () => {
+          if (getMode === 'THROW') {
+            throw new Error(HUMAN_REVIEW_CLIENT_SAFE_ERRORS.GET_CALL_FAILED);
+          }
+          if (getMode === 'HOLD') {
+            return {
+              ok: false,
+              status: 'HOLD',
+              errorCode: 'REVIEW_DRAFT_NOT_PENDING_HOLD',
+              errorMessage: 'Draft is on hold.',
+              receiptId,
+              isSanitized: false,
+              isVerifiedSafe: false,
+              isRightsApproved: false,
+              isPublished: false,
+              isReadyForPeia: false,
+            };
+          }
+          return {
+            ok: true,
+            status: 'READY',
+            receiptId,
+            sourceRevision: 2,
+            draftStatus: 'PENDING_HUMAN_REVIEW',
+            adminReceipt,
+            currentRevision: 0,
+            reviewCase: null,
+            isSanitized: false,
+            isVerifiedSafe: false,
+            isRightsApproved: false,
+            isPublished: false,
+            isReadyForPeia: false,
+          };
+        },
+        saveCaseFn: async () => {
+          saveCalls += 1;
+          throw new Error(HUMAN_REVIEW_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED);
+        },
+      }
+    );
+
+    await controller.openCase(adminReceipt, 2);
+    controller.updateFormField('status', 'METADATA_RECORDED');
+    controller.updateFormField('titleAr', 'وثيقة محمية ضد فقدان البيانات');
+    controller.updateFormField('sourceEvidenceNotes', 'مصدر موثق رقم 55');
+
+    await controller.saveCase();
+    assert.notEqual(controller.getSnapshot().uncertainState, null);
+
+    getMode = 'THROW';
+    await controller.reloadCase();
+    assert.equal(saveCalls, 1);
+    assert.notEqual(controller.getSnapshot().uncertainState, null);
+    assert.equal(
+      controller.getSnapshot().uncertainState?.verificationStatus,
+      'VERIFY_CALL_FAILED'
+    );
+    assert.equal(
+      controller.getSnapshot().form.titleAr,
+      'وثيقة محمية ضد فقدان البيانات'
+    );
+    assert.equal(
+      controller.getSnapshot().form.sourceEvidenceNotes,
+      'مصدر موثق رقم 55'
+    );
+    assert.equal(controller.acknowledgeUncommittedSaveAfterVerify(), false);
+
+    getMode = 'HOLD';
+    await controller.reloadCase();
+    assert.equal(saveCalls, 1);
+    assert.notEqual(controller.getSnapshot().uncertainState, null);
+    assert.equal(
+      controller.getSnapshot().uncertainState?.verificationStatus,
+      'VERIFY_HOLD'
+    );
+    assert.equal(
+      controller.getSnapshot().form.titleAr,
+      'وثيقة محمية ضد فقدان البيانات'
+    );
+
+    passed += 1;
+    console.log(
+      'PASS [9/15] (Case C): GET failure or server HOLD during uncertainty keeps uncertainState and all attempted form fields intact'
+    );
+  }
+
+  // =========================================================================
+  // TEST 10 (Case D): Concurrent Mismatching Case, Future Revision, or Changed Source Context
+  //                   During Uncertainty -> No False Success, No Overwrite, Remain Held
+  // =========================================================================
+  {
+    const receiptId = buildHexReceiptId(100);
+    const adminReceipt = buildSanitizedAdminReceipt(100, { receiptId });
+    let onCaseSavedCount = 0;
+    let serverSourceRevision = 2;
+    let serverRevision = 0;
+    let serverCase: SanitizedLibraryQuarantineHumanReviewCaseDto | null = null;
+
+    const controller = new LibraryQuarantineHumanReviewModalController(
+      curator,
+      {
+        humanReviewEnabled: true,
+        onCaseSaved: () => {
+          onCaseSavedCount += 1;
+        },
+        getCaseFn: async () => ({
+          ok: true,
+          status: 'READY',
+          receiptId,
+          sourceRevision: serverSourceRevision,
+          draftStatus: 'PENDING_HUMAN_REVIEW',
+          adminReceipt,
+          currentRevision: serverRevision,
+          reviewCase: serverCase,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+        saveCaseFn: async () => {
+          throw new Error(HUMAN_REVIEW_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED);
+        },
+      }
+    );
+
+    await controller.openCase(adminReceipt, 2);
+    controller.updateFormField('status', 'METADATA_RECORDED');
+    controller.updateFormField('titleAr', 'مسودة المراجع الأول');
+    controller.updateFormField('sourceEvidenceNotes', 'مصدر المراجع الأول');
+
+    await controller.saveCase();
+    assert.notEqual(controller.getSnapshot().uncertainState, null);
+
+    // 10a. Server is at expectedRevision + 1 (revision 1), but with DIFFERENT editorial content
+    serverRevision = 1;
+    serverCase = buildSanitizedCaseDto(receiptId, 1, {
+      status: 'METADATA_RECORDED',
+      titleAr: 'مسودة مراجع آخر مختلف تماماً',
+      sourceEvidenceNotes: 'مصدر آخر',
+    });
+
+    await controller.reloadCase();
+    assert.equal(onCaseSavedCount, 0);
+    assert.notEqual(controller.getSnapshot().uncertainState, null);
+    assert.equal(
+      controller.getSnapshot().uncertainState?.verificationStatus,
+      'REVISION_OR_CONTENT_MISMATCH'
+    );
+    assert.equal(
+      controller.getSnapshot().form.titleAr,
+      'مسودة المراجع الأول'
+    );
+    assert.equal(controller.acknowledgeUncommittedSaveAfterVerify(), false);
+
+    // 10b. Server jumped to future revision 3 even with matching fields -> still mismatch
+    serverRevision = 3;
+    serverCase = buildSanitizedCaseDto(receiptId, 3, {
+      status: 'METADATA_RECORDED',
+      titleAr: 'مسودة المراجع الأول',
+      titleEn: '',
+      issuingOrganization: '',
+      summaryAr: '',
+      summaryEn: '',
+      sourceEvidenceNotes: 'مصدر المراجع الأول',
+      rightsEvidenceNotes: '',
+      editorialNotes: '',
+    });
+
+    await controller.reloadCase();
+    assert.equal(onCaseSavedCount, 0);
+    assert.notEqual(controller.getSnapshot().uncertainState, null);
+    assert.equal(
+      controller.getSnapshot().uncertainState?.verificationStatus,
+      'REVISION_OR_CONTENT_MISMATCH'
+    );
+    assert.equal(
+      controller.getSnapshot().form.titleAr,
+      'مسودة المراجع الأول'
+    );
+
+    // 10c. Source revision changed on server (sourceRevision 2 -> 5)
+    serverSourceRevision = 5;
+    serverRevision = 1;
+    serverCase = buildSanitizedCaseDto(receiptId, 1, {
+      sourceRevision: 5,
+      status: 'METADATA_RECORDED',
+      titleAr: 'مسودة المراجع الأول',
+      titleEn: '',
+      issuingOrganization: '',
+      summaryAr: '',
+      summaryEn: '',
+      sourceEvidenceNotes: 'مصدر المراجع الأول',
+      rightsEvidenceNotes: '',
+      editorialNotes: '',
+    });
+
+    await controller.reloadCase();
+    assert.equal(onCaseSavedCount, 0);
+    assert.notEqual(controller.getSnapshot().uncertainState, null);
+    assert.equal(
+      controller.getSnapshot().uncertainState?.verificationStatus,
+      'SOURCE_CHANGED'
+    );
+    assert.equal(
+      controller.getSnapshot().form.titleAr,
+      'مسودة المراجع الأول'
+    );
+
+    passed += 1;
+    console.log(
+      'PASS [10/15] (Case D): Concurrent mismatching case, future revision, or changed sourceRevision never triggers false success or overwrites form'
+    );
+  }
+
+  // =========================================================================
+  // TEST 11 (Case E): Malformed Save Response (`SAVE_RESPONSE_CONTRACT_INVALID` / `CASE_DTO_CONTRACT_INVALID`)
+  //                   Enters Conservative Unconfirmed-Save Hold (`SAVE_RESULT_UNCONFIRMED`)
+  // =========================================================================
+  {
+    const receiptId = buildHexReceiptId(110);
+    const adminReceipt = buildSanitizedAdminReceipt(110, { receiptId });
+    let errorToThrow: string =
+      HUMAN_REVIEW_CLIENT_SAFE_ERRORS.SAVE_RESPONSE_CONTRACT_INVALID;
+
+    const controller = new LibraryQuarantineHumanReviewModalController(
+      curator,
+      {
+        humanReviewEnabled: true,
+        getCaseFn: async () => ({
+          ok: true,
+          status: 'READY',
+          receiptId,
+          sourceRevision: 2,
+          draftStatus: 'PENDING_HUMAN_REVIEW',
+          adminReceipt,
+          currentRevision: 0,
+          reviewCase: null,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+        saveCaseFn: async () => {
+          throw new Error(errorToThrow);
+        },
+      }
+    );
+
+    await controller.openCase(adminReceipt, 2);
+    controller.updateFormField('titleAr', 'اختبار استجابة غير صالحة');
+    await controller.saveCase();
+
+    assert.equal(
+      controller.getSnapshot().uncertainState?.errorCode,
+      HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE
+    );
+    assert.equal(controller.getSnapshot().saveError, null);
+    assert.equal(
+      controller.getSnapshot().form.titleAr,
+      'اختبار استجابة غير صالحة'
+    );
+
+    errorToThrow = HUMAN_REVIEW_CLIENT_SAFE_ERRORS.CASE_DTO_CONTRACT_INVALID;
+    await controller.openCase(adminReceipt, 2);
+    controller.updateFormField('titleAr', 'اختبار عقد السجل');
+    await controller.saveCase();
+
+    assert.equal(
+      controller.getSnapshot().uncertainState?.errorCode,
+      HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE
+    );
+    assert.equal(controller.getSnapshot().form.titleAr, 'اختبار عقد السجل');
+
+    passed += 1;
+    console.log(
+      'PASS [11/15] (Case E): Malformed save response (SAVE_RESPONSE_CONTRACT_INVALID / CASE_DTO_CONTRACT_INVALID) enters conservative unconfirmed-save hold'
+    );
+  }
+
+  // =========================================================================
+  // TEST 12 (Case F): Explicit Server `UNKNOWN` (`TRANSACTION_COMMIT_UNCERTAIN`) Preserves
+  //                   9-Field Non-Destructive Verification & Server `HOLD` Path Remains Intact
+  // =========================================================================
+  {
+    const receiptId = buildHexReceiptId(120);
+    const adminReceipt = buildSanitizedAdminReceipt(120, { receiptId });
+    let saveMode: 'UNKNOWN' | 'HOLD' = 'UNKNOWN';
+
+    const controller = new LibraryQuarantineHumanReviewModalController(
+      curator,
+      {
+        humanReviewEnabled: true,
+        getCaseFn: async () => ({
+          ok: true,
+          status: 'READY',
+          receiptId,
+          sourceRevision: 2,
+          draftStatus: 'PENDING_HUMAN_REVIEW',
+          adminReceipt,
+          currentRevision: 0,
+          reviewCase: null,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+        saveCaseFn: async () => {
+          if (saveMode === 'HOLD') {
+            return {
+              ok: false,
+              status: 'HOLD',
+              caseSaveOutcome: 'HOLD',
+              caseSaved: false,
+              errorCode: 'QUARANTINE_RECEIPT_NOT_FOUND_HOLD',
+              errorMessage: 'Quarantine receipt not found.',
+              receiptId,
+              isSanitized: false,
+              isVerifiedSafe: false,
+              isRightsApproved: false,
+              isPublished: false,
+              isReadyForPeia: false,
+            };
+          }
+          return {
+            ok: false,
+            status: 'UNKNOWN',
+            caseSaveOutcome: 'UNKNOWN',
+            caseSaved: null,
+            errorCode: 'TRANSACTION_COMMIT_UNCERTAIN',
+            errorMessage: 'Transaction commit confirmation lost.',
+            receiptId,
+            isSanitized: false,
+            isVerifiedSafe: false,
+            isRightsApproved: false,
+            isPublished: false,
+            isReadyForPeia: false,
+          };
+        },
+      }
+    );
+
+    await controller.openCase(adminReceipt, 2);
+    controller.updateFormField('titleAr', 'مسودة معاملة غير مؤكدة');
+    await controller.saveCase();
+
+    assert.equal(
+      controller.getSnapshot().uncertainState?.errorCode,
+      'TRANSACTION_COMMIT_UNCERTAIN'
+    );
+    assert.equal(
+      controller.getSnapshot().uncertainState?.origin,
+      'SERVER_TRANSACTION_UNCERTAIN'
+    );
+
+    await controller.reloadCase();
+    assert.equal(
+      controller.getSnapshot().uncertainState?.verificationStatus,
+      'STILL_AT_EXPECTED_REVISION'
+    );
+    assert.equal(
+      controller.getSnapshot().form.titleAr,
+      'مسودة معاملة غير مؤكدة'
+    );
+
+    assert.equal(controller.acknowledgeUncommittedSaveAfterVerify(), true);
+    saveMode = 'HOLD';
+    const holdRes = await controller.saveCase();
+    assert.equal(holdRes?.status, 'HOLD');
+    assert.equal(controller.getSnapshot().uncertainState, null);
+    assert.equal(
+      controller.getSnapshot().saveError,
+      'QUARANTINE_RECEIPT_NOT_FOUND_HOLD: Quarantine receipt not found.'
+    );
+
+    passed += 1;
+    console.log(
+      'PASS [12/15] (Case F): Explicit server UNKNOWN shares 9-field non-destructive verification and server HOLD path remains intact'
+    );
+  }
+
+  // =========================================================================
+  // TEST 13 (Case G): Pre-Dispatch Conditions (`FEATURE_NOT_RELEASED`, `BACKEND_UNAVAILABLE`,
+  //                   Local Validation Failures) Do NOT Enter `uncertainState`
+  // =========================================================================
+  {
+    const receiptId = buildHexReceiptId(130);
+    const adminReceipt = buildSanitizedAdminReceipt(130, { receiptId });
+    let saveCalls = 0;
+    let saveThrowError: Error = new Error(
+      HUMAN_REVIEW_CLIENT_SAFE_ERRORS.BACKEND_UNAVAILABLE
+    );
+
+    const controller = new LibraryQuarantineHumanReviewModalController(
+      curator,
+      {
+        humanReviewEnabled: true,
+        getCaseFn: async () => ({
+          ok: true,
+          status: 'READY',
+          receiptId,
+          sourceRevision: 2,
+          draftStatus: 'PENDING_HUMAN_REVIEW',
+          adminReceipt,
+          currentRevision: 0,
+          reviewCase: null,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+        saveCaseFn: async () => {
+          saveCalls += 1;
+          throw saveThrowError;
+        },
+      }
+    );
+
+    await controller.openCase(adminReceipt, 2);
+
+    const invalidRes = await controller.saveCase();
+    assert.equal(invalidRes, null);
+    assert.equal(saveCalls, 0);
+    assert.equal(controller.getSnapshot().uncertainState, null);
+    assert.equal(
+      controller.getSnapshot().saveError,
+      HUMAN_REVIEW_CLIENT_SAFE_ERRORS.EMPTY_REVIEW_CASE_NOT_ALLOWED
+    );
+
+    controller.updateFormField('titleAr', 'عنوان صالح');
+    const backendUnavailRes = await controller.saveCase();
+    assert.equal(backendUnavailRes, null);
+    assert.equal(saveCalls, 1);
+    assert.equal(controller.getSnapshot().uncertainState, null);
+    assert.equal(
+      controller.getSnapshot().saveError,
+      HUMAN_REVIEW_CLIENT_SAFE_ERRORS.BACKEND_UNAVAILABLE
+    );
+
+    saveThrowError = new Error(
+      HUMAN_REVIEW_CLIENT_SAFE_ERRORS.FEATURE_NOT_RELEASED
+    );
+    const notReleasedRes = await controller.saveCase();
+    assert.equal(notReleasedRes, null);
+    assert.equal(controller.getSnapshot().uncertainState, null);
+    assert.equal(controller.getSnapshot().humanReviewEnabled, false);
+    assert.equal(
+      controller.getSnapshot().saveError,
+      HUMAN_REVIEW_CLIENT_SAFE_ERRORS.FEATURE_NOT_RELEASED
+    );
+
+    passed += 1;
+    console.log(
+      'PASS [13/15] (Case G): Pre-dispatch errors (validation, BACKEND_UNAVAILABLE, FEATURE_NOT_RELEASED) do not enter uncertainState'
+    );
+  }
+
+  // =========================================================================
+  // TEST 14 (Case H): Session Isolation — Receipt Switch, Close, or User Switch While
+  //                   `SAVE` or Verification `GET` Is In-Flight Cannot Contaminate State
+  // =========================================================================
+  {
+    const receiptA = buildSanitizedAdminReceipt(141);
+    const receiptB = buildSanitizedAdminReceipt(142);
+    let rejectInFlightSaveA: ((err: Error) => void) | null = null;
+    let resolveInFlightVerifyGetA:
+      | ((res: GetLibraryQuarantineHumanReviewCaseResponseDto) => void)
+      | null = null;
+    let isVerifyGetForA = false;
+
+    const controller = new LibraryQuarantineHumanReviewModalController(
+      curator,
+      {
+        humanReviewEnabled: true,
+        getCaseFn: (rId) => {
+          if (rId === receiptA.receiptId && isVerifyGetForA) {
+            return new Promise<GetLibraryQuarantineHumanReviewCaseResponseDto>(
+              (res) => {
+                resolveInFlightVerifyGetA = res;
+              }
+            );
+          }
+          const adminReceipt = rId === receiptA.receiptId ? receiptA : receiptB;
+          return Promise.resolve({
+            ok: true,
+            status: 'READY',
+            receiptId: rId,
+            sourceRevision: 2,
+            draftStatus: 'PENDING_HUMAN_REVIEW',
+            adminReceipt,
+            currentRevision: 0,
+            reviewCase: null,
+            isSanitized: false,
+            isVerifiedSafe: false,
+            isRightsApproved: false,
+            isPublished: false,
+            isReadyForPeia: false,
+          });
+        },
+        saveCaseFn: ({ receiptId: rId }) => {
+          if (rId === receiptA.receiptId && !isVerifyGetForA) {
+            return new Promise<SaveLibraryQuarantineHumanReviewCaseResponseDto>(
+              (_res, rej) => {
+                rejectInFlightSaveA = rej;
+              }
+            );
+          }
+          return Promise.reject(
+            new Error(HUMAN_REVIEW_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED)
+          );
+        },
+      }
+    );
+
+    await controller.openCase(receiptA, 2);
+    controller.updateFormField('titleAr', 'مسودة الإيصال أ');
+    const inFlightSavePromiseA = controller.saveCase();
+
+    await controller.openCase(receiptB, 2);
+    rejectInFlightSaveA!(
+      new Error(HUMAN_REVIEW_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED)
+    );
+    const lateSaveARes = await inFlightSavePromiseA;
+    assert.equal(lateSaveARes, null);
+    assert.equal(
+      controller.getSnapshot().activeReceipt?.receiptId,
+      receiptB.receiptId
+    );
+    assert.equal(controller.getSnapshot().uncertainState, null);
+    assert.equal(controller.getSnapshot().form.titleAr, '');
+
+    isVerifyGetForA = false;
+    await controller.openCase(receiptA, 2);
+    isVerifyGetForA = true;
+    controller.updateFormField('titleAr', 'مسودة الإيصال أ للتحقق');
+    await controller.saveCase();
+    assert.notEqual(controller.getSnapshot().uncertainState, null);
+
+    const verifyPromiseA = controller.reloadCase();
+    controller.closeModal();
+
+    resolveInFlightVerifyGetA!({
+      ok: true,
+      status: 'READY',
+      receiptId: receiptA.receiptId,
+      sourceRevision: 2,
+      draftStatus: 'PENDING_HUMAN_REVIEW',
+      adminReceipt: receiptA,
+      currentRevision: 1,
+      reviewCase: buildSanitizedCaseDto(receiptA.receiptId, 1, {
+        status: 'IN_REVIEW',
+        titleAr: 'مسودة الإيصال أ للتحقق',
+        titleEn: '',
+        issuingOrganization: '',
+        summaryAr: '',
+        summaryEn: '',
+        sourceEvidenceNotes: '',
+        rightsEvidenceNotes: '',
+        editorialNotes: '',
+      }),
+      isSanitized: false,
+      isVerifiedSafe: false,
+      isRightsApproved: false,
+      isPublished: false,
+      isReadyForPeia: false,
+    });
+
+    const lateVerifyRes = await verifyPromiseA;
+    assert.equal(lateVerifyRes, null);
+    assert.equal(controller.getSnapshot().isOpen, false);
+    assert.equal(controller.getSnapshot().uncertainState, null);
+
+    passed += 1;
+    console.log(
+      'PASS [14/15] (Case H): Receipt switch and modal close during in-flight save or verification GET prevent cross-session contamination'
+    );
+  }
+
+  // =========================================================================
+  // TEST 15 (Case I): Bilingual AR/EN UI Rendering of `SAVE_RESULT_UNCONFIRMED` vs
+  //                   `TRANSACTION_COMMIT_UNCERTAIN`, Verification Banner, and Zero Raw Leak
+  // =========================================================================
+  {
+    const receiptId = buildHexReceiptId(150);
+    const adminReceipt = buildSanitizedAdminReceipt(150, { receiptId });
+
+    const controller = new LibraryQuarantineHumanReviewModalController(
+      curator,
+      {
+        humanReviewEnabled: true,
+        getCaseFn: async () => ({
+          ok: true,
+          status: 'READY',
+          receiptId,
+          sourceRevision: 2,
+          draftStatus: 'PENDING_HUMAN_REVIEW',
+          adminReceipt,
+          currentRevision: 0,
+          reviewCase: null,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+        saveCaseFn: async () => {
+          throw new Error(
+            'FirebaseError: INTERNAL raw-stack-trace-secret gs://internal-bucket/secret.pdf'
+          );
+        },
+      }
+    );
+
+    await controller.openCase(adminReceipt, 2);
+    controller.updateFormField('titleAr', 'عنوان لاختبار واجهة عدم اليقين');
+    await controller.saveCase();
+
+    const unconfirmedArHtml = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineHumanReviewModal, {
+        controller,
+        isAr: true,
+      })
+    );
+    const unconfirmedEnHtml = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineHumanReviewModal, {
+        controller,
+        isAr: false,
+      })
+    );
+
+    assert.equal(
+      unconfirmedArHtml.includes(HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE),
+      true
+    );
+    assert.equal(
+      unconfirmedEnHtml.includes(HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE),
+      true
+    );
+    assert.equal(
+      unconfirmedArHtml.includes('قد يكون الحفظ قد اكتمل على الخادم أو لم يكتمل'),
+      true
+    );
+    assert.equal(
+      unconfirmedEnHtml.includes(
+        'the server write may or may not have completed'
+      ),
+      true
+    );
+    assert.equal(
+      unconfirmedArHtml.includes('raw-stack-trace-secret'),
+      false
+    );
+    assert.equal(unconfirmedArHtml.includes('gs://'), false);
+    assert.equal(
+      unconfirmedArHtml.includes(
+        'acknowledge-uncommitted-human-review-save-btn'
+      ),
+      false
+    );
+
+    await controller.reloadCase();
+
+    const verifiedArHtml = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineHumanReviewModal, {
+        controller,
+        isAr: true,
+      })
+    );
+    const verifiedEnHtml = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineHumanReviewModal, {
+        controller,
+        isAr: false,
+      })
+    );
+
+    assert.equal(
+      verifiedArHtml.includes(
+        'quarantine-human-review-uncertain-verification-status'
+      ),
+      true
+    );
+    assert.equal(
+      verifiedArHtml.includes('acknowledge-uncommitted-human-review-save-btn'),
+      true
+    );
+    assert.equal(
+      verifiedEnHtml.includes('Unlock preserved draft at verified revision'),
+      true
+    );
+    assert.equal(
+      verifiedArHtml.includes('عنوان لاختبار واجهة عدم اليقين'),
+      true
+    );
+
+    passed += 1;
+    console.log(
+      'PASS [15/15] (Case I): Bilingual AR/EN rendering of SAVE_RESULT_UNCONFIRMED, verification notice, unlock action, and zero raw error leak verified'
+    );
+  }
+
   console.log(
-    `\nALL ${passed}/6 LIB-FILE-HUMAN-CASEWORK-01 CLIENT TESTS PASSED.`
+    `\nALL ${passed}/15 LIB-FILE-HUMAN-CASEWORK-01 & LIB-HUMAN-CASE-SAVE-RECOVERY-01 CLIENT TESTS PASSED.`
   );
 }
 

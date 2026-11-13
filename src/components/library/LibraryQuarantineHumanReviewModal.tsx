@@ -65,6 +65,24 @@ import {
  *   manual verification («تحقق من السجل / Verify case record») and zero auto-retry.
  */
 
+export const HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE =
+  'SAVE_RESULT_UNCONFIRMED' as const;
+
+export type LibraryQuarantineHumanReviewUncertainVerificationStatus =
+  | 'UNVERIFIED'
+  | 'STILL_AT_EXPECTED_REVISION'
+  | 'REVISION_OR_CONTENT_MISMATCH'
+  | 'SOURCE_CHANGED'
+  | 'VERIFY_HOLD'
+  | 'VERIFY_CALL_FAILED';
+
+export interface LibraryQuarantineHumanReviewPendingSaveAttempt {
+  readonly receiptId: string;
+  readonly sourceRevision: number | null;
+  readonly expectedRevision: number;
+  readonly attemptedFields: LibraryQuarantineHumanReviewEditorialFields;
+}
+
 export interface LibraryQuarantineHumanReviewConflictState {
   readonly errorCode: string;
   readonly errorMessage: string;
@@ -77,6 +95,13 @@ export interface LibraryQuarantineHumanReviewUncertainState {
   readonly errorMessage: string;
   readonly caseSaveOutcome: 'UNKNOWN';
   readonly caseSaved: null;
+  readonly origin?: 'SERVER_TRANSACTION_UNCERTAIN' | 'CLIENT_SAVE_UNCONFIRMED';
+  readonly expectedRevision?: number;
+  readonly verifiedServerRevision?: number | null;
+  readonly verificationStatus?: LibraryQuarantineHumanReviewUncertainVerificationStatus;
+  readonly verificationErrorCode?: string | null;
+  readonly verificationMessageAr?: string | null;
+  readonly verificationMessageEn?: string | null;
 }
 
 export interface LibraryQuarantineHumanReviewModalSnapshot {
@@ -130,6 +155,30 @@ export function createFormFromSanitizedHumanReviewCase(
   });
 }
 
+export function doHumanReviewEditorialFieldsExactlyMatch(
+  actual:
+    | SanitizedLibraryQuarantineHumanReviewCaseDto
+    | LibraryQuarantineHumanReviewEditorialFields
+    | null
+    | undefined,
+  expected: LibraryQuarantineHumanReviewEditorialFields
+): boolean {
+  if (!actual) {
+    return false;
+  }
+  return (
+    actual.status === expected.status &&
+    actual.titleAr.trim() === expected.titleAr.trim() &&
+    actual.titleEn.trim() === expected.titleEn.trim() &&
+    actual.issuingOrganization.trim() === expected.issuingOrganization.trim() &&
+    actual.summaryAr.trim() === expected.summaryAr.trim() &&
+    actual.summaryEn.trim() === expected.summaryEn.trim() &&
+    actual.sourceEvidenceNotes.trim() === expected.sourceEvidenceNotes.trim() &&
+    actual.rightsEvidenceNotes.trim() === expected.rightsEvidenceNotes.trim() &&
+    actual.editorialNotes.trim() === expected.editorialNotes.trim()
+  );
+}
+
 export interface LibraryQuarantineHumanReviewControllerOptions {
   readonly humanReviewEnabled?: boolean;
   readonly getCaseFn?: (
@@ -158,6 +207,8 @@ export class LibraryQuarantineHumanReviewModalController {
   private onCaseSaved?: (
     savedCase: SanitizedLibraryQuarantineHumanReviewCaseDto
   ) => void;
+  private pendingSaveAttempt: LibraryQuarantineHumanReviewPendingSaveAttempt | null =
+    null;
   private state: LibraryQuarantineHumanReviewModalSnapshot;
   private readonly listeners = new Set<
     (snapshot: LibraryQuarantineHumanReviewModalSnapshot) => void
@@ -273,6 +324,7 @@ export class LibraryQuarantineHumanReviewModalController {
 
   public closeModal(): void {
     const nextToken = this.state.sessionToken + 1;
+    this.pendingSaveAttempt = null;
     this.setState({
       isOpen: false,
       activeReceipt: null,
@@ -294,7 +346,12 @@ export class LibraryQuarantineHumanReviewModalController {
   public updateFormField<
     K extends keyof LibraryQuarantineHumanReviewEditorialFields,
   >(field: K, value: LibraryQuarantineHumanReviewEditorialFields[K]): void {
-    if (!this.state.isOpen || this.state.saving) {
+    if (
+      !this.state.isOpen ||
+      this.state.saving ||
+      this.state.loading ||
+      this.state.uncertainState !== null
+    ) {
       return;
     }
     this.setState({
@@ -323,6 +380,7 @@ export class LibraryQuarantineHumanReviewModalController {
     const nextToken = this.state.sessionToken + 1;
     const expectedUserId = this.currentUser?.id ?? null;
     const targetReceiptId = receipt.receiptId;
+    this.pendingSaveAttempt = null;
 
     this.setState({
       isOpen: true,
@@ -367,6 +425,23 @@ export class LibraryQuarantineHumanReviewModalController {
     const expectedUserId = this.currentUser?.id ?? null;
     const targetReceiptId = this.state.activeReceipt.receiptId;
 
+    if (this.state.uncertainState !== null) {
+      this.setState({
+        loading: true,
+        loadError: null,
+        saveError: null,
+        lastSaveOutcome: null,
+        conflictState: null,
+        sessionToken: nextToken,
+      });
+
+      return this.executeVerifyUncertainCase(
+        targetReceiptId,
+        nextToken,
+        expectedUserId
+      );
+    }
+
     this.setState({
       loading: true,
       loadError: null,
@@ -382,6 +457,209 @@ export class LibraryQuarantineHumanReviewModalController {
     });
   }
 
+  public acknowledgeUncommittedSaveAfterVerify(): boolean {
+    if (
+      !this.state.isOpen ||
+      !this.state.activeReceipt ||
+      this.state.loading ||
+      this.state.saving ||
+      !this.state.uncertainState ||
+      this.state.uncertainState.verificationStatus !==
+        'STILL_AT_EXPECTED_REVISION' ||
+      !this.pendingSaveAttempt ||
+      this.state.uncertainState.verifiedServerRevision !==
+        this.pendingSaveAttempt.expectedRevision
+    ) {
+      return false;
+    }
+
+    const verifiedRevision = this.pendingSaveAttempt.expectedRevision;
+    const preservedForm = this.pendingSaveAttempt.attemptedFields;
+    this.pendingSaveAttempt = null;
+
+    this.setState({
+      currentRevision: verifiedRevision,
+      form: preservedForm,
+      uncertainState: null,
+      saveError: null,
+      lastSaveOutcome: null,
+    });
+    return true;
+  }
+
+  private async executeVerifyUncertainCase(
+    targetReceiptId: string,
+    activeToken: number,
+    expectedUserId: string | null
+  ): Promise<GetLibraryQuarantineHumanReviewCaseResponseDto | null> {
+    const pendingAttempt = this.pendingSaveAttempt;
+
+    try {
+      const response = await this.getCaseFn(targetReceiptId);
+
+      if (
+        !this.state.isOpen ||
+        this.state.sessionToken !== activeToken ||
+        (this.currentUser?.id ?? null) !== expectedUserId ||
+        !canOpenLibraryQuarantineHumanReviewCase(this.currentUser) ||
+        this.state.activeReceipt?.receiptId !== targetReceiptId ||
+        !this.state.uncertainState
+      ) {
+        return null;
+      }
+
+      if (!response.ok) {
+        this.setState({
+          loading: false,
+          loadError: null,
+          uncertainState: Object.freeze({
+            ...this.state.uncertainState,
+            verificationStatus: 'VERIFY_HOLD' as const,
+            verificationErrorCode: response.errorCode,
+            verificationMessageAr: `تعذر التحقق من السجل على الخادم (${response.errorCode}). تم الاحتفاظ بمسودة التعديلات وإبقاء القفل لمنع الكتابة المكررة.`,
+            verificationMessageEn: `Could not verify server case record (${response.errorCode}). Your attempted edits remain preserved and locked to prevent duplicate writes.`,
+          }),
+        });
+        return response;
+      }
+
+      if (
+        pendingAttempt &&
+        pendingAttempt.sourceRevision !== null &&
+        response.sourceRevision !== pendingAttempt.sourceRevision
+      ) {
+        this.setState({
+          activeReceipt: response.adminReceipt,
+          sourceRevision: response.sourceRevision,
+          currentRevision: response.currentRevision,
+          reviewCase: response.reviewCase,
+          loading: false,
+          loadError: null,
+          uncertainState: Object.freeze({
+            ...this.state.uncertainState,
+            verifiedServerRevision: response.currentRevision,
+            verificationStatus: 'SOURCE_CHANGED' as const,
+            verificationErrorCode: 'SOURCE_REVISION_CHANGED',
+            verificationMessageAr: `تغيرت نسخة مصدر المراجعة على الخادم (إلى النسخة المصدرية #${response.sourceRevision} / نسخة السجل #${response.currentRevision}). تم الإبقاء على القفل والاحتفاظ بمسودة تعديلاتك دون استبدالها.`,
+            verificationMessageEn: `Server source revision changed (to source revision #${response.sourceRevision} / case revision #${response.currentRevision}). Hold remains active and your attempted edits are preserved without overwrite.`,
+          }),
+        });
+        return response;
+      }
+
+      if (
+        pendingAttempt &&
+        pendingAttempt.receiptId === targetReceiptId &&
+        response.adminReceipt.receiptId === targetReceiptId &&
+        response.currentRevision === pendingAttempt.expectedRevision + 1 &&
+        response.reviewCase !== null &&
+        response.reviewCase.receiptId === targetReceiptId &&
+        response.reviewCase.revision === pendingAttempt.expectedRevision + 1 &&
+        doHumanReviewEditorialFieldsExactlyMatch(
+          response.reviewCase,
+          pendingAttempt.attemptedFields
+        )
+      ) {
+        const resolvedOutcome: 'CREATED' | 'UPDATED' =
+          pendingAttempt.expectedRevision === 0 ? 'CREATED' : 'UPDATED';
+        this.pendingSaveAttempt = null;
+
+        this.setState({
+          activeReceipt: response.adminReceipt,
+          sourceRevision: response.sourceRevision,
+          currentRevision: response.currentRevision,
+          reviewCase: response.reviewCase,
+          form: createFormFromSanitizedHumanReviewCase(response.reviewCase),
+          loading: false,
+          loadError: null,
+          saveError: null,
+          conflictState: null,
+          uncertainState: null,
+          lastSaveOutcome: resolvedOutcome,
+        });
+
+        this.onCaseSaved?.(response.reviewCase);
+        return response;
+      }
+
+      if (
+        pendingAttempt &&
+        response.currentRevision === pendingAttempt.expectedRevision
+      ) {
+        this.setState({
+          activeReceipt: response.adminReceipt,
+          sourceRevision: response.sourceRevision,
+          currentRevision: response.currentRevision,
+          reviewCase: response.reviewCase,
+          loading: false,
+          loadError: null,
+          uncertainState: Object.freeze({
+            ...this.state.uncertainState,
+            verifiedServerRevision: response.currentRevision,
+            verificationStatus: 'STILL_AT_EXPECTED_REVISION' as const,
+            verificationErrorCode: null,
+            verificationMessageAr: `يُظهر الخادم أن السجل ما زال عند النسخة #${response.currentRevision} (لم يُسجّل التعديل على الخادم حتى لحظة القراءة). تم الاحتفاظ بمسودة حقولك التسعة دون حذف؛ يمكنك إعادة التحقق أو فتح المسودة يدوياً للحفظ المحمي برقم النسخة.`,
+            verificationMessageEn: `Server still shows Revision #${response.currentRevision} (the attempted write was not persisted as of this readback). All 9 attempted fields remain preserved; you may re-verify or explicitly unlock the preserved draft at the verified CAS revision.`,
+          }),
+        });
+        return response;
+      }
+
+      this.setState({
+        activeReceipt: response.adminReceipt,
+        sourceRevision: response.sourceRevision,
+        currentRevision: response.currentRevision,
+        reviewCase: response.reviewCase,
+        loading: false,
+        loadError: null,
+        uncertainState: Object.freeze({
+          ...this.state.uncertainState,
+          verifiedServerRevision: response.currentRevision,
+          verificationStatus: 'REVISION_OR_CONTENT_MISMATCH' as const,
+          verificationErrorCode: 'SERVER_CASE_MISMATCH',
+          verificationMessageAr: `يُظهر الخادم النسخة #${response.currentRevision} ببيانات لا تطابق محاولة الحفظ الحالية. تم الإبقاء على القفل والاحتفاظ بمسودة تعديلاتك لمنع الكتابة فوق بيانات الخادم.`,
+          verificationMessageEn: `Server record is at Revision #${response.currentRevision} with content that does not match your attempted save. Hold remains active and your attempted edits are preserved to prevent overwriting server data.`,
+        }),
+      });
+      return response;
+    } catch (err: unknown) {
+      if (
+        !this.state.isOpen ||
+        this.state.sessionToken !== activeToken ||
+        (this.currentUser?.id ?? null) !== expectedUserId ||
+        this.state.activeReceipt?.receiptId !== targetReceiptId ||
+        !this.state.uncertainState
+      ) {
+        return null;
+      }
+
+      const safeVerifyCode = isHumanCaseReviewNotReleasedError(err)
+        ? HUMAN_REVIEW_CLIENT_SAFE_ERRORS.FEATURE_NOT_RELEASED
+        : err instanceof Error &&
+            (err.message ===
+              HUMAN_REVIEW_CLIENT_SAFE_ERRORS.GET_RESPONSE_CONTRACT_INVALID ||
+              err.message ===
+                HUMAN_REVIEW_CLIENT_SAFE_ERRORS.CASE_DTO_CONTRACT_INVALID ||
+              err.message ===
+                HUMAN_REVIEW_CLIENT_SAFE_ERRORS.BACKEND_UNAVAILABLE)
+          ? err.message
+          : HUMAN_REVIEW_CLIENT_SAFE_ERRORS.GET_CALL_FAILED;
+
+      this.setState({
+        loading: false,
+        loadError: null,
+        uncertainState: Object.freeze({
+          ...this.state.uncertainState,
+          verificationStatus: 'VERIFY_CALL_FAILED' as const,
+          verificationErrorCode: safeVerifyCode,
+          verificationMessageAr: `فشل طلب التحقق من السجل (${safeVerifyCode}). تم الاحتفاظ بمسودة التعديلات وإبقاء إيقاف الإرسال لمنع التكرار.`,
+          verificationMessageEn: `Verification readback failed (${safeVerifyCode}). Your attempted edits remain preserved and submission stays locked.`,
+        }),
+      });
+      return null;
+    }
+  }
+
   private async executeLoadCase(
     targetReceiptId: string,
     activeToken: number,
@@ -395,7 +673,8 @@ export class LibraryQuarantineHumanReviewModalController {
         !this.state.isOpen ||
         this.state.sessionToken !== activeToken ||
         (this.currentUser?.id ?? null) !== expectedUserId ||
-        !canOpenLibraryQuarantineHumanReviewCase(this.currentUser)
+        !canOpenLibraryQuarantineHumanReviewCase(this.currentUser) ||
+        this.state.activeReceipt?.receiptId !== targetReceiptId
       ) {
         return null;
       }
@@ -427,7 +706,8 @@ export class LibraryQuarantineHumanReviewModalController {
       if (
         !this.state.isOpen ||
         this.state.sessionToken !== activeToken ||
-        (this.currentUser?.id ?? null) !== expectedUserId
+        (this.currentUser?.id ?? null) !== expectedUserId ||
+        this.state.activeReceipt?.receiptId !== targetReceiptId
       ) {
         return null;
       }
@@ -464,6 +744,7 @@ export class LibraryQuarantineHumanReviewModalController {
       return;
     }
     const { serverRevision, serverCase } = this.state.conflictState;
+    this.pendingSaveAttempt = null;
     this.setState({
       currentRevision: serverRevision,
       reviewCase: serverCase,
@@ -514,9 +795,19 @@ export class LibraryQuarantineHumanReviewModalController {
     const expectedUserId = this.currentUser?.id ?? null;
     const receiptId = this.state.activeReceipt.receiptId;
     const expectedRevision = this.state.currentRevision;
+    const attemptedAttempt: LibraryQuarantineHumanReviewPendingSaveAttempt =
+      Object.freeze({
+        receiptId,
+        sourceRevision: this.state.sourceRevision,
+        expectedRevision,
+        attemptedFields: validatedEditorial,
+      });
+
+    this.pendingSaveAttempt = attemptedAttempt;
 
     this.setState({
       saving: true,
+      form: validatedEditorial,
       saveError: null,
       lastSaveOutcome: null,
       conflictState: null,
@@ -533,12 +824,14 @@ export class LibraryQuarantineHumanReviewModalController {
         !this.state.isOpen ||
         this.state.sessionToken !== activeToken ||
         (this.currentUser?.id ?? null) !== expectedUserId ||
-        !canOpenLibraryQuarantineHumanReviewCase(this.currentUser)
+        !canOpenLibraryQuarantineHumanReviewCase(this.currentUser) ||
+        this.state.activeReceipt?.receiptId !== receiptId
       ) {
         return null;
       }
 
       if (response.ok && response.status === 'SAVED') {
+        this.pendingSaveAttempt = null;
         this.setState({
           saving: false,
           currentRevision: response.currentRevision,
@@ -561,6 +854,7 @@ export class LibraryQuarantineHumanReviewModalController {
       }
 
       if (!response.ok && response.status === 'CONFLICT') {
+        this.pendingSaveAttempt = null;
         this.setState({
           saving: false,
           lastSaveOutcome: null,
@@ -578,20 +872,30 @@ export class LibraryQuarantineHumanReviewModalController {
         !response.ok &&
         (response.status === 'UNKNOWN' || response.caseSaved === null)
       ) {
+        this.pendingSaveAttempt = attemptedAttempt;
         this.setState({
           saving: false,
           lastSaveOutcome: null,
+          saveError: null,
           uncertainState: Object.freeze({
             errorCode: response.errorCode,
             errorMessage: response.errorMessage,
             caseSaveOutcome: 'UNKNOWN' as const,
             caseSaved: null,
+            origin: 'SERVER_TRANSACTION_UNCERTAIN' as const,
+            expectedRevision,
+            verifiedServerRevision: null,
+            verificationStatus: 'UNVERIFIED' as const,
+            verificationErrorCode: null,
+            verificationMessageAr: null,
+            verificationMessageEn: null,
           }),
         });
         return response;
       }
 
       // status === 'HOLD'
+      this.pendingSaveAttempt = null;
       this.setState({
         saving: false,
         lastSaveOutcome: null,
@@ -602,12 +906,14 @@ export class LibraryQuarantineHumanReviewModalController {
       if (
         !this.state.isOpen ||
         this.state.sessionToken !== activeToken ||
-        (this.currentUser?.id ?? null) !== expectedUserId
+        (this.currentUser?.id ?? null) !== expectedUserId ||
+        this.state.activeReceipt?.receiptId !== receiptId
       ) {
         return null;
       }
 
       if (isHumanCaseReviewNotReleasedError(err)) {
+        this.pendingSaveAttempt = null;
         this.setState({
           saving: false,
           humanReviewEnabled: false,
@@ -616,20 +922,50 @@ export class LibraryQuarantineHumanReviewModalController {
         return null;
       }
 
-      const safeMessage =
+      if (
         err instanceof Error &&
-        (err.message ===
-          HUMAN_REVIEW_CLIENT_SAFE_ERRORS.SAVE_RESPONSE_CONTRACT_INVALID ||
+        (err.message === HUMAN_REVIEW_CLIENT_SAFE_ERRORS.BACKEND_UNAVAILABLE ||
+          err.message === HUMAN_REVIEW_CLIENT_SAFE_ERRORS.INVALID_RECEIPT_ID ||
           err.message ===
-            HUMAN_REVIEW_CLIENT_SAFE_ERRORS.CASE_DTO_CONTRACT_INVALID ||
-          err.message === HUMAN_REVIEW_CLIENT_SAFE_ERRORS.BACKEND_UNAVAILABLE)
-          ? err.message
-          : HUMAN_REVIEW_CLIENT_SAFE_ERRORS.SAVE_CALL_FAILED;
+            HUMAN_REVIEW_CLIENT_SAFE_ERRORS.INVALID_EXPECTED_REVISION ||
+          err.message ===
+            HUMAN_REVIEW_CLIENT_SAFE_ERRORS.INVALID_EDITORIAL_INPUT ||
+          err.message ===
+            HUMAN_REVIEW_CLIENT_SAFE_ERRORS.METADATA_RECORDED_REQUIREMENTS_NOT_MET ||
+          err.message ===
+            HUMAN_REVIEW_CLIENT_SAFE_ERRORS.JUSTIFICATION_NOTES_REQUIRED ||
+          err.message ===
+            HUMAN_REVIEW_CLIENT_SAFE_ERRORS.EMPTY_REVIEW_CASE_NOT_ALLOWED)
+      ) {
+        this.pendingSaveAttempt = null;
+        this.setState({
+          saving: false,
+          lastSaveOutcome: null,
+          saveError: err.message,
+        });
+        return null;
+      }
 
+      this.pendingSaveAttempt = attemptedAttempt;
       this.setState({
         saving: false,
         lastSaveOutcome: null,
-        saveError: safeMessage,
+        saveError: null,
+        conflictState: null,
+        uncertainState: Object.freeze({
+          errorCode: HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE,
+          errorMessage:
+            'SAVE_RESULT_UNCONFIRMED: Save request outcome could not be confirmed due to a call or response error. Verify the server case record before making further changes.',
+          caseSaveOutcome: 'UNKNOWN' as const,
+          caseSaved: null,
+          origin: 'CLIENT_SAVE_UNCONFIRMED' as const,
+          expectedRevision,
+          verifiedServerRevision: null,
+          verificationStatus: 'UNVERIFIED' as const,
+          verificationErrorCode: null,
+          verificationMessageAr: null,
+          verificationMessageEn: null,
+        }),
       });
       return null;
     }
@@ -945,40 +1281,92 @@ export function LibraryQuarantineHumanReviewModal({
           </div>
         )}
 
-        {/* Ambiguous Commit Hold Banner (UNKNOWN / caseSaved: null) */}
+        {/* Ambiguous Commit / Unconfirmed Save Hold Banner (UNKNOWN / caseSaved: null / SAVE_RESULT_UNCONFIRMED) */}
         {uncertainState && (
           <div
             data-testid="quarantine-human-review-uncertain-banner"
             role="alert"
             className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/60 border-2 border-amber-400 dark:border-amber-700 text-amber-950 dark:text-amber-100 text-xs space-y-2.5"
           >
-            <div className="font-extrabold flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
-              <span>
-                {isAr
-                  ? 'حالة الحفظ غير مؤكدة — تم إيقاف إعادة الإرسال التلقائي'
-                  : 'Save Outcome Uncertain — Automatic Resubmission Stopped'}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="font-extrabold flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span>
+                  {isAr
+                    ? 'حالة الحفظ غير مؤكدة — تم إيقاف إعادة الإرسال التلقائي'
+                    : 'Save Outcome Uncertain — Automatic Resubmission Stopped'}
+                </span>
+              </div>
+              <span
+                data-testid="quarantine-human-review-uncertain-code"
+                className="px-2 py-0.5 rounded-md font-mono text-[11px] font-bold bg-amber-100 dark:bg-amber-900/70 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700"
+                dir="ltr"
+              >
+                {uncertainState.errorCode}
               </span>
             </div>
             <p className="leading-relaxed">
-              {isAr
-                ? 'انقطع تأكيد المعاملة بعد بدء الكتابة. لتجنب الكتابة المكررة، يرجى الضغط على «تحقق من السجل» لقراءة الحالة الفعلية المحفوظة على الخادم قبل أي تعديل إضافي.'
-                : 'Transaction commit confirmation was lost after staging writes. Click "Verify case record" to read the authoritative server state before making further changes.'}
+              {uncertainState.origin === 'CLIENT_SAVE_UNCONFIRMED' ||
+              uncertainState.errorCode ===
+                HUMAN_REVIEW_CLIENT_SAVE_UNCONFIRMED_CODE
+                ? isAr
+                  ? 'تعذر تأكيد نتيجة طلب الحفظ بسبب انقطاع الاتصال أو خطأ في استجابة الخدمة (قد يكون الحفظ قد اكتمل على الخادم أو لم يكتمل). تم الاحتفاظ بمسودة تعديلاتك وإيقاف الحفظ لتجنب التكرار. يرجى الضغط على «تحقق من السجل» لقراءة الحالة الفعلية على الخادم.'
+                  : 'Save request outcome could not be confirmed due to a call or response error (the server write may or may not have completed). Your attempted edits are preserved and locked to prevent duplicate writes. Click "Verify case record" to inspect the server state.'
+                : isAr
+                  ? 'انقطع تأكيد المعاملة بعد بدء الكتابة. لتجنب الكتابة المكررة، يرجى الضغط على «تحقق من السجل» لقراءة الحالة الفعلية المحفوظة على الخادم قبل أي تعديل إضافي.'
+                  : 'Transaction commit confirmation was lost after staging writes. Click "Verify case record" to read the authoritative server state before making further changes.'}
             </p>
-            <div className="pt-1">
+            {uncertainState.verificationStatus &&
+              uncertainState.verificationStatus !== 'UNVERIFIED' && (
+                <div
+                  data-testid="quarantine-human-review-uncertain-verification-status"
+                  className="p-2.5 rounded-lg bg-amber-100/80 dark:bg-amber-900/50 border border-amber-300 dark:border-amber-700 text-[11px] space-y-1"
+                >
+                  <div className="font-extrabold">
+                    {isAr
+                      ? `نتيجة التحقق من الخادم (${uncertainState.verificationStatus}):`
+                      : `Server Verification Result (${uncertainState.verificationStatus}):`}
+                  </div>
+                  <p className="leading-relaxed">
+                    {isAr
+                      ? uncertainState.verificationMessageAr
+                      : uncertainState.verificationMessageEn}
+                  </p>
+                </div>
+              )}
+            <div className="pt-1 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 data-testid="verify-quarantine-human-review-case-btn"
+                disabled={loading || saving}
                 onClick={() => {
                   void controller.reloadCase();
                 }}
-                className="px-3.5 py-2 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-extrabold text-xs cursor-pointer inline-flex items-center gap-1.5 shadow-xs"
+                className="px-3.5 py-2 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-extrabold text-xs cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5 shadow-xs"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
                 <span>
                   {isAr ? 'تحقق من السجل' : 'Verify case record'}
                 </span>
               </button>
+              {uncertainState.verificationStatus ===
+                'STILL_AT_EXPECTED_REVISION' && (
+                <button
+                  type="button"
+                  data-testid="acknowledge-uncommitted-human-review-save-btn"
+                  disabled={loading || saving}
+                  onClick={() => {
+                    controller.acknowledgeUncommittedSaveAfterVerify();
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-white dark:bg-gray-800 hover:bg-amber-100 dark:hover:bg-gray-700 border border-amber-400 dark:border-amber-600 text-amber-950 dark:text-amber-100 font-extrabold text-xs cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5"
+                >
+                  <span>
+                    {isAr
+                      ? 'فتح مسودة التعديل المحفوظة محلياً بعد التحقق'
+                      : 'Unlock preserved draft at verified revision'}
+                  </span>
+                </button>
+              )}
             </div>
           </div>
         )}
