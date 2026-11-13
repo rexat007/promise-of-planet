@@ -1,0 +1,793 @@
+name: Library Human Review One-Shot Live Release (Functions + Hosting)
+
+# GOVERNANCE & ARCHITECTURAL BOUNDARY NOTICE:
+# 1. Trigger: Manual 'workflow_dispatch' ONLY on 'refs/heads/main' with explicit confirmation
+#    input 'RELEASE_LIBRARY_HUMAN_REVIEW_LIVE'. Never triggers on push, pull_request, or schedule.
+# 2. Scope: Intends to release the 7 human quarantine-library workflow stages together in a single run:
+#    - Review Workbench
+#    - Human Review Case
+#    - Catalog Handoff
+#    - Rights Decision
+#    - Catalog Case Alignment
+#    - Binary Safety Case
+#    - RECORD-ONLY Isolated Inspection Request
+#    while keeping Isolated ClamAV Execution strictly disabled (VITE_LIBRARY_AV_EXECUTION_ENABLED=false,
+#    POP_LIBRARY_AV_EXECUTION_ENABLED=false) and preserving existing quarantine upload and public 'qcat-' exclusion.
+# 3. Single Deployment Invocation: Executes one 'firebase deploy --project promiseofplanet-bb325
+#    --only "functions:manageLibraryDocuments,functions:getPublicLibrary,hosting" --non-interactive'
+#    command ONLY after all offline, test, build, and GCP read-only preflight checks pass.
+#    Firebase CLI updates Cloud Functions Gen2 and Hosting sequentially within one invocation (not a cloud-atomic transaction);
+#    this workflow never auto-retries on partial failure.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_release:
+        description: "Type RELEASE_LIBRARY_HUMAN_REVIEW_LIVE to authorize the one-shot live deployment"
+        required: true
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: library-human-review-one-shot-live
+  cancel-in-progress: false
+
+jobs:
+  one_shot_human_review_release:
+    name: Preflight, Build, Verify & One-Shot Deploy (manageLibraryDocuments + getPublicLibrary + Hosting)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 60
+    env:
+      FIREBASE_PROJECT_ID: promiseofplanet-bb325
+      EXPECTED_FUNCTION_REGION: us-central1
+      HISTORICAL_OWNER_VERIFIED_FIRESTORE_LOCATION: me-central2
+      EXPECTED_QUARANTINE_BUCKET: promiseofplanet-bb325-library-quarantine
+      FORBIDDEN_DEFAULT_BUCKET: promiseofplanet-bb325.firebasestorage.app
+      EXPECTED_UPLOAD_ENDPOINT_URL: https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryQuarantineUploadEndpoint
+
+    steps:
+      - name: Verify Main Branch and Explicit Release Confirmation Input
+        id: verify_branch_and_confirmation
+        env:
+          CONFIRM_INPUT: ${{ inputs.confirm_release }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::This workflow can only be executed from refs/heads/main (found: ${{ github.ref }})."
+            exit 1
+          fi
+          if [ "${CONFIRM_INPUT}" != "RELEASE_LIBRARY_HUMAN_REVIEW_LIVE" ]; then
+            echo "::error::Invalid confirm_release input. Must equal exact literal RELEASE_LIBRARY_HUMAN_REVIEW_LIVE."
+            exit 1
+          fi
+          echo "PINNED_JOB_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "Verified main branch and explicit confirmation literal for commit ${GITHUB_SHA}."
+
+      - name: Checkout Pinned Repository Commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Verify Single Commit Identity and Guard Against Tracked Dotenv Files
+        id: verify_checkout_and_dotenv_guard
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "${HEAD_SHA}" != "${PINNED_JOB_SHA}" ]; then
+            echo "::error::Checked out HEAD (${HEAD_SHA}) does not match pinned job SHA (${PINNED_JOB_SHA})."
+            exit 1
+          fi
+          shopt -s nullglob dotglob
+          CONFLICTING_DOTENV=(
+            functions/.env
+            functions/.env.*
+            .env
+            .env.local
+            .env.production
+            .env.production.*
+          )
+          for f in "${CONFLICTING_DOTENV[@]}"; do
+            if [ "$(basename "$f")" = ".env.example" ]; then
+              continue
+            fi
+            if [ -e "$f" ]; then
+              echo "::error::Conflicting dotenv file present in repository checkout before preflight: $f"
+              exit 1
+            fi
+          done
+          echo "Verified checkout HEAD=${HEAD_SHA} and absence of conflicting dotenv files."
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate Existing Firebase & Editorial Image Repository Variables (Fail-Closed, No Secret Logging)
+        id: validate_repo_vars
+        env:
+          CHECK_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          CHECK_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          CHECK_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          CHECK_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+          CHECK_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          UPLOAD_URL: ${{ vars.VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL }}
+          PREVIEW_URL: ${{ vars.VITE_EDITORIAL_IMAGE_PREVIEW_URL }}
+          PUBLIC_DELIVERY_URL: ${{ vars.VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL }}
+          LIBRARY_UPLOAD_ENABLED: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED }}
+          LIBRARY_UPLOAD_ENDPOINT_URL: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL }}
+        run: |
+          node -e '
+            const requiredNonEmpty = [
+              "CHECK_FIREBASE_API_KEY",
+              "CHECK_FIREBASE_AUTH_DOMAIN",
+              "CHECK_FIREBASE_PROJECT_ID",
+              "CHECK_FIREBASE_APP_ID",
+              "CHECK_FIREBASE_STORAGE_BUCKET",
+              "UPLOAD_URL",
+              "PREVIEW_URL",
+              "PUBLIC_DELIVERY_URL",
+              "LIBRARY_UPLOAD_ENABLED",
+              "LIBRARY_UPLOAD_ENDPOINT_URL",
+            ];
+            for (const envKey of requiredNonEmpty) {
+              const val = process.env[envKey];
+              if (typeof val !== "string" || !val.trim() || val.trim() !== val || /\s/.test(val)) {
+                console.error(`::error::Required repository variable mapped to ${envKey} is missing, empty, or contains whitespace.`);
+                process.exit(1);
+              }
+            }
+
+            if (process.env.CHECK_FIREBASE_PROJECT_ID !== "promiseofplanet-bb325") {
+              console.error("::error::VITE_FIREBASE_PROJECT_ID must equal exactly \"promiseofplanet-bb325\".");
+              process.exit(1);
+            }
+
+            function validateCleanHttpsUrl(raw, label) {
+              if (raw.includes("?") || raw.includes("#")) {
+                console.error(`::error::${label} must not include query parameters or URL fragments.`);
+                process.exit(1);
+              }
+              let parsed;
+              try {
+                parsed = new URL(raw);
+              } catch (err) {
+                console.error(`::error::${label} is not a syntactically valid URL: ${err.message}`);
+                process.exit(1);
+              }
+              if (
+                parsed.protocol !== "https:" ||
+                !parsed.hostname ||
+                !parsed.hostname.includes(".") ||
+                parsed.username ||
+                parsed.password ||
+                parsed.search ||
+                parsed.hash
+              ) {
+                console.error(`::error::${label} must be a clean https URL without embedded credentials, query parameters, or fragments.`);
+                process.exit(1);
+              }
+              const lowerUrl = raw.toLowerCase();
+              const lowerHost = parsed.hostname.toLowerCase();
+              if (
+                lowerHost === "localhost" ||
+                lowerHost === "127.0.0.1" ||
+                lowerHost === "0.0.0.0" ||
+                lowerHost === "[::1]" ||
+                lowerHost.endsWith(".example.com") ||
+                lowerHost === "example.com" ||
+                lowerHost.endsWith(".invalid") ||
+                lowerHost.endsWith(".local") ||
+                lowerUrl.includes("placeholder") ||
+                lowerUrl.includes("changeme") ||
+                lowerUrl.includes("todo") ||
+                lowerUrl.includes("<") ||
+                lowerUrl.includes(">")
+              ) {
+                console.error(`::error::${label} must not use a placeholder, local, or invented URL.`);
+                process.exit(1);
+              }
+            }
+
+            validateCleanHttpsUrl(process.env.UPLOAD_URL, "VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL");
+            validateCleanHttpsUrl(process.env.PREVIEW_URL, "VITE_EDITORIAL_IMAGE_PREVIEW_URL");
+            validateCleanHttpsUrl(process.env.PUBLIC_DELIVERY_URL, "VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL");
+
+            const expectedUploadEndpoint = process.env.EXPECTED_UPLOAD_ENDPOINT_URL;
+            if (process.env.LIBRARY_UPLOAD_ENABLED !== "true") {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED must equal exactly \"true\".");
+              process.exit(1);
+            }
+            validateCleanHttpsUrl(process.env.LIBRARY_UPLOAD_ENDPOINT_URL, "VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL");
+            if (process.env.LIBRARY_UPLOAD_ENDPOINT_URL !== expectedUploadEndpoint) {
+              console.error(`::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must equal exactly "${expectedUploadEndpoint}".`);
+              process.exit(1);
+            }
+
+            console.log("Validated all required Firebase, editorial image, and quarantine upload repository variables.");
+          '
+
+      - name: Install Root and Functions Dependencies (CI Lockfile Only)
+        run: |
+          npm ci
+          npm --prefix functions ci
+
+      - name: Run Root TypeScript Check and Build Cloud Functions
+        run: |
+          npx tsc --noEmit
+          npm --prefix functions run build
+
+      - name: Verify Compiled Function Exports (manageLibraryDocuments & getPublicLibrary), Server Release Gates, and Public qcat- Exclusion Guard
+        id: verify_compiled_exports_and_guards
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const indexSource = fs.readFileSync("functions/src/index.ts", "utf8");
+            if (!indexSource.includes("manageLibraryDocuments") || !indexSource.includes("getPublicLibrary")) {
+              console.error("::error::functions/src/index.ts must export both manageLibraryDocuments and getPublicLibrary.");
+              process.exit(1);
+            }
+
+            const indexExport = require("./functions/lib/index.js");
+            if (typeof indexExport.manageLibraryDocuments !== "function") {
+              console.error("::error::Compiled functions/lib/index.js is missing manageLibraryDocuments function export.");
+              process.exit(1);
+            }
+            if (typeof indexExport.getPublicLibrary !== "function") {
+              console.error("::error::Compiled functions/lib/index.js is missing getPublicLibrary function export.");
+              process.exit(1);
+            }
+
+            const handlersMod = require("./functions/lib/library/libraryAdminHandlers.js");
+            const expectedGates = [
+              ["LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR", "POP_LIBRARY_REVIEW_WORKBENCH_ENABLED"],
+              ["LIBRARY_HUMAN_CASE_REVIEW_RELEASE_ENV_VAR", "POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED"],
+              ["LIBRARY_CATALOG_HANDOFF_RELEASE_ENV_VAR", "POP_LIBRARY_CATALOG_HANDOFF_ENABLED"],
+              ["LIBRARY_RIGHTS_DECISION_RELEASE_ENV_VAR", "POP_LIBRARY_RIGHTS_DECISION_ENABLED"],
+              ["LIBRARY_CASE_ALIGNMENT_RELEASE_ENV_VAR", "POP_LIBRARY_CASE_ALIGNMENT_ENABLED"],
+              ["LIBRARY_BINARY_SAFETY_CASE_RELEASE_ENV_VAR", "POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED"],
+              ["LIBRARY_ISOLATED_INSPECTION_REQUEST_RELEASE_ENV_VAR", "POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED"],
+              ["LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR", "POP_LIBRARY_AV_EXECUTION_ENABLED"],
+            ];
+
+            for (const [exportName, expectedEnvName] of expectedGates) {
+              if (handlersMod[exportName] !== expectedEnvName) {
+                console.error(`::error::Compiled libraryAdminHandlers.${exportName} mismatch: expected ${expectedEnvName}, found ${String(handlersMod[exportName])}`);
+                process.exit(1);
+              }
+            }
+
+            const pubRepoSource = fs.readFileSync("functions/src/library/publicLibraryRepository.ts", "utf8");
+            if (
+              !pubRepoSource.includes("isQuarantineCatalogDocumentId") ||
+              !pubRepoSource.includes("!isQuarantineCatalogDocumentId(doc.id)")
+            ) {
+              console.error("::error::publicLibraryRepository.ts is missing the mandatory !isQuarantineCatalogDocumentId(doc.id) qcat- exclusion guard.");
+              process.exit(1);
+            }
+
+            console.log("Verified compiled manageLibraryDocuments and getPublicLibrary exports, all 8 server release gate constants, and public qcat- exclusion guard.");
+          '
+
+      - name: Run Public Library & All 15 Quarantine / Human Review Backend & Client Test Suites
+        id: run_preflight_test_suites
+        run: |
+          npx tsx scripts/runPublicLibraryFunctionalTests.ts
+          npx tsx scripts/runLibraryQuarantineAdminReadTests.ts
+          npx tsx scripts/runLibraryQuarantineReviewWorkbenchBackendTests.ts
+          npx tsx scripts/runLibraryQuarantineReviewWorkbenchClientTests.ts
+          npx tsx scripts/runLibraryQuarantineHumanReviewBackendTests.ts
+          npx tsx scripts/runLibraryQuarantineHumanReviewClientTests.ts
+          npx tsx scripts/runLibraryQuarantineCatalogHandoffBackendTests.ts
+          npx tsx scripts/runLibraryQuarantineCatalogHandoffClientTests.ts
+          npx tsx scripts/runLibraryQuarantineRightsDecisionBackendTests.ts
+          npx tsx scripts/runLibraryQuarantineRightsDecisionClientTests.ts
+          npx tsx scripts/runLibraryQuarantineCatalogCaseAlignmentBackendTests.ts
+          npx tsx scripts/runLibraryQuarantineCatalogCaseAlignmentClientTests.ts
+          npx tsx scripts/runLibraryQuarantineBinarySafetyCaseBackendTests.ts
+          npx tsx scripts/runLibraryQuarantineBinarySafetyCaseClientTests.ts
+          npx tsx scripts/runLibraryQuarantineIsolatedInspectionRequestBackendTests.ts
+          npx tsx scripts/runLibraryQuarantineIsolatedInspectionRequestClientTests.ts
+
+      - name: Build Frontend (Vite) with Explicit Human Review Release Flags and AV Execution Disabled
+        id: build_vite_frontend
+        env:
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL: ${{ vars.VITE_EDITORIAL_NEWS_IMAGE_UPLOAD_URL }}
+          VITE_EDITORIAL_IMAGE_PREVIEW_URL: ${{ vars.VITE_EDITORIAL_IMAGE_PREVIEW_URL }}
+          VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL: ${{ vars.VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL }}
+          VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED: "true"
+          VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL: "https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryQuarantineUploadEndpoint"
+          VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: "true"
+          VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: "true"
+          VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: "true"
+          VITE_LIBRARY_RIGHTS_DECISION_ENABLED: "true"
+          VITE_LIBRARY_CASE_ALIGNMENT_ENABLED: "true"
+          VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED: "true"
+          VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: "true"
+          VITE_LIBRARY_AV_EXECUTION_ENABLED: "false"
+        run: |
+          node -e '
+            const mustBeTrue = [
+              "VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED",
+              "VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED",
+              "VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED",
+              "VITE_LIBRARY_CATALOG_HANDOFF_ENABLED",
+              "VITE_LIBRARY_RIGHTS_DECISION_ENABLED",
+              "VITE_LIBRARY_CASE_ALIGNMENT_ENABLED",
+              "VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED",
+              "VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED",
+            ];
+            for (const key of mustBeTrue) {
+              if (process.env[key] !== "true") {
+                console.error(`::error::Expected ${key}=true for Vite build, found ${String(process.env[key])}`);
+                process.exit(1);
+              }
+            }
+            if (process.env.VITE_LIBRARY_AV_EXECUTION_ENABLED !== "false") {
+              console.error("::error::VITE_LIBRARY_AV_EXECUTION_ENABLED must strictly equal \"false\".");
+              process.exit(1);
+            }
+            if (process.env.VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL !== "https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryQuarantineUploadEndpoint") {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL mismatch.");
+              process.exit(1);
+            }
+            console.log("Verified explicit Vite release flags (7 human review stages=true, AV execution=false, quarantine upload preserved).");
+          '
+          npm run build
+          if [ ! -f "dist/index.html" ]; then
+            echo "::error::Vite build did not produce dist/index.html."
+            exit 1
+          fi
+
+      - name: Verify Service Account Credential JSON Identity (No Secret Output)
+        id: verify_service_account_credential
+        env:
+          CREDENTIAL_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+        run: |
+          if [ -z "$CREDENTIAL_JSON" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 secret is empty or missing."
+            exit 1
+          fi
+          node -e '
+            let cred;
+            try {
+              cred = JSON.parse(process.env.CREDENTIAL_JSON);
+            } catch {
+              console.error("::error::Failed to parse FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 JSON.");
+              process.exit(1);
+            }
+            if (cred.type !== "service_account") {
+              console.error("::error::Credential is not a service_account.");
+              process.exit(1);
+            }
+            if (cred.project_id !== "promiseofplanet-bb325") {
+              console.error("::error::Credential project_id mismatch. Expected promiseofplanet-bb325.");
+              process.exit(1);
+            }
+            if (typeof cred.client_email !== "string" || !cred.client_email.endsWith(".iam.gserviceaccount.com")) {
+              console.error("::error::Credential client_email is invalid.");
+              process.exit(1);
+            }
+            if (typeof cred.private_key !== "string" || !cred.private_key.includes("BEGIN PRIVATE KEY")) {
+              console.error("::error::Credential private_key is missing or malformed.");
+              process.exit(1);
+            }
+            console.log("Verified service-account credential for project: " + cred.project_id);
+          '
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Read-Only Cloud Preflight (manageLibraryDocuments & getPublicLibrary Strict Gen2/Region/State/Env/Secret Audit + Fail-Closed Quarantine Bucket Posture)
+        id: cloud_read_only_preflight
+        run: |
+          set -euo pipefail
+
+          echo "1. Auditing existing manageLibraryDocuments Cloud Function (Strict GEN_2, ${EXPECTED_FUNCTION_REGION})..."
+          gcloud functions describe manageLibraryDocuments \
+            --gen2 \
+            --region="${EXPECTED_FUNCTION_REGION}" \
+            --project="${FIREBASE_PROJECT_ID}" \
+            --format=json > /tmp/manage_library_fn_pre.json
+
+          echo "2. Auditing existing getPublicLibrary Cloud Function (Strict GEN_2, ${EXPECTED_FUNCTION_REGION})..."
+          gcloud functions describe getPublicLibrary \
+            --gen2 \
+            --region="${EXPECTED_FUNCTION_REGION}" \
+            --project="${FIREBASE_PROJECT_ID}" \
+            --format=json > /tmp/get_public_library_fn_pre.json
+
+          node -e '
+            const fs = require("node:fs");
+
+            const allowedSystemOrReleaseEnvKeys = new Set([
+              "FIREBASE_CONFIG",
+              "GCLOUD_PROJECT",
+              "GCP_PROJECT",
+              "EVENTARC_CLOUD_EVENT_SOURCE",
+              "FUNCTION_TARGET",
+              "FUNCTION_SIGNATURE_TYPE",
+              "K_SERVICE",
+              "K_REVISION",
+              "K_CONFIGURATION",
+              "PORT",
+              "NODE_ENV",
+              "FUNCTION_REGION",
+              "FIREBASE_DEBUG_MODE",
+              "FIREBASE_DEBUG_FEATURES",
+              "POP_LIBRARY_REVIEW_WORKBENCH_ENABLED",
+              "POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED",
+              "POP_LIBRARY_CATALOG_HANDOFF_ENABLED",
+              "POP_LIBRARY_RIGHTS_DECISION_ENABLED",
+              "POP_LIBRARY_CASE_ALIGNMENT_ENABLED",
+              "POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED",
+              "POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED",
+              "POP_LIBRARY_AV_EXECUTION_ENABLED",
+            ]);
+
+            function auditExistingGen2Function(jsonPath, expectedFunctionName, requireGeminiSecret) {
+              const fn = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+              const expectedSuffix = `projects/promiseofplanet-bb325/locations/us-central1/functions/${expectedFunctionName}`;
+              if (typeof fn.name !== "string" || !fn.name.endsWith(expectedSuffix)) {
+                console.error(`::error::Unexpected ${expectedFunctionName} resource name or region: ${String(fn.name)}`);
+                process.exit(1);
+              }
+              if (fn.environment !== "GEN_2") {
+                console.error(`::error::${expectedFunctionName} environment must strictly equal "GEN_2" (found: ${String(fn.environment)}).`);
+                process.exit(1);
+              }
+              if (fn.state !== "ACTIVE") {
+                console.error(`::error::${expectedFunctionName} state must equal "ACTIVE" before release (found: ${String(fn.state)}).`);
+                process.exit(1);
+              }
+
+              const serviceConfig = fn.serviceConfig || {};
+              const secretEnvVars = Array.isArray(serviceConfig.secretEnvironmentVariables)
+                ? serviceConfig.secretEnvironmentVariables
+                : [];
+
+              if (requireGeminiSecret) {
+                const hasGeminiSecret = secretEnvVars.some((s) => s && s.key === "GEMINI_API_KEY");
+                if (!hasGeminiSecret) {
+                  console.error(`::error::Existing ${expectedFunctionName} is missing expected GEMINI_API_KEY secret binding.`);
+                  process.exit(1);
+                }
+              }
+
+              const envVars = serviceConfig.environmentVariables && typeof serviceConfig.environmentVariables === "object"
+                ? serviceConfig.environmentVariables
+                : {};
+              const envKeys = Object.keys(envVars);
+
+              const unrecognizedCustomKeys = envKeys.filter(
+                (k) => !allowedSystemOrReleaseEnvKeys.has(k) && !k.startsWith("FIREBASE_") && !k.startsWith("X_GOOGLE_")
+              );
+
+              console.log(`Existing ${expectedFunctionName} state=${fn.state}, environment=${fn.environment}`);
+              console.log(`Existing ${expectedFunctionName} secret binding keys: ${secretEnvVars.length ? secretEnvVars.map((s) => s.key).join(", ") : "(none)"}`);
+              console.log(`Existing ${expectedFunctionName} runtime env keys: ${envKeys.length ? envKeys.join(", ") : "(none)"}`);
+
+              if (unrecognizedCustomKeys.length > 0) {
+                console.error(
+                  `::error::STOP BEFORE DEPLOY: Existing ${expectedFunctionName} has custom runtime environment variable(s) that could be overwritten by dotenv deployment: ` +
+                  unrecognizedCustomKeys.join(", ")
+                );
+                process.exit(1);
+              }
+            }
+
+            auditExistingGen2Function("/tmp/manage_library_fn_pre.json", "manageLibraryDocuments", true);
+            auditExistingGen2Function("/tmp/get_public_library_fn_pre.json", "getPublicLibrary", false);
+          '
+
+          echo "3. Firestore (default) database location note: Historically verified by Project Owner as ${HISTORICAL_OWNER_VERIFIED_FIRESTORE_LOCATION} (not re-queried via datastore.databases.getMetadata in CI)."
+
+          echo "4. Auditing dedicated quarantine bucket (${EXPECTED_QUARANTINE_BUCKET}) posture (Fail-Closed)..."
+          node -e '
+            const { initializeApp, applicationDefault, deleteApp } = require("./functions/node_modules/firebase-admin/app");
+            const { getStorage } = require("./functions/node_modules/firebase-admin/storage");
+
+            (async () => {
+              const targetBucketName = process.env.EXPECTED_QUARANTINE_BUCKET;
+              const forbiddenDefaultBucket = process.env.FORBIDDEN_DEFAULT_BUCKET;
+              if (!targetBucketName || targetBucketName === forbiddenDefaultBucket) {
+                console.error("::error::Invalid quarantine bucket configuration.");
+                process.exit(1);
+              }
+
+              const app = initializeApp(
+                { credential: applicationDefault(), projectId: "promiseofplanet-bb325" },
+                "one-shot-preflight-bucket-verify"
+              );
+              try {
+                const bucket = getStorage(app).bucket(targetBucketName);
+                const [exists] = await bucket.exists();
+                if (exists !== true) {
+                  console.error("::error::Dedicated quarantine bucket does not exist: " + targetBucketName);
+                  process.exit(1);
+                }
+                const [metadata] = await bucket.getMetadata();
+                if (!metadata || metadata.name !== targetBucketName) {
+                  console.error("::error::Bucket metadata missing or bucket name mismatch.");
+                  process.exit(1);
+                }
+                const iamConfig = metadata.iamConfiguration || {};
+                const ubla = Boolean(
+                  iamConfig.uniformBucketLevelAccess &&
+                  iamConfig.uniformBucketLevelAccess.enabled === true
+                );
+                if (!ubla) {
+                  console.error("::error::UBLA is not enabled on " + targetBucketName);
+                  process.exit(1);
+                }
+                if (iamConfig.publicAccessPrevention !== "enforced") {
+                  console.error("::error::Public Access Prevention is not enforced on " + targetBucketName);
+                  process.exit(1);
+                }
+                const [policy] = await bucket.iam.getPolicy({ requestedPolicyVersion: 3 });
+                if (!policy || typeof policy !== "object" || !Array.isArray(policy.bindings)) {
+                  console.error("::error::Bucket IAM policy returned an invalid, missing, or non-array bindings structure (failing closed).");
+                  process.exit(1);
+                }
+                for (const b of policy.bindings) {
+                  if (!b || typeof b !== "object" || !Array.isArray(b.members)) {
+                    console.error("::error::Bucket IAM policy binding entry is malformed or missing members array (failing closed).");
+                    process.exit(1);
+                  }
+                  for (const member of b.members) {
+                    const norm = String(member).trim().toLowerCase();
+                    if (
+                      norm === "allusers" ||
+                      norm === "allauthenticatedusers" ||
+                      norm.startsWith("allusers:") ||
+                      norm.startsWith("allauthenticatedusers:") ||
+                      norm.startsWith("domain:")
+                    ) {
+                      console.error("::error::Forbidden public IAM principal on quarantine bucket: " + member);
+                      process.exit(1);
+                    }
+                  }
+                }
+                console.log("Verified dedicated quarantine bucket exists, UBLA=true, PAP=enforced, and fail-closed non-public IAM across " + policy.bindings.length + " binding(s).");
+              } finally {
+                await deleteApp(app);
+              }
+            })().catch((err) => {
+              console.error("::error::Quarantine bucket read-only check failed (failing closed): " + (err && err.message ? err.message : String(err)));
+              process.exit(1);
+            });
+          '
+
+      - name: Write Transient Project-Scoped Functions Dotenv (Runner Only, Post-Preflight)
+        id: write_transient_dotenv
+        run: |
+          set -euo pipefail
+          DOTENV_PATH="functions/.env.promiseofplanet-bb325"
+          if [ -e "${DOTENV_PATH}" ]; then
+            echo "::error::${DOTENV_PATH} already existed unexpectedly."
+            exit 1
+          fi
+          cat <<'EOF' > "${DOTENV_PATH}"
+          POP_LIBRARY_REVIEW_WORKBENCH_ENABLED=true
+          POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED=true
+          POP_LIBRARY_CATALOG_HANDOFF_ENABLED=true
+          POP_LIBRARY_RIGHTS_DECISION_ENABLED=true
+          POP_LIBRARY_CASE_ALIGNMENT_ENABLED=true
+          POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true
+          POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true
+          POP_LIBRARY_AV_EXECUTION_ENABLED=false
+          EOF
+
+          node -e '
+            const fs = require("node:fs");
+            const raw = fs.readFileSync("functions/.env.promiseofplanet-bb325", "utf8").trim().split(/\r?\n/);
+            const expected = [
+              "POP_LIBRARY_REVIEW_WORKBENCH_ENABLED=true",
+              "POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED=true",
+              "POP_LIBRARY_CATALOG_HANDOFF_ENABLED=true",
+              "POP_LIBRARY_RIGHTS_DECISION_ENABLED=true",
+              "POP_LIBRARY_CASE_ALIGNMENT_ENABLED=true",
+              "POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true",
+              "POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true",
+              "POP_LIBRARY_AV_EXECUTION_ENABLED=false",
+            ];
+            if (raw.length !== expected.length || !expected.every((line, idx) => raw[idx] === line)) {
+              console.error("::error::Transient functions/.env.promiseofplanet-bb325 content mismatch.");
+              process.exit(1);
+            }
+            if (fs.existsSync("dist/.env") || fs.existsSync("dist/.env.promiseofplanet-bb325")) {
+              console.error("::error::Dotenv file must never exist inside dist/.");
+              process.exit(1);
+            }
+            console.log("Created and verified transient functions/.env.promiseofplanet-bb325 (7 human gates=true, AV execution=false).");
+          '
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Execute Single Live Firebase Deployment (functions:manageLibraryDocuments,functions:getPublicLibrary,hosting)
+        id: firebase_one_shot_deploy
+        run: |
+          set -euo pipefail
+          CURRENT_SHA="$(git rev-parse HEAD)"
+          if [ "${CURRENT_SHA}" != "${PINNED_JOB_SHA}" ]; then
+            echo "::error::Commit identity drifted before deploy (${CURRENT_SHA} != ${PINNED_JOB_SHA})."
+            exit 1
+          fi
+          echo "DEPLOY_ATTEMPTED=true" >> "$GITHUB_ENV"
+          firebase deploy --project promiseofplanet-bb325 --only "functions:manageLibraryDocuments,functions:getPublicLibrary,hosting" --non-interactive
+
+      - name: Remove Transient Functions Dotenv File
+        if: always()
+        run: |
+          rm -f functions/.env.promiseofplanet-bb325
+
+      - name: Post-Deploy Readback of manageLibraryDocuments (Strict GEN_2, Region, State, Runtime Flags & GEMINI_API_KEY Secret Binding)
+        id: post_deploy_readback_manage_library
+        run: |
+          set -euo pipefail
+          gcloud functions describe manageLibraryDocuments \
+            --gen2 \
+            --region="${EXPECTED_FUNCTION_REGION}" \
+            --project="${FIREBASE_PROJECT_ID}" \
+            --format=json > /tmp/manage_library_fn_post.json
+
+          node -e '
+            const fs = require("node:fs");
+            const fn = JSON.parse(fs.readFileSync("/tmp/manage_library_fn_post.json", "utf8"));
+            if (typeof fn.name !== "string" || !fn.name.endsWith("projects/promiseofplanet-bb325/locations/us-central1/functions/manageLibraryDocuments")) {
+              console.error("::error::Post-deploy manageLibraryDocuments name/region mismatch: " + String(fn.name));
+              process.exit(1);
+            }
+            if (fn.environment !== "GEN_2") {
+              console.error("::error::Post-deploy manageLibraryDocuments environment must strictly equal \"GEN_2\" (found: " + String(fn.environment) + ").");
+              process.exit(1);
+            }
+            if (fn.state !== "ACTIVE") {
+              console.error("::error::Post-deploy manageLibraryDocuments state must equal \"ACTIVE\" (found: " + String(fn.state) + ").");
+              process.exit(1);
+            }
+
+            const serviceConfig = fn.serviceConfig || {};
+            const envVars = serviceConfig.environmentVariables || {};
+            const expectedFlags = {
+              POP_LIBRARY_REVIEW_WORKBENCH_ENABLED: "true",
+              POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: "true",
+              POP_LIBRARY_CATALOG_HANDOFF_ENABLED: "true",
+              POP_LIBRARY_RIGHTS_DECISION_ENABLED: "true",
+              POP_LIBRARY_CASE_ALIGNMENT_ENABLED: "true",
+              POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED: "true",
+              POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: "true",
+              POP_LIBRARY_AV_EXECUTION_ENABLED: "false",
+            };
+
+            for (const [k, expectedVal] of Object.entries(expectedFlags)) {
+              if (envVars[k] !== expectedVal) {
+                console.error(`::error::Post-deploy readback mismatch on manageLibraryDocuments for ${k}: expected "${expectedVal}", found "${String(envVars[k])}"`);
+                process.exit(1);
+              }
+            }
+
+            const secretEnvVars = Array.isArray(serviceConfig.secretEnvironmentVariables)
+              ? serviceConfig.secretEnvironmentVariables
+              : [];
+            if (!secretEnvVars.some((s) => s && s.key === "GEMINI_API_KEY")) {
+              console.error("::error::Post-deploy readback failed: GEMINI_API_KEY secret binding is missing on manageLibraryDocuments.");
+              process.exit(1);
+            }
+
+            console.log("Post-deploy readback verified manageLibraryDocuments (GEN_2, ACTIVE, us-central1, all 8 POP_LIBRARY_* flags, and GEMINI_API_KEY secret binding).");
+          '
+
+      - name: Post-Deploy Readback of getPublicLibrary (Strict GEN_2, Region, State & AV Disabled Check)
+        id: post_deploy_readback_public_library
+        run: |
+          set -euo pipefail
+          gcloud functions describe getPublicLibrary \
+            --gen2 \
+            --region="${EXPECTED_FUNCTION_REGION}" \
+            --project="${FIREBASE_PROJECT_ID}" \
+            --format=json > /tmp/get_public_library_fn_post.json
+
+          node -e '
+            const fs = require("node:fs");
+            const fn = JSON.parse(fs.readFileSync("/tmp/get_public_library_fn_post.json", "utf8"));
+            if (typeof fn.name !== "string" || !fn.name.endsWith("projects/promiseofplanet-bb325/locations/us-central1/functions/getPublicLibrary")) {
+              console.error("::error::Post-deploy getPublicLibrary name/region mismatch: " + String(fn.name));
+              process.exit(1);
+            }
+            if (fn.environment !== "GEN_2") {
+              console.error("::error::Post-deploy getPublicLibrary environment must strictly equal \"GEN_2\" (found: " + String(fn.environment) + ").");
+              process.exit(1);
+            }
+            if (fn.state !== "ACTIVE") {
+              console.error("::error::Post-deploy getPublicLibrary state must equal \"ACTIVE\" (found: " + String(fn.state) + ").");
+              process.exit(1);
+            }
+
+            const serviceConfig = fn.serviceConfig || {};
+            const envVars = serviceConfig.environmentVariables || {};
+            if (envVars.POP_LIBRARY_AV_EXECUTION_ENABLED === "true") {
+              console.error("::error::Post-deploy getPublicLibrary must never have POP_LIBRARY_AV_EXECUTION_ENABLED=true.");
+              process.exit(1);
+            }
+
+            console.log("Post-deploy readback verified getPublicLibrary (GEN_2, ACTIVE, us-central1, POP_LIBRARY_AV_EXECUTION_ENABLED=" + String(envVars.POP_LIBRARY_AV_EXECUTION_ENABLED) + ").");
+          '
+
+      - name: Write Truthful One-Shot Release Summary
+        if: always()
+        env:
+          PREFLIGHT_OUTCOME: ${{ steps.cloud_read_only_preflight.outcome }}
+          DEPLOY_OUTCOME: ${{ steps.firebase_one_shot_deploy.outcome }}
+          READBACK_MANAGE_OUTCOME: ${{ steps.post_deploy_readback_manage_library.outcome }}
+          READBACK_PUBLIC_OUTCOME: ${{ steps.post_deploy_readback_public_library.outcome }}
+        run: |
+          set -euo pipefail
+          DEPLOY_ATTEMPTED_FLAG="${DEPLOY_ATTEMPTED:-false}"
+          if [ "${DEPLOY_OUTCOME}" = "success" ]; then
+            DEPLOY_SUCCEEDED_LABEL="YES (firebase_one_shot_deploy outcome: success)"
+          else
+            DEPLOY_SUCCEEDED_LABEL="NO (firebase_one_shot_deploy outcome: ${DEPLOY_OUTCOME})"
+          fi
+
+          if [ "${DEPLOY_OUTCOME}" = "success" ] && [ "${READBACK_MANAGE_OUTCOME}" = "success" ] && [ "${READBACK_PUBLIC_OUTCOME}" = "success" ]; then
+            BOTH_READBACKS_VERIFIED_LABEL="YES (manageLibraryDocuments=success, getPublicLibrary=success)"
+            OVERALL_RELEASE_STATE="LIVE_DEPLOY_AND_READBACK_SUCCEEDED_PENDING_HUMAN_ACCEPTANCE"
+          elif [ "${DEPLOY_ATTEMPTED_FLAG}" != "true" ]; then
+            BOTH_READBACKS_VERIFIED_LABEL="NO (not executed; workflow halted in preflight before any Firebase deployment)"
+            OVERALL_RELEASE_STATE="HALTED_BEFORE_DEPLOY_NO_CLOUD_MUTATION"
+          else
+            BOTH_READBACKS_VERIFIED_LABEL="NO (manageLibraryDocuments=${READBACK_MANAGE_OUTCOME}, getPublicLibrary=${READBACK_PUBLIC_OUTCOME})"
+            OVERALL_RELEASE_STATE="FAILED_OR_INCOMPLETE_DEPLOYMENT_DO_NOT_AUTO_RETRY"
+          fi
+
+          {
+            echo "### Library Human Review One-Shot Release Execution Summary"
+            echo ""
+            echo "- **Overall Release State:** \`${OVERALL_RELEASE_STATE}\`"
+            echo "- **GitHub Run ID:** \`${{ github.run_id }}\`"
+            echo "- **Git Ref:** \`${{ github.ref }}\`"
+            echo "- **Pinned Commit SHA:** \`${{ github.sha }}\`"
+            echo "- **Target Project:** \`promiseofplanet-bb325\`"
+            echo "- **Job Status:** \`${{ job.status }}\`"
+            echo ""
+            echo "#### Execution & Verification Truth Table"
+            echo "- **Cloud Read-Only Preflight Outcome:** \`${PREFLIGHT_OUTCOME}\`"
+            echo "- **Deployment Attempted:** \`${DEPLOY_ATTEMPTED_FLAG}\`"
+            echo "- **Deployment Succeeded (\`functions:manageLibraryDocuments,functions:getPublicLibrary,hosting\`):** \`${DEPLOY_SUCCEEDED_LABEL}\`"
+            echo "- **Both Function Readbacks Verified (\`manageLibraryDocuments\` & \`getPublicLibrary\`):** \`${BOTH_READBACKS_VERIFIED_LABEL}\`"
+            echo "- **Firestore Location Inventory Note:** \`me-central2\` (recorded as historical Owner-verified inventory evidence; not re-queried via \`datastore.databases.getMetadata\` in CI)"
+            echo ""
+            echo "#### Intended Release Configuration (Applied Only When Deployment & Readback Succeed)"
+            echo "- **Intended Target Resources:** \`functions:manageLibraryDocuments\`, \`functions:getPublicLibrary\`, \`hosting\`"
+            echo "- **Intended Human Review Flags (\`true\`):**"
+            echo "  - \`VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED=true\` / \`POP_LIBRARY_REVIEW_WORKBENCH_ENABLED=true\`"
+            echo "  - \`VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED=true\` / \`POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED=true\`"
+            echo "  - \`VITE_LIBRARY_CATALOG_HANDOFF_ENABLED=true\` / \`POP_LIBRARY_CATALOG_HANDOFF_ENABLED=true\`"
+            echo "  - \`VITE_LIBRARY_RIGHTS_DECISION_ENABLED=true\` / \`POP_LIBRARY_RIGHTS_DECISION_ENABLED=true\`"
+            echo "  - \`VITE_LIBRARY_CASE_ALIGNMENT_ENABLED=true\` / \`POP_LIBRARY_CASE_ALIGNMENT_ENABLED=true\`"
+            echo "  - \`VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true\` / \`POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true\`"
+            echo "  - \`VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true\` / \`POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true\`"
+            echo "- **Enforced Safety Locks:**"
+            echo "  - \`VITE_LIBRARY_AV_EXECUTION_ENABLED=false\` / \`POP_LIBRARY_AV_EXECUTION_ENABLED=false\`"
+            echo "  - \`VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED=true\` (preserved existing endpoint)"
+            echo "  - \`qcat-\` catalog drafts remain excluded from public library queries; no binary download or publication enabled."
+            echo ""
+            echo "#### Post-Release Acceptance Notice"
+            echo "- If \`Overall Release State\` is \`FAILED_OR_INCOMPLETE_DEPLOYMENT_DO_NOT_AUTO_RETRY\`, inspect the failed step logs and cloud state before taking manual action; never auto-retry."
+            echo "- Even when deployment and readback succeed, CI does not prove live end-to-end acceptance; the Owner must test existing \`Quarantined\` receipts directly."
+          } >> "$GITHUB_STEP_SUMMARY"
