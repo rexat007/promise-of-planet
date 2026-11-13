@@ -2014,7 +2014,7 @@ async function runTests(): Promise<void> {
         'functions/src/index.ts',
         '5a14cada5dad8e764f8cc3092f40c386f6b09616',
       ],
-      ['package.json', '34cb668d837d342c9b5367461cca2ad9dd8a18e7'],
+      ['package.json', '923f67eebb513a6fab3e1e4d30de2ca9e48eb50b'],
     ];
 
     for (const [relPath, expectedSha1] of protectedFiles) {

@@ -315,22 +315,22 @@ jobs:
         id: run_preflight_test_suites
         run: |
           set -euo pipefail
-          ./node_modules/.bin/tsx scripts/runPublicLibraryFunctionalTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineAdminReadTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineReviewWorkbenchBackendTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineReviewWorkbenchClientTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineHumanReviewBackendTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineHumanReviewClientTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineCatalogHandoffBackendTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineCatalogHandoffClientTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineRightsDecisionBackendTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineRightsDecisionClientTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineCatalogCaseAlignmentBackendTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineCatalogCaseAlignmentClientTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineBinarySafetyCaseBackendTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineBinarySafetyCaseClientTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineIsolatedInspectionRequestBackendTests.ts
-          ./node_modules/.bin/tsx scripts/runLibraryQuarantineIsolatedInspectionRequestClientTests.ts
+          ./node_modules/.bin/tsx -e 'require("./scripts/runPublicLibraryFunctionalTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineAdminReadTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineReviewWorkbenchBackendTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineReviewWorkbenchClientTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineHumanReviewBackendTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineHumanReviewClientTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineCatalogHandoffBackendTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineCatalogHandoffClientTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineRightsDecisionBackendTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineRightsDecisionClientTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineCatalogCaseAlignmentBackendTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineCatalogCaseAlignmentClientTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineBinarySafetyCaseBackendTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineBinarySafetyCaseClientTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineIsolatedInspectionRequestBackendTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineIsolatedInspectionRequestClientTests.ts")'
 
       - name: Build Frontend (Vite) with Explicit Human Review Release Flags and AV Execution Disabled
         id: build_vite_frontend
