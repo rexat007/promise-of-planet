@@ -1000,7 +1000,7 @@ async function runTests(): Promise<void> {
       ],
       [
         'functions/src/library/libraryApplicationService.ts',
-        'd9bcfa9db99a334a2743e1171cee9435d3a1559c',
+        '1f8dad76a835e9c7a48bb9108625e8826e6cff6a',
       ],
       [
         'functions/src/library/publicLibraryRepository.ts',

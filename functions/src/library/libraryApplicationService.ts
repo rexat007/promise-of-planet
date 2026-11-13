@@ -161,32 +161,137 @@ export class LibraryApplicationService {
   }
 
   async updateMetadata(id: string, updates: UpdateLibraryMetadataInput, actor: AdminUser): Promise<LibraryDocument> {
+    if (typeof id !== 'string' || id.trim() === '') {
+      throw new Error('VALIDATION_ERROR: Document ID is required');
+    }
+
     const doc = await this.getById(id);
     if (!doc) {
       throw new Error(`NOT_FOUND: Document ${id} not found`);
     }
 
+    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+      throw new Error('VALIDATION_ERROR: Metadata updates payload must be a valid object');
+    }
+
+    const validateRequiredStringField = (
+      val: unknown,
+      fieldName: string
+    ): string | undefined => {
+      if (val === undefined) {
+        return undefined;
+      }
+      if (typeof val !== 'string' || val.trim() === '') {
+        throw new Error(`VALIDATION_ERROR: Field '${fieldName}' must be a non-empty string`);
+      }
+      return val.trim();
+    };
+
+    const validateOptionalStringField = (
+      val: unknown,
+      fieldName: string
+    ): string | undefined => {
+      if (val === undefined || val === null) {
+        return undefined;
+      }
+      if (typeof val !== 'string') {
+        throw new Error(`VALIDATION_ERROR: Optional field '${fieldName}' must be a string when provided`);
+      }
+      return val.trim();
+    };
+
+    const validateStringArrayField = (
+      val: unknown,
+      fieldName: string
+    ): string[] | undefined => {
+      if (val === undefined) {
+        return undefined;
+      }
+      if (
+        !Array.isArray(val) ||
+        !val.every((item): item is string => typeof item === 'string' && item.trim() !== '')
+      ) {
+        throw new Error(
+          `VALIDATION_ERROR: Field '${fieldName}' must be an array of non-empty strings`
+        );
+      }
+      return val.map((item) => item.trim());
+    };
+
+    const titleAr = validateRequiredStringField(updates.titleAr, 'titleAr');
+    const titleEn = validateRequiredStringField(updates.titleEn, 'titleEn');
+    const originalTitle = validateOptionalStringField(updates.originalTitle, 'originalTitle');
+    const organizationId = validateRequiredStringField(updates.organizationId, 'organizationId');
+    const sourceId = validateRequiredStringField(updates.sourceId, 'sourceId');
+    const geographyAr = validateRequiredStringField(updates.geographyAr, 'geographyAr');
+    const geographyEn = validateRequiredStringField(updates.geographyEn, 'geographyEn');
+    const publicationDate = validateRequiredStringField(updates.publicationDate, 'publicationDate');
+    if (publicationDate !== undefined && isNaN(Date.parse(publicationDate))) {
+      throw new Error('VALIDATION_ERROR: Invalid publication date format');
+    }
+
+    if (
+      updates.documentType !== undefined &&
+      (typeof updates.documentType !== 'string' ||
+        !Object.values(LibraryDocumentType).includes(updates.documentType as LibraryDocumentType))
+    ) {
+      throw new Error(`VALIDATION_ERROR: Invalid document type: ${String(updates.documentType)}`);
+    }
+
+    if (
+      updates.language !== undefined &&
+      (typeof updates.language !== 'string' ||
+        !['ar', 'en', 'bilingual', 'other'].includes(updates.language))
+    ) {
+      throw new Error(`VALIDATION_ERROR: Invalid language: ${String(updates.language)}`);
+    }
+
+    const summaryAr = validateRequiredStringField(updates.summaryAr, 'summaryAr');
+    const summaryEn = validateRequiredStringField(updates.summaryEn, 'summaryEn');
+    const topicsAr = validateStringArrayField(updates.topicsAr, 'topicsAr');
+    const topicsEn = validateStringArrayField(updates.topicsEn, 'topicsEn');
+    const environmentalDomains = validateStringArrayField(
+      updates.environmentalDomains,
+      'environmentalDomains'
+    );
+    const legalStatusDescriptionAr = validateRequiredStringField(
+      updates.legalStatusDescriptionAr,
+      'legalStatusDescriptionAr'
+    );
+    const legalStatusDescriptionEn = validateRequiredStringField(
+      updates.legalStatusDescriptionEn,
+      'legalStatusDescriptionEn'
+    );
+    const authorMetadataAr = validateOptionalStringField(
+      updates.authorMetadataAr,
+      'authorMetadataAr'
+    );
+    const authorMetadataEn = validateOptionalStringField(
+      updates.authorMetadataEn,
+      'authorMetadataEn'
+    );
+
     const updated: LibraryDocument = {
       ...doc,
-      ...(updates.titleAr !== undefined && { titleAr: updates.titleAr.trim() }),
-      ...(updates.titleEn !== undefined && { titleEn: updates.titleEn.trim() }),
-      ...(updates.originalTitle !== undefined && { originalTitle: updates.originalTitle.trim() }),
+      ...(titleAr !== undefined && { titleAr }),
+      ...(titleEn !== undefined && { titleEn }),
+      ...(originalTitle !== undefined && { originalTitle }),
       ...(updates.documentType !== undefined && { documentType: updates.documentType }),
-      ...(updates.organizationId !== undefined && { organizationId: updates.organizationId.trim() }),
-      ...(updates.sourceId !== undefined && { sourceId: updates.sourceId.trim() }),
-      ...(updates.geographyAr !== undefined && { geographyAr: updates.geographyAr.trim() }),
-      ...(updates.geographyEn !== undefined && { geographyEn: updates.geographyEn.trim() }),
-      ...(updates.publicationDate !== undefined && { publicationDate: updates.publicationDate.trim() }),
+      ...(organizationId !== undefined && { organizationId }),
+      ...(sourceId !== undefined && { sourceId }),
+      ...(geographyAr !== undefined && { geographyAr }),
+      ...(geographyEn !== undefined && { geographyEn }),
+      ...(publicationDate !== undefined && { publicationDate }),
       ...(updates.language !== undefined && { language: updates.language }),
-      ...(updates.summaryAr !== undefined && { summaryAr: updates.summaryAr.trim() }),
-      ...(updates.summaryEn !== undefined && { summaryEn: updates.summaryEn.trim() }),
-      ...(updates.topicsAr !== undefined && { topicsAr: updates.topicsAr.map(t => t.trim()) }),
-      ...(updates.topicsEn !== undefined && { topicsEn: updates.topicsEn.map(t => t.trim()) }),
-      ...(updates.environmentalDomains !== undefined && { environmentalDomains: updates.environmentalDomains.map(d => d.trim()) }),
-      ...(updates.legalStatusDescriptionAr !== undefined && { legalStatusDescriptionAr: updates.legalStatusDescriptionAr.trim() }),
-      ...(updates.legalStatusDescriptionEn !== undefined && { legalStatusDescriptionEn: updates.legalStatusDescriptionEn.trim() }),
-      ...(updates.authorMetadataAr !== undefined && { authorMetadataAr: updates.authorMetadataAr.trim() }),
-      ...(updates.authorMetadataEn !== undefined && { authorMetadataEn: updates.authorMetadataEn.trim() }),
+      ...(summaryAr !== undefined && { summaryAr }),
+      ...(summaryEn !== undefined && { summaryEn }),
+      ...(topicsAr !== undefined && { topicsAr }),
+      ...(topicsEn !== undefined && { topicsEn }),
+      ...(environmentalDomains !== undefined && { environmentalDomains }),
+      ...(legalStatusDescriptionAr !== undefined && { legalStatusDescriptionAr }),
+      ...(legalStatusDescriptionEn !== undefined && { legalStatusDescriptionEn }),
+      ...(authorMetadataAr !== undefined && { authorMetadataAr }),
+      ...(authorMetadataEn !== undefined && { authorMetadataEn }),
       updatedAt: new Date().toISOString(),
     };
 

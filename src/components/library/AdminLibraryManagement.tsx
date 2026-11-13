@@ -89,6 +89,7 @@ import {
   canCreateLibraryQuarantineCatalogDraft,
   isHumanReviewCaseEligibleForCatalogHandoff,
   isLibraryQuarantineCatalogHandoffEnabled,
+  isQuarantineCatalogDocumentId,
   type CreateLibraryQuarantineCatalogDraftClassificationInput,
   type CreateLibraryQuarantineCatalogDraftResponseDto,
   type GetLibraryQuarantineCatalogHandoffResponseDto,
@@ -1897,62 +1898,72 @@ export function AdminLibraryManagement({
   }, [documents, searchQuery, selectedType, selectedRights, selectedWorkflow]);
 
   const handleSaveDocument = async (savedDoc: LibraryDocument) => {
-    try {
-      const exists = documents.some((d) => d.id === savedDoc.id);
-      let canonical: LibraryDocument;
-      if (exists) {
-        canonical = await LibraryAdminClient.updateMetadata(savedDoc.id, {
-          titleAr: savedDoc.titleAr,
-          titleEn: savedDoc.titleEn,
-          originalTitle: savedDoc.originalTitle,
-          documentType: savedDoc.documentType,
-          organizationId: savedDoc.organizationId,
-          sourceId: savedDoc.sourceId,
-          geographyAr: savedDoc.geographyAr,
-          geographyEn: savedDoc.geographyEn,
-          publicationDate: savedDoc.publicationDate,
-          language: savedDoc.language,
-          summaryAr: savedDoc.summaryAr,
-          summaryEn: savedDoc.summaryEn,
-          topicsAr: savedDoc.topicsAr,
-          topicsEn: savedDoc.topicsEn,
-          environmentalDomains: savedDoc.environmentalDomains,
-          legalStatusDescriptionAr: savedDoc.legalStatusDescriptionAr,
-          legalStatusDescriptionEn: savedDoc.legalStatusDescriptionEn,
-          authorMetadataAr: savedDoc.authorMetadataAr,
-          authorMetadataEn: savedDoc.authorMetadataEn,
-        });
-      } else {
-        canonical = await LibraryAdminClient.create({
-          id: savedDoc.id,
-          titleAr: savedDoc.titleAr,
-          titleEn: savedDoc.titleEn,
-          originalTitle: savedDoc.originalTitle,
-          documentType: savedDoc.documentType,
-          organizationId: savedDoc.organizationId,
-          sourceId: savedDoc.sourceId,
-          geographyAr: savedDoc.geographyAr,
-          geographyEn: savedDoc.geographyEn,
-          publicationDate: savedDoc.publicationDate,
-          language: savedDoc.language,
-          summaryAr: savedDoc.summaryAr,
-          summaryEn: savedDoc.summaryEn,
-          topicsAr: savedDoc.topicsAr,
-          topicsEn: savedDoc.topicsEn,
-          environmentalDomains: savedDoc.environmentalDomains,
-          legalStatusDescriptionAr: savedDoc.legalStatusDescriptionAr,
-          legalStatusDescriptionEn: savedDoc.legalStatusDescriptionEn,
-          authorMetadataAr: savedDoc.authorMetadataAr,
-          authorMetadataEn: savedDoc.authorMetadataEn,
-          rightsStatus: savedDoc.rightsStatus,
-          rightsNotesAr: savedDoc.rightsNotesAr,
-          rightsNotesEn: savedDoc.rightsNotesEn,
-        });
+    const isQuarantineDraft = isQuarantineCatalogDocumentId(savedDoc.id);
+    const exists = documents.some((d) => d.id === savedDoc.id) || isQuarantineDraft;
+
+    if (exists) {
+      // Existing documents (including all qcat- catalog drafts) have already been persisted
+      // once by LibraryDocumentEditorModal. Update local state directly from the canonical
+      // response without issuing a duplicate updateMetadata write.
+      setDocuments((prev) =>
+        prev.some((d) => d.id === savedDoc.id)
+          ? prev.map((d) => (d.id === savedDoc.id ? savedDoc : d))
+          : [savedDoc, ...prev]
+      );
+      setActiveModalDoc(savedDoc);
+      try {
+        await loadAllData();
+      } catch {
+        // Post-save list refresh errors must not look like the save failed or cause a second write.
       }
-      await loadAllData();
+      return;
+    }
+
+    try {
+      const canonical = await LibraryAdminClient.create({
+        id: savedDoc.id,
+        titleAr: savedDoc.titleAr,
+        titleEn: savedDoc.titleEn,
+        ...(typeof savedDoc.originalTitle === 'string' && savedDoc.originalTitle.trim() !== ''
+          ? { originalTitle: savedDoc.originalTitle.trim() }
+          : {}),
+        documentType: savedDoc.documentType,
+        organizationId: savedDoc.organizationId,
+        sourceId: savedDoc.sourceId,
+        geographyAr: savedDoc.geographyAr,
+        geographyEn: savedDoc.geographyEn,
+        publicationDate: savedDoc.publicationDate,
+        language: savedDoc.language,
+        summaryAr: savedDoc.summaryAr,
+        summaryEn: savedDoc.summaryEn,
+        topicsAr: savedDoc.topicsAr,
+        topicsEn: savedDoc.topicsEn,
+        environmentalDomains: savedDoc.environmentalDomains,
+        legalStatusDescriptionAr: savedDoc.legalStatusDescriptionAr,
+        legalStatusDescriptionEn: savedDoc.legalStatusDescriptionEn,
+        ...(typeof savedDoc.authorMetadataAr === 'string' && savedDoc.authorMetadataAr.trim() !== ''
+          ? { authorMetadataAr: savedDoc.authorMetadataAr.trim() }
+          : {}),
+        ...(typeof savedDoc.authorMetadataEn === 'string' && savedDoc.authorMetadataEn.trim() !== ''
+          ? { authorMetadataEn: savedDoc.authorMetadataEn.trim() }
+          : {}),
+        rightsStatus: savedDoc.rightsStatus,
+        rightsNotesAr: savedDoc.rightsNotesAr,
+        rightsNotesEn: savedDoc.rightsNotesEn,
+      });
+      setDocuments((prev) => [
+        canonical,
+        ...prev.filter((d) => d.id !== canonical.id),
+      ]);
       setActiveModalDoc(canonical);
+      try {
+        await loadAllData();
+      } catch {
+        // Post-create list refresh errors must not look like creation failed or cause a second write.
+      }
     } catch (err: any) {
       alert(err.message || 'Failed to save document');
+      throw err;
     }
   };
 
@@ -5189,10 +5200,15 @@ export function AdminLibraryManagement({
       {/* Editor & Detail Modal */}
       <LibraryDocumentEditorModal
         document={activeModalDoc}
+        isNewDocument={
+          Boolean(activeModalDoc) &&
+          !documents.some((d) => d.id === activeModalDoc?.id) &&
+          !isQuarantineCatalogDocumentId(activeModalDoc?.id)
+        }
         isOpen={isModalOpen}
         onClose={() => {
           setIsModalOpen(false);
-          loadAllData();
+          void loadAllData().catch(() => {});
         }}
         onSave={handleSaveDocument}
         organizations={organizations}

@@ -1996,7 +1996,7 @@ async function runTests(): Promise<void> {
       ],
       [
         'src/components/library/AdminLibraryManagement.tsx',
-        'c75aa53829d4185641335de6e1e0780d0d759bd7',
+        'fe71f7ac57a580da5e1309fb77e761f75695d274',
       ],
       [
         'functions/src/shared/adminContract.ts',
@@ -2004,7 +2004,7 @@ async function runTests(): Promise<void> {
       ],
       [
         'functions/src/library/libraryApplicationService.ts',
-        'd9bcfa9db99a334a2743e1171cee9435d3a1559c',
+        '1f8dad76a835e9c7a48bb9108625e8826e6cff6a',
       ],
       [
         'functions/src/library/publicLibraryRepository.ts',
