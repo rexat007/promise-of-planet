@@ -215,6 +215,45 @@ jobs:
           npm ci
           npm --prefix functions ci
 
+      - name: Verify Lockfile-Installed tsx Binary and Package-Aware Firebase Admin SDK Resolution
+        id: verify_tsx_and_firebase_admin_resolution
+        run: |
+          set -euo pipefail
+          if [ ! -x "./node_modules/.bin/tsx" ]; then
+            echo "::error::Pinned ./node_modules/.bin/tsx executable is missing after npm ci."
+            exit 1
+          fi
+          ./node_modules/.bin/tsx --version
+
+          node -e '
+            const { createRequire } = require("node:module");
+            const path = require("node:path");
+
+            const functionsRequire =
+              createRequire(path.resolve("functions/package.json"));
+
+            const {
+              initializeApp,
+              applicationDefault,
+              deleteApp
+            } = functionsRequire("firebase-admin/app");
+
+            const { getStorage } =
+              functionsRequire("firebase-admin/storage");
+
+            if (
+              typeof initializeApp !== "function" ||
+              typeof applicationDefault !== "function" ||
+              typeof deleteApp !== "function" ||
+              typeof getStorage !== "function"
+            ) {
+              console.error("::error::Package-aware resolution of firebase-admin/app or firebase-admin/storage failed to return expected functions.");
+              process.exit(1);
+            }
+
+            console.log("Verified lockfile-installed ./node_modules/.bin/tsx and package-aware resolution of firebase-admin/app and firebase-admin/storage via functions/package.json.");
+          '
+
       - name: Run Root TypeScript Check and Build Cloud Functions
         run: |
           npx tsc --noEmit
@@ -272,25 +311,26 @@ jobs:
             console.log("Verified compiled manageLibraryDocuments and getPublicLibrary exports, all 8 server release gate constants, and public qcat- exclusion guard.");
           '
 
-      - name: Run Public Library & All 15 Quarantine / Human Review Backend & Client Test Suites
+      - name: Run Public Library & All 15 Quarantine / Human Review Backend & Client Test Suites (Pinned Local tsx)
         id: run_preflight_test_suites
         run: |
-          npx tsx scripts/runPublicLibraryFunctionalTests.ts
-          npx tsx scripts/runLibraryQuarantineAdminReadTests.ts
-          npx tsx scripts/runLibraryQuarantineReviewWorkbenchBackendTests.ts
-          npx tsx scripts/runLibraryQuarantineReviewWorkbenchClientTests.ts
-          npx tsx scripts/runLibraryQuarantineHumanReviewBackendTests.ts
-          npx tsx scripts/runLibraryQuarantineHumanReviewClientTests.ts
-          npx tsx scripts/runLibraryQuarantineCatalogHandoffBackendTests.ts
-          npx tsx scripts/runLibraryQuarantineCatalogHandoffClientTests.ts
-          npx tsx scripts/runLibraryQuarantineRightsDecisionBackendTests.ts
-          npx tsx scripts/runLibraryQuarantineRightsDecisionClientTests.ts
-          npx tsx scripts/runLibraryQuarantineCatalogCaseAlignmentBackendTests.ts
-          npx tsx scripts/runLibraryQuarantineCatalogCaseAlignmentClientTests.ts
-          npx tsx scripts/runLibraryQuarantineBinarySafetyCaseBackendTests.ts
-          npx tsx scripts/runLibraryQuarantineBinarySafetyCaseClientTests.ts
-          npx tsx scripts/runLibraryQuarantineIsolatedInspectionRequestBackendTests.ts
-          npx tsx scripts/runLibraryQuarantineIsolatedInspectionRequestClientTests.ts
+          set -euo pipefail
+          ./node_modules/.bin/tsx scripts/runPublicLibraryFunctionalTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineAdminReadTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineReviewWorkbenchBackendTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineReviewWorkbenchClientTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineHumanReviewBackendTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineHumanReviewClientTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineCatalogHandoffBackendTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineCatalogHandoffClientTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineRightsDecisionBackendTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineRightsDecisionClientTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineCatalogCaseAlignmentBackendTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineCatalogCaseAlignmentClientTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineBinarySafetyCaseBackendTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineBinarySafetyCaseClientTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineIsolatedInspectionRequestBackendTests.ts
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineIsolatedInspectionRequestClientTests.ts
 
       - name: Build Frontend (Vite) with Explicit Human Review Release Flags and AV Execution Disabled
         id: build_vite_frontend
@@ -497,8 +537,20 @@ jobs:
 
           echo "4. Auditing dedicated quarantine bucket (${EXPECTED_QUARANTINE_BUCKET}) posture (Fail-Closed)..."
           node -e '
-            const { initializeApp, applicationDefault, deleteApp } = require("./functions/node_modules/firebase-admin/app");
-            const { getStorage } = require("./functions/node_modules/firebase-admin/storage");
+            const { createRequire } = require("node:module");
+            const path = require("node:path");
+
+            const functionsRequire =
+              createRequire(path.resolve("functions/package.json"));
+
+            const {
+              initializeApp,
+              applicationDefault,
+              deleteApp
+            } = functionsRequire("firebase-admin/app");
+
+            const { getStorage } =
+              functionsRequire("firebase-admin/storage");
 
             (async () => {
               const targetBucketName = process.env.EXPECTED_QUARANTINE_BUCKET;
