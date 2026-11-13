@@ -468,6 +468,7 @@ jobs:
               "FUNCTION_REGION",
               "FIREBASE_DEBUG_MODE",
               "FIREBASE_DEBUG_FEATURES",
+              "LOG_EXECUTION_ID",
               "POP_LIBRARY_REVIEW_WORKBENCH_ENABLED",
               "POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED",
               "POP_LIBRARY_CATALOG_HANDOFF_ENABLED",
@@ -511,6 +512,15 @@ jobs:
                 ? serviceConfig.environmentVariables
                 : {};
               const envKeys = Object.keys(envVars);
+
+              if (Object.prototype.hasOwnProperty.call(envVars, "LOG_EXECUTION_ID")) {
+                if (envVars.LOG_EXECUTION_ID !== "true") {
+                  console.error(
+                    `::error::STOP BEFORE DEPLOY: Existing ${expectedFunctionName} has a non-default or malformed LOG_EXECUTION_ID configuration (expected Firebase CLI-managed default "true").`
+                  );
+                  process.exit(1);
+                }
+              }
 
               const unrecognizedCustomKeys = envKeys.filter(
                 (k) => !allowedSystemOrReleaseEnvKeys.has(k) && !k.startsWith("FIREBASE_") && !k.startsWith("X_GOOGLE_")
