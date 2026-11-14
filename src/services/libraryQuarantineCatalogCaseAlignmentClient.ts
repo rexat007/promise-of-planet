@@ -2091,38 +2091,77 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
     this.setState(this.createInitialState());
   }
 
+  private isUncertainLatched(): boolean {
+    return (
+      this.state.phase === 'uncertain' || this.state.uncertainState !== null
+    );
+  }
+
+  private isConflictLatched(): boolean {
+    return (
+      !this.isUncertainLatched() &&
+      (this.state.phase === 'conflict' || this.state.conflictState !== null)
+    );
+  }
+
+  private static appendVerificationDiagnostic(
+    baseMessage: string,
+    errorCode: string,
+    errorMessage: string
+  ): string {
+    const separator = ' | Verification GET failed [';
+    const existingIdx = baseMessage.indexOf(separator);
+    const cleanBase =
+      existingIdx >= 0 ? baseMessage.slice(0, existingIdx) : baseMessage;
+    return `${cleanBase}${separator}${errorCode}]: ${errorMessage}`;
+  }
+
   public setConfirmedApplyCaseMetadata(confirmed: boolean): void {
-    if (this.state.inFlight || this.state.phase === 'uncertain') {
+    if (
+      this.state.inFlight ||
+      this.isUncertainLatched() ||
+      this.isConflictLatched()
+    ) {
       return;
     }
     const nextConfirmed = confirmed === true;
+    if (nextConfirmed && this.state.phase !== 'ready') {
+      if (
+        this.state.phase === 'hold' &&
+        this.state.holdState?.errorCode === 'CONFIRMATION_REQUIRED' &&
+        this.state.snapshot !== null
+      ) {
+        this.setState({
+          ...this.state,
+          phase: 'ready',
+          confirmedApplyCaseMetadata: true,
+          alignError: null,
+          holdState: null,
+        });
+      }
+      return;
+    }
     this.setState({
       ...this.state,
       confirmedApplyCaseMetadata: nextConfirmed,
       alignError: nextConfirmed ? null : this.state.alignError,
-      ...(this.state.holdState?.errorCode === 'CONFIRMATION_REQUIRED'
-        ? {
-            phase: this.state.snapshot ? 'ready' : this.state.phase,
-            holdState: null,
-          }
-        : {}),
-      ...(nextConfirmed && this.state.phase === 'conflict' && this.state.snapshot
-        ? {
-            phase: 'ready',
-            conflictState: null,
-          }
-        : {}),
     });
   }
 
   public setHasUnsavedCaseEdits(hasUnsavedCaseEdits: boolean): void {
     const dirty = hasUnsavedCaseEdits === true;
+    const canClearUnsavedHold =
+      !dirty &&
+      !this.isUncertainLatched() &&
+      !this.isConflictLatched() &&
+      this.state.phase === 'hold' &&
+      this.state.holdState?.errorCode === 'UNSAVED_CASE_EDITS_PRESENT';
+
     this.setState({
       ...this.state,
       hasUnsavedCaseEdits: dirty,
       ...(dirty ? { confirmedApplyCaseMetadata: false } : {}),
-      ...(!dirty &&
-      this.state.holdState?.errorCode === 'UNSAVED_CASE_EDITS_PRESENT'
+      ...(canClearUnsavedHold
         ? {
             phase: this.state.snapshot ? 'ready' : this.state.phase,
             holdState: null,
@@ -2155,6 +2194,17 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
       return this.state;
     }
 
+    if (
+      this.state.receiptId === savedCase.receiptId &&
+      (this.isUncertainLatched() || this.isConflictLatched())
+    ) {
+      if (options?.hasUnsavedCaseEdits !== undefined) {
+        this.setHasUnsavedCaseEdits(options.hasUnsavedCaseEdits);
+      }
+      await this.verifyAlignmentStatus();
+      return this.state;
+    }
+
     const epoch = ++this.requestEpoch;
     const receiptId = savedCase.receiptId;
     const hasUnsavedCaseEdits =
@@ -2179,23 +2229,40 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
       uncertainState: null,
     });
 
-    const response = await getQuarantineCatalogCaseAlignmentClient(
-      receiptId,
-      this.options
-    );
+    let response: GetLibraryQuarantineCatalogCaseAlignmentResponseDto;
+    try {
+      response = await getQuarantineCatalogCaseAlignmentClient(
+        receiptId,
+        this.options
+      );
+    } catch (err: unknown) {
+      response = makeClientGetHoldDto(
+        receiptId,
+        'CALLABLE_REQUEST_FAILED',
+        err instanceof Error && err.message.trim().length > 0
+          ? err.message
+          : 'Callable getQuarantineCatalogCaseAlignment request failed.'
+      );
+    }
 
-    if (epoch !== this.requestEpoch) {
+    if (epoch !== this.requestEpoch || this.state.receiptId !== receiptId) {
       return this.state;
     }
 
-    if (!response.ok) {
+    if (!response.ok || response.receiptId !== receiptId) {
+      const errorCode = !response.ok
+        ? response.errorCode
+        : 'RESPONSE_VALIDATION_FAILED';
+      const errorMessage = !response.ok
+        ? response.errorMessage
+        : 'Server response receiptId did not match active receiptId.';
       this.setState({
         ...this.state,
         phase: 'hold',
         inFlight: false,
         holdState: Object.freeze({
-          errorCode: response.errorCode,
-          errorMessage: response.errorMessage,
+          errorCode,
+          errorMessage,
         }),
       });
       return this.state;
@@ -2229,7 +2296,16 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
       return null;
     }
 
-    if (this.state.phase === 'uncertain' || this.state.phase === 'conflict') {
+    if (
+      this.isUncertainLatched() ||
+      this.isConflictLatched() ||
+      (this.state.phase !== 'ready' &&
+        !(
+          this.state.phase === 'hold' &&
+          (this.state.holdState?.errorCode === 'CONFIRMATION_REQUIRED' ||
+            this.state.holdState?.errorCode === 'UNSAVED_CASE_EDITS_PRESENT')
+        ))
+    ) {
       return null;
     }
 
@@ -2335,7 +2411,7 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
         this.options
       );
 
-      if (epoch !== this.requestEpoch) {
+      if (epoch !== this.requestEpoch || this.state.receiptId !== receiptId) {
         return response;
       }
 
@@ -2483,6 +2559,9 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
       });
       return response;
     } catch (err: unknown) {
+      if (epoch !== this.requestEpoch || this.state.receiptId !== receiptId) {
+        return null;
+      }
       this.setState({
         ...this.state,
         phase: 'uncertain',
@@ -2513,34 +2592,120 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
 
     const epoch = ++this.requestEpoch;
     const receiptId = this.state.receiptId;
+    const wasUncertain = this.isUncertainLatched();
+    const previousUncertainState = this.state.uncertainState;
+    const wasConflict = this.isConflictLatched();
+    const previousConflictState = this.state.conflictState;
 
     this.setState({
       ...this.state,
-      phase: 'loading',
+      phase: wasUncertain
+        ? 'uncertain'
+        : wasConflict
+          ? 'conflict'
+          : 'loading',
+      confirmedApplyCaseMetadata: false,
       inFlight: true,
       holdState: null,
-      conflictState: null,
-      uncertainState: null,
+      conflictState: wasConflict ? previousConflictState : null,
+      uncertainState: wasUncertain ? previousUncertainState : null,
     });
 
-    const response = await getQuarantineCatalogCaseAlignmentClient(
-      receiptId,
-      this.options
-    );
+    let response: GetLibraryQuarantineCatalogCaseAlignmentResponseDto;
+    try {
+      response = await getQuarantineCatalogCaseAlignmentClient(
+        receiptId,
+        this.options
+      );
+    } catch (err: unknown) {
+      response = makeClientGetHoldDto(
+        receiptId,
+        'CALLABLE_REQUEST_FAILED',
+        err instanceof Error && err.message.trim().length > 0
+          ? err.message
+          : 'Callable getQuarantineCatalogCaseAlignment request failed.'
+      );
+    }
 
-    if (epoch !== this.requestEpoch) {
+    if (epoch !== this.requestEpoch || this.state.receiptId !== receiptId) {
       return response;
     }
 
-    if (!response.ok) {
+    if (!response.ok || response.receiptId !== receiptId) {
+      const failureCode = !response.ok
+        ? response.errorCode
+        : 'RESPONSE_VALIDATION_FAILED';
+      const failureMessage = !response.ok
+        ? response.errorMessage
+        : 'Server response receiptId did not match active receiptId.';
+      const latestHoldState = Object.freeze({
+        errorCode: failureCode,
+        errorMessage: failureMessage,
+      });
+
+      if (wasUncertain) {
+        const baseUncertainMessage =
+          previousUncertainState?.errorMessage ??
+          CASE_ALIGNMENT_CLIENT_SAFE_ERRORS.TRANSACTION_COMMIT_UNCERTAIN;
+        this.setState({
+          ...this.state,
+          phase: 'uncertain',
+          confirmedApplyCaseMetadata: false,
+          inFlight: false,
+          lastAlignmentOutcome: 'UNKNOWN',
+          lastAlignOutcome: 'UNKNOWN',
+          lastAlignmentSaved: null,
+          holdState: latestHoldState,
+          conflictState: null,
+          uncertainState: Object.freeze({
+            errorCode:
+              previousUncertainState?.errorCode ??
+              'TRANSACTION_COMMIT_UNCERTAIN',
+            errorMessage:
+              LibraryQuarantineCatalogCaseAlignmentPanelController.appendVerificationDiagnostic(
+                baseUncertainMessage,
+                failureCode,
+                failureMessage
+              ),
+          }),
+        });
+        return response;
+      }
+
+      if (wasConflict && previousConflictState) {
+        const updatedConflictState: AlignLibraryQuarantineCatalogCaseConflictDto =
+          Object.freeze({
+            ...previousConflictState,
+            errorMessage:
+              LibraryQuarantineCatalogCaseAlignmentPanelController.appendVerificationDiagnostic(
+                previousConflictState.errorMessage,
+                failureCode,
+                failureMessage
+              ),
+          });
+        this.setState({
+          ...this.state,
+          phase: 'conflict',
+          confirmedApplyCaseMetadata: false,
+          inFlight: false,
+          lastAlignmentOutcome: 'NOT_ALIGNED',
+          lastAlignOutcome: 'NOT_ALIGNED',
+          lastAlignmentSaved: false,
+          holdState: latestHoldState,
+          conflictState: updatedConflictState,
+          uncertainState: null,
+        });
+        return response;
+      }
+
       this.setState({
         ...this.state,
         phase: 'hold',
+        confirmedApplyCaseMetadata: false,
         inFlight: false,
-        holdState: Object.freeze({
-          errorCode: response.errorCode,
-          errorMessage: response.errorMessage,
-        }),
+        holdState: latestHoldState,
+        conflictState: null,
+        uncertainState: null,
       });
       return response;
     }
@@ -2557,6 +2722,7 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
         response.currentHumanCaseRevision !==
           response.effectiveAlignedCaseRevision,
       inFlight: false,
+      alignError: null,
       rightsInvalidatedNotice:
         response.requiresFreshRightsReview ||
         response.rightsDecisionInvalidatedByCaseChange,

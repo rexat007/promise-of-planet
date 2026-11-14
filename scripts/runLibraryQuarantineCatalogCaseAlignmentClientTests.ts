@@ -997,14 +997,28 @@ async function runTests(): Promise<void> {
   }
 
   // =========================================================================
-  // CASE 7: ALIGN CONFLICT -> explicit conflict state and required fresh
-  // review/GET; no auto-write
+  // CASE 7: ALIGN CONFLICT -> explicit conflict state; re-checking confirmation
+  // cannot clear conflict or unblock align; failed/malformed/HOLD GET (via
+  // verifyAlignmentStatus or openPanelForCase) retains conflict; valid READY
+  // GET reconciles and requires a fresh explicit confirmation before write
   // =========================================================================
   {
     const savedCaseV4 = makeSavedHumanReviewCase({ revision: 4 });
+    const savedCaseV5 = makeSavedHumanReviewCase({
+      revision: 5,
+      titleAr: 'تقرير التحول البيئي 2026 (مراجعة حالة #5)',
+      titleEn: 'Ecological Transition Report 2026 (Case v5)',
+    });
     const catalogDoc = makeCatalogDocForUi();
     let getCalls = 0;
     let alignCalls = 0;
+    let getBehavior:
+      | 'INITIAL_READY_V4'
+      | 'THROW_ERROR'
+      | 'MALFORMED_PAYLOAD'
+      | 'SERVER_HOLD'
+      | 'VALID_READY_V5' = 'INITIAL_READY_V4';
+    let lastAlignPayload: Record<string, unknown> | null = null;
 
     const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
       owner,
@@ -1013,14 +1027,64 @@ async function runTests(): Promise<void> {
         invokeCallable: async (req) => {
           if (req.action === 'getQuarantineCatalogCaseAlignment') {
             getCalls += 1;
-            const rev = getCalls === 1 ? 4 : 5;
+            if (getBehavior === 'INITIAL_READY_V4') {
+              return makeServerGetReadyResponse({
+                currentHumanCaseRevision: 4,
+                humanReviewCase: savedCaseV4,
+              });
+            }
+            if (getBehavior === 'THROW_ERROR') {
+              throw new Error('GET_NETWORK_TIMEOUT_DURING_CONFLICT_RECOVERY');
+            }
+            if (getBehavior === 'MALFORMED_PAYLOAD') {
+              return { ok: true, status: 'READY', invalidContractShape: true };
+            }
+            if (getBehavior === 'SERVER_HOLD') {
+              return makeServerGetHoldResponse({
+                errorCode: 'SOURCE_CASE_VERSION_DRIFT_HOLD',
+                errorMessage: 'تعذر التحقق المؤقت من حالة المواءمة أثناء التعارض.',
+              });
+            }
+            const docV1 = makeSanitizedCatalogDocumentDto();
             return makeServerGetReadyResponse({
-              currentHumanCaseRevision: rev,
-              humanReviewCase: makeSavedHumanReviewCase({ revision: rev }),
+              currentHumanCaseRevision: 5,
+              humanReviewCase: savedCaseV5,
+              catalogDocument: docV1,
+              diff: computeClientCatalogCaseFourFieldDiff(savedCaseV5, docV1),
             });
           }
           alignCalls += 1;
-          return makeServerAlignConflictResponse();
+          lastAlignPayload = req as unknown as Record<string, unknown>;
+          if (alignCalls === 1) {
+            return makeServerAlignConflictResponse({
+              currentHumanCaseRevision: 5,
+              humanReviewCase: savedCaseV5,
+              diff: computeClientCatalogCaseFourFieldDiff(
+                savedCaseV5,
+                makeSanitizedCatalogDocumentDto({
+                  updatedAt: '2026-11-14T10:00:00.000Z',
+                })
+              ),
+            });
+          }
+          return makeServerAlignAlignedResponse({
+            humanReviewCase: savedCaseV5,
+            effectiveAlignedCaseRevision: 5,
+            currentHumanCaseRevision: 5,
+            currentAlignmentRevision: 1,
+            catalogDocument: makeSanitizedCatalogDocumentDto({
+              titleAr: savedCaseV5.titleAr,
+              titleEn: savedCaseV5.titleEn,
+              summaryAr: savedCaseV5.summaryAr,
+              summaryEn: savedCaseV5.summaryEn,
+              updatedAt: UPDATED_ISO,
+            }),
+            alignment: makeAlignmentDto({
+              alignedHumanCaseRevision: 5,
+              alignmentRevision: 1,
+              documentUpdatedAt: UPDATED_ISO,
+            }),
+          });
         },
       }
     );
@@ -1037,10 +1101,49 @@ async function runTests(): Promise<void> {
     assert.equal(controller.getSnapshot().conflictState?.errorCode, 'ALIGNMENT_REVISION_CONFLICT');
     assert.equal(controller.getSnapshot().confirmedApplyCaseMetadata, false);
 
-    // Repeat align while in conflict is blocked until fresh review/confirmation
+    // 7a: Toggling confirmation MUST NOT clear conflict or switch phase to ready
+    controller.setConfirmedApplyCaseMetadata(true);
+    controller.setConfirmReconciliation(true);
+    assert.equal(controller.getSnapshot().phase, 'conflict');
+    assert.notEqual(controller.getSnapshot().conflictState, null);
+    assert.equal(controller.getSnapshot().confirmedApplyCaseMetadata, false);
+
     const blockedRepeat = await controller.alignCatalogDraft();
     assert.equal(blockedRepeat, null);
     assert.equal(alignCalls, 1);
+
+    // 7b: Failed GET (throws), malformed GET, and server HOLD (via verifyAlignmentStatus and openPanelForCase)
+    // MUST preserve the conflict latch and never enable writes
+    getBehavior = 'THROW_ERROR';
+    await controller.verifyAlignmentStatus();
+    assert.equal(getCalls, 2);
+    assert.equal(controller.getSnapshot().phase, 'conflict');
+    assert.equal(controller.getSnapshot().conflictState?.errorCode, 'ALIGNMENT_REVISION_CONFLICT');
+    assert.equal(controller.getSnapshot().holdState?.errorCode, 'CALLABLE_REQUEST_FAILED');
+    assert.equal(
+      controller.getSnapshot().conflictState?.errorMessage.includes('GET_NETWORK_TIMEOUT_DURING_CONFLICT_RECOVERY'),
+      true
+    );
+    controller.setConfirmedApplyCaseMetadata(true);
+    assert.equal(await controller.alignCatalogDraft(), null);
+    assert.equal(alignCalls, 1);
+
+    getBehavior = 'MALFORMED_PAYLOAD';
+    await controller.openPanelForCase(savedCaseV4);
+    assert.equal(getCalls, 3);
+    assert.equal(controller.getSnapshot().phase, 'conflict');
+    assert.equal(controller.getSnapshot().conflictState?.errorCode, 'ALIGNMENT_REVISION_CONFLICT');
+    assert.equal(controller.getSnapshot().holdState?.errorCode, 'RESPONSE_VALIDATION_FAILED');
+    controller.setConfirmedApplyCaseMetadata(true);
+    assert.equal(await controller.alignCatalogDraft(), null);
+    assert.equal(alignCalls, 1);
+
+    getBehavior = 'SERVER_HOLD';
+    await controller.verifyAlignmentStatus();
+    assert.equal(getCalls, 4);
+    assert.equal(controller.getSnapshot().phase, 'conflict');
+    assert.equal(controller.getSnapshot().conflictState?.errorCode, 'ALIGNMENT_REVISION_CONFLICT');
+    assert.equal(controller.getSnapshot().holdState?.errorCode, 'SOURCE_CASE_VERSION_DRIFT_HOLD');
 
     const conflictMarkupAr = renderToStaticMarkup(
       React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
@@ -1057,12 +1160,40 @@ async function runTests(): Promise<void> {
       true
     );
     assert.equal(conflictMarkupAr.includes('ALIGNMENT_REVISION_CONFLICT'), true);
+    assert.equal(conflictMarkupAr.includes('SOURCE_CASE_VERSION_DRIFT_HOLD'), true);
     assert.equal(
       conflictMarkupAr.includes('data-testid="resolve-quarantine-catalog-case-alignment-conflict-btn"'),
       true
     );
 
-    console.log('CASE 7: ALIGN CONFLICT displays explicit conflict state, blocks auto-write, and requires fresh review/GET.');
+    // 7c: Valid successful READY GET reconciles conflict, sets phase='ready', and requires fresh confirmation
+    getBehavior = 'VALID_READY_V5';
+    const reconciledGet = await controller.verifyAlignmentStatus();
+    assert.equal(reconciledGet?.ok, true);
+    assert.equal(reconciledGet?.status, 'READY');
+    assert.equal(getCalls, 5);
+    assert.equal(alignCalls, 1);
+    assert.equal(controller.getSnapshot().phase, 'ready');
+    assert.equal(controller.getSnapshot().conflictState, null);
+    assert.equal(controller.getSnapshot().holdState, null);
+    assert.equal(controller.getSnapshot().confirmedApplyCaseMetadata, false);
+    assert.equal(controller.getSnapshot().snapshot?.currentHumanCaseRevision, 5);
+
+    // Align without fresh human confirmation after conflict recovery must still be blocked
+    const unconfirmedPostConflict = await controller.alignCatalogDraft();
+    assert.equal(unconfirmedPostConflict, null);
+    assert.equal(alignCalls, 1);
+
+    // Fresh explicit confirmation now permits alignment at verified revision 5
+    controller.setConfirmedApplyCaseMetadata(true);
+    assert.equal(controller.getSnapshot().confirmedApplyCaseMetadata, true);
+    const postConflictAlign = await controller.alignCatalogDraft();
+    assert.equal(postConflictAlign?.ok, true);
+    assert.equal(postConflictAlign?.status, 'ALIGNED');
+    assert.equal(alignCalls, 2);
+    assert.equal(lastAlignPayload?.expectedCaseRevision, 5);
+
+    console.log('CASE 7: ALIGN CONFLICT latches across confirmation toggles and failed/HOLD GETs, then recovers only on valid READY GET with fresh human confirmation.');
   }
 
   // =========================================================================
@@ -1121,8 +1252,10 @@ async function runTests(): Promise<void> {
   }
 
   // =========================================================================
-  // CASE 9: ALIGN UNKNOWN and malformed post-dispatch response -> alignmentSaved === null,
-  // GET verification required, zero blind retry
+  // CASE 9: ALIGN UNKNOWN and malformed post-dispatch response -> alignmentSaved === null;
+  // UNKNOWN latch persists across GET throws, malformed GET, and server HOLD
+  // (via verifyAlignmentStatus and openPanelForCase) with zero align writes;
+  // clears ONLY on valid READY GET and requires fresh human confirmation
   // =========================================================================
   {
     const savedCaseV4 = makeSavedHumanReviewCase({ revision: 4 });
@@ -1130,6 +1263,12 @@ async function runTests(): Promise<void> {
     let getCount = 0;
     let alignCount = 0;
     let alignMode: 'SERVER_UNKNOWN' | 'MALFORMED_POST_DISPATCH' = 'SERVER_UNKNOWN';
+    let getMode:
+      | 'INITIAL_READY'
+      | 'GET_THROWS'
+      | 'GET_MALFORMED'
+      | 'GET_SERVER_HOLD'
+      | 'GET_VALID_READY_REFRESHED' = 'INITIAL_READY';
 
     const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
       owner,
@@ -1138,7 +1277,27 @@ async function runTests(): Promise<void> {
         invokeCallable: async (req) => {
           if (req.action === 'getQuarantineCatalogCaseAlignment') {
             getCount += 1;
-            return makeServerGetReadyResponse();
+            if (getMode === 'INITIAL_READY') {
+              return makeServerGetReadyResponse();
+            }
+            if (getMode === 'GET_THROWS') {
+              throw new Error('READ_VERIFICATION_RPC_UNAVAILABLE');
+            }
+            if (getMode === 'GET_MALFORMED') {
+              return { ok: true, status: 'READY', corruptedField: 'bad' };
+            }
+            if (getMode === 'GET_SERVER_HOLD') {
+              return makeServerGetHoldResponse({
+                errorCode: 'TEMPORARY_VERIFICATION_HOLD',
+                errorMessage: 'توقف احترازي أثناء التحقق من حالة المواءمة.',
+              });
+            }
+            // Valid READY GET after UNKNOWN showing alignment still needs realignment
+            return makeServerGetReadyResponse({
+              currentHumanCaseRevision: 4,
+              effectiveAlignedCaseRevision: 1,
+              currentAlignmentRevision: 0,
+            });
           }
           alignCount += 1;
           if (alignMode === 'SERVER_UNKNOWN') {
@@ -1151,17 +1310,75 @@ async function runTests(): Promise<void> {
 
     // 9a: Server returns explicit UNKNOWN
     await controller.openPanelForCase(savedCaseV4);
+    const snapshotBeforeUnknown = controller.getSnapshot().snapshot;
+    assert.notEqual(snapshotBeforeUnknown, null);
+
     controller.setConfirmedApplyCaseMetadata(true);
     const unknownRes = await controller.alignCatalogDraft();
     assert.equal(unknownRes, null);
     assert.equal(controller.getSnapshot().phase, 'uncertain');
     assert.equal(controller.getSnapshot().lastAlignmentSaved, null);
+    assert.equal(controller.getSnapshot().lastAlignmentOutcome, 'UNKNOWN');
     assert.equal(controller.getSnapshot().uncertainState?.errorCode, 'TRANSACTION_COMMIT_UNCERTAIN');
+    assert.equal(controller.getSnapshot().snapshot, snapshotBeforeUnknown);
 
-    // Blind retry while uncertain must be blocked
+    // Blind retry or confirmation toggle while uncertain must be blocked
+    controller.setConfirmedApplyCaseMetadata(true);
+    assert.equal(controller.getSnapshot().confirmedApplyCaseMetadata, false);
     const blockedRetry = await controller.alignCatalogDraft();
     assert.equal(blockedRetry, null);
     assert.equal(alignCount, 1);
+
+    // 9b: UNKNOWN -> GET throws: phase MUST remain uncertain, original snapshot & receipt intact, diagnostic visible
+    getMode = 'GET_THROWS';
+    const throwVerifyRes = await controller.verifyAlignmentStatus();
+    assert.equal(throwVerifyRes?.ok, false);
+    assert.equal(getCount, 2);
+    assert.equal(alignCount, 1);
+    assert.equal(controller.getSnapshot().phase, 'uncertain');
+    assert.equal(controller.getSnapshot().lastAlignmentSaved, null);
+    assert.equal(controller.getSnapshot().receiptId, VALID_RECEIPT_ID);
+    assert.equal(controller.getSnapshot().snapshot, snapshotBeforeUnknown);
+    assert.equal(controller.getSnapshot().uncertainState?.errorCode, 'TRANSACTION_COMMIT_UNCERTAIN');
+    assert.equal(
+      controller.getSnapshot().uncertainState?.errorMessage.includes('READ_VERIFICATION_RPC_UNAVAILABLE'),
+      true
+    );
+    controller.setConfirmedApplyCaseMetadata(true);
+    assert.equal(await controller.alignCatalogDraft(), null);
+    assert.equal(alignCount, 1);
+
+    // 9c: UNKNOWN -> GET malformed (via openPanelForCase on same receipt): phase MUST remain uncertain
+    getMode = 'GET_MALFORMED';
+    await controller.openPanelForCase(savedCaseV4);
+    assert.equal(getCount, 3);
+    assert.equal(alignCount, 1);
+    assert.equal(controller.getSnapshot().phase, 'uncertain');
+    assert.equal(controller.getSnapshot().lastAlignmentSaved, null);
+    assert.equal(controller.getSnapshot().receiptId, VALID_RECEIPT_ID);
+    assert.equal(controller.getSnapshot().snapshot, snapshotBeforeUnknown);
+    assert.equal(
+      controller.getSnapshot().uncertainState?.errorMessage.includes('RESPONSE_VALIDATION_FAILED'),
+      true
+    );
+    controller.setConfirmedApplyCaseMetadata(true);
+    assert.equal(await controller.alignCatalogDraft(), null);
+    assert.equal(alignCount, 1);
+
+    // 9d: UNKNOWN -> server HOLD on GET: phase MUST remain uncertain and banner displays diagnostic
+    getMode = 'GET_SERVER_HOLD';
+    await controller.verifyAlignmentStatus();
+    assert.equal(getCount, 4);
+    assert.equal(alignCount, 1);
+    assert.equal(controller.getSnapshot().phase, 'uncertain');
+    assert.equal(controller.getSnapshot().lastAlignmentSaved, null);
+    assert.equal(controller.getSnapshot().receiptId, VALID_RECEIPT_ID);
+    assert.equal(controller.getSnapshot().snapshot, snapshotBeforeUnknown);
+    assert.equal(controller.getSnapshot().holdState?.errorCode, 'TEMPORARY_VERIFICATION_HOLD');
+    assert.equal(
+      controller.getSnapshot().uncertainState?.errorMessage.includes('TEMPORARY_VERIFICATION_HOLD'),
+      true
+    );
 
     const uncertainMarkupAr = renderToStaticMarkup(
       React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
@@ -1177,33 +1394,53 @@ async function runTests(): Promise<void> {
       uncertainMarkupAr.includes('data-testid="quarantine-catalog-case-alignment-uncertain-banner"'),
       true
     );
+    assert.equal(uncertainMarkupAr.includes('TEMPORARY_VERIFICATION_HOLD'), true);
     assert.equal(
       uncertainMarkupAr.includes('data-testid="verify-quarantine-catalog-case-alignment-btn"'),
       true
     );
 
-    // Read-only GET verification clears uncertain state without calling alignCaseFn
-    const verifyRes = await controller.verifyAlignmentStatus();
-    assert.equal(verifyRes?.status, 'READY');
-    assert.equal(controller.getSnapshot().uncertainState, null);
-    assert.equal(controller.getSnapshot().phase, 'ready');
-    assert.equal(getCount, 2);
+    // Even after server HOLD during UNKNOWN recovery, align remains strictly blocked
+    controller.setConfirmedApplyCaseMetadata(true);
+    assert.equal(controller.getSnapshot().confirmedApplyCaseMetadata, false);
+    assert.equal(await controller.alignCatalogDraft(), null);
     assert.equal(alignCount, 1);
 
-    // 9b: Malformed post-dispatch response also resolves to UNKNOWN (alignmentSaved === null)
+    // 9e: UNKNOWN -> valid READY GET: latch cleared ONLY after successful validated read;
+    // aligned revision and 4-field diff refreshed; no align write during GET; fresh confirmation required
+    getMode = 'GET_VALID_READY_REFRESHED';
+    const verifyRes = await controller.verifyAlignmentStatus();
+    assert.equal(verifyRes?.ok, true);
+    assert.equal(verifyRes?.status, 'READY');
+    assert.equal(controller.getSnapshot().uncertainState, null);
+    assert.equal(controller.getSnapshot().holdState, null);
+    assert.equal(controller.getSnapshot().phase, 'ready');
+    assert.equal(controller.getSnapshot().confirmedApplyCaseMetadata, false);
+    assert.equal(controller.getSnapshot().snapshot?.effectiveAlignedCaseRevision, 1);
+    assert.equal(controller.getSnapshot().snapshot?.diff.hasAnyDifference, true);
+    assert.equal(getCount, 5);
+    assert.equal(alignCount, 1);
+
+    // Attempting align without fresh confirmation after UNKNOWN recovery is rejected with 0 writes
+    assert.equal(await controller.alignCatalogDraft(), null);
+    assert.equal(alignCount, 1);
+
+    // 9f: Malformed post-dispatch response after fresh confirmation also resolves to UNKNOWN
     alignMode = 'MALFORMED_POST_DISPATCH';
     controller.setConfirmedApplyCaseMetadata(true);
+    assert.equal(controller.getSnapshot().confirmedApplyCaseMetadata, true);
     const malformedAlignRes = await controller.alignCatalogDraft();
     assert.equal(malformedAlignRes, null);
     assert.equal(controller.getSnapshot().phase, 'uncertain');
     assert.equal(controller.getSnapshot().lastAlignmentSaved, null);
     assert.equal(alignCount, 2);
 
-    console.log('CASE 9: ALIGN UNKNOWN and malformed post-dispatch response set alignmentSaved === null, block blind retry, and recover via read-only GET.');
+    console.log('CASE 9: ALIGN UNKNOWN latch persists across failed/malformed/HOLD GETs and openPanelForCase, clears only on valid READY GET, and requires fresh confirmation.');
   }
 
   // =========================================================================
   // CASE 10: Stale session / receipt change -> no state leak into another case
+  // and stale async replies cannot unlock or corrupt an active receipt
   // =========================================================================
   {
     const firstCase = makeSavedHumanReviewCase({
@@ -1218,15 +1455,26 @@ async function runTests(): Promise<void> {
     });
 
     let resolveFirstGet: ((val: GetLibraryQuarantineCatalogCaseAlignmentSuccessDto) => void) | null = null;
+    let alignCalls = 0;
 
     const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
       owner,
       {
         envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
         invokeCallable: async (req) => {
-          if (req.receiptId === VALID_RECEIPT_ID) {
+          if (req.action === 'alignQuarantineCatalogCase') {
+            alignCalls += 1;
+            return makeServerAlignUnknownResponse({ receiptId: req.receiptId });
+          }
+          if (req.receiptId === VALID_RECEIPT_ID && resolveFirstGet === null) {
             return new Promise<GetLibraryQuarantineCatalogCaseAlignmentSuccessDto>((resolve) => {
               resolveFirstGet = resolve;
+            });
+          }
+          if (req.receiptId === VALID_RECEIPT_ID) {
+            return makeServerGetReadyResponse({
+              receiptId: VALID_RECEIPT_ID,
+              humanReviewCase: firstCase,
             });
           }
           const doc2 = makeSanitizedCatalogDocumentDto({
@@ -1274,6 +1522,19 @@ async function runTests(): Promise<void> {
       controller.getSnapshot().snapshot?.humanReviewCase.titleAr,
       'عنوان الوثيقة الثانية'
     );
+
+    // Put second receipt into UNKNOWN, then switch back to first receipt: first receipt is isolated
+    controller.setConfirmedApplyCaseMetadata(true);
+    await controller.alignCatalogDraft();
+    assert.equal(alignCalls, 1);
+    assert.equal(controller.getSnapshot().phase, 'uncertain');
+    assert.equal(controller.getSnapshot().receiptId, SECOND_RECEIPT_ID);
+
+    const switchedBackToFirst = await controller.openPanelForCase(firstCase);
+    assert.equal(switchedBackToFirst.receiptId, VALID_RECEIPT_ID);
+    assert.equal(switchedBackToFirst.phase, 'ready');
+    assert.equal(switchedBackToFirst.uncertainState, null);
+    assert.equal(alignCalls, 1);
 
     console.log('CASE 10: Stale session / receipt switch prevents state leak across cases.');
   }
