@@ -75,8 +75,8 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
   const isEnabled =
     envOverride !== undefined
       ? areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled(envOverride)
-      : typeof (controller as any)?.isCaseAlignmentEnabled === 'function'
-      ? (controller as any).isCaseAlignmentEnabled()
+      : typeof controller.isCaseAlignmentEnabled === 'function'
+      ? controller.isCaseAlignmentEnabled()
       : areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled(envOverride);
 
   useEffect(() => {
@@ -95,11 +95,10 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
     if (
       current.receiptId !== savedReviewCase.receiptId ||
       current.phase === 'idle' ||
-      (current.snapshot?.currentHumanCaseRevision !== undefined &&
-        current.snapshot.currentHumanCaseRevision !== null &&
+      (current.phase === 'ready' &&
+        current.snapshot !== null &&
         current.snapshot.currentHumanCaseRevision !== savedReviewCase.revision &&
-        !current.inFlight &&
-        current.phase !== 'uncertain')
+        !current.inFlight)
     ) {
       void controller.openPanelForCase(savedReviewCase, {
         hasUnsavedCaseEdits,
@@ -135,30 +134,80 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
   const isUncertain = state.phase === 'uncertain';
   const isAligning = state.phase === 'aligning' || state.inFlight;
 
-  // Initial / Collapsed state: snapshot has not been loaded yet
+  const handleOpenOrRetryClick = async () => {
+    const nextState = await controller.openPanelForCase(savedReviewCase, {
+      hasUnsavedCaseEdits,
+    });
+    if (nextState.snapshot && onAlignmentReconciled) {
+      onAlignmentReconciled(nextState.snapshot);
+    }
+  };
+
+  const handleVerifyClick = async () => {
+    const result = await controller.verifyAlignmentStatus();
+    const latest = controller.getState().snapshot;
+    if (result && result.ok && latest && onAlignmentReconciled) {
+      onAlignmentReconciled(latest);
+    }
+  };
+
+  const handleAlignClick = async () => {
+    const result = await controller.alignCatalogDraft();
+    const latest = controller.getState().snapshot;
+    if (result && result.ok && latest && onAlignmentReconciled) {
+      onAlignmentReconciled(latest);
+    }
+  };
+
+  // Initial / Collapsed / Read-Failure state when snapshot has not been loaded yet
   if (!snapshot) {
+    const showInitialHoldBanner =
+      state.phase !== 'loading' &&
+      !state.inFlight &&
+      (state.phase === 'hold' || state.holdState !== null);
+    const showInitialUncertainBanner =
+      state.phase !== 'loading' &&
+      !state.inFlight &&
+      (state.phase === 'uncertain' || state.uncertainState !== null);
+
     return (
       <div
         className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/40 p-4 space-y-4"
         data-testid="quarantine-catalog-case-alignment-panel"
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <GitCompare className="w-4 h-4 text-indigo-700 shrink-0" />
             <h5 className="text-xs font-bold text-indigo-950">
               {isAr
                 ? 'مواءمة بيانات ملف المراجعة مع مسودة الفهرس / Case-to-Catalog Metadata Alignment'
                 : 'Align Catalog Draft with Human Review Case'}
             </h5>
+            {showInitialHoldBanner && (
+              <span
+                className="inline-flex items-center gap-1 rounded-md border border-red-300 bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-900"
+                data-testid="quarantine-case-alignment-status-badge"
+              >
+                {isAr
+                  ? 'توقف احترازي للمواءمة / HOLD'
+                  : 'Alignment Hold / HOLD'}
+              </span>
+            )}
+            {showInitialUncertainBanner && (
+              <span
+                className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-900"
+                data-testid="quarantine-case-alignment-status-badge"
+              >
+                {isAr
+                  ? 'حالة غير مؤكدة / UNKNOWN'
+                  : 'Alignment Uncertain / UNKNOWN'}
+              </span>
+            )}
           </div>
           <button
             type="button"
             onClick={() => {
-              if (savedReviewCase) {
-                void controller.openPanelForCase(savedReviewCase, {
-                  hasUnsavedCaseEdits,
-                });
-              }
+              void handleOpenOrRetryClick();
             }}
             data-testid="open-quarantine-catalog-case-alignment-btn"
             disabled={state.inFlight}
@@ -195,74 +244,116 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
             </span>
           </div>
         )}
+
+        {showInitialUncertainBanner && state.uncertainState && (
+          <div
+            className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950 space-y-2"
+            role="alert"
+            data-testid="quarantine-catalog-case-alignment-uncertain-banner"
+          >
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="font-bold">
+                  حالة حفظ المواءمة غير مؤكدة / Alignment Commit Outcome Uncertain (
+                  {state.uncertainState.errorCode})
+                </div>
+                <p className="text-amber-800">
+                  {state.uncertainState.errorMessage}
+                </p>
+                <p className="text-[11px] text-amber-900 font-medium">
+                  تم إيقاف إعادة المحاولة التلقائية. استخدم زر التحقق أدناه
+                  لقراءة الحالة الفعلية من الخادم بدون أي كتابة. / Automatic
+                  retry is blocked. Use the verification button below to read
+                  the actual state from the server with zero writes.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  void handleVerifyClick();
+                }}
+                disabled={state.inFlight}
+                data-testid="verify-quarantine-catalog-case-alignment-btn"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-amber-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-900 disabled:opacity-50"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Verify alignment / تحقق من المواءمة
+              </button>
+            </div>
+          </div>
+        )}
+
+        {showInitialHoldBanner && state.holdState && (
+          <div
+            className="rounded-lg border border-red-300 bg-red-50 p-3 text-xs text-red-950 space-y-2"
+            role="alert"
+            data-testid="quarantine-case-alignment-hold-banner"
+          >
+            <div className="flex items-center gap-1.5 font-bold">
+              <Lock className="w-4 h-4 text-red-700 shrink-0" />
+              <span>
+                {isAr
+                  ? `توقف احترازي لفحص المواءمة بدون أي تعديل / Alignment Check Hold (${state.holdState.errorCode})`
+                  : `Alignment Check Hold — Fail-Closed Zero Writes (${state.holdState.errorCode})`}
+              </span>
+            </div>
+            <p className="text-red-800">{state.holdState.errorMessage}</p>
+            <p className="text-[11px] text-red-900">
+              {isAr
+                ? 'تعذر إظهار مقارنة الحقول بسبب توقف الفحص احترازياً دون أي كتابة على المسودة أو سجل المراجعة. يمكنك إعادة فحص المواءمة للقراءة فقط.'
+                : 'Field comparison was held fail-closed with zero writes to the catalog draft or human review case. You can retry the read-only alignment check below.'}
+            </p>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  void handleOpenOrRetryClick();
+                }}
+                disabled={state.inFlight}
+                data-testid="retry-quarantine-catalog-case-alignment-btn"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-900 hover:bg-red-100 disabled:opacity-50"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>
+                  {isAr
+                    ? 'إعادة فحص المواءمة (قراءة فقط) / Retry Alignment Check (Read-Only)'
+                    : 'Retry Alignment Check (Read-Only)'}
+                </span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
-  // Helper to extract field diff from backend diff or client diffSummary
-  const getFieldDiff = (
-    fieldKey: LibraryQuarantineCatalogCaseFourFieldKey
-  ) => {
-    if (snapshot.diff && (snapshot.diff as any)[fieldKey]) {
-      const f = (snapshot.diff as any)[fieldKey];
-      return {
-        changed: Boolean(f.changed),
-        caseValue: String(f.caseValue ?? ''),
-        catalogValue: String(f.catalogValue ?? ''),
-      };
-    }
-    if (
-      (snapshot as any).diffSummary?.fields &&
-      (snapshot as any).diffSummary.fields[fieldKey]
-    ) {
-      const f = (snapshot as any).diffSummary.fields[fieldKey];
-      return {
-        changed: Boolean(f.hasDiff),
-        caseValue: String(f.currentCaseValue ?? ''),
-        catalogValue: String(f.catalogDraftValue ?? ''),
-      };
-    }
-    return { changed: false, caseValue: '', catalogValue: '' };
+  const getFieldDiff = (fieldKey: LibraryQuarantineCatalogCaseFourFieldKey) => {
+    const f = snapshot.diff.fields[fieldKey];
+    return {
+      changed: Boolean(f.changed),
+      caseValue: String(f.caseValue ?? ''),
+      catalogValue: String(f.catalogValue ?? ''),
+    };
   };
 
   const needsRealignment = Boolean(
-    snapshot.diff?.hasAnyChange ||
-    (snapshot as any).hasDiff ||
-    (snapshot as any).diffSummary?.hasDiff ||
-    snapshot.requiresCaseRealignment ||
-    (snapshot.alignmentStatus as string) === 'NEEDS_REALIGNMENT'
+    snapshot.alignmentState === 'NEEDS_REALIGNMENT' ||
+      snapshot.diff.hasAnyDifference ||
+      snapshot.currentHumanCaseRevision !== snapshot.effectiveAlignedCaseRevision
   );
 
-  const handleAlignClick = async () => {
-    const result = await controller.alignCatalogDraft();
-    const latest = controller.getState().snapshot;
-    if (result && result.ok && latest && onAlignmentReconciled) {
-      onAlignmentReconciled(latest);
-    }
-  };
-
-  const handleVerifyClick = async () => {
-    const result = await controller.verifyAlignmentStatus();
-    const latest = controller.getState().snapshot;
-    if (result && result.ok && latest && onAlignmentReconciled) {
-      onAlignmentReconciled(latest);
-    }
-  };
+  const isRevisionOnlyDrift =
+    needsRealignment &&
+    !snapshot.diff.hasAnyDifference &&
+    snapshot.currentHumanCaseRevision !== snapshot.effectiveAlignedCaseRevision;
 
   const showRightsWarning =
     Boolean(state.rightsInvalidatedNotice) ||
     Boolean(snapshot.requiresFreshRightsReview) ||
-    Boolean((snapshot as any).hasDiff) ||
-    Boolean((snapshot as any).diffSummary?.hasDiff) ||
-    Boolean(
-      snapshot.currentHumanCaseRevision !== undefined &&
-        (snapshot.effectiveAlignedCaseRevision !== undefined
-          ? snapshot.currentHumanCaseRevision !==
-            snapshot.effectiveAlignedCaseRevision
-          : (snapshot as any).catalogHandoffCaseRevision !== undefined &&
-            snapshot.currentHumanCaseRevision !==
-              (snapshot as any).catalogHandoffCaseRevision)
-    );
+    Boolean(snapshot.rightsDecisionInvalidatedByCaseChange);
 
   return (
     <div
@@ -349,9 +440,25 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
               <p className="text-rose-800">{state.conflictState.errorMessage}</p>
               <p className="text-[11px] text-rose-900">
                 تم تحديث مقارنة الحقول بالنسخة الأحدث على الخادم. راجع الفروق
-                ثم أعد التأكيد للمواءمة.
+                أو أعد فحص المواءمة للقراءة فقط ثم أعد التأكيد للمواءمة.
               </p>
             </div>
+          </div>
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={handleVerifyClick}
+              disabled={state.inFlight}
+              data-testid="resolve-quarantine-catalog-case-alignment-conflict-btn"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-900 hover:bg-rose-100 disabled:opacity-50"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>
+                {isAr
+                  ? 'إعادة فحص المواءمة (قراءة فقط) / Re-check Alignment (Read-Only)'
+                  : 'Re-check Alignment (Read-Only)'}
+              </span>
+            </button>
           </div>
         </div>
       )}
@@ -359,7 +466,7 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
       {/* Fail-Closed Hold Banner */}
       {state.phase === 'hold' && state.holdState && (
         <div
-          className="rounded-lg border border-red-300 bg-red-50 p-3 text-xs text-red-950 space-y-1.5"
+          className="rounded-lg border border-red-300 bg-red-50 p-3 text-xs text-red-950 space-y-2"
           role="alert"
           data-testid="quarantine-case-alignment-hold-banner"
         >
@@ -370,6 +477,22 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
             </span>
           </div>
           <p className="text-red-800">{state.holdState.errorMessage}</p>
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={handleVerifyClick}
+              disabled={state.inFlight}
+              data-testid="retry-quarantine-catalog-case-alignment-btn"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-900 hover:bg-red-100 disabled:opacity-50"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>
+                {isAr
+                  ? 'إعادة فحص المواءمة (قراءة فقط) / Retry Alignment Check (Read-Only)'
+                  : 'Retry Alignment Check (Read-Only)'}
+              </span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -409,14 +532,34 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
             </div>
             <p className="text-purple-900">
               {isAr
-                ? `أدت مواءمة البيانات الوصفية الجديدة إلى إبطال سريان قرار الحقوق السابق للنسخة الأقدم. يجب أن يقوم مراجع حقوق مخوّل (Owner أو RightsReviewer بصلاحيتي Review + ManageRights) بتسجيل قرار حقوق بشري جديد ومستقل للنسخة الحالية (${
-                    snapshot.effectiveAlignedCaseRevision ??
-                    snapshot.currentHumanCaseRevision ??
-                    savedReviewCase.revision
+                ? `أدت التعديلات في سجل المراجعة البشرية إلى إبطال سريان قرار الحقوق السابق للنسخة الأقدم (v${
+                    snapshot.recordedRightsDecisionCaseRevision ??
+                    snapshot.originalHandoffCaseRevision
+                  }). يجب أن يقوم مراجع حقوق مخوّل (Owner أو RightsReviewer بصلاحيتي Review + ManageRights) بتسجيل قرار حقوق بشري جديد ومستقل للنسخة الحالية (v${
+                    snapshot.currentHumanCaseRevision
                   }).`
-                : 'Case alignment to a newer revision invalidates prior human rights determinations. An authorized rights reviewer must perform an independent review of this revision.'}
+                : 'Case changes to a newer revision invalidate prior human rights determinations. An authorized rights reviewer must perform an independent review of this revision.'}
             </p>
           </div>
+        </div>
+      )}
+
+      {/* Revision-only drift notice when the 4 text fields match but case revision advanced */}
+      {isRevisionOnlyDrift && (
+        <div
+          className="rounded-lg border border-indigo-300 bg-indigo-50 p-3 text-xs text-indigo-950 space-y-1"
+          data-testid="quarantine-case-alignment-revision-only-drift-notice"
+        >
+          <div className="font-bold">
+            {isAr
+              ? 'تقدم رقم نسخة ملف المراجعة البشرية مع تطابق النصوص الأربعة / Case Revision Advanced with Identical 4-Field Text'
+              : 'Case Revision Advanced with Identical 4-Field Text'}
+          </div>
+          <p className="text-indigo-900 text-[11px]">
+            {isAr
+              ? `الحقول النصية الأربعة متطابقة حالياً (hasAnyDifference = false)، لكن ملف المراجعة البشرية تقدم من النسخة v${snapshot.effectiveAlignedCaseRevision} إلى النسخة v${snapshot.currentHumanCaseRevision}. يلزم تأكيد المواءمة بشرياً لتحديث ارتباط النسخة المعتمدة.`
+              : `All 4 text fields match (hasAnyDifference = false), but the human review case advanced from v${snapshot.effectiveAlignedCaseRevision} to v${snapshot.currentHumanCaseRevision}. Explicit human confirmation is required to advance the aligned case revision.`}
+          </p>
         </div>
       )}
 
@@ -429,10 +572,7 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
               className="font-mono font-bold text-slate-800"
               data-testid="alignment-original-handoff-rev"
             >
-              v
-              {snapshot.originalHandoffCaseRevision ??
-                (snapshot as any).catalogHandoffCaseRevision ??
-                1}
+              v{snapshot.originalHandoffCaseRevision}
             </span>
           </div>
           <div>
@@ -441,10 +581,7 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
               className="font-mono font-bold text-indigo-900"
               data-testid="alignment-effective-case-rev"
             >
-              v
-              {snapshot.effectiveAlignedCaseRevision ??
-                (snapshot as any).catalogHandoffCaseRevision ??
-                1}
+              v{snapshot.effectiveAlignedCaseRevision}
             </span>
           </div>
           <div>
@@ -453,7 +590,7 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
               className="font-mono font-bold text-slate-900"
               data-testid="alignment-current-case-rev"
             >
-              v{snapshot.currentHumanCaseRevision ?? savedReviewCase.revision}
+              v{snapshot.currentHumanCaseRevision}
             </span>
           </div>
           <div>
@@ -462,15 +599,12 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
               className="font-mono font-bold text-slate-800"
               data-testid="alignment-revision-count"
             >
-              #{snapshot.currentAlignmentRevision ?? (snapshot as any).alignmentRevision ?? 0}
+              #{snapshot.currentAlignmentRevision}
             </span>
           </div>
         </div>
 
-        <div
-          className="space-y-2"
-          data-testid="alignment-diff-grid"
-        >
+        <div className="space-y-2" data-testid="alignment-diff-grid">
           {(
             ['titleAr', 'titleEn', 'summaryAr', 'summaryEn'] as const
           ).map((fieldKey) => {
@@ -543,7 +677,12 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
               <input
                 type="checkbox"
                 checked={state.confirmedApplyCaseMetadata}
-                disabled={isAligning || isUncertain || state.hasUnsavedCaseEdits || hasUnsavedCaseEdits}
+                disabled={
+                  isAligning ||
+                  isUncertain ||
+                  state.hasUnsavedCaseEdits ||
+                  hasUnsavedCaseEdits
+                }
                 onChange={(e) =>
                   controller.setConfirmedApplyCaseMetadata(e.target.checked)
                 }
@@ -552,9 +691,7 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
               />
               <span>
                 {isAr
-                  ? `أؤكد مراجعة الفروق في الحقول الوصفية الأربعة وتحديث مسودة الفهرس الداخلية لتطابق النسخة المحفوظة رقم v${
-                      snapshot.currentHumanCaseRevision ?? savedReviewCase.revision
-                    } من ملف المراجعة البشري، مع بقاء حالة المسودة UnderReview وحجب النشر العام.`
+                  ? `أؤكد مراجعة الفروق في الحقول الوصفية الأربعة وتحديث مسودة الفهرس الداخلية لتطابق النسخة المحفوظة رقم v${snapshot.currentHumanCaseRevision} من ملف المراجعة البشري، مع بقاء حالة المسودة Draft / ReviewRequired وحجب النشر العام.`
                   : 'I confirm reviewing the 4 descriptive metadata field differences and applying them to the catalog draft.'}
               </span>
             </label>
@@ -566,6 +703,7 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
                 disabled={
                   isAligning ||
                   isUncertain ||
+                  state.phase === 'conflict' ||
                   state.hasUnsavedCaseEdits ||
                   hasUnsavedCaseEdits ||
                   !state.confirmedApplyCaseMetadata
@@ -603,13 +741,19 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
             <div className="flex items-center gap-1.5 font-medium">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
               <span>
-                {isAr
-                  ? `مسودة الفهرس الداخلية مطابقة للنسخة الحالية المحفوظة من ملف المراجعة (v${
-                      snapshot.effectiveAlignedCaseRevision ??
-                      snapshot.currentHumanCaseRevision ??
-                      savedReviewCase.revision
-                    }).`
-                  : 'Catalog draft is aligned with current human review case revision.'}
+                {state.lastAlignmentOutcome === 'ALIGNED' &&
+                state.lastAlignmentSaved === true
+                  ? isAr
+                    ? `تم تطبيق مواءمة الحقول الأربعة وحفظ سجل المواءمة مع النسخة (v${snapshot.effectiveAlignedCaseRevision}) بنجاح (alignmentSaved: true).`
+                    : `Applied 4-field metadata alignment and saved alignment record for case v${snapshot.effectiveAlignedCaseRevision} (alignmentSaved: true).`
+                  : state.lastAlignmentOutcome === 'ALREADY_ALIGNED' &&
+                      state.lastAlignmentSaved === false
+                    ? isAr
+                      ? `مسودة الفهرس الداخلية متوائمة مسبقاً مع النسخة (v${snapshot.effectiveAlignedCaseRevision}) بدون أي كتابة إضافية (alignmentSaved: false).`
+                      : `Catalog draft was already aligned with case v${snapshot.effectiveAlignedCaseRevision} with zero additional writes (alignmentSaved: false).`
+                    : isAr
+                      ? `مسودة الفهرس الداخلية مطابقة للنسخة الحالية المحفوظة من ملف المراجعة (v${snapshot.effectiveAlignedCaseRevision}).`
+                      : 'Catalog draft is aligned with current human review case revision.'}
               </span>
             </div>
             <button

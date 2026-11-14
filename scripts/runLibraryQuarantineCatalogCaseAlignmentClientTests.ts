@@ -2,28 +2,43 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  AdminDomain,
   AdminPermission,
   AdminRole,
   type AdminUser,
 } from '../src/types/admin';
-import type { SanitizedLibraryQuarantineAdminReceiptDto } from '../src/services/libraryAdminClient';
-import type { SanitizedLibraryQuarantineHumanReviewCaseDto } from '../src/services/libraryQuarantineHumanReviewClient';
-import type { SanitizedLibraryQuarantineCatalogHandoffDto } from '../src/services/libraryQuarantineCatalogHandoffClient';
-import type { LibraryDocument } from '../src/types/library';
 import {
-  LIBRARY_CASE_ALIGNMENT_RELEASE_ENV_VAR,
+  LibraryDocumentType,
+  LibraryRightsStatus,
+  type LibraryDocument,
+} from '../src/types/library';
+import { WorkflowState } from '../src/types/workflow';
+import type { SanitizedLibraryQuarantineHumanReviewCaseDto } from '../src/services/libraryQuarantineHumanReviewClient';
+import type {
+  SanitizedLibraryQuarantineCatalogDocumentDto,
+  SanitizedLibraryQuarantineCatalogHandoffDto,
+} from '../src/services/libraryQuarantineCatalogHandoffClient';
+import {
+  LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
   CASE_ALIGNMENT_CLIENT_SAFE_ERRORS,
-  LibraryQuarantineCatalogCaseAlignmentClient,
   LibraryQuarantineCatalogCaseAlignmentPanelController,
+  alignQuarantineCatalogCaseClient,
+  areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled,
   canCurrentAdminAlignQuarantineCatalogDraft,
-  isLibraryQuarantineCatalogCaseAlignmentEnabled,
+  computeClientCatalogCaseFourFieldDiff,
+  getQuarantineCatalogCaseAlignmentClient,
+  validateAlignCatalogCaseResponseDto,
   validateAlignQuarantineCatalogCaseResponseDto,
+  validateGetCatalogCaseAlignmentResponseDto,
   validateGetQuarantineCatalogCaseAlignmentResponseDto,
   validateSanitizedCatalogCaseAlignmentDto,
-  type AlignQuarantineCatalogCaseResponseDto,
-  type GetQuarantineCatalogCaseAlignmentResponseDto,
+  type AlignLibraryQuarantineCatalogCaseConflictDto,
+  type AlignLibraryQuarantineCatalogCaseHoldDto,
+  type AlignLibraryQuarantineCatalogCaseSuccessDto,
+  type AlignLibraryQuarantineCatalogCaseUnknownDto,
+  type GetLibraryQuarantineCatalogCaseAlignmentHoldDto,
+  type GetLibraryQuarantineCatalogCaseAlignmentSuccessDto,
+  type LibraryQuarantineCatalogCaseFourFieldDiffDto,
   type SanitizedLibraryQuarantineCatalogCaseAlignmentDto,
 } from '../src/services/libraryQuarantineCatalogCaseAlignmentClient';
 import {
@@ -31,8 +46,17 @@ import {
 } from '../src/components/library/LibraryQuarantineCatalogCaseAlignmentPanel';
 
 const VALID_RECEIPT_ID = 'e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6';
+const SECOND_RECEIPT_ID = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4';
 const VALID_DOC_ID = `qcat-${VALID_RECEIPT_ID}`;
 const VALID_ISO = '2026-11-10T14:00:00.000Z';
+const UPDATED_ISO = '2026-11-14T09:30:00.000Z';
+
+const ALL_ALIGNMENT_FLAGS_ENABLED: Record<string, unknown> = Object.freeze({
+  VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+  VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+  VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+  VITE_LIBRARY_CASE_ALIGNMENT_ENABLED: 'true',
+});
 
 function makeAdminUser(
   role: AdminRole,
@@ -64,21 +88,40 @@ function makeSavedHumanReviewCase(
   return Object.freeze({
     schemaVersion: 1 as const,
     receiptId: VALID_RECEIPT_ID,
-    revision: 2,
     sourceRevision: 1,
     sourceUpdatedAt: VALID_ISO,
     draftSourceRevision: 1,
+    revision: 4,
     status: 'METADATA_RECORDED' as const,
-    titleAr: 'تقرير التحول البيئي 2026 (معدل)',
-    titleEn: 'Ecological Transition Report 2026 (Revised)',
+    titleAr: 'تقرير التحول البيئي 2026 (مراجعة حالة #4)',
+    titleEn: 'Ecological Transition Report 2026 (Case v4)',
     issuingOrganization: 'Ministry of Environment',
-    summaryAr: 'ملخص محدث لتقرير التحول البيئي.',
-    summaryEn: 'Revised summary of ecological transition report.',
+    summaryAr: 'ملخص محدث في حالة المراجعة البشرية v4.',
+    summaryEn: 'Updated summary in human review case v4.',
     sourceEvidenceNotes: 'Gazette 4210.',
     rightsEvidenceNotes: 'Open access note.',
-    editorialNotes: 'Metadata updated.',
+    editorialNotes: 'Metadata updated to v4.',
     createdAt: VALID_ISO,
-    updatedAt: VALID_ISO,
+    updatedAt: UPDATED_ISO,
+    ...overrides,
+  });
+}
+
+function makeSanitizedHandoffDto(
+  overrides?: Partial<SanitizedLibraryQuarantineCatalogHandoffDto>
+): SanitizedLibraryQuarantineCatalogHandoffDto {
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    receiptId: VALID_RECEIPT_ID,
+    documentId: VALID_DOC_ID,
+    sourceRevision: 1,
+    sourceUpdatedAt: VALID_ISO,
+    draftSourceRevision: 1,
+    caseRevision: 1,
+    caseUpdatedAt: VALID_ISO,
+    organizationId: 'org-ministry-env',
+    sourceId: 'src-gazette-4210',
+    createdAt: VALID_ISO,
     isSanitized: false as const,
     isVerifiedSafe: false as const,
     isRightsApproved: false as const,
@@ -88,453 +131,1213 @@ function makeSavedHumanReviewCase(
   });
 }
 
-function makeCatalogDoc(
-  overrides?: Partial<LibraryDocument>
-): LibraryDocument {
-  return {
+function makeSanitizedCatalogDocumentDto(
+  overrides?: Partial<SanitizedLibraryQuarantineCatalogDocumentDto>
+): SanitizedLibraryQuarantineCatalogDocumentDto {
+  return Object.freeze({
     id: VALID_DOC_ID,
-    type: 'Report',
-    category: 'ENVIRONMENTAL_REPORTS',
-    language: 'ar',
-    titleAr: 'تقرير التحول البيئي 2026 (أولي)',
-    titleEn: 'Ecological Transition Report 2026 (Preliminary)',
-    issuingOrganization: 'Ministry of Environment',
-    publicationYear: 2026,
-    summaryAr: 'ملخص أولي لتقرير التحول البيئي.',
-    summaryEn: 'Preliminary summary of ecological transition report.',
-    sourceEvidenceNotes: 'Gazette 4210.',
-    rightsEvidenceNotes: 'Open access note.',
-    editorialNotes: 'Metadata initial.',
-    tags: ['ecology', 'transition'],
-    storageBucket: 'promiseofplanet-bb325-library-quarantine',
-    storagePath: `quarantine/${VALID_RECEIPT_ID}/original.pdf`,
-    downloadUrl: '',
-    referenceUrl: null,
-    fileSize: 204800,
-    pageCount: 12,
-    rightsStatus: 'Undetermined',
-    workflowState: 'ReviewRequired',
-    isSanitized: false,
-    isVerifiedSafe: false,
-    isRightsApproved: false,
-    isPublished: false,
-    isReadyForPeia: false,
-    isQuarantinedPrivateOnly: true,
+    titleAr: 'تقرير التحول البيئي 2026 (مسودة أولية v1)',
+    titleEn: 'Ecological Transition Report 2026 (Initial Draft v1)',
+    documentType: LibraryDocumentType.InstitutionalReport,
+    organizationId: 'org-ministry-env',
+    sourceId: 'src-gazette-4210',
+    geographyAr: 'الأردن',
+    geographyEn: 'Jordan',
+    publicationDate: '2026-11-10',
+    language: 'ar' as const,
+    summaryAr: 'ملخص أولي في مسودة الفهرس v1.',
+    summaryEn: 'Initial summary in catalog draft v1.',
+    topicsAr: ['التحول البيئي'],
+    topicsEn: ['Ecological Transition'],
+    environmentalDomains: ['climate'],
+    rightsStatus: LibraryRightsStatus.ReviewRequired,
+    workflowState: WorkflowState.Draft,
+    legalStatusDescriptionAr: 'قيد المراجعة القانونية',
+    legalStatusDescriptionEn: 'Under legal review',
     createdAt: VALID_ISO,
     updatedAt: VALID_ISO,
-    publishedAt: null,
+    versions: [
+      {
+        id: `${VALID_DOC_ID}-v1`,
+        documentId: VALID_DOC_ID,
+        versionNumber: '1.0-quarantine-draft',
+        publishedDate: '2026-11-10',
+        changeDescriptionAr: 'إنشاء مسودة الفهرس الخاصة من الحجر.',
+        changeDescriptionEn: 'Created private quarantine catalog draft.',
+      },
+    ],
+    ...overrides,
+  });
+}
+
+function makeCatalogDocForUi(
+  overrides?: Partial<LibraryDocument>
+): LibraryDocument {
+  const dto = makeSanitizedCatalogDocumentDto();
+  return {
+    ...dto,
+    versions: [...dto.versions],
+    topicsAr: [...dto.topicsAr],
+    topicsEn: [...dto.topicsEn],
+    environmentalDomains: [...dto.environmentalDomains],
     ...overrides,
   };
 }
 
-function makeMockGetResponse(
-  overrides?: Partial<GetQuarantineCatalogCaseAlignmentResponseDto>
-): GetQuarantineCatalogCaseAlignmentResponseDto {
+function makeAlignmentDto(
+  overrides?: Partial<SanitizedLibraryQuarantineCatalogCaseAlignmentDto>
+): SanitizedLibraryQuarantineCatalogCaseAlignmentDto {
   return Object.freeze({
-    ok: true as const,
     schemaVersion: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
     receiptId: VALID_RECEIPT_ID,
     documentId: VALID_DOC_ID,
-    hasDiff: true,
-    currentHumanCaseRevision: 2,
-    catalogHandoffCaseRevision: 1,
-    catalogDocumentRevision: 1,
-    alignmentRevision: 0,
+    sourceRevision: 1,
+    sourceUpdatedAt: VALID_ISO,
+    originalHandoffCaseRevision: 1,
+    alignmentRevision: 1,
+    alignedHumanCaseRevision: 4,
+    alignedHumanCaseUpdatedAt: UPDATED_ISO,
+    documentUpdatedAt: UPDATED_ISO,
+    createdAt: UPDATED_ISO,
+    updatedAt: UPDATED_ISO,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+    ...overrides,
+  });
+}
+
+function makeServerGetReadyResponse(
+  overrides?: Partial<GetLibraryQuarantineCatalogCaseAlignmentSuccessDto>
+): GetLibraryQuarantineCatalogCaseAlignmentSuccessDto {
+  const handoff = overrides?.handoff ?? makeSanitizedHandoffDto();
+  const catalogDocument =
+    overrides?.catalogDocument ?? makeSanitizedCatalogDocumentDto();
+  const humanReviewCase =
+    overrides?.humanReviewCase ?? makeSavedHumanReviewCase();
+  const alignment =
+    overrides?.alignment !== undefined ? overrides.alignment : null;
+  const diff: LibraryQuarantineCatalogCaseFourFieldDiffDto =
+    overrides?.diff ??
+    computeClientCatalogCaseFourFieldDiff(humanReviewCase, catalogDocument);
+  const effectiveAlignedCaseRevision =
+    overrides?.effectiveAlignedCaseRevision ??
+    (alignment ? alignment.alignedHumanCaseRevision : handoff.caseRevision);
+  const currentHumanCaseRevision =
+    overrides?.currentHumanCaseRevision ?? humanReviewCase.revision;
+  const alignmentState =
+    overrides?.alignmentState ??
+    (diff.hasAnyDifference ||
+    currentHumanCaseRevision !== effectiveAlignedCaseRevision
+      ? 'NEEDS_REALIGNMENT'
+      : 'ALIGNED');
+  const hasRecordedRightsDecision =
+    overrides?.hasRecordedRightsDecision ?? true;
+  const recordedRightsDecisionCaseRevision =
+    overrides?.recordedRightsDecisionCaseRevision !== undefined
+      ? overrides.recordedRightsDecisionCaseRevision
+      : hasRecordedRightsDecision
+      ? 1
+      : null;
+  const rightsDecisionInvalidatedByCaseChange =
+    overrides?.rightsDecisionInvalidatedByCaseChange ??
+    (hasRecordedRightsDecision &&
+      recordedRightsDecisionCaseRevision !== null &&
+      recordedRightsDecisionCaseRevision < currentHumanCaseRevision);
+  const requiresFreshRightsReview =
+    overrides?.requiresFreshRightsReview ??
+    (hasRecordedRightsDecision &&
+      (rightsDecisionInvalidatedByCaseChange ||
+        alignmentState === 'NEEDS_REALIGNMENT'));
+
+  return Object.freeze({
+    ok: true as const,
+    status: 'READY' as const,
+    receiptId: VALID_RECEIPT_ID,
+    documentId: VALID_DOC_ID,
+    alignmentState,
+    sourceRevision: handoff.sourceRevision,
+    originalHandoffCaseRevision: handoff.caseRevision,
+    effectiveAlignedCaseRevision,
+    currentHumanCaseRevision,
+    currentAlignmentRevision: alignment ? alignment.alignmentRevision : 0,
+    catalogUpdatedAt: catalogDocument.updatedAt,
+    diff,
+    alignment,
+    handoff,
+    catalogDocument,
+    humanReviewCase,
+    hasRecordedRightsDecision,
+    recordedRightsDecisionCaseRevision,
+    rightsDecisionInvalidatedByCaseChange,
+    requiresFreshRightsReview,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+    ...overrides,
+  });
+}
+
+function makeServerGetHoldResponse(
+  overrides?: Partial<GetLibraryQuarantineCatalogCaseAlignmentHoldDto>
+): GetLibraryQuarantineCatalogCaseAlignmentHoldDto {
+  return Object.freeze({
+    ok: false as const,
+    status: 'HOLD' as const,
+    errorCode: 'CATALOG_HANDOFF_MISSING',
+    errorMessage:
+      'لا يمكن فحص المواءمة قبل إنشاء مسودة الفهرس الخاصة / Cannot inspect alignment before creating the private catalog draft.',
+    receiptId: VALID_RECEIPT_ID,
+    documentId: VALID_DOC_ID,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+    ...overrides,
+  });
+}
+
+function makeServerAlignAlignedResponse(
+  overrides?: Partial<AlignLibraryQuarantineCatalogCaseSuccessDto>
+): AlignLibraryQuarantineCatalogCaseSuccessDto {
+  const handoff = overrides?.handoff ?? makeSanitizedHandoffDto();
+  const humanReviewCase =
+    overrides?.humanReviewCase ?? makeSavedHumanReviewCase({ revision: 4 });
+  const catalogDocument =
+    overrides?.catalogDocument ??
+    makeSanitizedCatalogDocumentDto({
+      titleAr: humanReviewCase.titleAr,
+      titleEn: humanReviewCase.titleEn,
+      summaryAr: humanReviewCase.summaryAr,
+      summaryEn: humanReviewCase.summaryEn,
+      updatedAt: UPDATED_ISO,
+    });
+  const alignment =
+    overrides?.alignment !== undefined
+      ? overrides.alignment
+      : makeAlignmentDto({
+          alignedHumanCaseRevision: humanReviewCase.revision,
+          alignmentRevision: 1,
+          documentUpdatedAt: catalogDocument.updatedAt,
+        });
+  const diff =
+    overrides?.diff ??
+    computeClientCatalogCaseFourFieldDiff(humanReviewCase, catalogDocument);
+
+  return Object.freeze({
+    ok: true as const,
+    status: 'ALIGNED' as const,
+    alignmentOutcome: 'ALIGNED' as const,
+    alignmentSaved: true,
+    receiptId: VALID_RECEIPT_ID,
+    documentId: VALID_DOC_ID,
+    alignmentState: 'ALIGNED' as const,
+    sourceRevision: handoff.sourceRevision,
+    originalHandoffCaseRevision: handoff.caseRevision,
+    effectiveAlignedCaseRevision: humanReviewCase.revision,
+    currentHumanCaseRevision: humanReviewCase.revision,
+    currentAlignmentRevision: alignment ? alignment.alignmentRevision : 1,
+    catalogUpdatedAt: catalogDocument.updatedAt,
+    diff,
+    alignment,
+    handoff,
+    catalogDocument,
+    humanReviewCase,
+    hasRecordedRightsDecision: true,
+    recordedRightsDecisionCaseRevision: 1,
+    rightsDecisionInvalidatedByCaseChange: true,
+    requiresFreshRightsReview: true,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+    ...overrides,
+  });
+}
+
+function makeServerAlignAlreadyAlignedResponse(
+  overrides?: Partial<AlignLibraryQuarantineCatalogCaseSuccessDto>
+): AlignLibraryQuarantineCatalogCaseSuccessDto {
+  const base = makeServerAlignAlignedResponse();
+  return Object.freeze({
+    ...base,
+    status: 'ALREADY_ALIGNED' as const,
+    alignmentOutcome: 'ALREADY_ALIGNED' as const,
+    alignmentSaved: false,
+    ...overrides,
+  });
+}
+
+function makeServerAlignConflictResponse(
+  overrides?: Partial<AlignLibraryQuarantineCatalogCaseConflictDto>
+): AlignLibraryQuarantineCatalogCaseConflictDto {
+  const humanReviewCase = makeSavedHumanReviewCase({ revision: 5 });
+  const catalogDocument = makeSanitizedCatalogDocumentDto({
+    updatedAt: '2026-11-14T10:00:00.000Z',
+  });
+  const diff = computeClientCatalogCaseFourFieldDiff(
+    humanReviewCase,
+    catalogDocument
+  );
+
+  return Object.freeze({
+    ok: false as const,
+    status: 'CONFLICT' as const,
+    alignmentOutcome: 'NOT_ALIGNED' as const,
+    alignmentSaved: false as const,
+    errorCode: 'ALIGNMENT_REVISION_CONFLICT' as const,
+    errorMessage:
+      'تغيرت نسخة ملف المراجعة أو مسودة الفهرس أثناء المراجعة؛ يرجى فحص المقارنة المحدثة ثم إعادة التأكيد.',
+    receiptId: VALID_RECEIPT_ID,
+    documentId: VALID_DOC_ID,
+    currentHumanCaseRevision: 5,
+    currentCatalogUpdatedAt: '2026-11-14T10:00:00.000Z',
+    currentAlignmentRevision: 0,
+    effectiveAlignedCaseRevision: 1,
+    diff,
     alignment: null,
-    diffSummary: {
-      hasDiff: true,
-      diffFieldCount: 4,
-      fields: {
-        titleAr: {
-          fieldName: 'titleAr' as const,
-          hasDiff: true,
-          currentCaseValue: 'تقرير التحول البيئي 2026 (معدل)',
-          catalogDraftValue: 'تقرير التحول البيئي 2026 (أولي)',
-        },
-        titleEn: {
-          fieldName: 'titleEn' as const,
-          hasDiff: true,
-          currentCaseValue: 'Ecological Transition Report 2026 (Revised)',
-          catalogDraftValue: 'Ecological Transition Report 2026 (Preliminary)',
-        },
-        summaryAr: {
-          fieldName: 'summaryAr' as const,
-          hasDiff: true,
-          currentCaseValue: 'ملخص محدث لتقرير التحول البيئي.',
-          catalogDraftValue: 'ملخص أولي لتقرير التحول البيئي.',
-        },
-        summaryEn: {
-          fieldName: 'summaryEn' as const,
-          hasDiff: true,
-          currentCaseValue: 'Revised summary of ecological transition report.',
-          catalogDraftValue: 'Preliminary summary of ecological transition report.',
-        },
-      },
-    },
-    readiness: {
-      rightsScope: 'CATALOG_METADATA_ONLY',
-      binarySafety: 'NOT_VERIFIED',
-      fileSanitization: 'UNVERIFIED',
-      publication: 'BLOCKED',
-      catalogWorkflow: 'REVIEW_REQUIRED',
-    },
-    serverTimeIso: VALID_ISO,
+    catalogDocument,
+    humanReviewCase,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+    ...overrides,
+  });
+}
+
+function makeServerAlignHoldResponse(
+  overrides?: Partial<AlignLibraryQuarantineCatalogCaseHoldDto>
+): AlignLibraryQuarantineCatalogCaseHoldDto {
+  return Object.freeze({
+    ok: false as const,
+    status: 'HOLD' as const,
+    alignmentOutcome: 'NOT_ALIGNED' as const,
+    alignmentSaved: false as const,
+    errorCode: 'CATALOG_RIGHTS_STATE_INVALID_FOR_ALIGNMENT',
+    errorMessage: 'حالة الحقوق في مسودة الفهرس الخاصة لا تسمح بالمواءمة.',
+    receiptId: VALID_RECEIPT_ID,
+    documentId: VALID_DOC_ID,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+    ...overrides,
+  });
+}
+
+function makeServerAlignUnknownResponse(
+  overrides?: Partial<AlignLibraryQuarantineCatalogCaseUnknownDto>
+): AlignLibraryQuarantineCatalogCaseUnknownDto {
+  return Object.freeze({
+    ok: false as const,
+    status: 'UNKNOWN' as const,
+    alignmentOutcome: 'UNKNOWN' as const,
+    alignmentSaved: null,
+    errorCode: 'TRANSACTION_COMMIT_UNCERTAIN' as const,
+    errorMessage:
+      'تعذر الجزم بنتيجة حفظ المواءمة. يرجى التحقق من حالة المواءمة دون إعادة الإرسال.',
+    receiptId: VALID_RECEIPT_ID,
+    documentId: VALID_DOC_ID,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
     ...overrides,
   });
 }
 
 async function runTests(): Promise<void> {
-  console.log('STARTING LIB-FILE-CASE-ALIGNMENT-01 CLIENT TESTS...');
+  console.log('STARTING LIB-CASE-ALIGNMENT-LIVE-CONTRACT-REPAIR-01 CLIENT TESTS...');
 
   const owner = makeAdminUser(AdminRole.Owner);
   const curatorWithCreate = makeAdminUser(AdminRole.LibraryCurator, {
     permissions: [AdminPermission.Create, AdminPermission.Review],
   });
-  const rightsReviewerOnly = makeAdminUser(AdminRole.SuperAdmin, {
-    permissions: [AdminPermission.ManageRights], // No Create
+  const rightsReviewerOnly = makeAdminUser(AdminRole.RightsReviewer, {
+    permissions: [AdminPermission.ManageRights, AdminPermission.Review],
   });
 
   // =========================================================================
-  // PASS 1: RBAC Split & Release Gate Checking
+  // PASS 0: RBAC Split, Release Gate & Confirmation Literal
   // =========================================================================
   {
+    assert.equal(
+      LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+      'APPLY_CASE_METADATA'
+    );
     assert.equal(canCurrentAdminAlignQuarantineCatalogDraft(owner), true);
     assert.equal(canCurrentAdminAlignQuarantineCatalogDraft(curatorWithCreate), true);
     assert.equal(canCurrentAdminAlignQuarantineCatalogDraft(rightsReviewerOnly), false);
     assert.equal(canCurrentAdminAlignQuarantineCatalogDraft(null), false);
+    assert.equal(
+      areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled(ALL_ALIGNMENT_FLAGS_ENABLED),
+      true
+    );
 
-    console.log('PASS 1: RBAC split for case alignment verified.');
+    console.log('PASS 0: RBAC split, release flags, and APPLY_CASE_METADATA confirmation literal verified.');
   }
 
   // =========================================================================
-  // PASS 2: Strict DTO Validation (GET & ALIGN Responses)
+  // CASE 1: Server READY with drift (v4 vs v1) and 4 real fields -> validated,
+  // displayed in AR/EN, revision lineage (v1, v1, v4, #0) correct, zero writes
   // =========================================================================
   {
-    const validGet = makeMockGetResponse();
-    const validatedGet = validateGetQuarantineCatalogCaseAlignmentResponseDto(validGet);
-    assert.equal(validatedGet.ok, true);
-    assert.equal(validatedGet.hasDiff, true);
-    assert.equal(validatedGet.diffSummary.diffFieldCount, 4);
+    const savedCaseV4 = makeSavedHumanReviewCase({ revision: 4 });
+    const catalogDocV1 = makeCatalogDocForUi();
+    const serverReadyWire = makeServerGetReadyResponse();
 
-    // Reject unknown or missing fields
-    assert.throws(() => {
-      validateGetQuarantineCatalogCaseAlignmentResponseDto({
-        ...validGet,
-        hasDiff: 'invalid' as any,
-      });
-    });
-
-    const validAlignSuccess: AlignQuarantineCatalogCaseResponseDto = {
-      ok: true,
-      status: 'ALIGNED',
-      schemaVersion: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
-      receiptId: VALID_RECEIPT_ID,
-      documentId: VALID_DOC_ID,
-      alignedHumanCaseRevision: 2,
-      previousHandoffCaseRevision: 1,
-      catalogDocumentRevision: 2,
-      alignmentRevision: 1,
-      alignmentSaved: true,
-      alignmentOutcome: 'ALIGNED',
-      readiness: {
-        rightsScope: 'CATALOG_METADATA_ONLY',
-        binarySafety: 'NOT_VERIFIED',
-        fileSanitization: 'UNVERIFIED',
-        publication: 'BLOCKED',
-        catalogWorkflow: 'REVIEW_REQUIRED',
-      },
-      alignment: {
-        schemaVersion: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
-        receiptId: VALID_RECEIPT_ID,
-        documentId: VALID_DOC_ID,
-        alignedHumanCaseRevision: 2,
-        previousHandoffCaseRevision: 1,
-        sourceRevision: 1,
-        catalogDocumentRevision: 2,
-        alignmentRevision: 1,
-        titleAr: 'تقرير التحول البيئي 2026 (معدل)',
-        titleEn: 'Ecological Transition Report 2026 (Revised)',
-        summaryAr: 'ملخص محدث لتقرير التحول البيئي.',
-        summaryEn: 'Revised summary of ecological transition report.',
-        alignedByUid: curatorWithCreate.id,
-        alignedByEmail: curatorWithCreate.email,
-        alignedAt: VALID_ISO,
-        workflowState: 'ReviewRequired',
-        rightsStatus: 'Undetermined',
-        isSanitized: false,
-        isVerifiedSafe: false,
-        isRightsApproved: false,
-        isPublished: false,
-        isReadyForPeia: false,
-        isQuarantinedPrivateOnly: true,
-      },
-      serverTimeIso: VALID_ISO,
-    };
-
-    const validatedAlign = validateAlignQuarantineCatalogCaseResponseDto(validAlignSuccess);
-    assert.equal(validatedAlign.ok, true);
-    if (validatedAlign.ok) {
-      assert.equal(validatedAlign.status, 'ALIGNED');
-      assert.equal(validatedAlign.catalogDocumentRevision, 2);
+    // Validate wire DTO directly through production validators
+    const validatedReady = validateGetQuarantineCatalogCaseAlignmentResponseDto(serverReadyWire);
+    assert.equal(validatedReady.ok, true);
+    assert.equal(validatedReady.status, 'READY');
+    if (validatedReady.status === 'READY') {
+      assert.equal(validatedReady.originalHandoffCaseRevision, 1);
+      assert.equal(validatedReady.effectiveAlignedCaseRevision, 1);
+      assert.equal(validatedReady.currentHumanCaseRevision, 4);
+      assert.equal(validatedReady.currentAlignmentRevision, 0);
+      assert.equal(validatedReady.alignmentState, 'NEEDS_REALIGNMENT');
+      assert.equal(validatedReady.diff.hasAnyDifference, true);
+      assert.equal(validatedReady.diff.fields.titleAr.changed, true);
+      assert.equal(validatedReady.diff.fields.titleEn.changed, true);
+      assert.equal(validatedReady.diff.fields.summaryAr.changed, true);
+      assert.equal(validatedReady.diff.fields.summaryEn.changed, true);
     }
 
-    console.log('PASS 2: Strict DTO validation verified.');
-  }
+    // Legacy forged test shape (diffSummary / hasDiff) must be rejected by strict validator
+    assert.equal(
+      validateGetCatalogCaseAlignmentResponseDto({
+        ok: true,
+        status: 'READY',
+        hasDiff: true,
+        diffSummary: {},
+      }),
+      null
+    );
+    assert.throws(() => {
+      validateGetQuarantineCatalogCaseAlignmentResponseDto({
+        ok: true,
+        status: 'READY',
+        hasDiff: true,
+        diffSummary: {},
+      });
+    }, /RESPONSE_VALIDATION_FAILED/);
 
-  // =========================================================================
-  // PASS 3: Panel UI Rendering & 4-Field Diff (AR & EN)
-  // =========================================================================
-  {
-    const savedCase = makeSavedHumanReviewCase();
-    const catalogDoc = makeCatalogDoc();
-    let getCalls = 0;
-    let alignCalls = 0;
+    let getInvocations = 0;
+    let alignInvocations = 0;
 
     const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
-      curatorWithCreate,
+      owner,
       {
-        caseAlignmentEnabled: true,
-        getAlignmentFn: async () => {
-          getCalls += 1;
-          return makeMockGetResponse();
-        },
-        alignCaseFn: async () => {
-          alignCalls += 1;
-          throw new Error('Not needed for render test');
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        invokeCallable: async (req) => {
+          if (req.action === 'getQuarantineCatalogCaseAlignment') {
+            getInvocations += 1;
+            assert.equal(req.receiptId, VALID_RECEIPT_ID);
+            return serverReadyWire;
+          }
+          alignInvocations += 1;
+          throw new Error('Zero writes allowed during GET inspection');
         },
       }
     );
 
-    // Initial state: not expanded
-    const markupCollapsed = renderToStaticMarkup(
+    const openState = await controller.openPanelForCase(savedCaseV4);
+    assert.equal(getInvocations, 1);
+    assert.equal(alignInvocations, 0);
+    assert.equal(openState.phase, 'ready');
+    assert.equal(openState.snapshot?.status, 'READY');
+
+    const markupAr = renderToStaticMarkup(
       React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
         controller,
-        currentUser: curatorWithCreate,
-        savedReviewCase: savedCase,
-        catalogDocument: catalogDoc,
+        currentUser: owner,
+        savedReviewCase: savedCaseV4,
+        catalogDocument: catalogDocV1,
         hasUnsavedCaseEdits: false,
         isAr: true,
       })
     );
-    assert.equal(markupCollapsed.includes('data-testid="quarantine-catalog-case-alignment-panel"'), true);
-    assert.equal(markupCollapsed.includes('data-testid="open-quarantine-catalog-case-alignment-btn"'), true);
 
-    // Open panel
+    assert.equal(markupAr.includes('data-testid="alignment-diff-grid"'), true);
+    assert.equal(markupAr.includes('data-testid="alignment-diff-field-titleAr"'), true);
+    assert.equal(markupAr.includes('data-testid="alignment-diff-field-titleEn"'), true);
+    assert.equal(markupAr.includes('data-testid="alignment-diff-field-summaryAr"'), true);
+    assert.equal(markupAr.includes('data-testid="alignment-diff-field-summaryEn"'), true);
+    assert.equal(markupAr.includes('تقرير التحول البيئي 2026 (مسودة أولية v1)'), true);
+    assert.equal(markupAr.includes('تقرير التحول البيئي 2026 (مراجعة حالة #4)'), true);
+    assert.equal(markupAr.includes('ملخص أولي في مسودة الفهرس v1.'), true);
+    assert.equal(markupAr.includes('ملخص محدث في حالة المراجعة البشرية v4.'), true);
+    // Lineage v1, v1, v4, #0
+    assert.equal(markupAr.includes('>v1<'), true);
+    assert.equal(markupAr.includes('>v4<'), true);
+    assert.equal(markupAr.includes('>#0<'), true);
+    assert.equal(markupAr.includes('data-testid="quarantine-rights-rereview-warning-banner"'), true);
+
+    const markupEn = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+        controller,
+        currentUser: owner,
+        savedReviewCase: savedCaseV4,
+        catalogDocument: catalogDocV1,
+        hasUnsavedCaseEdits: false,
+        isAr: false,
+      })
+    );
+
+    assert.equal(markupEn.includes('Ecological Transition Report 2026 (Initial Draft v1)'), true);
+    assert.equal(markupEn.includes('Ecological Transition Report 2026 (Case v4)'), true);
+    assert.equal(markupEn.includes('Initial summary in catalog draft v1.'), true);
+    assert.equal(markupEn.includes('Updated summary in human review case v4.'), true);
+    assert.equal(markupEn.includes('Differences Detected'), true);
+
+    console.log('CASE 1: Server READY with drift (v4 vs v1) and 4 real fields verified in AR/EN with zero writes.');
+  }
+
+  // =========================================================================
+  // CASE 2: Server READY with no textual field changes (diff.hasAnyDifference === false)
+  // but case revision drift (effectiveAlignedCaseRevision: 1, currentHumanCaseRevision: 2)
+  // -> still requires realignment and allows human-confirmed alignment
+  // =========================================================================
+  {
+    const savedCaseV2SameText = makeSavedHumanReviewCase({
+      revision: 2,
+      titleAr: 'تقرير التحول البيئي 2026 (مسودة أولية v1)',
+      titleEn: 'Ecological Transition Report 2026 (Initial Draft v1)',
+      summaryAr: 'ملخص أولي في مسودة الفهرس v1.',
+      summaryEn: 'Initial summary in catalog draft v1.',
+      editorialNotes: 'Updated non-catalog notes in v2.',
+    });
+    const catalogDocV1 = makeSanitizedCatalogDocumentDto();
+    const diffNoTextChanges = computeClientCatalogCaseFourFieldDiff(
+      savedCaseV2SameText,
+      catalogDocV1
+    );
+    assert.equal(diffNoTextChanges.hasAnyDifference, false);
+
+    const readyRevisionDriftOnly = makeServerGetReadyResponse({
+      catalogDocument: catalogDocV1,
+      humanReviewCase: savedCaseV2SameText,
+      diff: diffNoTextChanges,
+      originalHandoffCaseRevision: 1,
+      effectiveAlignedCaseRevision: 1,
+      currentHumanCaseRevision: 2,
+      currentAlignmentRevision: 0,
+      alignmentState: 'NEEDS_REALIGNMENT',
+      recordedRightsDecisionCaseRevision: 1,
+      rightsDecisionInvalidatedByCaseChange: true,
+      requiresFreshRightsReview: true,
+    });
+
+    let alignCapturedPayload: Record<string, unknown> | null = null;
+    const alignedRevisionOnlyResponse = makeServerAlignAlignedResponse({
+      catalogDocument: {
+        ...catalogDocV1,
+        updatedAt: UPDATED_ISO,
+      },
+      humanReviewCase: savedCaseV2SameText,
+      diff: diffNoTextChanges,
+      effectiveAlignedCaseRevision: 2,
+      currentHumanCaseRevision: 2,
+      currentAlignmentRevision: 1,
+      alignment: makeAlignmentDto({
+        alignedHumanCaseRevision: 2,
+        alignmentRevision: 1,
+        documentUpdatedAt: UPDATED_ISO,
+      }),
+      recordedRightsDecisionCaseRevision: 1,
+      rightsDecisionInvalidatedByCaseChange: true,
+      requiresFreshRightsReview: true,
+    });
+
+    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
+      curatorWithCreate,
+      {
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        invokeCallable: async (req) => {
+          if (req.action === 'getQuarantineCatalogCaseAlignment') {
+            return readyRevisionDriftOnly;
+          }
+          alignCapturedPayload = req as unknown as Record<string, unknown>;
+          return alignedRevisionOnlyResponse;
+        },
+      }
+    );
+
+    await controller.openPanelForCase(savedCaseV2SameText);
+
+    const markupRevisionDriftAr = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+        controller,
+        currentUser: curatorWithCreate,
+        savedReviewCase: savedCaseV2SameText,
+        catalogDocument: makeCatalogDocForUi(),
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+      })
+    );
+
+    assert.equal(
+      markupRevisionDriftAr.includes('data-testid="quarantine-case-alignment-revision-only-drift-notice"'),
+      true
+    );
+    assert.equal(
+      markupRevisionDriftAr.includes('data-testid="quarantine-catalog-case-alignment-confirm-checkbox"'),
+      true
+    );
+    assert.equal(
+      markupRevisionDriftAr.includes('data-testid="align-quarantine-catalog-case-btn"'),
+      true
+    );
+
+    controller.setConfirmedApplyCaseMetadata(true);
+    const alignRes = await controller.alignCatalogDraft();
+    assert.equal(alignRes?.status, 'ALIGNED');
+    assert.equal(alignCapturedPayload?.expectedCaseRevision, 2);
+    assert.equal(alignCapturedPayload?.confirmation, 'APPLY_CASE_METADATA');
+
+    console.log('CASE 2: Revision-only drift (hasAnyDifference === false, v2 vs v1) requires realignment and allows human-confirmed alignment.');
+  }
+
+  // =========================================================================
+  // CASE 3: Server HOLD and malformed server reply on GET -> visible fail-closed
+  // UI banner in AR/EN even when snapshot === null, with retry button, zero writes
+  // =========================================================================
+  {
+    const savedCase = makeSavedHumanReviewCase();
+    const catalogDoc = makeCatalogDocForUi();
+    let getMode: 'SERVER_HOLD' | 'MALFORMED' = 'SERVER_HOLD';
+    let getCalls = 0;
+    let alignCalls = 0;
+
+    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
+      owner,
+      {
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        invokeCallable: async (req) => {
+          if (req.action === 'getQuarantineCatalogCaseAlignment') {
+            getCalls += 1;
+            if (getMode === 'SERVER_HOLD') {
+              return makeServerGetHoldResponse();
+            }
+            return { ok: true, status: 'READY', unexpectedGarbage: true };
+          }
+          alignCalls += 1;
+          throw new Error('Zero writes allowed');
+        },
+      }
+    );
+
+    // 3a: Server HOLD when snapshot === null
     await controller.openPanelForCase(savedCase);
-    assert.equal(getCalls, 1);
-    assert.equal(controller.getSnapshot().hasDiff, true);
+    assert.equal(controller.getSnapshot().snapshot, null);
+    assert.equal(controller.getSnapshot().phase, 'hold');
+    assert.equal(controller.getSnapshot().holdState?.errorCode, 'CATALOG_HANDOFF_MISSING');
+    assert.equal(alignCalls, 0);
 
-    // Render expanded with 4 diff fields in Arabic
-    const markupExpandedAr = renderToStaticMarkup(
+    const holdMarkupAr = renderToStaticMarkup(
       React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
         controller,
-        currentUser: curatorWithCreate,
+        currentUser: owner,
         savedReviewCase: savedCase,
         catalogDocument: catalogDoc,
         hasUnsavedCaseEdits: false,
         isAr: true,
       })
     );
-    assert.equal(markupExpandedAr.includes('data-testid="alignment-diff-grid"'), true);
-    assert.equal(markupExpandedAr.includes('data-testid="alignment-diff-field-titleAr"'), true);
-    assert.equal(markupExpandedAr.includes('data-testid="alignment-diff-field-titleEn"'), true);
-    assert.equal(markupExpandedAr.includes('data-testid="alignment-diff-field-summaryAr"'), true);
-    assert.equal(markupExpandedAr.includes('data-testid="alignment-diff-field-summaryEn"'), true);
-    assert.equal(markupExpandedAr.includes('data-testid="quarantine-catalog-case-alignment-confirm-checkbox"'), true);
-    assert.equal(markupExpandedAr.includes('data-testid="align-quarantine-catalog-case-btn"'), true);
-    assert.equal(markupExpandedAr.includes('data-testid="quarantine-rights-rereview-warning-banner"'), true);
+    assert.equal(holdMarkupAr.includes('data-testid="quarantine-case-alignment-hold-banner"'), true);
+    assert.equal(holdMarkupAr.includes('CATALOG_HANDOFF_MISSING'), true);
+    assert.equal(holdMarkupAr.includes('لا يمكن فحص المواءمة قبل إنشاء مسودة الفهرس الخاصة'), true);
+    assert.equal(holdMarkupAr.includes('data-testid="retry-quarantine-catalog-case-alignment-btn"'), true);
 
-    // Render in English
-    const markupExpandedEn = renderToStaticMarkup(
+    const holdMarkupEn = renderToStaticMarkup(
       React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
         controller,
-        currentUser: curatorWithCreate,
+        currentUser: owner,
         savedReviewCase: savedCase,
         catalogDocument: catalogDoc,
         hasUnsavedCaseEdits: false,
         isAr: false,
       })
     );
-    assert.equal(markupExpandedEn.includes('Align Catalog Draft with Human Review Case'), true);
-    assert.equal(markupExpandedEn.includes('Differences Detected'), true);
-
-    console.log('PASS 3: Panel UI rendering and 4-field diff (AR & EN) verified.');
-  }
-
-  // =========================================================================
-  // PASS 4: Unsaved Human Case Edits Block
-  // =========================================================================
-  {
-    const savedCase = makeSavedHumanReviewCase();
-    const catalogDoc = makeCatalogDoc();
-
-    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
-      curatorWithCreate,
-      {
-        caseAlignmentEnabled: true,
-        getAlignmentFn: async () => makeMockGetResponse(),
-        alignCaseFn: async () => { throw new Error('Blocked'); },
-      }
-    );
-
-    await controller.openPanelForCase(savedCase);
-    controller.setConfirmReconciliation(true);
-
-    // Render with hasUnsavedCaseEdits: true
-    const markupUnsaved = renderToStaticMarkup(
-      React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
-        controller,
-        currentUser: curatorWithCreate,
-        savedReviewCase: savedCase,
-        catalogDocument: catalogDoc,
-        hasUnsavedCaseEdits: true,
-        isAr: true,
-      })
-    );
-
+    assert.equal(holdMarkupEn.includes('data-testid="quarantine-case-alignment-hold-banner"'), true);
     assert.equal(
-      markupUnsaved.includes('data-testid="alignment-unsaved-case-edits-warning"'),
+      holdMarkupEn.includes('Cannot inspect alignment before creating the private catalog draft.'),
       true
     );
-    assert.equal(
-      markupUnsaved.includes('يوجد تعديل غير محفوظ في نموذج المراجعة البشرية أعلاه'),
-      true
-    );
+    assert.equal(holdMarkupEn.includes('Retry Alignment Check (Read-Only)'), true);
 
-    console.log('PASS 4: Unsaved human review case edits blocking verified.');
-  }
-
-  // =========================================================================
-  // PASS 5: Network Failure -> UNKNOWN with Verify-Only Recovery
-  // =========================================================================
-  {
-    const savedCase = makeSavedHumanReviewCase();
-    const catalogDoc = makeCatalogDoc();
-    let getCount = 0;
-
-    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
-      curatorWithCreate,
-      {
-        caseAlignmentEnabled: true,
-        getAlignmentFn: async () => {
-          getCount += 1;
-          return makeMockGetResponse();
-        },
-        alignCaseFn: async () => {
-          // Simulate transport network failure after send
-          throw new Error('TypeError: Failed to fetch (Network disconnected after dispatch)');
-        },
-      }
-    );
-
+    // 3b: Malformed server reply on GET when snapshot === null
+    getMode = 'MALFORMED';
     await controller.openPanelForCase(savedCase);
-    controller.setConfirmReconciliation(true);
+    assert.equal(controller.getSnapshot().snapshot, null);
+    assert.equal(controller.getSnapshot().phase, 'hold');
+    assert.equal(controller.getSnapshot().holdState?.errorCode, 'RESPONSE_VALIDATION_FAILED');
+    assert.equal(getCalls, 2);
+    assert.equal(alignCalls, 0);
 
-    const alignRes = await controller.alignCase();
-    assert.equal(alignRes, null);
-    assert.equal(controller.getSnapshot().uncertainState !== null, true);
-    assert.equal(controller.getSnapshot().uncertainState?.errorCode, 'TRANSACTION_COMMIT_UNCERTAIN');
-
-    // UI renders UNKNOWN banner
-    const markupUncertain = renderToStaticMarkup(
+    const malformedMarkupAr = renderToStaticMarkup(
       React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
         controller,
-        currentUser: curatorWithCreate,
+        currentUser: owner,
         savedReviewCase: savedCase,
         catalogDocument: catalogDoc,
         hasUnsavedCaseEdits: false,
         isAr: true,
       })
     );
+    assert.equal(malformedMarkupAr.includes('data-testid="quarantine-case-alignment-hold-banner"'), true);
+    assert.equal(malformedMarkupAr.includes('RESPONSE_VALIDATION_FAILED'), true);
 
-    assert.equal(
-      markupUncertain.includes('data-testid="quarantine-catalog-case-alignment-uncertain-banner"'),
-      true
-    );
-    assert.equal(
-      markupUncertain.includes('data-testid="verify-quarantine-catalog-case-alignment-btn"'),
-      true
-    );
-
-    // Verify-only button calls getAlignmentFn (never alignCaseFn)
-    const verifyRes = await controller.verifyAlignmentStatus();
-    assert.equal(verifyRes !== null, true);
-    assert.equal(controller.getSnapshot().uncertainState, null);
-    assert.equal(getCount, 2);
-
-    console.log('PASS 5: Network transport failure -> UNKNOWN with verify-only recovery verified.');
+    console.log('CASE 3: Server HOLD and malformed GET reply render visible fail-closed banner in AR/EN when snapshot === null.');
   }
 
   // =========================================================================
-  // PASS 6: Confirmation Checkbox Requirement & Idempotent Alignment
+  // CASE 4: Missing credentials / callable rejection on GET -> visible completed
+  // read failure (inFlight === false) rather than stuck loading
   // =========================================================================
   {
     const savedCase = makeSavedHumanReviewCase();
-    const catalogDoc = makeCatalogDoc();
-    let alignedPayload: any = null;
+    const catalogDoc = makeCatalogDocForUi();
+
+    // Direct client invocation without Firebase initialization / credentials must NOT throw unhandled
+    const directNoCredsResult = await getQuarantineCatalogCaseAlignmentClient(
+      VALID_RECEIPT_ID,
+      {
+        currentUser: owner,
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+      }
+    );
+    assert.equal(directNoCredsResult.ok, false);
+    assert.equal(directNoCredsResult.status, 'HOLD');
+    if (!directNoCredsResult.ok) {
+      assert.equal(directNoCredsResult.errorCode, 'BACKEND_UNAVAILABLE');
+    }
 
     const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
-      curatorWithCreate,
+      owner,
       {
-        caseAlignmentEnabled: true,
-        getAlignmentFn: async () => makeMockGetResponse(),
-        alignCaseFn: async (payload) => {
-          alignedPayload = payload;
-          return {
-            ok: true,
-            status: 'ALIGNED',
-            schemaVersion: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
-            receiptId: VALID_RECEIPT_ID,
-            documentId: VALID_DOC_ID,
-            alignedHumanCaseRevision: 2,
-            previousHandoffCaseRevision: 1,
-            catalogDocumentRevision: 2,
-            alignmentRevision: 1,
-            alignmentSaved: true,
-            alignmentOutcome: 'ALIGNED',
-            readiness: {
-              rightsScope: 'CATALOG_METADATA_ONLY',
-              binarySafety: 'NOT_VERIFIED',
-              fileSanitization: 'UNVERIFIED',
-              publication: 'BLOCKED',
-              catalogWorkflow: 'REVIEW_REQUIRED',
-            },
-            alignment: null,
-            serverTimeIso: VALID_ISO,
-          };
-        },
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
       }
     );
 
     await controller.openPanelForCase(savedCase);
+    const snapAfterReject = controller.getSnapshot();
+    assert.equal(snapAfterReject.inFlight, false);
+    assert.equal(snapAfterReject.phase, 'hold');
+    assert.equal(snapAfterReject.holdState?.errorCode, 'BACKEND_UNAVAILABLE');
 
-    // Attempting to align without checkbox fails
-    const failRes = await controller.alignCase();
-    assert.equal(failRes, null);
+    const markupReject = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+        controller,
+        currentUser: owner,
+        savedReviewCase: savedCase,
+        catalogDocument: catalogDoc,
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+      })
+    );
+    assert.equal(markupReject.includes('data-testid="quarantine-case-alignment-hold-banner"'), true);
+    assert.equal(markupReject.includes('BACKEND_UNAVAILABLE'), true);
+    assert.equal(markupReject.includes('data-testid="quarantine-case-alignment-loading"'), false);
+
+    console.log('CASE 4: Missing credentials / callable rejection on GET finishes cleanly (inFlight === false) with visible hold banner.');
+  }
+
+  // =========================================================================
+  // CASE 5: ALIGN ALIGNED -> one human-confirmed CAS write, alignmentSaved === true,
+  // post-write state/readback validated
+  // =========================================================================
+  {
+    const savedCaseV4 = makeSavedHumanReviewCase({ revision: 4 });
+    const catalogDocV1 = makeCatalogDocForUi();
+    let getCount = 0;
+    let alignCount = 0;
+    let capturedWirePayload: Record<string, unknown> | null = null;
+
+    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
+      owner,
+      {
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        invokeCallable: async (req) => {
+          if (req.action === 'getQuarantineCatalogCaseAlignment') {
+            getCount += 1;
+            return makeServerGetReadyResponse();
+          }
+          alignCount += 1;
+          capturedWirePayload = req as unknown as Record<string, unknown>;
+          return makeServerAlignAlignedResponse();
+        },
+      }
+    );
+
+    await controller.openPanelForCase(savedCaseV4);
+    assert.equal(getCount, 1);
+
+    // Attempt without confirmation checkbox fails closed before calling alignCaseFn
+    const unconfirmedRes = await controller.alignCatalogDraft();
+    assert.equal(unconfirmedRes, null);
+    assert.equal(alignCount, 0);
     assert.equal(
       controller.getSnapshot().alignError,
       CASE_ALIGNMENT_CLIENT_SAFE_ERRORS.UNCONFIRMED_RECONCILIATION
     );
-    assert.equal(alignedPayload, null);
 
-    // Confirm checkbox
-    controller.setConfirmReconciliation(true);
-    assert.equal(controller.getSnapshot().alignError, null);
+    // Check confirmation box and align once
+    controller.setConfirmedApplyCaseMetadata(true);
+    const alignedRes = await controller.alignCatalogDraft();
 
-    // Align succeeds
-    const successRes = await controller.alignCase();
-    assert.equal(successRes !== null, true);
-    assert.equal(successRes?.ok, true);
-    assert.equal(alignedPayload?.expectedHandoffCaseRevision, 1);
-    assert.equal(controller.getSnapshot().lastAlignOutcome, 'ALIGNED');
+    assert.equal(alignCount, 1);
+    assert.equal(alignedRes?.ok, true);
+    assert.equal(alignedRes?.status, 'ALIGNED');
+    assert.equal(alignedRes?.alignmentSaved, true);
+    assert.deepEqual(capturedWirePayload, {
+      action: 'alignQuarantineCatalogCase',
+      receiptId: VALID_RECEIPT_ID,
+      expectedCaseRevision: 4,
+      expectedCatalogUpdatedAt: VALID_ISO,
+      expectedAlignmentRevision: 0,
+      confirmation: 'APPLY_CASE_METADATA',
+    });
 
-    console.log('PASS 6: Confirmation checkbox requirement and successful alignment verified.');
+    const postAlignSnap = controller.getSnapshot();
+    assert.equal(postAlignSnap.lastAlignmentSaved, true);
+    assert.equal(postAlignSnap.lastAlignmentOutcome, 'ALIGNED');
+    assert.equal(postAlignSnap.snapshot?.alignmentState, 'ALIGNED');
+    assert.equal(postAlignSnap.snapshot?.effectiveAlignedCaseRevision, 4);
+    assert.equal(postAlignSnap.snapshot?.currentAlignmentRevision, 1);
+    assert.equal(postAlignSnap.snapshot?.catalogDocument.titleAr, savedCaseV4.titleAr);
+
+    const alignedMarkupAr = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+        controller,
+        currentUser: owner,
+        savedReviewCase: savedCaseV4,
+        catalogDocument: catalogDocV1,
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+      })
+    );
+    assert.equal(
+      alignedMarkupAr.includes('data-testid="quarantine-case-alignment-aligned-summary"'),
+      true
+    );
+    assert.equal(
+      alignedMarkupAr.includes('alignmentSaved: true'),
+      true
+    );
+
+    console.log('CASE 5: ALIGN ALIGNED performs one human-confirmed CAS write (APPLY_CASE_METADATA) with alignmentSaved === true and validated post-write state.');
   }
 
-  console.log('\nALL LIB-FILE-CASE-ALIGNMENT-01 CLIENT TESTS PASSED.');
+  // =========================================================================
+  // CASE 6: ALIGN ALREADY_ALIGNED -> idempotent success of existing alignment,
+  // alignmentSaved === false, zero additional writes
+  // =========================================================================
+  {
+    const savedCaseV4 = makeSavedHumanReviewCase({ revision: 4 });
+    const catalogDoc = makeCatalogDocForUi();
+    let alignCalls = 0;
+
+    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
+      curatorWithCreate,
+      {
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        invokeCallable: async (req) => {
+          if (req.action === 'getQuarantineCatalogCaseAlignment') {
+            return makeServerGetReadyResponse();
+          }
+          alignCalls += 1;
+          return makeServerAlignAlreadyAlignedResponse();
+        },
+      }
+    );
+
+    await controller.openPanelForCase(savedCaseV4);
+    controller.setConfirmedApplyCaseMetadata(true);
+    const res = await controller.alignCatalogDraft();
+
+    assert.equal(alignCalls, 1);
+    assert.equal(res?.ok, true);
+    assert.equal(res?.status, 'ALREADY_ALIGNED');
+    assert.equal(res?.alignmentSaved, false);
+    assert.equal(controller.getSnapshot().lastAlignmentSaved, false);
+    assert.equal(controller.getSnapshot().lastAlignmentOutcome, 'ALREADY_ALIGNED');
+    assert.equal(controller.getSnapshot().snapshot?.alignmentState, 'ALIGNED');
+
+    const markupAlreadyAlignedAr = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+        controller,
+        currentUser: curatorWithCreate,
+        savedReviewCase: savedCaseV4,
+        catalogDocument: catalogDoc,
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+      })
+    );
+    assert.equal(
+      markupAlreadyAlignedAr.includes('data-testid="quarantine-case-alignment-aligned-summary"'),
+      true
+    );
+    assert.equal(
+      markupAlreadyAlignedAr.includes('alignmentSaved: false'),
+      true
+    );
+
+    console.log('CASE 6: ALIGN ALREADY_ALIGNED handled idempotently with alignmentSaved === false.');
+  }
+
+  // =========================================================================
+  // CASE 7: ALIGN CONFLICT -> explicit conflict state and required fresh
+  // review/GET; no auto-write
+  // =========================================================================
+  {
+    const savedCaseV4 = makeSavedHumanReviewCase({ revision: 4 });
+    const catalogDoc = makeCatalogDocForUi();
+    let getCalls = 0;
+    let alignCalls = 0;
+
+    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
+      owner,
+      {
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        invokeCallable: async (req) => {
+          if (req.action === 'getQuarantineCatalogCaseAlignment') {
+            getCalls += 1;
+            const rev = getCalls === 1 ? 4 : 5;
+            return makeServerGetReadyResponse({
+              currentHumanCaseRevision: rev,
+              humanReviewCase: makeSavedHumanReviewCase({ revision: rev }),
+            });
+          }
+          alignCalls += 1;
+          return makeServerAlignConflictResponse();
+        },
+      }
+    );
+
+    await controller.openPanelForCase(savedCaseV4);
+    controller.setConfirmedApplyCaseMetadata(true);
+    const conflictRes = await controller.alignCatalogDraft();
+
+    assert.equal(alignCalls, 1);
+    assert.equal(getCalls, 1); // No auto-GET or auto-write
+    assert.equal(conflictRes?.ok, false);
+    assert.equal(conflictRes?.status, 'CONFLICT');
+    assert.equal(controller.getSnapshot().phase, 'conflict');
+    assert.equal(controller.getSnapshot().conflictState?.errorCode, 'ALIGNMENT_REVISION_CONFLICT');
+    assert.equal(controller.getSnapshot().confirmedApplyCaseMetadata, false);
+
+    // Repeat align while in conflict is blocked until fresh review/confirmation
+    const blockedRepeat = await controller.alignCatalogDraft();
+    assert.equal(blockedRepeat, null);
+    assert.equal(alignCalls, 1);
+
+    const conflictMarkupAr = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+        controller,
+        currentUser: owner,
+        savedReviewCase: savedCaseV4,
+        catalogDocument: catalogDoc,
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+      })
+    );
+    assert.equal(
+      conflictMarkupAr.includes('data-testid="quarantine-case-alignment-conflict-banner"'),
+      true
+    );
+    assert.equal(conflictMarkupAr.includes('ALIGNMENT_REVISION_CONFLICT'), true);
+    assert.equal(
+      conflictMarkupAr.includes('data-testid="resolve-quarantine-catalog-case-alignment-conflict-btn"'),
+      true
+    );
+
+    console.log('CASE 7: ALIGN CONFLICT displays explicit conflict state, blocks auto-write, and requires fresh review/GET.');
+  }
+
+  // =========================================================================
+  // CASE 8: ALIGN HOLD -> fail closed with visible hold message
+  // =========================================================================
+  {
+    const savedCaseV4 = makeSavedHumanReviewCase({ revision: 4 });
+    const catalogDoc = makeCatalogDocForUi();
+
+    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
+      owner,
+      {
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        invokeCallable: async (req) => {
+          if (req.action === 'getQuarantineCatalogCaseAlignment') {
+            return makeServerGetReadyResponse();
+          }
+          return makeServerAlignHoldResponse();
+        },
+      }
+    );
+
+    await controller.openPanelForCase(savedCaseV4);
+    controller.setConfirmedApplyCaseMetadata(true);
+    const holdRes = await controller.alignCatalogDraft();
+
+    assert.equal(holdRes?.ok, false);
+    assert.equal(holdRes?.status, 'HOLD');
+    assert.equal(controller.getSnapshot().phase, 'hold');
+    assert.equal(controller.getSnapshot().lastAlignmentSaved, false);
+    assert.equal(
+      controller.getSnapshot().holdState?.errorCode,
+      'CATALOG_RIGHTS_STATE_INVALID_FOR_ALIGNMENT'
+    );
+
+    const holdMarkupAr = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+        controller,
+        currentUser: owner,
+        savedReviewCase: savedCaseV4,
+        catalogDocument: catalogDoc,
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+      })
+    );
+    assert.equal(
+      holdMarkupAr.includes('data-testid="quarantine-case-alignment-hold-banner"'),
+      true
+    );
+    assert.equal(
+      holdMarkupAr.includes('CATALOG_RIGHTS_STATE_INVALID_FOR_ALIGNMENT'),
+      true
+    );
+
+    console.log('CASE 8: ALIGN HOLD fails closed with visible hold banner.');
+  }
+
+  // =========================================================================
+  // CASE 9: ALIGN UNKNOWN and malformed post-dispatch response -> alignmentSaved === null,
+  // GET verification required, zero blind retry
+  // =========================================================================
+  {
+    const savedCaseV4 = makeSavedHumanReviewCase({ revision: 4 });
+    const catalogDoc = makeCatalogDocForUi();
+    let getCount = 0;
+    let alignCount = 0;
+    let alignMode: 'SERVER_UNKNOWN' | 'MALFORMED_POST_DISPATCH' = 'SERVER_UNKNOWN';
+
+    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
+      owner,
+      {
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        invokeCallable: async (req) => {
+          if (req.action === 'getQuarantineCatalogCaseAlignment') {
+            getCount += 1;
+            return makeServerGetReadyResponse();
+          }
+          alignCount += 1;
+          if (alignMode === 'SERVER_UNKNOWN') {
+            return makeServerAlignUnknownResponse();
+          }
+          return { ok: true, status: 'ALIGNED', brokenPostDispatchPayload: 123 };
+        },
+      }
+    );
+
+    // 9a: Server returns explicit UNKNOWN
+    await controller.openPanelForCase(savedCaseV4);
+    controller.setConfirmedApplyCaseMetadata(true);
+    const unknownRes = await controller.alignCatalogDraft();
+    assert.equal(unknownRes, null);
+    assert.equal(controller.getSnapshot().phase, 'uncertain');
+    assert.equal(controller.getSnapshot().lastAlignmentSaved, null);
+    assert.equal(controller.getSnapshot().uncertainState?.errorCode, 'TRANSACTION_COMMIT_UNCERTAIN');
+
+    // Blind retry while uncertain must be blocked
+    const blockedRetry = await controller.alignCatalogDraft();
+    assert.equal(blockedRetry, null);
+    assert.equal(alignCount, 1);
+
+    const uncertainMarkupAr = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+        controller,
+        currentUser: owner,
+        savedReviewCase: savedCaseV4,
+        catalogDocument: catalogDoc,
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+      })
+    );
+    assert.equal(
+      uncertainMarkupAr.includes('data-testid="quarantine-catalog-case-alignment-uncertain-banner"'),
+      true
+    );
+    assert.equal(
+      uncertainMarkupAr.includes('data-testid="verify-quarantine-catalog-case-alignment-btn"'),
+      true
+    );
+
+    // Read-only GET verification clears uncertain state without calling alignCaseFn
+    const verifyRes = await controller.verifyAlignmentStatus();
+    assert.equal(verifyRes?.status, 'READY');
+    assert.equal(controller.getSnapshot().uncertainState, null);
+    assert.equal(controller.getSnapshot().phase, 'ready');
+    assert.equal(getCount, 2);
+    assert.equal(alignCount, 1);
+
+    // 9b: Malformed post-dispatch response also resolves to UNKNOWN (alignmentSaved === null)
+    alignMode = 'MALFORMED_POST_DISPATCH';
+    controller.setConfirmedApplyCaseMetadata(true);
+    const malformedAlignRes = await controller.alignCatalogDraft();
+    assert.equal(malformedAlignRes, null);
+    assert.equal(controller.getSnapshot().phase, 'uncertain');
+    assert.equal(controller.getSnapshot().lastAlignmentSaved, null);
+    assert.equal(alignCount, 2);
+
+    console.log('CASE 9: ALIGN UNKNOWN and malformed post-dispatch response set alignmentSaved === null, block blind retry, and recover via read-only GET.');
+  }
+
+  // =========================================================================
+  // CASE 10: Stale session / receipt change -> no state leak into another case
+  // =========================================================================
+  {
+    const firstCase = makeSavedHumanReviewCase({
+      receiptId: VALID_RECEIPT_ID,
+      revision: 4,
+      titleAr: 'عنوان الوثيقة الأولى',
+    });
+    const secondCase = makeSavedHumanReviewCase({
+      receiptId: SECOND_RECEIPT_ID,
+      revision: 2,
+      titleAr: 'عنوان الوثيقة الثانية',
+    });
+
+    let resolveFirstGet: ((val: GetLibraryQuarantineCatalogCaseAlignmentSuccessDto) => void) | null = null;
+
+    const controller = new LibraryQuarantineCatalogCaseAlignmentPanelController(
+      owner,
+      {
+        envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        invokeCallable: async (req) => {
+          if (req.receiptId === VALID_RECEIPT_ID) {
+            return new Promise<GetLibraryQuarantineCatalogCaseAlignmentSuccessDto>((resolve) => {
+              resolveFirstGet = resolve;
+            });
+          }
+          const doc2 = makeSanitizedCatalogDocumentDto({
+            id: `qcat-${SECOND_RECEIPT_ID}`,
+            titleAr: 'مسودة الوثيقة الثانية',
+            versions: [
+              {
+                id: `qcat-${SECOND_RECEIPT_ID}-v1`,
+                documentId: `qcat-${SECOND_RECEIPT_ID}`,
+                versionNumber: '1.0-quarantine-draft',
+                publishedDate: '2026-11-10',
+                changeDescriptionAr: 'إنشاء مسودة الفهرس الخاصة من الحجر.',
+                changeDescriptionEn: 'Created private quarantine catalog draft.',
+              },
+            ],
+          });
+          return makeServerGetReadyResponse({
+            receiptId: SECOND_RECEIPT_ID,
+            documentId: `qcat-${SECOND_RECEIPT_ID}`,
+            handoff: makeSanitizedHandoffDto({
+              receiptId: SECOND_RECEIPT_ID,
+              documentId: `qcat-${SECOND_RECEIPT_ID}`,
+            }),
+            catalogDocument: doc2,
+            humanReviewCase: secondCase,
+            diff: computeClientCatalogCaseFourFieldDiff(secondCase, doc2),
+            currentHumanCaseRevision: 2,
+          });
+        },
+      }
+    );
+
+    const pendingFirst = controller.openPanelForCase(firstCase);
+    // Switch to second receipt before first completes
+    const secondState = await controller.openPanelForCase(secondCase);
+    assert.equal(secondState.receiptId, SECOND_RECEIPT_ID);
+    assert.equal(controller.getSnapshot().receiptId, SECOND_RECEIPT_ID);
+
+    // Now resolve the stale first GET; it must be ignored and never overwrite second receipt state
+    assert.notEqual(resolveFirstGet, null);
+    resolveFirstGet!(makeServerGetReadyResponse({ receiptId: VALID_RECEIPT_ID }));
+    await pendingFirst;
+    assert.equal(controller.getSnapshot().receiptId, SECOND_RECEIPT_ID);
+    assert.equal(
+      controller.getSnapshot().snapshot?.humanReviewCase.titleAr,
+      'عنوان الوثيقة الثانية'
+    );
+
+    console.log('CASE 10: Stale session / receipt switch prevents state leak across cases.');
+  }
+
+  // =========================================================================
+  // CASE 11: Protected qcat- fields remain Draft / ReviewRequired and all 5
+  // assurance flags remain false, and independent human rights re-review
+  // warning is preserved
+  // =========================================================================
+  {
+    const validAlignment = makeAlignmentDto();
+    const validatedAlignment = validateSanitizedCatalogCaseAlignmentDto(validAlignment);
+    assert.notEqual(validatedAlignment, null);
+    assert.equal(validatedAlignment?.isSanitized, false);
+    assert.equal(validatedAlignment?.isVerifiedSafe, false);
+    assert.equal(validatedAlignment?.isRightsApproved, false);
+    assert.equal(validatedAlignment?.isPublished, false);
+    assert.equal(validatedAlignment?.isReadyForPeia, false);
+
+    // Any attempt to smuggle true assurance flags or non-Draft catalog state must fail validation
+    assert.equal(
+      validateSanitizedCatalogCaseAlignmentDto({
+        ...validAlignment,
+        isPublished: true,
+      }),
+      null
+    );
+
+    assert.equal(
+      validateAlignCatalogCaseResponseDto({
+        ...makeServerAlignAlignedResponse(),
+        catalogDocument: {
+          ...makeServerAlignAlignedResponse().catalogDocument,
+          workflowState: WorkflowState.Published,
+        },
+      }),
+      null
+    );
+
+    assert.equal(
+      validateAlignCatalogCaseResponseDto({
+        ...makeServerAlignAlignedResponse(),
+        catalogDocument: {
+          ...makeServerAlignAlignedResponse().catalogDocument,
+          rightsStatus: LibraryRightsStatus.PublicDomain,
+        },
+      }),
+      null
+    );
+
+    assert.throws(() => {
+      validateAlignQuarantineCatalogCaseResponseDto({
+        ...makeServerAlignAlignedResponse(),
+        requiresFreshRightsReview: false,
+      });
+    }, /RESPONSE_VALIDATION_FAILED/);
+
+    console.log('CASE 11: Protected qcat- Draft/ReviewRequired invariants, 5 false assurance flags, and fresh rights review requirement verified.');
+  }
+
+  console.log('\nALL LIB-CASE-ALIGNMENT-LIVE-CONTRACT-REPAIR-01 CLIENT TESTS PASSED.');
 }
 
 runTests().catch((err: unknown) => {
-  console.error('LIB-FILE-CASE-ALIGNMENT-01 CLIENT TESTS FAILED:', err);
+  console.error('LIB-CASE-ALIGNMENT-LIVE-CONTRACT-REPAIR-01 CLIENT TESTS FAILED:', err);
   process.exit(1);
 });
