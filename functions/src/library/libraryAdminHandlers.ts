@@ -112,6 +112,7 @@ import {
 import {
   LibraryQuarantineCatalogCaseAlignmentService,
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+  LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
   type AlignLibraryQuarantineCatalogCaseResponseDto,
   type GetLibraryQuarantineCatalogCaseAlignmentResponseDto,
   type InspectLibraryQuarantineLegacyCatalogRecoveryHoldDto,
@@ -195,6 +196,11 @@ export type {
   DispatchLibraryQuarantineAvInspectionResponseDto,
   SanitizedLibraryQuarantineAvExecutionDto,
   LibraryQuarantineAvDispatchConfirmationLiteral,
+};
+
+export {
+  LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+  LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
 };
 
 export const LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR =
@@ -326,6 +332,17 @@ const ALIGN_QUARANTINE_CATALOG_CASE_ALLOWED_KEYS: ReadonlySet<string> =
     'expectedCatalogUpdatedAt',
     'expectedAlignmentRevision',
     'confirmation',
+  ]);
+
+const APPLY_QUARANTINE_LEGACY_CATALOG_RECOVERY_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set([
+    'action',
+    'receiptId',
+    'expectedCaseRevision',
+    'expectedCatalogUpdatedAt',
+    'expectedAlignmentRevision',
+    'confirmation',
+    'legacyUnattributedCatalogUpdateAcknowledgement',
   ]);
 
 const WORKBENCH_ALLOWED_AUTH_ENVELOPE_KEYS: ReadonlySet<string> = new Set([
@@ -2267,7 +2284,8 @@ export async function executeManageLibraryDocumentsRequest(
   if (
     action === 'getQuarantineCatalogCaseAlignment' ||
     action === 'inspectQuarantineLegacyCatalogRecovery' ||
-    action === 'alignQuarantineCatalogCase'
+    action === 'alignQuarantineCatalogCase' ||
+    action === 'applyQuarantineLegacyCatalogRecovery'
   ) {
     assertCaseAlignmentReleaseGatesEnabled(quarantineWorkbenchOptions);
     assertStrictNoSymbolCallerKeys(requestContext?.data, action);
@@ -2277,7 +2295,9 @@ export async function executeManageLibraryDocumentsRequest(
         ? GET_QUARANTINE_CATALOG_CASE_ALIGNMENT_ALLOWED_KEYS
         : action === 'inspectQuarantineLegacyCatalogRecovery'
           ? INSPECT_QUARANTINE_LEGACY_CATALOG_RECOVERY_ALLOWED_KEYS
-          : ALIGN_QUARANTINE_CATALOG_CASE_ALLOWED_KEYS;
+          : action === 'applyQuarantineLegacyCatalogRecovery'
+            ? APPLY_QUARANTINE_LEGACY_CATALOG_RECOVERY_ALLOWED_KEYS
+            : ALIGN_QUARANTINE_CATALOG_CASE_ALLOWED_KEYS;
 
     const validatedPayload = assertStrictAllowedCallerKeys(
       requestContext?.data,
@@ -2295,7 +2315,10 @@ export async function executeManageLibraryDocumentsRequest(
       );
     }
 
-    if (action === 'alignQuarantineCatalogCase') {
+    if (
+      action === 'alignQuarantineCatalogCase' ||
+      action === 'applyQuarantineLegacyCatalogRecovery'
+    ) {
       if (
         !Object.prototype.hasOwnProperty.call(
           validatedPayload,
@@ -2352,6 +2375,22 @@ export async function executeManageLibraryDocumentsRequest(
           'invalid-argument',
           'CONFIRMATION_REQUIRED: confirmation must equal APPLY_CASE_METADATA.'
         );
+      }
+
+      if (action === 'applyQuarantineLegacyCatalogRecovery') {
+        if (
+          !Object.prototype.hasOwnProperty.call(
+            validatedPayload,
+            'legacyUnattributedCatalogUpdateAcknowledgement'
+          ) ||
+          validatedPayload.legacyUnattributedCatalogUpdateAcknowledgement !==
+            LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL
+        ) {
+          throw new HttpsError(
+            'invalid-argument',
+            'LEGACY_RECOVERY_ACKNOWLEDGEMENT_REQUIRED: legacyUnattributedCatalogUpdateAcknowledgement must equal ACKNOWLEDGE_UNATTRIBUTED_LEGACY_CATALOG_CHANGE.'
+          );
+        }
       }
     }
 
@@ -2469,6 +2508,23 @@ export async function executeManageLibraryDocumentsRequest(
       return caseAlignmentService.inspectQuarantineLegacyCatalogRecovery(
         Object.freeze({
           receiptId: validatedPayload.receiptId,
+        })
+      );
+    }
+
+    if (action === 'applyQuarantineLegacyCatalogRecovery') {
+      return caseAlignmentService.alignQuarantineCatalogCase(
+        Object.freeze({
+          receiptId: validatedPayload.receiptId,
+          expectedCaseRevision: validatedPayload.expectedCaseRevision as number,
+          expectedCatalogUpdatedAt:
+            validatedPayload.expectedCatalogUpdatedAt as string,
+          expectedAlignmentRevision:
+            validatedPayload.expectedAlignmentRevision as number,
+          confirmation:
+            validatedPayload.confirmation as typeof LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+          legacyUnattributedCatalogUpdateAcknowledgement:
+            validatedPayload.legacyUnattributedCatalogUpdateAcknowledgement as typeof LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
         })
       );
     }

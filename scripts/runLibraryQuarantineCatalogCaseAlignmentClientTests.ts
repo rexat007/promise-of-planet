@@ -22,9 +22,11 @@ import {
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
   LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS,
   LIBRARY_QUARANTINE_LEGACY_RECOVERY_MAX_CASE_REVISIONS,
+  LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
   CASE_ALIGNMENT_CLIENT_SAFE_ERRORS,
   LibraryQuarantineCatalogCaseAlignmentPanelController,
   alignQuarantineCatalogCaseClient,
+  applyQuarantineLegacyCatalogRecoveryClient,
   areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled,
   canCurrentAdminAlignQuarantineCatalogDraft,
   computeClientCatalogCaseFourFieldDiff,
@@ -32,6 +34,7 @@ import {
   inspectQuarantineLegacyCatalogRecoveryClient,
   validateAlignCatalogCaseResponseDto,
   validateAlignQuarantineCatalogCaseResponseDto,
+  validateApplyQuarantineLegacyCatalogRecoveryResponseDto,
   validateGetCatalogCaseAlignmentResponseDto,
   validateGetQuarantineCatalogCaseAlignmentResponseDto,
   validateInspectLegacyCatalogRecoveryResponseDto,
@@ -2189,8 +2192,20 @@ async function runTests(): Promise<void> {
         true
       );
     }
-    // No recovery confirmation checkbox and no recovery execution button exist
-    assert.equal(htmlAfterZeroDiffInspect.includes('type="checkbox"'), false);
+    // Ordinary alignment confirmation checkbox and submit button remain absent;
+    // separate recovery confirmation checkbox is unchecked and apply recovery button is disabled
+    assert.equal(
+      htmlBeforeInspect.includes('type="checkbox"'),
+      false,
+      'Before inspection, no checkbox may be rendered.'
+    );
+    assert.equal(
+      htmlBeforeInspect.includes(
+        'data-testid="apply-quarantine-legacy-catalog-recovery-btn"'
+      ),
+      false,
+      'Before inspection, no recovery execution button may be rendered.'
+    );
     assert.equal(
       htmlAfterZeroDiffInspect.includes(
         'data-testid="confirm-quarantine-case-alignment-checkbox"'
@@ -2202,6 +2217,18 @@ async function runTests(): Promise<void> {
         'data-testid="submit-quarantine-catalog-case-alignment-btn"'
       ),
       false
+    );
+    assert.equal(
+      htmlAfterZeroDiffInspect.includes(
+        'data-testid="confirm-quarantine-legacy-catalog-recovery-checkbox"'
+      ),
+      true
+    );
+    assert.equal(
+      htmlAfterZeroDiffInspect.includes(
+        'data-testid="apply-quarantine-legacy-catalog-recovery-btn"'
+      ),
+      true
     );
 
     // Now test text-difference case (hasAnyDifference === true)
@@ -2252,7 +2279,12 @@ async function runTests(): Promise<void> {
       ),
       true
     );
-    assert.equal(htmlAfterTextDiffInspect.includes('type="checkbox"'), false);
+    assert.equal(
+      htmlAfterTextDiffInspect.includes(
+        'data-testid="confirm-quarantine-case-alignment-checkbox"'
+      ),
+      false
+    );
 
     // 11. Changing receiptId or saved case revision/updatedAt invalidates displayed inspection evidence
     const incidentCaseRev7 = makeIncidentCaseDto({
@@ -2491,6 +2523,621 @@ async function runTests(): Promise<void> {
     console.log(
       'CASE 12: LIB-QCAT-LEGACY-R2C read-only historical recovery inspection client, validator, state isolation, and UI verified.'
     );
+
+    // -------------------------------------------------------------------------
+    // CASE 13: LIB-QCAT-LEGACY-R2D — Authorized Legacy Catalog Recovery Execution,
+    // Fresh GET Read-Back, UNKNOWN Lock, and Stale Evidence Invalidation
+    // -------------------------------------------------------------------------
+    {
+      const RECOVERY_APPLIED_ISO = '2026-11-15T10:30:00.000Z';
+
+      const makeIncidentRecoveredAlignmentDto = (): SanitizedLibraryQuarantineCatalogCaseAlignmentDto => ({
+        schemaVersion: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
+        receiptId: INCIDENT_RECEIPT_ID,
+        documentId: INCIDENT_DOC_ID,
+        sourceRevision: 1,
+        sourceUpdatedAt: '2026-11-13T12:00:00.000Z',
+        originalHandoffCaseRevision: 3,
+        alignmentRevision: 1,
+        alignedHumanCaseRevision: 6,
+        alignedHumanCaseUpdatedAt: INCIDENT_CASE_REV6_UPDATED_AT,
+        documentUpdatedAt: RECOVERY_APPLIED_ISO,
+        createdAt: RECOVERY_APPLIED_ISO,
+        updatedAt: RECOVERY_APPLIED_ISO,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      });
+
+      const makeIncidentRecoveryAlignSuccessResponse = (): AlignLibraryQuarantineCatalogCaseSuccessDto => {
+        const recoveredCatalogDoc = makeIncidentCatalogDocDto({
+          updatedAt: RECOVERY_APPLIED_ISO,
+        });
+        const recoveredAlignment = makeIncidentRecoveredAlignmentDto();
+        return {
+          ok: true,
+          status: 'ALIGNED',
+          alignmentOutcome: 'ALIGNED',
+          alignmentSaved: true,
+          receiptId: INCIDENT_RECEIPT_ID,
+          documentId: INCIDENT_DOC_ID,
+          alignmentState: 'ALIGNED',
+          sourceRevision: 1,
+          originalHandoffCaseRevision: 3,
+          effectiveAlignedCaseRevision: 6,
+          currentHumanCaseRevision: 6,
+          currentAlignmentRevision: 1,
+          catalogUpdatedAt: RECOVERY_APPLIED_ISO,
+          diff: computeClientCatalogCaseFourFieldDiff(
+            incidentCaseRev6,
+            recoveredCatalogDoc
+          ),
+          alignment: recoveredAlignment,
+          handoff: makeIncidentHandoffDto(),
+          catalogDocument: recoveredCatalogDoc,
+          humanReviewCase: incidentCaseRev6,
+          hasRecordedRightsDecision: false,
+          recordedRightsDecisionCaseRevision: null,
+          rightsDecisionInvalidatedByCaseChange: false,
+          requiresFreshRightsReview: false,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        };
+      };
+
+      const makeIncidentPostRecoveryGetSuccessResponse = (): GetLibraryQuarantineCatalogCaseAlignmentSuccessDto => {
+        const recoveredCatalogDoc = makeIncidentCatalogDocDto({
+          updatedAt: RECOVERY_APPLIED_ISO,
+        });
+        const recoveredAlignment = makeIncidentRecoveredAlignmentDto();
+        return {
+          ok: true,
+          status: 'READY',
+          receiptId: INCIDENT_RECEIPT_ID,
+          documentId: INCIDENT_DOC_ID,
+          alignmentState: 'ALIGNED',
+          sourceRevision: 1,
+          originalHandoffCaseRevision: 3,
+          effectiveAlignedCaseRevision: 6,
+          currentHumanCaseRevision: 6,
+          currentAlignmentRevision: 1,
+          catalogUpdatedAt: RECOVERY_APPLIED_ISO,
+          diff: computeClientCatalogCaseFourFieldDiff(
+            incidentCaseRev6,
+            recoveredCatalogDoc
+          ),
+          alignment: recoveredAlignment,
+          handoff: makeIncidentHandoffDto(),
+          catalogDocument: recoveredCatalogDoc,
+          humanReviewCase: incidentCaseRev6,
+          hasRecordedRightsDecision: false,
+          recordedRightsDecisionCaseRevision: null,
+          rightsDecisionInvalidatedByCaseChange: false,
+          requiresFreshRightsReview: false,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        };
+      };
+
+      // 13.1: applyQuarantineLegacyCatalogRecoveryClient pre-dispatch fail-closed checks (zero network calls)
+      let recoveryCallableCount = 0;
+      const countingRecoveryInvoker = async (payload: unknown) => {
+        recoveryCallableCount += 1;
+        assert.deepEqual(payload, {
+          action: 'applyQuarantineLegacyCatalogRecovery',
+          receiptId: INCIDENT_RECEIPT_ID,
+          expectedCaseRevision: 6,
+          expectedCatalogUpdatedAt: INCIDENT_CATALOG_UPDATED_AT,
+          expectedAlignmentRevision: 0,
+          confirmation:
+            LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+          legacyUnattributedCatalogUpdateAcknowledgement:
+            LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+        });
+        return makeIncidentRecoveryAlignSuccessResponse();
+      };
+
+      const validRecoveryReq = {
+        receiptId: INCIDENT_RECEIPT_ID,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: INCIDENT_CATALOG_UPDATED_AT,
+        expectedAlignmentRevision: 0,
+        confirmedApplyCaseMetadata: true,
+        acknowledgedLegacyUnattributedCatalogChange: true,
+        hasUnsavedCaseEdits: false,
+      };
+
+      // Missing release flag
+      const holdFlagOff = await applyQuarantineLegacyCatalogRecoveryClient(
+        validRecoveryReq,
+        {
+          envOverride: {
+            ...ALL_ALIGNMENT_FLAGS_ENABLED,
+            VITE_LIBRARY_CASE_ALIGNMENT_ENABLED: 'false',
+          },
+          currentUser: owner,
+          invokeCallable: countingRecoveryInvoker,
+        }
+      );
+      assert.equal(holdFlagOff.ok, false);
+      assert.equal(holdFlagOff.status, 'HOLD');
+      if (!holdFlagOff.ok && holdFlagOff.status === 'HOLD') {
+        assert.equal(holdFlagOff.errorCode, 'FEATURE_NOT_RELEASED');
+      }
+      assert.equal(recoveryCallableCount, 0);
+
+      // Insufficient permissions
+      const holdUnauth = await applyQuarantineLegacyCatalogRecoveryClient(
+        validRecoveryReq,
+        {
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+          currentUser: nonLibraryAdmin,
+          invokeCallable: countingRecoveryInvoker,
+        }
+      );
+      assert.equal(holdUnauth.ok, false);
+      assert.equal(holdUnauth.status, 'HOLD');
+      if (!holdUnauth.ok && holdUnauth.status === 'HOLD') {
+        assert.equal(holdUnauth.errorCode, 'INSUFFICIENT_PERMISSIONS');
+      }
+      assert.equal(recoveryCallableCount, 0);
+
+      // Unsaved case edits
+      const holdUnsaved = await applyQuarantineLegacyCatalogRecoveryClient(
+        { ...validRecoveryReq, hasUnsavedCaseEdits: true },
+        {
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+          currentUser: owner,
+          invokeCallable: countingRecoveryInvoker,
+        }
+      );
+      assert.equal(holdUnsaved.ok, false);
+      assert.equal(holdUnsaved.status, 'HOLD');
+      if (!holdUnsaved.ok && holdUnsaved.status === 'HOLD') {
+        assert.equal(holdUnsaved.errorCode, 'UNSAVED_CASE_EDITS_PRESENT');
+      }
+      assert.equal(recoveryCallableCount, 0);
+
+      // Missing confirmation or missing legacy acknowledgement
+      for (const badConfirm of [
+        {
+          ...validRecoveryReq,
+          confirmedApplyCaseMetadata: false,
+        },
+        {
+          ...validRecoveryReq,
+          acknowledgedLegacyUnattributedCatalogChange: false,
+        },
+      ]) {
+        const holdConfirm = await applyQuarantineLegacyCatalogRecoveryClient(
+          badConfirm,
+          {
+            envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+            currentUser: owner,
+            invokeCallable: countingRecoveryInvoker,
+          }
+        );
+        assert.equal(holdConfirm.ok, false);
+        assert.equal(holdConfirm.status, 'HOLD');
+        if (!holdConfirm.ok && holdConfirm.status === 'HOLD') {
+          assert.equal(holdConfirm.errorCode, 'CONFIRMATION_REQUIRED');
+        }
+      }
+      assert.equal(recoveryCallableCount, 0);
+
+      // Invalid expectedAlignmentRevision (must be 0)
+      const holdNonZeroAlignRev =
+        await applyQuarantineLegacyCatalogRecoveryClient(
+          { ...validRecoveryReq, expectedAlignmentRevision: 1 },
+          {
+            envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+            currentUser: owner,
+            invokeCallable: countingRecoveryInvoker,
+          }
+        );
+      assert.equal(holdNonZeroAlignRev.ok, false);
+      assert.equal(holdNonZeroAlignRev.status, 'HOLD');
+      if (!holdNonZeroAlignRev.ok && holdNonZeroAlignRev.status === 'HOLD') {
+        assert.equal(
+          holdNonZeroAlignRev.errorCode,
+          'INVALID_EXPECTED_ALIGNMENT_REVISION'
+        );
+      }
+      assert.equal(recoveryCallableCount, 0);
+
+      // Valid request dispatches applyQuarantineLegacyCatalogRecovery
+      const directRecoveryOk = await applyQuarantineLegacyCatalogRecoveryClient(
+        validRecoveryReq,
+        {
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+          currentUser: owner,
+          invokeCallable: countingRecoveryInvoker,
+        }
+      );
+      assert.equal(directRecoveryOk.ok, true);
+      assert.equal(recoveryCallableCount, 1);
+      assert.equal(
+        validateApplyQuarantineLegacyCatalogRecoveryResponseDto(
+          directRecoveryOk,
+          INCIDENT_RECEIPT_ID
+        ).ok,
+        true
+      );
+
+      // Post-dispatch network error returns UNKNOWN (TRANSACTION_COMMIT_UNCERTAIN)
+      const directRecoveryUnknown =
+        await applyQuarantineLegacyCatalogRecoveryClient(validRecoveryReq, {
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+          currentUser: owner,
+          invokeCallable: async () => {
+            throw new Error('Network dropped after dispatch');
+          },
+        });
+      assert.equal(directRecoveryUnknown.ok, false);
+      assert.equal(directRecoveryUnknown.status, 'UNKNOWN');
+      if (
+        !directRecoveryUnknown.ok &&
+        directRecoveryUnknown.status === 'UNKNOWN'
+      ) {
+        assert.equal(
+          directRecoveryUnknown.errorCode,
+          'TRANSACTION_COMMIT_UNCERTAIN'
+        );
+        assert.equal(directRecoveryUnknown.alignmentSaved, null);
+      }
+
+      // 13.2: End-to-end Controller + Panel workflow:
+      // Cannot execute recovery without inspection and separate confirmation;
+      // after confirmation, executes applyQuarantineLegacyCatalogRecovery, invalidates
+      // inspection evidence, refreshes ordinary alignment via getQuarantineCatalogCaseAlignment,
+      // and transitions to READY / ALIGNED from the fresh GET response.
+      let r2dGetCalls = 0;
+      let r2dInspectCalls = 0;
+      let r2dApplyRecoveryCalls = 0;
+      let r2dNormalAlignCalls = 0;
+      let isIncidentRecoveredOnServer = false;
+      let lastDispatchedRecoveryPayload: unknown = null;
+      let reconciledCallbackSnapshot: GetLibraryQuarantineCatalogCaseAlignmentSuccessDto | null =
+        null;
+
+      const r2dController =
+        new LibraryQuarantineCatalogCaseAlignmentPanelController(owner, {
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+          invokeCallable: async (payload) => {
+            if (payload.action === 'getQuarantineCatalogCaseAlignment') {
+              r2dGetCalls += 1;
+              if (!isIncidentRecoveredOnServer) {
+                return makeServerGetHoldResponse({
+                  receiptId: payload.receiptId,
+                  documentId: INCIDENT_DOC_ID,
+                  errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+                  errorMessage:
+                    'Catalog document updatedAt does not match catalog handoff createdAt while no alignment record exists.',
+                });
+              }
+              return makeIncidentPostRecoveryGetSuccessResponse();
+            }
+            if (payload.action === 'inspectQuarantineLegacyCatalogRecovery') {
+              r2dInspectCalls += 1;
+              return validInspectZeroDiff;
+            }
+            if (payload.action === 'applyQuarantineLegacyCatalogRecovery') {
+              r2dApplyRecoveryCalls += 1;
+              lastDispatchedRecoveryPayload = payload;
+              isIncidentRecoveredOnServer = true;
+              return makeIncidentRecoveryAlignSuccessResponse();
+            }
+            if (payload.action === 'alignQuarantineCatalogCase') {
+              r2dNormalAlignCalls += 1;
+              throw new Error(
+                'Ordinary alignQuarantineCatalogCase must not be called for legacy recovery'
+              );
+            }
+            throw new Error('Unexpected action');
+          },
+        });
+
+      // Open panel -> GET returns HOLD (INCONSISTENT_ALIGNMENT_STATE)
+      await r2dController.openPanelForCase(incidentCaseRev6);
+      assert.equal(r2dGetCalls, 1);
+      assert.equal(r2dController.getState().phase, 'hold');
+      assert.equal(r2dController.canApplyHistoricalRecovery(), false);
+
+      // Attempt recovery before inspection -> blocked with 0 calls
+      const beforeInspectApply =
+        await r2dController.applyHistoricalRecovery(incidentCaseRev6);
+      assert.equal(beforeInspectApply, null);
+      assert.equal(r2dApplyRecoveryCalls, 0);
+
+      // Run read-only inspection -> INSPECTION_ONLY
+      const inspectRes =
+        await r2dController.inspectHistoricalRecoveryEvidence(incidentCaseRev6);
+      assert.equal(inspectRes?.ok, true);
+      assert.equal(r2dInspectCalls, 1);
+      assert.equal(r2dController.canApplyHistoricalRecovery(), true);
+      assert.equal(
+        r2dController.getHistoricalInspectionState()
+          .confirmedLegacyRecoveryApply,
+        false
+      );
+
+      // Attempt recovery without checking separate confirmation -> blocked with 0 calls and sets recoveryError
+      const unconfirmedApply =
+        await r2dController.applyHistoricalRecovery(incidentCaseRev6);
+      assert.equal(unconfirmedApply, null);
+      assert.equal(r2dApplyRecoveryCalls, 0);
+      assert.notEqual(
+        r2dController.getHistoricalInspectionState().recoveryError,
+        null
+      );
+
+      const htmlWithUnconfirmedError = renderToStaticMarkup(
+        React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+          controller: r2dController,
+          currentUser: owner,
+          savedReviewCase: incidentCaseRev6,
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        })
+      );
+      assert.equal(
+        htmlWithUnconfirmedError.includes(
+          'data-testid="quarantine-legacy-recovery-error-banner"'
+        ),
+        true
+      );
+
+      // Check separate human confirmation checkbox
+      r2dController.setConfirmedLegacyRecoveryApply(true);
+      assert.equal(
+        r2dController.getHistoricalInspectionState()
+          .confirmedLegacyRecoveryApply,
+        true
+      );
+      assert.equal(
+        r2dController.getHistoricalInspectionState().recoveryError,
+        null
+      );
+
+      // Execute authorized recovery
+      const recoveryResult =
+        await r2dController.applyHistoricalRecovery(incidentCaseRev6);
+      assert.notEqual(recoveryResult, null);
+      assert.equal(recoveryResult?.ok, true);
+      assert.equal(r2dApplyRecoveryCalls, 1);
+      assert.equal(r2dNormalAlignCalls, 0);
+      // Fresh GET must have been invoked after recovery (r2dGetCalls: 1 -> 2)
+      assert.equal(r2dGetCalls, 2);
+      assert.deepEqual(lastDispatchedRecoveryPayload, {
+        action: 'applyQuarantineLegacyCatalogRecovery',
+        receiptId: INCIDENT_RECEIPT_ID,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: INCIDENT_CATALOG_UPDATED_AT,
+        expectedAlignmentRevision: 0,
+        confirmation:
+          LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+
+      // Inspection evidence is invalidated after recovery
+      assert.equal(r2dController.getHistoricalInspectionState().phase, 'idle');
+      assert.equal(
+        r2dController.getHistoricalInspectionState().evidence,
+        null
+      );
+      assert.equal(
+        r2dController.getHistoricalInspectionState()
+          .confirmedLegacyRecoveryApply,
+        false
+      );
+
+      // Controller is now in normal READY / ALIGNED state from the fresh GET response
+      assert.equal(r2dController.getState().phase, 'ready');
+      assert.equal(
+        r2dController.getState().snapshot?.alignmentState,
+        'ALIGNED'
+      );
+      assert.equal(
+        r2dController.getState().snapshot?.currentAlignmentRevision,
+        1
+      );
+      assert.equal(
+        r2dController.getState().snapshot?.effectiveAlignedCaseRevision,
+        6
+      );
+
+      const htmlAfterRecoverySuccess = renderToStaticMarkup(
+        React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+          controller: r2dController,
+          currentUser: owner,
+          savedReviewCase: incidentCaseRev6,
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+          onAlignmentReconciled: (snap) => {
+            reconciledCallbackSnapshot = snap;
+          },
+        })
+      );
+      assert.equal(
+        htmlAfterRecoverySuccess.includes('مواءمة مكتملة / ALIGNED'),
+        true
+      );
+      assert.equal(
+        htmlAfterRecoverySuccess.includes(
+          'data-testid="quarantine-legacy-recovery-inspection-section"'
+        ),
+        false
+      );
+      assert.equal(
+        htmlAfterRecoverySuccess.includes(
+          'data-testid="quarantine-case-alignment-hold-banner"'
+        ),
+        false
+      );
+      assert.equal(reconciledCallbackSnapshot, null);
+
+      // 13.3: Never falsely displays success from cached data if fresh post-recovery GET returns HOLD
+      let freshGetFailedGetCalls = 0;
+      const freshGetHoldController =
+        new LibraryQuarantineCatalogCaseAlignmentPanelController(owner, {
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+          invokeCallable: async (payload) => {
+            if (payload.action === 'getQuarantineCatalogCaseAlignment') {
+              freshGetFailedGetCalls += 1;
+              return makeServerGetHoldResponse({
+                receiptId: payload.receiptId,
+                documentId: INCIDENT_DOC_ID,
+                errorCode:
+                  freshGetFailedGetCalls === 1
+                    ? 'INCONSISTENT_ALIGNMENT_STATE'
+                    : 'BACKEND_UNAVAILABLE',
+                errorMessage:
+                  freshGetFailedGetCalls === 1
+                    ? 'Catalog document updatedAt does not match catalog handoff createdAt while no alignment record exists.'
+                    : 'Post-recovery fresh GET failed to reach backend.',
+              });
+            }
+            if (payload.action === 'inspectQuarantineLegacyCatalogRecovery') {
+              return validInspectZeroDiff;
+            }
+            if (payload.action === 'applyQuarantineLegacyCatalogRecovery') {
+              return makeIncidentRecoveryAlignSuccessResponse();
+            }
+            throw new Error('Unexpected action');
+          },
+        });
+
+      await freshGetHoldController.openPanelForCase(incidentCaseRev6);
+      await freshGetHoldController.inspectHistoricalRecoveryEvidence(
+        incidentCaseRev6
+      );
+      freshGetHoldController.setConfirmedLegacyRecoveryApply(true);
+      await freshGetHoldController.applyHistoricalRecovery(incidentCaseRev6);
+      assert.equal(freshGetFailedGetCalls, 2);
+      // Must NOT transition to 'ready' from the applyQuarantineLegacyCatalogRecovery response alone!
+      assert.equal(freshGetHoldController.getState().phase, 'hold');
+      assert.equal(freshGetHoldController.getState().snapshot, null);
+      assert.equal(
+        freshGetHoldController.getState().holdState?.errorCode,
+        'BACKEND_UNAVAILABLE'
+      );
+
+      // 13.4: UNKNOWN response on applyQuarantineLegacyCatalogRecovery locks alignment & recovery buttons
+      // and requires authoritative read-back (verifyAlignmentStatus) before any further action
+      let unknownFlowRecovered = false;
+      const unknownRecoveryController =
+        new LibraryQuarantineCatalogCaseAlignmentPanelController(owner, {
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+          invokeCallable: async (payload) => {
+            if (payload.action === 'getQuarantineCatalogCaseAlignment') {
+              if (!unknownFlowRecovered) {
+                return makeServerGetHoldResponse({
+                  receiptId: payload.receiptId,
+                  documentId: INCIDENT_DOC_ID,
+                  errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+                  errorMessage:
+                    'Catalog document updatedAt does not match catalog handoff createdAt while no alignment record exists.',
+                });
+              }
+              return makeIncidentPostRecoveryGetSuccessResponse();
+            }
+            if (payload.action === 'inspectQuarantineLegacyCatalogRecovery') {
+              return validInspectZeroDiff;
+            }
+            if (payload.action === 'applyQuarantineLegacyCatalogRecovery') {
+              unknownFlowRecovered = true;
+              throw new Error('Transport timeout after recovery commit');
+            }
+            throw new Error('Unexpected action');
+          },
+        });
+
+      await unknownRecoveryController.openPanelForCase(incidentCaseRev6);
+      await unknownRecoveryController.inspectHistoricalRecoveryEvidence(
+        incidentCaseRev6
+      );
+      unknownRecoveryController.setConfirmedLegacyRecoveryApply(true);
+      const unknownApplyRes =
+        await unknownRecoveryController.applyHistoricalRecovery(
+          incidentCaseRev6
+        );
+      assert.equal(unknownApplyRes?.status, 'UNKNOWN');
+      assert.equal(unknownRecoveryController.getState().phase, 'uncertain');
+      assert.equal(
+        unknownRecoveryController.getState().lastAlignmentOutcome,
+        'UNKNOWN'
+      );
+      assert.equal(
+        unknownRecoveryController.getState().lastAlignmentSaved,
+        null
+      );
+      assert.equal(
+        unknownRecoveryController.getHistoricalInspectionState().phase,
+        'idle'
+      );
+      assert.equal(
+        unknownRecoveryController.canInspectHistoricalRecoveryEvidence(),
+        false
+      );
+      assert.equal(
+        unknownRecoveryController.canApplyHistoricalRecovery(),
+        false
+      );
+
+      const htmlUnknownLocked = renderToStaticMarkup(
+        React.createElement(LibraryQuarantineCatalogCaseAlignmentPanel, {
+          controller: unknownRecoveryController,
+          currentUser: owner,
+          savedReviewCase: incidentCaseRev6,
+          envOverride: ALL_ALIGNMENT_FLAGS_ENABLED,
+        })
+      );
+      assert.equal(
+        htmlUnknownLocked.includes(
+          'data-testid="quarantine-catalog-case-alignment-uncertain-banner"'
+        ),
+        true
+      );
+      assert.equal(
+        htmlUnknownLocked.includes(
+          'data-testid="verify-quarantine-catalog-case-alignment-btn"'
+        ),
+        true
+      );
+      assert.equal(
+        htmlUnknownLocked.includes(
+          'data-testid="apply-quarantine-legacy-catalog-recovery-btn"'
+        ),
+        false
+      );
+      assert.equal(
+        htmlUnknownLocked.includes(
+          'data-testid="inspect-quarantine-legacy-catalog-recovery-btn"'
+        ),
+        false
+      );
+
+      // Authoritative read-back via verifyAlignmentStatus resolves UNKNOWN -> READY / ALIGNED
+      const verifyAfterUnknown =
+        await unknownRecoveryController.verifyAlignmentStatus();
+      assert.equal(verifyAfterUnknown?.ok, true);
+      assert.equal(unknownRecoveryController.getState().phase, 'ready');
+      assert.equal(
+        unknownRecoveryController.getState().snapshot?.alignmentState,
+        'ALIGNED'
+      );
+
+      console.log(
+        'CASE 13: LIB-QCAT-LEGACY-R2D authorized legacy catalog recovery execution, fresh GET read-back, UNKNOWN lock, and stale evidence invalidation verified.'
+      );
+    }
   }
 
   console.log('\nALL LIB-CASE-ALIGNMENT-LIVE-CONTRACT-REPAIR-01 CLIENT TESTS PASSED.');

@@ -2662,11 +2662,501 @@ async function runTests(): Promise<void> {
       console.log(
         'PASS 9: LIB-QCAT-LEGACY-R2B read-only legacy catalog recovery inspection verified.'
       );
+
+      // =========================================================================
+      // PASS 10: LIB-QCAT-LEGACY-R2D — Callable applyQuarantineLegacyCatalogRecovery
+      // =========================================================================
+      // 10.1: Callable applyQuarantineLegacyCatalogRecovery rejects missing, wrong, extra, or symbol fields with 0 reads/writes
+      {
+        const db = buildIncidentFixture();
+        db.resetCounters();
+
+        const validBasePayload = {
+          action: 'applyQuarantineLegacyCatalogRecovery',
+          receiptId: incidentReceiptId,
+          expectedCaseRevision: 6,
+          expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+          expectedAlignmentRevision: 0,
+          confirmation:
+            LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+          legacyUnattributedCatalogUpdateAcknowledgement:
+            LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+        };
+
+        const invalidPayloads: Array<Record<string, unknown>> = [
+          // Missing legacyUnattributedCatalogUpdateAcknowledgement
+          {
+            action: 'applyQuarantineLegacyCatalogRecovery',
+            receiptId: incidentReceiptId,
+            expectedCaseRevision: 6,
+            expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+            expectedAlignmentRevision: 0,
+            confirmation:
+              LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+          },
+          // Wrong legacyUnattributedCatalogUpdateAcknowledgement
+          {
+            ...validBasePayload,
+            legacyUnattributedCatalogUpdateAcknowledgement:
+              'APPLY_CASE_METADATA',
+          },
+          // Wrong confirmation
+          {
+            ...validBasePayload,
+            confirmation: 'ACKNOWLEDGE_UNATTRIBUTED_LEGACY_CATALOG_CHANGE',
+          },
+          // Extra field
+          {
+            ...validBasePayload,
+            extraField: true,
+          },
+          // Invalid receiptId
+          {
+            ...validBasePayload,
+            receiptId: 'invalid-receipt-id',
+          },
+          // Invalid expectedCaseRevision
+          {
+            ...validBasePayload,
+            expectedCaseRevision: 0,
+          },
+          // Invalid expectedCatalogUpdatedAt
+          {
+            ...validBasePayload,
+            expectedCatalogUpdatedAt: '   ',
+          },
+          // Invalid expectedAlignmentRevision
+          {
+            ...validBasePayload,
+            expectedAlignmentRevision: -1,
+          },
+        ];
+
+        for (const badData of invalidPayloads) {
+          await assert.rejects(
+            async () => {
+              await executeManageLibraryDocumentsRequest(
+                {
+                  auth: {
+                    uid: ownerAdmin.id,
+                    token: { email: ownerAdmin.email },
+                  },
+                  data: badData,
+                },
+                adminRepo,
+                dummyService,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                { draftDatabase: db }
+              );
+            },
+            (err: unknown) => {
+              assert.equal((err as { code?: string }).code, 'invalid-argument');
+              return true;
+            }
+          );
+        }
+
+        const payloadWithSymbol: Record<PropertyKey, unknown> = {
+          ...validBasePayload,
+        };
+        payloadWithSymbol[Symbol('injected')] = 'bad';
+        await assert.rejects(
+          async () => {
+            await executeManageLibraryDocumentsRequest(
+              {
+                auth: {
+                  uid: ownerAdmin.id,
+                  token: { email: ownerAdmin.email },
+                },
+                data: payloadWithSymbol,
+              },
+              adminRepo,
+              dummyService,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              { draftDatabase: db }
+            );
+          },
+          (err: unknown) => {
+            assert.equal((err as { code?: string }).code, 'invalid-argument');
+            return true;
+          }
+        );
+
+        assert.equal(db.pointGetCalls, 0);
+        assert.equal(db.transactionCount, 0);
+        assert.equal(db.txCreateCalls, 0);
+        assert.equal(db.txUpdateCalls, 0);
+      }
+
+      // 10.2: Callable applyQuarantineLegacyCatalogRecovery enforces release gates and Review+Create RBAC with 0 reads/writes
+      {
+        const db = buildIncidentFixture();
+        db.resetCounters();
+
+        // Unauthorized role (Review only, missing Create)
+        await assert.rejects(
+          async () => {
+            await executeManageLibraryDocumentsRequest(
+              {
+                auth: {
+                  uid: rightsReviewerOnly.id,
+                  token: { email: rightsReviewerOnly.email },
+                },
+                data: {
+                  action: 'applyQuarantineLegacyCatalogRecovery',
+                  receiptId: incidentReceiptId,
+                  expectedCaseRevision: 6,
+                  expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+                  expectedAlignmentRevision: 0,
+                  confirmation:
+                    LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+                  legacyUnattributedCatalogUpdateAcknowledgement:
+                    LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+                },
+              },
+              adminRepo,
+              dummyService,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              { draftDatabase: db }
+            );
+          },
+          (err: unknown) => {
+            assert.equal((err as { code?: string }).code, 'permission-denied');
+            return true;
+          }
+        );
+        assert.equal(db.pointGetCalls, 0);
+        assert.equal(db.transactionCount, 0);
+
+        // Release gate disabled
+        process.env[LIBRARY_CASE_ALIGNMENT_RELEASE_ENV_VAR] = 'false';
+        await assert.rejects(
+          async () => {
+            await executeManageLibraryDocumentsRequest(
+              {
+                auth: {
+                  uid: ownerAdmin.id,
+                  token: { email: ownerAdmin.email },
+                },
+                data: {
+                  action: 'applyQuarantineLegacyCatalogRecovery',
+                  receiptId: incidentReceiptId,
+                  expectedCaseRevision: 6,
+                  expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+                  expectedAlignmentRevision: 0,
+                  confirmation:
+                    LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+                  legacyUnattributedCatalogUpdateAcknowledgement:
+                    LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+                },
+              },
+              adminRepo,
+              dummyService,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              { draftDatabase: db }
+            );
+          },
+          (err: unknown) => {
+            assert.equal(
+              (err as { code?: string }).code,
+              'failed-precondition'
+            );
+            return true;
+          }
+        );
+        process.env[LIBRARY_CASE_ALIGNMENT_RELEASE_ENV_VAR] = 'true';
+        assert.equal(db.pointGetCalls, 0);
+        assert.equal(db.transactionCount, 0);
+      }
+
+      // 10.3: End-to-end Callable workflow for verified historical incident (GET HOLD -> INSPECT -> APPLY RECOVERY -> GET READY)
+      {
+        const db = buildIncidentFixture();
+
+        // Step A: Ordinary GET returns HOLD (INCONSISTENT_ALIGNMENT_STATE)
+        db.resetCounters();
+        const stepAGet = (await executeManageLibraryDocumentsRequest(
+          {
+            auth: {
+              uid: curatorWithCreate.id,
+              token: { email: curatorWithCreate.email },
+            },
+            data: {
+              action: 'getQuarantineCatalogCaseAlignment',
+              receiptId: incidentReceiptId,
+            },
+          },
+          adminRepo,
+          dummyService,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            draftDatabase: db,
+            caseAlignmentClock: () => recoveryClockIso,
+          }
+        )) as GetLibraryQuarantineCatalogCaseAlignmentResponse;
+        assert.equal(stepAGet.ok, false);
+        if (!stepAGet.ok) {
+          assert.equal(stepAGet.status, 'HOLD');
+          assert.equal(stepAGet.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+        }
+        assert.equal(db.transactionCount, 0);
+
+        // Step B: Read-only inspection returns INSPECTION_ONLY
+        db.resetCounters();
+        const stepBInspect = (await executeManageLibraryDocumentsRequest(
+          {
+            auth: {
+              uid: curatorWithCreate.id,
+              token: { email: curatorWithCreate.email },
+            },
+            data: {
+              action: 'inspectQuarantineLegacyCatalogRecovery',
+              receiptId: incidentReceiptId,
+            },
+          },
+          adminRepo,
+          dummyService,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            draftDatabase: db,
+            caseAlignmentClock: () => recoveryClockIso,
+          }
+        )) as InspectLibraryQuarantineLegacyCatalogRecoveryResponse;
+        assert.equal(stepBInspect.ok, true);
+        if (!stepBInspect.ok) {
+          throw new Error('Expected stepBInspect to succeed');
+        }
+        assert.equal(stepBInspect.status, 'INSPECTION_ONLY');
+        assert.equal(stepBInspect.currentHumanCaseRevision, 6);
+        assert.equal(stepBInspect.originalHandoffCaseRevision, 3);
+        assert.equal(stepBInspect.currentAlignmentRevision, 0);
+        assert.equal(stepBInspect.hasAlignmentRecord, false);
+        assert.equal(db.pointGetCalls, 14);
+        assert.equal(db.transactionCount, 0);
+
+        // Step C: Authorized recovery via applyQuarantineLegacyCatalogRecovery
+        db.resetCounters();
+        const stepCRecover = (await executeManageLibraryDocumentsRequest(
+          {
+            auth: {
+              uid: curatorWithCreate.id,
+              token: { email: curatorWithCreate.email },
+            },
+            data: {
+              action: 'applyQuarantineLegacyCatalogRecovery',
+              receiptId: stepBInspect.receiptId,
+              expectedCaseRevision: stepBInspect.currentHumanCaseRevision,
+              expectedCatalogUpdatedAt: stepBInspect.catalogUpdatedAt,
+              expectedAlignmentRevision: stepBInspect.currentAlignmentRevision,
+              confirmation:
+                LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+              legacyUnattributedCatalogUpdateAcknowledgement:
+                LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+            },
+          },
+          adminRepo,
+          dummyService,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            draftDatabase: db,
+            caseAlignmentClock: () => recoveryClockIso,
+          }
+        )) as AlignLibraryQuarantineCatalogCaseResponse;
+        assert.equal(stepCRecover.ok, true);
+        if (stepCRecover.ok) {
+          assert.equal(stepCRecover.status, 'ALIGNED');
+          assert.equal(stepCRecover.alignmentOutcome, 'ALIGNED');
+          assert.equal(stepCRecover.alignmentSaved, true);
+          assert.equal(stepCRecover.currentAlignmentRevision, 1);
+          assert.equal(stepCRecover.effectiveAlignedCaseRevision, 6);
+          assert.equal(stepCRecover.currentHumanCaseRevision, 6);
+          assert.equal(stepCRecover.catalogUpdatedAt, recoveryClockIso);
+          assert.equal(stepCRecover.isSanitized, false);
+          assert.equal(stepCRecover.isVerifiedSafe, false);
+          assert.equal(stepCRecover.isRightsApproved, false);
+          assert.equal(stepCRecover.isPublished, false);
+          assert.equal(stepCRecover.isReadyForPeia, false);
+        }
+        assert.equal(db.transactionCount, 1);
+        assert.equal(db.txGetCalls, 15);
+        assert.equal(db.txUpdateCalls, 1);
+        assert.equal(db.txCreateCalls, 2);
+
+        const updatedQcat = db.getRawDoc(
+          LIBRARY_DOCUMENTS_COLLECTION,
+          incidentDocId
+        ) as unknown as LibraryDocument;
+        assert.equal(updatedQcat.workflowState, WorkflowState.Draft);
+        assert.equal(
+          updatedQcat.rightsStatus,
+          LibraryRightsStatus.ReviewRequired
+        );
+
+        const createdEvent1Id =
+          deriveLibraryQuarantineCatalogCaseAlignmentEventId(
+            incidentReceiptId,
+            1
+          );
+        const rawEvent1 = db.getRawDoc(
+          LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENTS_COLLECTION,
+          createdEvent1Id
+        )!;
+        assert.equal(Object.keys(rawEvent1).length, 27);
+        assert.equal(
+          rawEvent1.reason,
+          LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON
+        );
+        assert.equal(
+          rawEvent1.historicalCatalogChangeAttribution,
+          LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS
+        );
+
+        // Step D: Subsequent ordinary GET returns READY / ALIGNED
+        db.resetCounters();
+        const stepDGet = (await executeManageLibraryDocumentsRequest(
+          {
+            auth: {
+              uid: curatorWithCreate.id,
+              token: { email: curatorWithCreate.email },
+            },
+            data: {
+              action: 'getQuarantineCatalogCaseAlignment',
+              receiptId: incidentReceiptId,
+            },
+          },
+          adminRepo,
+          dummyService,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            draftDatabase: db,
+            caseAlignmentClock: () => recoveryClockIso,
+          }
+        )) as GetLibraryQuarantineCatalogCaseAlignmentResponse;
+        assert.equal(stepDGet.ok, true);
+        if (stepDGet.ok) {
+          assert.equal(stepDGet.status, 'READY');
+          assert.equal(stepDGet.alignmentState, 'ALIGNED');
+          assert.equal(stepDGet.currentAlignmentRevision, 1);
+          assert.equal(stepDGet.effectiveAlignedCaseRevision, 6);
+          assert.equal(stepDGet.diff.hasAnyDifference, false);
+        }
+        assert.equal(db.pointGetCalls, 7);
+        assert.equal(db.transactionCount, 0);
+      }
+
+      // 10.4: Stale CAS tokens and post-stage commit uncertainty through Callable applyQuarantineLegacyCatalogRecovery
+      {
+        const db = buildIncidentFixture();
+
+        // Stale expectedCaseRevision (5 instead of 6) -> CONFLICT with 0 writes
+        db.resetCounters();
+        const staleRevRes = (await executeManageLibraryDocumentsRequest(
+          {
+            auth: {
+              uid: ownerAdmin.id,
+              token: { email: ownerAdmin.email },
+            },
+            data: {
+              action: 'applyQuarantineLegacyCatalogRecovery',
+              receiptId: incidentReceiptId,
+              expectedCaseRevision: 5,
+              expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+              expectedAlignmentRevision: 0,
+              confirmation:
+                LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+              legacyUnattributedCatalogUpdateAcknowledgement:
+                LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+            },
+          },
+          adminRepo,
+          dummyService,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            draftDatabase: db,
+            caseAlignmentClock: () => recoveryClockIso,
+          }
+        )) as AlignLibraryQuarantineCatalogCaseResponse;
+        assert.equal(staleRevRes.ok, false);
+        assert.equal(staleRevRes.status, 'CONFLICT');
+        assert.equal(db.txCreateCalls, 0);
+        assert.equal(db.txUpdateCalls, 0);
+
+        // Post-stage commit failure -> UNKNOWN
+        db.onAfterTransactionWritesStagedHook = () => {
+          throw new Error('Simulated commit network drop');
+        };
+        const unknownRes = (await executeManageLibraryDocumentsRequest(
+          {
+            auth: {
+              uid: ownerAdmin.id,
+              token: { email: ownerAdmin.email },
+            },
+            data: {
+              action: 'applyQuarantineLegacyCatalogRecovery',
+              receiptId: incidentReceiptId,
+              expectedCaseRevision: 6,
+              expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+              expectedAlignmentRevision: 0,
+              confirmation:
+                LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+              legacyUnattributedCatalogUpdateAcknowledgement:
+                LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+            },
+          },
+          adminRepo,
+          dummyService,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          {
+            draftDatabase: db,
+            caseAlignmentClock: () => recoveryClockIso,
+          }
+        )) as AlignLibraryQuarantineCatalogCaseResponse;
+        assert.equal(unknownRes.ok, false);
+        assert.equal(unknownRes.status, 'UNKNOWN');
+        if (!unknownRes.ok && unknownRes.status === 'UNKNOWN') {
+          assert.equal(unknownRes.errorCode, 'TRANSACTION_COMMIT_UNCERTAIN');
+          assert.equal(unknownRes.alignmentSaved, null);
+        }
+      }
+
+      console.log(
+        'PASS 10: LIB-QCAT-LEGACY-R2D callable applyQuarantineLegacyCatalogRecovery verified.'
+      );
     }
   }
 
   console.log(
-    '\nALL LIB-FILE-CASE-ALIGNMENT-01 BACKEND TESTS PASSED (9/9).'
+    '\nALL LIB-FILE-CASE-ALIGNMENT-01 BACKEND TESTS PASSED (10/10).'
   );
 }
 

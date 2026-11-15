@@ -73,6 +73,9 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
             caseUpdatedAt: null,
             inFlight: false,
             evidence: null,
+            confirmedLegacyRecoveryApply: false,
+            applyingRecovery: false,
+            recoveryError: null,
             holdState: null,
           }
     );
@@ -233,6 +236,19 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
     (latestInspectionState.phase === 'inspecting' ||
       latestInspectionState.inFlight);
 
+  const isApplyingHistoricalRecovery =
+    isInspectionContextValid &&
+    Boolean(latestInspectionState.applyingRecovery);
+
+  const canApplyHistoricalRecovery =
+    Boolean(activeInspectionEvidence) &&
+    !state.inFlight &&
+    !isInspectingHistoricalEvidence &&
+    !isApplyingHistoricalRecovery &&
+    !hasAnyUnsavedCaseEdits &&
+    state.uncertainState === null &&
+    state.conflictState === null;
+
   const handleOpenOrRetryClick = async () => {
     const nextState = await controller.openPanelForCase(savedReviewCase, {
       hasUnsavedCaseEdits,
@@ -246,11 +262,37 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
     if (
       !canInspectHistoricalEvidence ||
       isInspectingHistoricalEvidence ||
+      isApplyingHistoricalRecovery ||
       typeof controller.inspectHistoricalRecoveryEvidence !== 'function'
     ) {
       return;
     }
     await controller.inspectHistoricalRecoveryEvidence(savedReviewCase);
+  };
+
+  const handleLegacyRecoveryConfirmChange = (checked: boolean) => {
+    if (
+      !canApplyHistoricalRecovery ||
+      typeof controller.setConfirmedLegacyRecoveryApply !== 'function'
+    ) {
+      return;
+    }
+    controller.setConfirmedLegacyRecoveryApply(checked);
+  };
+
+  const handleApplyLegacyRecoveryClick = async () => {
+    if (
+      !canApplyHistoricalRecovery ||
+      !latestInspectionState.confirmedLegacyRecoveryApply ||
+      typeof controller.applyHistoricalRecovery !== 'function'
+    ) {
+      return;
+    }
+    const result = await controller.applyHistoricalRecovery(savedReviewCase);
+    const latest = controller.getState().snapshot;
+    if (result && result.ok && latest && onAlignmentReconciled) {
+      onAlignmentReconciled(latest);
+    }
   };
 
   const handleVerifyClick = async () => {
@@ -800,6 +842,92 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
                   );
                 }
               )}
+            </div>
+
+            <div
+              className="rounded-lg border border-amber-400 bg-amber-50/80 p-3.5 space-y-3 text-xs text-amber-950"
+              data-testid="quarantine-legacy-recovery-execution-section"
+            >
+              <div className="space-y-1">
+                <div className="font-bold flex items-center gap-1.5 text-amber-950">
+                  <ShieldAlert className="w-4 h-4 text-amber-800 shrink-0" />
+                  <span>
+                    {isAr
+                      ? 'تفويض بشري منفصل لتطبيق استعادة ومواءمة المسودة التاريخية / Separate Human Authorization for Legacy Catalog Recovery'
+                      : 'Separate Human Authorization for Legacy Catalog Recovery / تفويض بشري منفصل لتطبيق الاستعادة'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-amber-900">
+                  {isAr
+                    ? `يتطلب تطبيق هذه الاستعادة الاستثنائية إقراراً صريحاً بالتعديل التاريخي غير المنسوب (${activeInspectionEvidence.historicalCatalogChangeAttribution} بتاريخ ${activeInspectionEvidence.catalogUpdatedAt}) وتفويض مواءمة الحقول الأربعة الثنائية اللغة من مراجعة ملف المراجعة البشري المحفوظة (v${activeInspectionEvidence.currentHumanCaseRevision}) مع حفظ نسخة كاملة من بيانات مسودة الفهرس قبل الاستعادة في سجل التدقيق.`
+                    : `Applying this exceptional recovery requires explicit acknowledgement of the unattributed historical catalog modification (${activeInspectionEvidence.historicalCatalogChangeAttribution} at ${activeInspectionEvidence.catalogUpdatedAt}) and authorization to align the four bilingual editorial fields from saved human review case v${activeInspectionEvidence.currentHumanCaseRevision} while preserving the pre-recovery catalog snapshot in the audit trail.`}
+                </p>
+              </div>
+
+              {latestInspectionState.recoveryError && (
+                <div
+                  className="rounded border border-red-300 bg-red-50 px-2.5 py-1.5 text-[11px] font-medium text-red-900"
+                  role="alert"
+                  data-testid="quarantine-legacy-recovery-error-banner"
+                >
+                  {latestInspectionState.recoveryError}
+                </div>
+              )}
+
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={Boolean(
+                    latestInspectionState.confirmedLegacyRecoveryApply
+                  )}
+                  disabled={!canApplyHistoricalRecovery}
+                  onChange={(e) => {
+                    handleLegacyRecoveryConfirmChange(e.target.checked);
+                  }}
+                  data-testid="confirm-quarantine-legacy-catalog-recovery-checkbox"
+                  className="mt-0.5 rounded border-amber-400 text-amber-800 focus:ring-amber-600 disabled:opacity-50"
+                />
+                <span className="text-[11px] font-medium text-amber-950 leading-relaxed">
+                  {isAr
+                    ? `أقر بأن تعديل مسودة الفهرس السابق (${activeInspectionEvidence.catalogUpdatedAt}) غير منسوب (${activeInspectionEvidence.historicalCatalogChangeAttribution}) وأفوض تطبيق بيانات ملف المراجعة البشري المحفوظة (v${activeInspectionEvidence.currentHumanCaseRevision}) وإنشاء سجل المواءمة الأولي (APPLY_CASE_METADATA + ACKNOWLEDGE_UNATTRIBUTED_LEGACY_CATALOG_CHANGE).`
+                    : `I acknowledge the unattributed historical catalog modification (${activeInspectionEvidence.catalogUpdatedAt}, ${activeInspectionEvidence.historicalCatalogChangeAttribution}) and authorize applying saved human review case v${activeInspectionEvidence.currentHumanCaseRevision} metadata and creating the initial alignment record (APPLY_CASE_METADATA + ACKNOWLEDGE_UNATTRIBUTED_LEGACY_CATALOG_CHANGE).`}
+                </span>
+              </label>
+
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleApplyLegacyRecoveryClick();
+                  }}
+                  disabled={
+                    !canApplyHistoricalRecovery ||
+                    !latestInspectionState.confirmedLegacyRecoveryApply
+                  }
+                  data-testid="apply-quarantine-legacy-catalog-recovery-btn"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-amber-800 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-amber-900 disabled:opacity-50"
+                >
+                  {isApplyingHistoricalRecovery ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>
+                        {isAr
+                          ? 'جاري تطبيق الاستعادة والتحقق... / Applying Recovery & Verifying...'
+                          : 'Applying Recovery & Verifying... / جاري تطبيق الاستعادة والتحقق...'}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldAlert className="w-3.5 h-3.5" />
+                      <span>
+                        {isAr
+                          ? 'تطبيق الاستعادة المعتمدة ومواءمة المسودة / Apply Authorized Legacy Catalog Recovery'
+                          : 'Apply Authorized Legacy Catalog Recovery / تطبيق الاستعادة المعتمدة ومواءمة المسودة'}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         )}
