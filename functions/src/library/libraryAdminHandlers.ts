@@ -114,6 +114,9 @@ import {
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
   type AlignLibraryQuarantineCatalogCaseResponseDto,
   type GetLibraryQuarantineCatalogCaseAlignmentResponseDto,
+  type InspectLibraryQuarantineLegacyCatalogRecoveryHoldDto,
+  type InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto,
+  type InspectLibraryQuarantineLegacyCatalogRecoverySuccessDto,
   type LibraryQuarantineCatalogCaseFourFieldDiffDto,
   type SanitizedLibraryQuarantineCatalogCaseAlignmentDto,
 } from './libraryQuarantineCatalogCaseAlignmentService';
@@ -175,6 +178,9 @@ export type {
   SaveLibraryQuarantineRightsDecisionResponseDto,
   AlignLibraryQuarantineCatalogCaseResponseDto,
   GetLibraryQuarantineCatalogCaseAlignmentResponseDto,
+  InspectLibraryQuarantineLegacyCatalogRecoveryHoldDto,
+  InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto,
+  InspectLibraryQuarantineLegacyCatalogRecoverySuccessDto,
   LibraryQuarantineCatalogCaseFourFieldDiffDto,
   SanitizedLibraryQuarantineCatalogCaseAlignmentDto,
   GetLibraryQuarantineBinarySafetyCaseResponseDto,
@@ -307,6 +313,9 @@ const SAVE_QUARANTINE_RIGHTS_DECISION_ALLOWED_KEYS: ReadonlySet<string> =
   ]);
 
 const GET_QUARANTINE_CATALOG_CASE_ALIGNMENT_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set(['action', 'receiptId']);
+
+const INSPECT_QUARANTINE_LEGACY_CATALOG_RECOVERY_ALLOWED_KEYS: ReadonlySet<string> =
   new Set(['action', 'receiptId']);
 
 const ALIGN_QUARANTINE_CATALOG_CASE_ALLOWED_KEYS: ReadonlySet<string> =
@@ -2257,6 +2266,7 @@ export async function executeManageLibraryDocumentsRequest(
 
   if (
     action === 'getQuarantineCatalogCaseAlignment' ||
+    action === 'inspectQuarantineLegacyCatalogRecovery' ||
     action === 'alignQuarantineCatalogCase'
   ) {
     assertCaseAlignmentReleaseGatesEnabled(quarantineWorkbenchOptions);
@@ -2265,7 +2275,9 @@ export async function executeManageLibraryDocumentsRequest(
     const allowedKeys =
       action === 'getQuarantineCatalogCaseAlignment'
         ? GET_QUARANTINE_CATALOG_CASE_ALIGNMENT_ALLOWED_KEYS
-        : ALIGN_QUARANTINE_CATALOG_CASE_ALLOWED_KEYS;
+        : action === 'inspectQuarantineLegacyCatalogRecovery'
+          ? INSPECT_QUARANTINE_LEGACY_CATALOG_RECOVERY_ALLOWED_KEYS
+          : ALIGN_QUARANTINE_CATALOG_CASE_ALLOWED_KEYS;
 
     const validatedPayload = assertStrictAllowedCallerKeys(
       requestContext?.data,
@@ -2447,6 +2459,14 @@ export async function executeManageLibraryDocumentsRequest(
 
     if (action === 'getQuarantineCatalogCaseAlignment') {
       return caseAlignmentService.getQuarantineCatalogCaseAlignment(
+        Object.freeze({
+          receiptId: validatedPayload.receiptId,
+        })
+      );
+    }
+
+    if (action === 'inspectQuarantineLegacyCatalogRecovery') {
+      return caseAlignmentService.inspectQuarantineLegacyCatalogRecovery(
         Object.freeze({
           receiptId: validatedPayload.receiptId,
         })

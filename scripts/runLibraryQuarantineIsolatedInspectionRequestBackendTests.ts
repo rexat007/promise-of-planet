@@ -888,7 +888,7 @@ const READ_ONLY_MANIFEST_EXPECTED_BLOBS: ReadonlyArray<
   ],
   [
     'functions/src/library/libraryQuarantineCatalogCaseAlignmentService.ts',
-    'a47f8a753ba9e4a84c68b67b9f1048b116eaf75f',
+    'e7acac996e3476ef7925a47f7427257a84a8b874',
   ],
   [
     'functions/src/library/libraryQuarantineRightsDecisionService.ts',

@@ -295,6 +295,48 @@ export type GetLibraryQuarantineCatalogCaseAlignmentResponseDto =
   | GetLibraryQuarantineCatalogCaseAlignmentSuccessDto
   | GetLibraryQuarantineCatalogCaseAlignmentHoldDto;
 
+export interface InspectLibraryQuarantineLegacyCatalogRecoverySuccessDto {
+  readonly ok: true;
+  readonly status: 'INSPECTION_ONLY';
+  readonly receiptId: string;
+  readonly documentId: string;
+  readonly sourceRevision: number;
+  readonly originalHandoffCaseRevision: number;
+  readonly originalHandoffCaseUpdatedAt: string;
+  readonly originalHandoffCreatedAt: string;
+  readonly currentHumanCaseRevision: number;
+  readonly currentHumanCaseUpdatedAt: string;
+  readonly catalogUpdatedAt: string;
+  readonly currentAlignmentRevision: 0;
+  readonly hasAlignmentRecord: false;
+  readonly alignment: null;
+  readonly historicalCatalogChangeAttribution: typeof LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS;
+  readonly historicalChainVerified: true;
+  readonly verifiedHumanReviewEventCount: number;
+  readonly recoveryApplied: false;
+  readonly requiresSeparateHumanAuthorization: true;
+  readonly diff: LibraryQuarantineCatalogCaseFourFieldDiffDto;
+  readonly handoff: SanitizedLibraryQuarantineCatalogHandoffDto;
+  readonly catalogDocument: SanitizedLibraryQuarantineCatalogDocumentDto;
+  readonly humanReviewCase: SanitizedLibraryQuarantineHumanReviewCaseDto;
+  readonly hasRecordedRightsDecision: boolean;
+  readonly recordedRightsDecisionCaseRevision: number | null;
+  readonly rightsDecisionInvalidatedByCaseChange: boolean;
+  readonly requiresFreshRightsReview: boolean;
+  readonly isSanitized: false;
+  readonly isVerifiedSafe: false;
+  readonly isRightsApproved: false;
+  readonly isPublished: false;
+  readonly isReadyForPeia: false;
+}
+
+export type InspectLibraryQuarantineLegacyCatalogRecoveryHoldDto =
+  GetLibraryQuarantineCatalogCaseAlignmentHoldDto;
+
+export type InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto =
+  | InspectLibraryQuarantineLegacyCatalogRecoverySuccessDto
+  | InspectLibraryQuarantineLegacyCatalogRecoveryHoldDto;
+
 export interface AlignLibraryQuarantineCatalogCaseSuccessDto {
   readonly ok: true;
   readonly status: 'ALIGNED' | 'ALREADY_ALIGNED';
@@ -2193,6 +2235,270 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
         receiptId,
         'ALIGNMENT_PERSISTENCE_FAILED',
         'Failed to load quarantine catalog case alignment snapshot.'
+      );
+    }
+  }
+
+  async inspectQuarantineLegacyCatalogRecovery(
+    rawInput: unknown
+  ): Promise<InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto> {
+    if (
+      !isPlainRecord(rawInput) ||
+      !hasOnlyAllowedKeys(rawInput, ALLOWED_GET_INPUT_KEYS)
+    ) {
+      return makeGetHoldDto(
+        null,
+        'INVALID_ALIGNMENT_PAYLOAD',
+        'inspectQuarantineLegacyCatalogRecovery requires { receiptId } only.'
+      );
+    }
+
+    const rawReceiptId = rawInput.receiptId;
+    if (
+      typeof rawReceiptId !== 'string' ||
+      rawReceiptId.trim() !== rawReceiptId ||
+      !isValidLibraryQuarantineReceiptId(rawReceiptId)
+    ) {
+      return makeGetHoldDto(
+        null,
+        'INVALID_RECEIPT_ID',
+        'receiptId must be a valid quarantine receipt ID.'
+      );
+    }
+    const receiptId = rawReceiptId;
+
+    const authResult = await this.resolveAuthorizedActor();
+    if (!authResult.ok) {
+      return makeGetHoldDto(
+        receiptId,
+        authResult.errorCode,
+        authResult.errorMessage
+      );
+    }
+
+    try {
+      const documentId = deriveQuarantineCatalogDocumentId(receiptId);
+      const receiptRef = this.db
+        .collection(LIBRARY_QUARANTINE_RECEIPT_COLLECTION)
+        .doc(receiptId);
+      const draftRef = this.db
+        .collection(LIBRARY_QUARANTINE_REVIEW_DRAFT_COLLECTION)
+        .doc(receiptId);
+      const caseRef = this.db
+        .collection(LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION)
+        .doc(receiptId);
+      const handoffRef = this.db
+        .collection(LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION)
+        .doc(receiptId);
+      const docRef = this.db
+        .collection(LIBRARY_DOCUMENTS_COLLECTION)
+        .doc(documentId);
+      const alignmentRef = this.db
+        .collection(LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION)
+        .doc(receiptId);
+      const rightsDecisionRef = this.db
+        .collection(LIBRARY_QUARANTINE_RIGHTS_DECISIONS_COLLECTION)
+        .doc(receiptId);
+
+      const readPointDocSnapshot = (
+        ref: LibraryQuarantineFirestoreDocumentRef
+      ): Promise<LibraryQuarantineFirestoreDocumentSnapshot> => {
+        if (!ref || typeof ref.get !== 'function') {
+          return Promise.reject(
+            new Error(
+              'INVALID_POINT_DOC_REF: Firestore document reference does not expose a point get() method.'
+            )
+          );
+        }
+        return ref.get();
+      };
+
+      // 7 base point reads, 0 writes
+      const [
+        receiptSnap,
+        draftSnap,
+        caseSnap,
+        handoffSnap,
+        docSnap,
+        alignmentSnap,
+        rightsDecisionSnap,
+      ] = await Promise.all([
+        readPointDocSnapshot(receiptRef),
+        readPointDocSnapshot(draftRef),
+        readPointDocSnapshot(caseRef),
+        readPointDocSnapshot(handoffRef),
+        readPointDocSnapshot(docRef),
+        readPointDocSnapshot(alignmentRef),
+        readPointDocSnapshot(rightsDecisionRef),
+      ]);
+
+      if (alignmentSnap.exists) {
+        return makeGetHoldDto(
+          receiptId,
+          'INCONSISTENT_ALIGNMENT_STATE',
+          'Legacy recovery inspection is forbidden when a catalog case alignment record already exists.'
+        );
+      }
+
+      const verified = verifyAlignmentChainSnapshots(
+        receiptId,
+        receiptSnap,
+        draftSnap,
+        caseSnap,
+        handoffSnap,
+        docSnap,
+        alignmentSnap,
+        rightsDecisionSnap,
+        { allowLegacyUnattributedRecovery: true }
+      );
+      if (!verified.ok) {
+        return makeGetHoldDto(
+          receiptId,
+          verified.errorCode,
+          verified.errorMessage
+        );
+      }
+
+      const s = verified.snapshot;
+
+      if (
+        s.sanitizedCatalogDocument.updatedAt === s.catalogHandoff.createdAt ||
+        Date.parse(s.sanitizedCatalogDocument.updatedAt) <=
+          Date.parse(s.catalogHandoff.createdAt)
+      ) {
+        return makeGetHoldDto(
+          receiptId,
+          'INCONSISTENT_ALIGNMENT_STATE',
+          'Catalog document was not modified after original catalog handoff creation.'
+        );
+      }
+
+      if (
+        s.humanReviewCase.revision >
+        LIBRARY_QUARANTINE_LEGACY_RECOVERY_MAX_CASE_REVISIONS
+      ) {
+        return makeGetHoldDto(
+          receiptId,
+          'INCONSISTENT_ALIGNMENT_STATE',
+          `Human review case revision exceeds the bounded legacy recovery verification limit (${LIBRARY_QUARANTINE_LEGACY_RECOVERY_MAX_CASE_REVISIONS}).`
+        );
+      }
+
+      const handoffEventRef = this.db
+        .collection(LIBRARY_QUARANTINE_CATALOG_HANDOFF_EVENTS_COLLECTION)
+        .doc(receiptId);
+      const humanReviewEventRefs = Array.from(
+        { length: s.humanReviewCase.revision },
+        (_, idx) =>
+          this.db
+            .collection(LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION)
+            .doc(deriveLibraryQuarantineHumanReviewEventId(receiptId, idx + 1))
+      );
+
+      // 1 + N historical audit point reads, 0 writes
+      const [handoffEventSnap, ...humanReviewEventSnaps] = await Promise.all([
+        readPointDocSnapshot(handoffEventRef),
+        ...humanReviewEventRefs.map((ref) => readPointDocSnapshot(ref)),
+      ]);
+
+      const auditVerification = verifyLegacyRecoveryHistoricalAuditChain(
+        receiptId,
+        s,
+        handoffEventSnap,
+        humanReviewEventSnaps
+      );
+      if (!auditVerification.ok) {
+        return makeGetHoldDto(
+          receiptId,
+          auditVerification.errorCode,
+          auditVerification.errorMessage
+        );
+      }
+
+      const rawPreTitleAr = s.rawCatalogDocument.titleAr;
+      const rawPreTitleEn = s.rawCatalogDocument.titleEn;
+      const rawPreSummaryAr = s.rawCatalogDocument.summaryAr;
+      const rawPreSummaryEn = s.rawCatalogDocument.summaryEn;
+      if (
+        typeof rawPreTitleAr !== 'string' ||
+        rawPreTitleAr.trim() !== rawPreTitleAr ||
+        !isSafeEditorialText(rawPreTitleAr, 300, false) ||
+        typeof rawPreTitleEn !== 'string' ||
+        rawPreTitleEn.trim() !== rawPreTitleEn ||
+        !isSafeEditorialText(rawPreTitleEn, 300, false) ||
+        typeof rawPreSummaryAr !== 'string' ||
+        rawPreSummaryAr.trim() !== rawPreSummaryAr ||
+        !isSafeEditorialText(rawPreSummaryAr, 2000, true) ||
+        typeof rawPreSummaryEn !== 'string' ||
+        rawPreSummaryEn.trim() !== rawPreSummaryEn ||
+        !isSafeEditorialText(rawPreSummaryEn, 2000, true)
+      ) {
+        return makeGetHoldDto(
+          receiptId,
+          'INVALID_CATALOG_DOCUMENT_STATE',
+          'Pre-recovery catalog document editorial fields failed strict plain-text validation.'
+        );
+      }
+
+      if (
+        !isSafeEditorialText(s.humanReviewCase.titleAr.trim(), 300, false) ||
+        !isSafeEditorialText(s.humanReviewCase.titleEn.trim(), 300, false) ||
+        !isSafeEditorialText(s.humanReviewCase.summaryAr.trim(), 2000, true) ||
+        !isSafeEditorialText(s.humanReviewCase.summaryEn.trim(), 2000, true)
+      ) {
+        return makeGetHoldDto(
+          receiptId,
+          'CATALOG_DOCUMENT_VALIDATION_FAILED',
+          'All four bilingual editorial fields (titleAr, titleEn, summaryAr, summaryEn) must be non-empty plain text in the saved human review case.'
+        );
+      }
+
+      return Object.freeze({
+        ok: true,
+        status: 'INSPECTION_ONLY',
+        receiptId,
+        documentId,
+        sourceRevision: s.receiptEnvelope.revision,
+        originalHandoffCaseRevision: s.catalogHandoff.caseRevision,
+        originalHandoffCaseUpdatedAt: s.catalogHandoff.caseUpdatedAt,
+        originalHandoffCreatedAt: s.catalogHandoff.createdAt,
+        currentHumanCaseRevision: s.humanReviewCase.revision,
+        currentHumanCaseUpdatedAt: s.humanReviewCase.updatedAt,
+        catalogUpdatedAt: s.sanitizedCatalogDocument.updatedAt,
+        currentAlignmentRevision: 0,
+        hasAlignmentRecord: false,
+        alignment: null,
+        historicalCatalogChangeAttribution:
+          LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS,
+        historicalChainVerified: true,
+        verifiedHumanReviewEventCount: s.humanReviewCase.revision,
+        recoveryApplied: false,
+        requiresSeparateHumanAuthorization: true,
+        diff: s.diff,
+        handoff: toSanitizedLibraryQuarantineCatalogHandoffDto(
+          s.catalogHandoff
+        ),
+        catalogDocument: s.sanitizedCatalogDocument,
+        humanReviewCase: toSanitizedLibraryQuarantineHumanReviewCaseDto(
+          s.humanReviewCase
+        ),
+        hasRecordedRightsDecision: s.hasRecordedRightsDecision,
+        recordedRightsDecisionCaseRevision:
+          s.recordedRightsDecisionCaseRevision,
+        rightsDecisionInvalidatedByCaseChange:
+          s.rightsDecisionInvalidatedByCaseChange,
+        requiresFreshRightsReview: s.requiresFreshRightsReview,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      });
+    } catch {
+      return makeGetHoldDto(
+        receiptId,
+        'ALIGNMENT_PERSISTENCE_FAILED',
+        'Failed to inspect quarantine legacy catalog recovery snapshot.'
       );
     }
   }

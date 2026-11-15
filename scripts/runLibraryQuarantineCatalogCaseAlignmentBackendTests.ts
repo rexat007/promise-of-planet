@@ -2049,10 +2049,624 @@ async function runTests(): Promise<void> {
     console.log(
       'PASS 8: Exceptional server-side legacy unattributed catalog draft recovery guard and historical audit chain verification passed.'
     );
+
+    // =========================================================================
+    // PASS 9: LIB-QCAT-LEGACY-R2B — Read-Only Legacy Recovery Inspection
+    // =========================================================================
+    {
+      // 9.1: Read-only recovery inspection on the 6-revision incident fixture performs 7 + 1 + 6 = 14 point reads and 0 writes
+      {
+        const db = buildIncidentFixture();
+        const service = makeServiceForDb(db, ownerAdmin, recoveryClockIso);
+        db.resetCounters();
+
+        const inspectRes =
+          await service.inspectQuarantineLegacyCatalogRecovery({
+            receiptId: incidentReceiptId,
+          });
+
+        assert.equal(inspectRes.ok, true);
+        if (inspectRes.ok) {
+          assert.equal(inspectRes.status, 'INSPECTION_ONLY');
+          assert.equal(inspectRes.receiptId, incidentReceiptId);
+          assert.equal(inspectRes.documentId, incidentDocId);
+          assert.equal(inspectRes.sourceRevision, 1);
+          assert.equal(inspectRes.originalHandoffCaseRevision, 3);
+          assert.equal(
+            inspectRes.originalHandoffCaseUpdatedAt,
+            handoffCaseUpdatedAt
+          );
+          assert.equal(inspectRes.originalHandoffCreatedAt, handoffCreatedAt);
+          assert.equal(inspectRes.currentHumanCaseRevision, 6);
+          assert.equal(inspectRes.currentHumanCaseUpdatedAt, rev6UpdatedAt);
+          assert.equal(inspectRes.catalogUpdatedAt, legacyCatalogUpdatedAt);
+          assert.equal(inspectRes.currentAlignmentRevision, 0);
+          assert.equal(inspectRes.hasAlignmentRecord, false);
+          assert.equal(inspectRes.alignment, null);
+          assert.equal(
+            inspectRes.historicalCatalogChangeAttribution,
+            LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS
+          );
+          assert.equal(inspectRes.historicalChainVerified, true);
+          assert.equal(inspectRes.verifiedHumanReviewEventCount, 6);
+          assert.equal(inspectRes.recoveryApplied, false);
+          assert.equal(inspectRes.requiresSeparateHumanAuthorization, true);
+          assert.equal(inspectRes.diff.hasAnyDifference, false);
+          assert.equal(
+            inspectRes.diff.fields.titleAr.caseValue,
+            'إطار حماية البيئة البحرية والساحلية 2026'
+          );
+          assert.equal(
+            inspectRes.diff.fields.titleAr.catalogValue,
+            'إطار حماية البيئة البحرية والساحلية 2026'
+          );
+          assert.equal(inspectRes.handoff.receiptId, incidentReceiptId);
+          assert.equal(inspectRes.handoff.caseRevision, 3);
+          assert.equal(inspectRes.catalogDocument.id, incidentDocId);
+          assert.equal(
+            inspectRes.catalogDocument.updatedAt,
+            legacyCatalogUpdatedAt
+          );
+          assert.equal(inspectRes.humanReviewCase.revision, 6);
+          assert.equal(inspectRes.hasRecordedRightsDecision, false);
+          assert.equal(inspectRes.recordedRightsDecisionCaseRevision, null);
+          assert.equal(inspectRes.rightsDecisionInvalidatedByCaseChange, false);
+          assert.equal(inspectRes.requiresFreshRightsReview, true);
+          assert.equal(inspectRes.isSanitized, false);
+          assert.equal(inspectRes.isVerifiedSafe, false);
+          assert.equal(inspectRes.isRightsApproved, false);
+          assert.equal(inspectRes.isPublished, false);
+          assert.equal(inspectRes.isReadyForPeia, false);
+        }
+
+        assert.equal(
+          db.pointGetCalls,
+          14,
+          'Read-only inspection on 6-revision incident must perform 7 + 1 + 6 = 14 point reads'
+        );
+        assert.equal(db.transactionCount, 0);
+        assert.equal(db.txGetCalls, 0);
+        assert.equal(db.txCreateCalls, 0);
+        assert.equal(db.txUpdateCalls, 0);
+        assert.equal(db.txSetCalls, 0);
+
+        // Verify zero secret leakage in serialized DTO
+        const serializedDto = JSON.stringify(inspectRes);
+        assert.equal(serializedDto.includes(sha256), false);
+        assert.equal(serializedDto.includes('sourceSha256'), false);
+        assert.equal(serializedDto.includes('storagePath'), false);
+        assert.equal(serializedDto.includes('library/quarantine/'), false);
+        assert.equal(serializedDto.includes('1731500000001'), false);
+        assert.equal(serializedDto.includes('generation'), false);
+        assert.equal(serializedDto.includes(ownerAdmin.id), false);
+        assert.equal(serializedDto.includes(ownerAdmin.email), false);
+        assert.equal(serializedDto.includes('actorUid'), false);
+        assert.equal(serializedDto.includes('createdBy'), false);
+        assert.equal(serializedDto.includes('updatedBy'), false);
+
+        // Verify no alignment or event document was created and qcat doc was untouched
+        assert.equal(
+          db.getRawDoc(
+            LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
+            incidentReceiptId
+          ),
+          undefined
+        );
+        assert.equal(
+          db.getRawDoc(
+            LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENTS_COLLECTION,
+            deriveLibraryQuarantineCatalogCaseAlignmentEventId(
+              incidentReceiptId,
+              1
+            )
+          ),
+          undefined
+        );
+        const qcatDocAfterInspect = db.getRawDoc(
+          LIBRARY_DOCUMENTS_COLLECTION,
+          incidentDocId
+        ) as unknown as LibraryDocument;
+        assert.equal(qcatDocAfterInspect.updatedAt, legacyCatalogUpdatedAt);
+
+        // Ordinary GET and ordinary ALIGN still return HOLD after inspection
+        db.resetCounters();
+        const postInspectGet = await service.getQuarantineCatalogCaseAlignment({
+          receiptId: incidentReceiptId,
+        });
+        assert.equal(postInspectGet.ok, false);
+        if (!postInspectGet.ok) {
+          assert.equal(postInspectGet.status, 'HOLD');
+          assert.equal(postInspectGet.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+        }
+        assert.equal(db.pointGetCalls, 7);
+
+        db.resetCounters();
+        const postInspectOrdinaryAlign =
+          await service.alignQuarantineCatalogCase({
+            receiptId: incidentReceiptId,
+            expectedCaseRevision: 6,
+            expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+            expectedAlignmentRevision: 0,
+            confirmation:
+              LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+          });
+        assert.equal(postInspectOrdinaryAlign.ok, false);
+        if (!postInspectOrdinaryAlign.ok) {
+          assert.equal(postInspectOrdinaryAlign.status, 'HOLD');
+          assert.equal(
+            postInspectOrdinaryAlign.errorCode,
+            'INCONSISTENT_ALIGNMENT_STATE'
+          );
+        }
+        assert.equal(db.txCreateCalls, 0);
+        assert.equal(db.txUpdateCalls, 0);
+      }
+
+      // 9.2: Callable executeManageLibraryDocumentsRequest for inspectQuarantineLegacyCatalogRecovery (14 point reads, 0 writes)
+      {
+        const db = buildIncidentFixture();
+        db.resetCounters();
+
+        const callableInspectRes = await executeManageLibraryDocumentsRequest(
+          {
+            auth: {
+              uid: curatorWithCreate.id,
+              token: { email: curatorWithCreate.email },
+            },
+            data: {
+              action: 'inspectQuarantineLegacyCatalogRecovery',
+              receiptId: incidentReceiptId,
+            },
+          },
+          adminRepo,
+          dummyService,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { draftDatabase: db }
+        );
+
+        assert.equal(callableInspectRes.ok, true);
+        assert.equal(callableInspectRes.status, 'INSPECTION_ONLY');
+        assert.equal(callableInspectRes.verifiedHumanReviewEventCount, 6);
+        assert.equal(callableInspectRes.recoveryApplied, false);
+        assert.equal(callableInspectRes.requiresSeparateHumanAuthorization, true);
+        assert.equal(db.pointGetCalls, 14);
+        assert.equal(db.transactionCount, 0);
+      }
+
+      // 9.3: Unauthorized actor and disabled gate rejected before any Firestore reads
+      {
+        const db = buildIncidentFixture();
+        const unauthorizedService = makeServiceForDb(
+          db,
+          rightsReviewerOnly,
+          recoveryClockIso
+        );
+        db.resetCounters();
+
+        const unauthServiceRes =
+          await unauthorizedService.inspectQuarantineLegacyCatalogRecovery({
+            receiptId: incidentReceiptId,
+          });
+        assert.equal(unauthServiceRes.ok, false);
+        if (!unauthServiceRes.ok) {
+          assert.equal(unauthServiceRes.status, 'HOLD');
+          assert.equal(
+            unauthServiceRes.errorCode,
+            'UNAUTHORIZED_ALIGNMENT_ACTOR'
+          );
+        }
+        assert.equal(db.pointGetCalls, 0);
+        assert.equal(db.transactionCount, 0);
+
+        db.resetCounters();
+        await assert.rejects(
+          async () => {
+            await executeManageLibraryDocumentsRequest(
+              {
+                auth: {
+                  uid: rightsReviewerOnly.id,
+                  token: { email: rightsReviewerOnly.email },
+                },
+                data: {
+                  action: 'inspectQuarantineLegacyCatalogRecovery',
+                  receiptId: incidentReceiptId,
+                },
+              },
+              adminRepo,
+              dummyService,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              { draftDatabase: db }
+            );
+          },
+          (err: unknown) => {
+            assert.equal((err as { code?: string }).code, 'permission-denied');
+            return true;
+          }
+        );
+        assert.equal(db.pointGetCalls, 0);
+
+        process.env[LIBRARY_CASE_ALIGNMENT_RELEASE_ENV_VAR] = 'false';
+        db.resetCounters();
+        await assert.rejects(
+          async () => {
+            await executeManageLibraryDocumentsRequest(
+              {
+                auth: {
+                  uid: curatorWithCreate.id,
+                  token: { email: curatorWithCreate.email },
+                },
+                data: {
+                  action: 'inspectQuarantineLegacyCatalogRecovery',
+                  receiptId: incidentReceiptId,
+                },
+              },
+              adminRepo,
+              dummyService,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              { draftDatabase: db }
+            );
+          },
+          (err: unknown) => {
+            assert.equal(
+              (err as { code?: string }).code,
+              'failed-precondition'
+            );
+            return true;
+          }
+        );
+        assert.equal(db.pointGetCalls, 0);
+        process.env[LIBRARY_CASE_ALIGNMENT_RELEASE_ENV_VAR] = 'true';
+      }
+
+      // 9.4: Extra or unexpected input keys on inspectQuarantineLegacyCatalogRecovery rejected with 0 reads
+      {
+        const db = buildIncidentFixture();
+        const service = makeServiceForDb(db, ownerAdmin, recoveryClockIso);
+        db.resetCounters();
+
+        const extraKeyServiceRes =
+          await service.inspectQuarantineLegacyCatalogRecovery({
+            receiptId: incidentReceiptId,
+            legacyUnattributedCatalogUpdateAcknowledgement:
+              LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+          });
+        assert.equal(extraKeyServiceRes.ok, false);
+        if (!extraKeyServiceRes.ok) {
+          assert.equal(extraKeyServiceRes.status, 'HOLD');
+          assert.equal(
+            extraKeyServiceRes.errorCode,
+            'INVALID_ALIGNMENT_PAYLOAD'
+          );
+        }
+        assert.equal(db.pointGetCalls, 0);
+
+        db.resetCounters();
+        await assert.rejects(
+          async () => {
+            await executeManageLibraryDocumentsRequest(
+              {
+                auth: {
+                  uid: curatorWithCreate.id,
+                  token: { email: curatorWithCreate.email },
+                },
+                data: {
+                  action: 'inspectQuarantineLegacyCatalogRecovery',
+                  receiptId: incidentReceiptId,
+                  confirmation: 'APPLY_CASE_METADATA',
+                },
+              },
+              adminRepo,
+              dummyService,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              { draftDatabase: db }
+            );
+          },
+          (err: unknown) => {
+            assert.equal((err as { code?: string }).code, 'invalid-argument');
+            return true;
+          }
+        );
+        assert.equal(db.pointGetCalls, 0);
+      }
+
+      // 9.5: External Callable alignQuarantineCatalogCase rejects legacyUnattributedCatalogUpdateAcknowledgement
+      {
+        const db = buildIncidentFixture();
+        db.resetCounters();
+
+        await assert.rejects(
+          async () => {
+            await executeManageLibraryDocumentsRequest(
+              {
+                auth: {
+                  uid: ownerAdmin.id,
+                  token: { email: ownerAdmin.email },
+                },
+                data: {
+                  action: 'alignQuarantineCatalogCase',
+                  receiptId: incidentReceiptId,
+                  expectedCaseRevision: 6,
+                  expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+                  expectedAlignmentRevision: 0,
+                  confirmation:
+                    LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+                  legacyUnattributedCatalogUpdateAcknowledgement:
+                    LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+                },
+              },
+              adminRepo,
+              dummyService,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              { draftDatabase: db }
+            );
+          },
+          (err: unknown) => {
+            assert.equal((err as { code?: string }).code, 'invalid-argument');
+            assert.match(
+              String((err as { message?: string }).message),
+              /legacyUnattributedCatalogUpdateAcknowledgement/
+            );
+            return true;
+          }
+        );
+        assert.equal(db.pointGetCalls, 0);
+        assert.equal(db.transactionCount, 0);
+        assert.equal(db.txCreateCalls, 0);
+        assert.equal(db.txUpdateCalls, 0);
+      }
+
+      // 9.6: Missing or corrupted handoff event returns HOLD
+      {
+        const dbCorruptHandoffEv = buildIncidentFixture();
+        dbCorruptHandoffEv.seedDoc(
+          LIBRARY_QUARANTINE_CATALOG_HANDOFF_EVENTS_COLLECTION,
+          incidentReceiptId,
+          { corrupted: true }
+        );
+        const service = makeServiceForDb(dbCorruptHandoffEv);
+        const res = await service.inspectQuarantineLegacyCatalogRecovery({
+          receiptId: incidentReceiptId,
+        });
+        assert.equal(res.ok, false);
+        if (!res.ok) {
+          assert.equal(res.status, 'HOLD');
+          assert.equal(res.errorCode, 'INVALID_PERSISTED_HANDOFF_SCHEMA');
+        }
+      }
+
+      // 9.7: Missing or corrupted human-review event _1.._6 returns HOLD
+      {
+        const dbMissingEv = buildIncidentFixture();
+        const rev5Id = deriveLibraryQuarantineHumanReviewEventId(
+          incidentReceiptId,
+          5
+        );
+        dbMissingEv.seedDoc(
+          LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION,
+          rev5Id,
+          { broken: true }
+        );
+        const service = makeServiceForDb(dbMissingEv);
+        const res = await service.inspectQuarantineLegacyCatalogRecovery({
+          receiptId: incidentReceiptId,
+        });
+        assert.equal(res.ok, false);
+        if (!res.ok) {
+          assert.equal(res.status, 'HOLD');
+          assert.equal(res.errorCode, 'INVALID_HUMAN_REVIEW_CASE');
+        }
+
+        // Advance case to rev 7 without seeding _7
+        const dbMissingEv7 = buildIncidentFixture();
+        const caseDoc = dbMissingEv7.getRawDoc(
+          LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+          incidentReceiptId
+        )!;
+        dbMissingEv7.seedDoc(
+          LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+          incidentReceiptId,
+          { ...caseDoc, revision: 7 }
+        );
+        const resMissing7 = await makeServiceForDb(
+          dbMissingEv7
+        ).inspectQuarantineLegacyCatalogRecovery({
+          receiptId: incidentReceiptId,
+        });
+        assert.equal(resMissing7.ok, false);
+        if (!resMissing7.ok) {
+          assert.equal(resMissing7.status, 'HOLD');
+          assert.equal(resMissing7.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+        }
+      }
+
+      // 9.8: Event with mismatched sourceSha256 / sourceRevision returns HOLD
+      {
+        const dbSourceMismatch = buildIncidentFixture();
+        const rev3Id = deriveLibraryQuarantineHumanReviewEventId(
+          incidentReceiptId,
+          3
+        );
+        const rev3Doc = dbSourceMismatch.getRawDoc(
+          LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION,
+          rev3Id
+        )!;
+        dbSourceMismatch.seedDoc(
+          LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION,
+          rev3Id,
+          {
+            ...rev3Doc,
+            sourceSha256: 'b'.repeat(64),
+          }
+        );
+        const res = await makeServiceForDb(
+          dbSourceMismatch
+        ).inspectQuarantineLegacyCatalogRecovery({
+          receiptId: incidentReceiptId,
+        });
+        assert.equal(res.ok, false);
+        if (!res.ok) {
+          assert.equal(res.status, 'HOLD');
+          assert.equal(res.errorCode, 'CASE_SOURCE_MISMATCH');
+        }
+      }
+
+      // 9.9: Invalid chronology or security posture violation returns HOLD
+      {
+        const dbBadChronology = buildIncidentFixture();
+        const rev4Id = deriveLibraryQuarantineHumanReviewEventId(
+          incidentReceiptId,
+          4
+        );
+        const rev4Doc = dbBadChronology.getRawDoc(
+          LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION,
+          rev4Id
+        )!;
+        dbBadChronology.seedDoc(
+          LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION,
+          rev4Id,
+          {
+            ...rev4Doc,
+            recordedAt: '2026-11-13T13:22:00.000Z', // >= sourceUpdatedAt but older than rev 3!
+          }
+        );
+        const resChronology = await makeServiceForDb(
+          dbBadChronology
+        ).inspectQuarantineLegacyCatalogRecovery({
+          receiptId: incidentReceiptId,
+        });
+        assert.equal(resChronology.ok, false);
+        if (!resChronology.ok) {
+          assert.equal(resChronology.status, 'HOLD');
+          assert.equal(resChronology.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+        }
+
+        const dbPostureViolation = buildIncidentFixture();
+        const handoffDoc = dbPostureViolation.getRawDoc(
+          LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION,
+          incidentReceiptId
+        )!;
+        dbPostureViolation.seedDoc(
+          LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION,
+          incidentReceiptId,
+          {
+            ...handoffDoc,
+            isPublished: true,
+          }
+        );
+        const resPosture = await makeServiceForDb(
+          dbPostureViolation
+        ).inspectQuarantineLegacyCatalogRecovery({
+          receiptId: incidentReceiptId,
+        });
+        assert.equal(resPosture.ok, false);
+        if (!resPosture.ok) {
+          assert.equal(resPosture.status, 'HOLD');
+          assert.equal(resPosture.errorCode, 'SECURITY_POSTURE_VIOLATION');
+        }
+      }
+
+      // 9.10: Existing alignment document or unmodified handoff draft returns HOLD
+      {
+        // Unmodified handoff draft (catalogDoc.updatedAt === handoff.createdAt)
+        const dbUnmodified = new InMemoryAlignmentFirestoreDatabase();
+        const seededNormal = makeSeededRecord(buildHexReceiptId(90), 2);
+        seedDatabaseWithRecord(dbUnmodified, seededNormal);
+        const resUnmodified = await makeServiceForDb(
+          dbUnmodified
+        ).inspectQuarantineLegacyCatalogRecovery({
+          receiptId: seededNormal.receiptId,
+        });
+        assert.equal(resUnmodified.ok, false);
+        if (!resUnmodified.ok) {
+          assert.equal(resUnmodified.status, 'HOLD');
+          assert.equal(resUnmodified.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+        }
+
+        // Existing alignment document
+        const dbWithAlignment = buildIncidentFixture();
+        const svc = makeServiceForDb(
+          dbWithAlignment,
+          ownerAdmin,
+          recoveryClockIso
+        );
+        const recovered = await svc.alignQuarantineCatalogCase({
+          receiptId: incidentReceiptId,
+          expectedCaseRevision: 6,
+          expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+          expectedAlignmentRevision: 0,
+          confirmation:
+            LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+          legacyUnattributedCatalogUpdateAcknowledgement:
+            LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+        });
+        assert.equal(recovered.ok, true);
+
+        const resAfterRecovery =
+          await svc.inspectQuarantineLegacyCatalogRecovery({
+            receiptId: incidentReceiptId,
+          });
+        assert.equal(resAfterRecovery.ok, false);
+        if (!resAfterRecovery.ok) {
+          assert.equal(resAfterRecovery.status, 'HOLD');
+          assert.equal(
+            resAfterRecovery.errorCode,
+            'INCONSISTENT_ALIGNMENT_STATE'
+          );
+        }
+      }
+
+      // 9.11: Case revision > 32 returns HOLD with 7 point reads and 0 event reads
+      {
+        const dbRev33 = buildIncidentFixture();
+        const caseDoc = dbRev33.getRawDoc(
+          LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+          incidentReceiptId
+        )!;
+        dbRev33.seedDoc(
+          LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+          incidentReceiptId,
+          {
+            ...caseDoc,
+            revision: 33,
+          }
+        );
+        const svc = makeServiceForDb(dbRev33);
+        dbRev33.resetCounters();
+        const resRev33 = await svc.inspectQuarantineLegacyCatalogRecovery({
+          receiptId: incidentReceiptId,
+        });
+        assert.equal(resRev33.ok, false);
+        if (!resRev33.ok) {
+          assert.equal(resRev33.status, 'HOLD');
+          assert.equal(resRev33.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+        }
+        assert.equal(dbRev33.pointGetCalls, 7);
+        assert.equal(dbRev33.transactionCount, 0);
+      }
+
+      console.log(
+        'PASS 9: LIB-QCAT-LEGACY-R2B read-only legacy catalog recovery inspection verified.'
+      );
+    }
   }
 
   console.log(
-    '\nALL LIB-FILE-CASE-ALIGNMENT-01 BACKEND TESTS PASSED (8/8).'
+    '\nALL LIB-FILE-CASE-ALIGNMENT-01 BACKEND TESTS PASSED (9/9).'
   );
 }
 
