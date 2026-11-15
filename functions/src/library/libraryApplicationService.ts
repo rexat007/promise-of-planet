@@ -165,9 +165,21 @@ export class LibraryApplicationService {
       throw new Error('VALIDATION_ERROR: Document ID is required');
     }
 
+    if (isQuarantineCatalogDocumentId(id)) {
+      throw new Error(
+        'QCAT_METADATA_WRITE_REQUIRES_CASE_ALIGNMENT: Quarantine catalog draft metadata cannot be modified through generic updateMetadata; use the dedicated catalog-case alignment transaction.'
+      );
+    }
+
     const doc = await this.getById(id);
     if (!doc) {
       throw new Error(`NOT_FOUND: Document ${id} not found`);
+    }
+
+    if (isQuarantineCatalogDocumentId(doc.id)) {
+      throw new Error(
+        'QCAT_METADATA_WRITE_REQUIRES_CASE_ALIGNMENT: Quarantine catalog draft metadata cannot be modified through generic updateMetadata; use the dedicated catalog-case alignment transaction.'
+      );
     }
 
     if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
@@ -295,25 +307,19 @@ export class LibraryApplicationService {
       updatedAt: new Date().toISOString(),
     };
 
-    // Ensure metadata update cannot mutate rights or workflow fields
-    if (isQuarantineCatalogDocumentId(doc.id)) {
-      updated.rightsStatus = LibraryRightsStatus.ReviewRequired;
-      updated.rightsNotesAr = doc.rightsNotesAr;
-      updated.rightsNotesEn = doc.rightsNotesEn;
-      updated.workflowState = WorkflowState.Draft;
-      updated.workflowHistory = [];
-      updated.versions = (doc.versions || []).map(v => {
-        const { referenceUrl: _omitted, ...safeVersion } = v;
-        return safeVersion;
-      });
-    } else {
-      updated.rightsStatus = doc.rightsStatus;
-      updated.rightsNotesAr = doc.rightsNotesAr;
-      updated.rightsNotesEn = doc.rightsNotesEn;
-      updated.workflowState = doc.workflowState;
-      updated.workflowHistory = doc.workflowHistory;
-      updated.versions = doc.versions;
+    if (isQuarantineCatalogDocumentId(doc.id) || isQuarantineCatalogDocumentId(updated.id)) {
+      throw new Error(
+        'QCAT_METADATA_WRITE_REQUIRES_CASE_ALIGNMENT: Quarantine catalog draft metadata cannot be modified through generic updateMetadata; use the dedicated catalog-case alignment transaction.'
+      );
     }
+
+    // Ensure metadata update cannot mutate rights or workflow fields
+    updated.rightsStatus = doc.rightsStatus;
+    updated.rightsNotesAr = doc.rightsNotesAr;
+    updated.rightsNotesEn = doc.rightsNotesEn;
+    updated.workflowState = doc.workflowState;
+    updated.workflowHistory = doc.workflowHistory;
+    updated.versions = doc.versions;
 
     LibraryValidator.validateDocument(updated);
     return this.repo.update(updated);

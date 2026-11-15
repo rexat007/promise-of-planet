@@ -1807,26 +1807,127 @@ async function runTests(): Promise<void> {
       /quarantine|versions|referenceUrl/i
     );
 
-    // 7E: updateMetadata on qcat- document is allowed for descriptive metadata while preserving Draft + ReviewRequired + no referenceUrl
-    const updatedDoc = await service.updateMetadata(
-      qcatDocId,
+    // 7E: updateMetadata on qcat- document is rejected fail-closed with QCAT_METADATA_WRITE_REQUIRES_CASE_ALIGNMENT and 0 writes
+    let repoUpdateWrites = 0;
+    const originalRepoUpdate = repo.update.bind(repo);
+    repo.update = async (docToUpdate: LibraryDocument) => {
+      repoUpdateWrites += 1;
+      return originalRepoUpdate(docToUpdate);
+    };
+
+    await assert.rejects(
+      async () =>
+        service.updateMetadata(
+          qcatDocId,
+          {
+            titleAr: 'عنوان محدث غير مصرح به',
+            titleEn: 'Updated Quarantine Catalog Draft Title',
+            summaryAr: 'ملخص محدث غير مصرح به',
+            summaryEn: 'Unauthorized updated summary',
+          },
+          ownerUser
+        ),
+      /QCAT_METADATA_WRITE_REQUIRES_CASE_ALIGNMENT/
+    );
+    assert.equal(
+      repoUpdateWrites,
+      0,
+      'Rejected qcat- updateMetadata call must perform 0 repository writes'
+    );
+
+    // Also verify canonical doc.id guard if a non-qcat lookup ID resolves to a loaded document with canonical qcat- ID
+    let aliasRepoUpdateWrites = 0;
+    const aliasRepoProxy = Object.create(repo) as InMemoryLibraryRepository;
+    aliasRepoProxy.getById = async (lookupId: string) => {
+      if (lookupId === 'alias-non-qcat-lookup-id') {
+        return repo.getById(qcatDocId);
+      }
+      return repo.getById(lookupId);
+    };
+    aliasRepoProxy.update = async (docToUpdate: LibraryDocument) => {
+      aliasRepoUpdateWrites += 1;
+      return originalRepoUpdate(docToUpdate);
+    };
+    const aliasService = new LibraryApplicationService(aliasRepoProxy);
+    await assert.rejects(
+      async () =>
+        aliasService.updateMetadata(
+          'alias-non-qcat-lookup-id',
+          {
+            titleEn: 'Bypass attempt via non-prefixed lookup key',
+          },
+          ownerUser
+        ),
+      /QCAT_METADATA_WRITE_REQUIRES_CASE_ALIGNMENT/
+    );
+    assert.equal(
+      aliasRepoUpdateWrites,
+      0,
+      'Rejected canonical qcat- doc.id updateMetadata call must perform 0 repository writes'
+    );
+
+    const persistedQcatAfter = await repo.getById(qcatDocId);
+    assert.ok(persistedQcatAfter, 'qcat- document must still exist in repository');
+    assert.equal(
+      persistedQcatAfter.updatedAt,
+      '2026-11-09T10:30:00.000Z',
+      'qcat- updatedAt must remain completely unchanged after rejected updateMetadata'
+    );
+    assert.deepEqual(
+      persistedQcatAfter,
+      qcatDoc,
+      'All persisted qcat- document fields must remain completely unchanged after rejected updateMetadata'
+    );
+
+    // 7F: Regression check — normal non-qcat documents remain editable via updateMetadata
+    const standardDoc: LibraryDocument = {
+      ...qcatDoc,
+      id: 'doc-standard-123',
+      titleAr: 'وثيقة قياسية قابلة للتعديل',
+      titleEn: 'Standard Editable Document',
+      summaryAr: 'ملخص قياسي أصلي.',
+      summaryEn: 'Original standard summary.',
+      versions: [
+        {
+          id: 'ver-doc-standard-123-1',
+          documentId: 'doc-standard-123',
+          versionNumber: '1.0',
+          publishedDate: '2026-05-15',
+          changeDescriptionAr: 'إنشاء وثيقة قياسية',
+          changeDescriptionEn: 'Standard document created',
+        },
+      ],
+    };
+    await repo.create(standardDoc);
+
+    const updatedStandardDoc = await service.updateMetadata(
+      'doc-standard-123',
       {
-        titleEn: 'Updated Quarantine Catalog Draft Title',
+        titleAr: 'وثيقة قياسية محدثة',
+        titleEn: 'Updated Standard Editable Document',
+        summaryAr: 'ملخص قياسي محدث.',
+        summaryEn: 'Updated standard summary.',
       },
       ownerUser
     );
-    assert.equal(updatedDoc.titleEn, 'Updated Quarantine Catalog Draft Title');
-    assert.equal(updatedDoc.workflowState, WorkflowState.Draft);
+    assert.equal(repoUpdateWrites, 1);
+    assert.equal(updatedStandardDoc.id, 'doc-standard-123');
+    assert.equal(updatedStandardDoc.titleAr, 'وثيقة قياسية محدثة');
     assert.equal(
-      updatedDoc.rightsStatus,
+      updatedStandardDoc.titleEn,
+      'Updated Standard Editable Document'
+    );
+    assert.equal(updatedStandardDoc.summaryAr, 'ملخص قياسي محدث.');
+    assert.equal(updatedStandardDoc.summaryEn, 'Updated standard summary.');
+    assert.equal(updatedStandardDoc.workflowState, WorkflowState.Draft);
+    assert.equal(
+      updatedStandardDoc.rightsStatus,
       LibraryRightsStatus.ReviewRequired
     );
-    assert.deepEqual(updatedDoc.workflowHistory, []);
-    assert.equal(updatedDoc.versions[0].referenceUrl, undefined);
 
     passed += 1;
     console.log(
-      'PASS [7/8]: LibraryApplicationService blocks create/transitionWorkflow/updateRights/addVersion on qcat-* documents'
+      'PASS [7/8]: LibraryApplicationService blocks create/transitionWorkflow/updateRights/addVersion/updateMetadata on qcat-* documents while preserving standard document updateMetadata'
     );
   }
 
