@@ -1864,6 +1864,188 @@ async function runTests(): Promise<void> {
       assert.equal(db.txUpdateCalls, 0);
     }
 
+    // 8.13: Exact preservation of all four distinct pre-recovery editorial strings when differing from human-review case
+    {
+      const db = buildIncidentFixture();
+      const rawDoc = db.getRawDoc(LIBRARY_DOCUMENTS_COLLECTION, incidentDocId)!;
+      const distinctPreTitleAr = 'عنوان مسودة الفهرس قبل الاسترداد المعتمد';
+      const distinctPreTitleEn = 'Pre-Recovery Catalog Draft Title Before Reconciliation';
+      const distinctPreSummaryAr = 'الفقرة الأولى من الملخص قبل الاسترداد.\nالفقرة الثانية المحفوظة حرفياً.';
+      const distinctPreSummaryEn = 'First paragraph of pre-recovery summary.\nSecond paragraph preserved verbatim.';
+
+      db.seedDoc(LIBRARY_DOCUMENTS_COLLECTION, incidentDocId, {
+        ...rawDoc,
+        titleAr: distinctPreTitleAr,
+        titleEn: distinctPreTitleEn,
+        summaryAr: distinctPreSummaryAr,
+        summaryEn: distinctPreSummaryEn,
+      });
+
+      const service = makeServiceForDb(db, ownerAdmin, recoveryClockIso);
+      db.resetCounters();
+
+      const res = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(res.ok, true);
+      if (res.ok) {
+        assert.equal(res.status, 'ALIGNED');
+        assert.equal(res.alignmentSaved, true);
+        assert.equal(
+          res.catalogDocument.titleAr,
+          'إطار حماية البيئة البحرية والساحلية 2026'
+        );
+        assert.equal(
+          res.catalogDocument.titleEn,
+          'Marine and Coastal Environmental Protection Framework 2026'
+        );
+      }
+
+      const recoveryEventId = deriveLibraryQuarantineCatalogCaseAlignmentEventId(
+        incidentReceiptId,
+        1
+      );
+      const persistedEvent = db.getRawDoc(
+        LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENTS_COLLECTION,
+        recoveryEventId
+      ) as unknown as LibraryQuarantinePersistedLegacyRecoveryCatalogCaseAlignmentEvent;
+      assert.equal(Object.keys(persistedEvent).length, 27);
+      assert.equal(persistedEvent.preRecoveryCatalogTitleAr, distinctPreTitleAr);
+      assert.equal(persistedEvent.preRecoveryCatalogTitleEn, distinctPreTitleEn);
+      assert.equal(persistedEvent.preRecoveryCatalogSummaryAr, distinctPreSummaryAr);
+      assert.equal(persistedEvent.preRecoveryCatalogSummaryEn, distinctPreSummaryEn);
+    }
+
+    // 8.14: Leading or trailing whitespace on any pre-recovery catalog editorial field is never silently discarded -> HOLD and 0 writes
+    {
+      const whitespaceMutations: ReadonlyArray<Record<string, string>> = [
+        { titleAr: '  إطار حماية البيئة البحرية والساحلية 2026' },
+        { titleAr: 'إطار حماية البيئة البحرية والساحلية 2026  ' },
+        { titleEn: ' Marine and Coastal Environmental Protection Framework 2026' },
+        { titleEn: 'Marine and Coastal Environmental Protection Framework 2026\t' },
+        { summaryAr: '\nوثيقة مرجعية محدثة لحماية النظم البيئية البحرية والساحلية.' },
+        { summaryAr: 'وثيقة مرجعية محدثة لحماية النظم البيئية البحرية والساحلية. ' },
+        { summaryEn: ' Updated reference framework for marine and coastal ecosystem protection.' },
+        { summaryEn: 'Updated reference framework for marine and coastal ecosystem protection.\n' },
+      ];
+
+      for (const patch of whitespaceMutations) {
+        const db = buildIncidentFixture();
+        const rawDoc = db.getRawDoc(LIBRARY_DOCUMENTS_COLLECTION, incidentDocId)!;
+        db.seedDoc(LIBRARY_DOCUMENTS_COLLECTION, incidentDocId, {
+          ...rawDoc,
+          ...patch,
+        });
+
+        const service = makeServiceForDb(db, ownerAdmin, recoveryClockIso);
+        db.resetCounters();
+
+        const res = await service.alignQuarantineCatalogCase({
+          receiptId: incidentReceiptId,
+          expectedCaseRevision: 6,
+          expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+          expectedAlignmentRevision: 0,
+          confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+          legacyUnattributedCatalogUpdateAcknowledgement:
+            LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+        });
+        assert.equal(res.ok, false);
+        if (!res.ok) {
+          assert.equal(res.status, 'HOLD');
+          assert.equal(res.errorCode, 'INVALID_PERSISTED_ALIGNMENT_SCHEMA');
+          assert.equal(res.alignmentSaved, false);
+        }
+        assert.equal(db.txCreateCalls, 0);
+        assert.equal(db.txUpdateCalls, 0);
+        assert.equal(db.txSetCalls, 0);
+        assert.equal(
+          db.getRawDoc(
+            LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
+            incidentReceiptId
+          ),
+          undefined
+        );
+      }
+    }
+
+    // 8.15: Unacceptable or unsafe original pre-recovery values -> HOLD and 0 writes
+    {
+      const unsafeMutations: ReadonlyArray<Record<string, string>> = [
+        { titleAr: 'عنوان يحتوي على <script>alert(1)</script>' },
+        { titleEn: 'Title with forbidden URL https://example.com/internal' },
+        { summaryAr: 'ملخص يحتوي على محرف تحكم ثنائي الاتجاه \u202E غير مسموح' },
+        { summaryEn: 'Summary referencing library/quarantine/secret/source.pdf' },
+        { titleEn: 'Single-line title\nwith embedded newline' },
+        { titleAr: 'أ'.repeat(301) },
+        { summaryEn: 'S'.repeat(2001) },
+      ];
+
+      for (const patch of unsafeMutations) {
+        const db = buildIncidentFixture();
+        const rawDoc = db.getRawDoc(LIBRARY_DOCUMENTS_COLLECTION, incidentDocId)!;
+        db.seedDoc(LIBRARY_DOCUMENTS_COLLECTION, incidentDocId, {
+          ...rawDoc,
+          ...patch,
+        });
+
+        const service = makeServiceForDb(db, ownerAdmin, recoveryClockIso);
+        db.resetCounters();
+
+        const res = await service.alignQuarantineCatalogCase({
+          receiptId: incidentReceiptId,
+          expectedCaseRevision: 6,
+          expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+          expectedAlignmentRevision: 0,
+          confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+          legacyUnattributedCatalogUpdateAcknowledgement:
+            LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+        });
+        assert.equal(res.ok, false);
+        if (!res.ok) {
+          assert.equal(res.status, 'HOLD');
+          assert.equal(res.errorCode, 'INVALID_PERSISTED_ALIGNMENT_SCHEMA');
+          assert.equal(res.alignmentSaved, false);
+        }
+        assert.equal(db.txCreateCalls, 0);
+        assert.equal(db.txUpdateCalls, 0);
+        assert.equal(db.txSetCalls, 0);
+      }
+    }
+
+    // 8.16: Commit uncertainty during legacy recovery returns UNKNOWN without automatic retries
+    {
+      const db = buildIncidentFixture();
+      const service = makeServiceForDb(db, ownerAdmin, recoveryClockIso);
+      db.resetCounters();
+      db.onAfterTransactionWritesStagedHook = () => {
+        throw new Error('Simulated network drop after legacy recovery writes staged');
+      };
+
+      const unknownRes = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(unknownRes.ok, false);
+      if (!unknownRes.ok && unknownRes.status === 'UNKNOWN') {
+        assert.equal(unknownRes.errorCode, 'TRANSACTION_COMMIT_UNCERTAIN');
+        assert.equal(unknownRes.alignmentSaved, null);
+      } else {
+        throw new Error('Expected UNKNOWN status on legacy recovery commit uncertainty');
+      }
+      assert.equal(db.transactionCount, 1, 'Must never auto-retry on uncertain legacy recovery commit');
+    }
+
     console.log(
       'PASS 8: Exceptional server-side legacy unattributed catalog draft recovery guard and historical audit chain verification passed.'
     );

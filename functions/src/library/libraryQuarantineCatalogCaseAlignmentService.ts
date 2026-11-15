@@ -2630,12 +2630,10 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
                 reason: LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON,
                 historicalCatalogChangeAttribution:
                   LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS,
-                preRecoveryCatalogTitleAr: s.rawCatalogDocument.titleAr.trim(),
-                preRecoveryCatalogTitleEn: s.rawCatalogDocument.titleEn.trim(),
-                preRecoveryCatalogSummaryAr:
-                  s.rawCatalogDocument.summaryAr.trim(),
-                preRecoveryCatalogSummaryEn:
-                  s.rawCatalogDocument.summaryEn.trim(),
+                preRecoveryCatalogTitleAr: s.rawCatalogDocument.titleAr,
+                preRecoveryCatalogTitleEn: s.rawCatalogDocument.titleEn,
+                preRecoveryCatalogSummaryAr: s.rawCatalogDocument.summaryAr,
+                preRecoveryCatalogSummaryEn: s.rawCatalogDocument.summaryEn,
                 sourceRevision: s.receiptEnvelope.revision,
                 sourceUpdatedAt: s.receiptEnvelope.receipt.updatedAt,
                 sourceSha256: s.receiptEnvelope.receipt.sha256,
