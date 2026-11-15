@@ -487,10 +487,17 @@ async function runTests(): Promise<void> {
         validateSanitizedRightsDecisionDto({
           ...validDto,
           catalogHandoffCaseRevision: 2,
-          currentHumanCaseRevision: 3,
+          currentHumanCaseRevision: 1,
         }),
       /RIGHTS_DECISION_DTO_CONTRACT_INVALID/
     );
+    const postAlignValidatedDto = validateSanitizedRightsDecisionDto({
+      ...validDto,
+      catalogHandoffCaseRevision: 2,
+      currentHumanCaseRevision: 3,
+    });
+    assert.equal(postAlignValidatedDto.catalogHandoffCaseRevision, 2);
+    assert.equal(postAlignValidatedDto.currentHumanCaseRevision, 3);
 
     // Client callable transport tests
     const capturedPayloads: unknown[] = [];
@@ -1386,6 +1393,608 @@ async function runTests(): Promise<void> {
 
     console.log(
       'PASS 6: Disabled release flags fallback (zero get/save calls and empty markup) verified'
+    );
+  }
+
+  // =========================================================================
+  // PASS 7: Post-Alignment Rights Decision DTO & Controller Contract
+  //         (LIB-RIGHTS-POST-ALIGN-RC1)
+  // =========================================================================
+  {
+    const ALIGNED_RECEIPT_ID = '1183ac250d0404e921d2aeadbec1b76c';
+    const ALIGNED_DOC_ID = `qcat-${ALIGNED_RECEIPT_ID}`;
+    const rightsReviewer = makeAdminUser(AdminRole.RightsReviewer);
+    const alignedHumanReviewCaseV6 = makeSavedHumanReviewCase({
+      receiptId: ALIGNED_RECEIPT_ID,
+      revision: 6,
+      sourceRevision: 1,
+      draftSourceRevision: 1,
+      status: 'METADATA_RECORDED',
+    });
+
+    // 7A. Handoff v3, existing decision v3, aligned case v6 -> GET accepted as stale
+    const decisionAtV3 = makeSanitizedRightsDecisionDto({
+      receiptId: ALIGNED_RECEIPT_ID,
+      documentId: ALIGNED_DOC_ID,
+      revision: 1,
+      sourceRevision: 1,
+      draftSourceRevision: 1,
+      catalogHandoffCaseRevision: 3,
+      currentHumanCaseRevision: 3,
+      decision: 'METADATA_USE_CLEARED',
+      basis: 'OFFICIAL_RECORD',
+    });
+
+    const validatedDecisionV3 = validateSanitizedRightsDecisionDto(
+      decisionAtV3,
+      ALIGNED_RECEIPT_ID
+    );
+    assert.equal(validatedDecisionV3.catalogHandoffCaseRevision, 3);
+    assert.equal(validatedDecisionV3.currentHumanCaseRevision, 3);
+
+    const getWithStaleV3 = validateGetQuarantineRightsDecisionResponseDto({
+      ok: true,
+      status: 'READY',
+      receiptId: ALIGNED_RECEIPT_ID,
+      documentId: ALIGNED_DOC_ID,
+      sourceRevision: 1,
+      catalogHandoffCaseRevision: 3,
+      currentHumanCaseRevision: 6,
+      effectiveCaseRevision: 6,
+      currentRevision: 1,
+      rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+      rightsDecision: decisionAtV3,
+      rightsDecisionIsCurrent: false,
+      requiresFreshHumanRightsReview: true,
+      readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+      isSanitized: false,
+      isVerifiedSafe: false,
+      isRightsApproved: false,
+      isPublished: false,
+      isReadyForPeia: false,
+    });
+    assert.equal(getWithStaleV3.ok, true);
+    if (getWithStaleV3.ok) {
+      assert.equal(getWithStaleV3.catalogHandoffCaseRevision, 3);
+      assert.equal(getWithStaleV3.currentHumanCaseRevision, 6);
+      assert.equal(getWithStaleV3.effectiveCaseRevision, 6);
+      assert.equal(getWithStaleV3.rightsDecisionIsCurrent, false);
+      assert.equal(getWithStaleV3.requiresFreshHumanRightsReview, true);
+      assert.equal(
+        getWithStaleV3.rightsDecision?.currentHumanCaseRevision,
+        3
+      );
+      assert.equal(getWithStaleV3.isRightsApproved, false);
+      assert.equal(getWithStaleV3.isPublished, false);
+      assert.equal(getWithStaleV3.isVerifiedSafe, false);
+    }
+
+    // Stale decision v3 must NEVER be accepted as current when effectiveCaseRevision is 6
+    assert.throws(
+      () =>
+        validateGetQuarantineRightsDecisionResponseDto({
+          ok: true,
+          status: 'READY',
+          receiptId: ALIGNED_RECEIPT_ID,
+          documentId: ALIGNED_DOC_ID,
+          sourceRevision: 1,
+          catalogHandoffCaseRevision: 3,
+          currentHumanCaseRevision: 6,
+          effectiveCaseRevision: 6,
+          currentRevision: 1,
+          rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+          rightsDecision: decisionAtV3,
+          rightsDecisionIsCurrent: true,
+          requiresFreshHumanRightsReview: false,
+          readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+      /RIGHTS_DECISION_GET_CONTRACT_INVALID/
+    );
+
+    // 7B. Handoff v3, existing decision v4, aligned case v6 -> GET accepted as stale
+    const decisionAtV4 = makeSanitizedRightsDecisionDto({
+      receiptId: ALIGNED_RECEIPT_ID,
+      documentId: ALIGNED_DOC_ID,
+      revision: 2,
+      sourceRevision: 1,
+      draftSourceRevision: 1,
+      catalogHandoffCaseRevision: 3,
+      currentHumanCaseRevision: 4,
+      decision: 'METADATA_USE_CLEARED',
+      basis: 'OFFICIAL_RECORD',
+    });
+
+    const validatedDecisionV4 = validateSanitizedRightsDecisionDto(
+      decisionAtV4,
+      ALIGNED_RECEIPT_ID
+    );
+    assert.equal(validatedDecisionV4.catalogHandoffCaseRevision, 3);
+    assert.equal(validatedDecisionV4.currentHumanCaseRevision, 4);
+
+    const getWithStaleV4 = validateGetQuarantineRightsDecisionResponseDto({
+      ok: true,
+      status: 'READY',
+      receiptId: ALIGNED_RECEIPT_ID,
+      documentId: ALIGNED_DOC_ID,
+      sourceRevision: 1,
+      catalogHandoffCaseRevision: 3,
+      currentHumanCaseRevision: 6,
+      effectiveCaseRevision: 6,
+      currentRevision: 2,
+      rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+      rightsDecision: decisionAtV4,
+      rightsDecisionIsCurrent: false,
+      requiresFreshHumanRightsReview: true,
+      readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+      isSanitized: false,
+      isVerifiedSafe: false,
+      isRightsApproved: false,
+      isPublished: false,
+      isReadyForPeia: false,
+    });
+    assert.equal(getWithStaleV4.ok, true);
+    if (getWithStaleV4.ok) {
+      assert.equal(getWithStaleV4.catalogHandoffCaseRevision, 3);
+      assert.equal(getWithStaleV4.currentHumanCaseRevision, 6);
+      assert.equal(getWithStaleV4.effectiveCaseRevision, 6);
+      assert.equal(getWithStaleV4.rightsDecisionIsCurrent, false);
+      assert.equal(getWithStaleV4.requiresFreshHumanRightsReview, true);
+      assert.equal(
+        getWithStaleV4.rightsDecision?.currentHumanCaseRevision,
+        4
+      );
+    }
+
+    // Stale decision v4 must also NEVER be accepted as current when effectiveCaseRevision is 6
+    assert.throws(
+      () =>
+        validateGetQuarantineRightsDecisionResponseDto({
+          ok: true,
+          status: 'READY',
+          receiptId: ALIGNED_RECEIPT_ID,
+          documentId: ALIGNED_DOC_ID,
+          sourceRevision: 1,
+          catalogHandoffCaseRevision: 3,
+          currentHumanCaseRevision: 6,
+          effectiveCaseRevision: 6,
+          currentRevision: 2,
+          rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+          rightsDecision: decisionAtV4,
+          rightsDecisionIsCurrent: true,
+          requiresFreshHumanRightsReview: false,
+          readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+      /RIGHTS_DECISION_GET_CONTRACT_INVALID/
+    );
+
+    // 7C. Handoff v3, saved decision v6, aligned case v6 -> SAVED, GET, CONFLICT, and Controller accepted
+    const decisionAtV6 = makeSanitizedRightsDecisionDto({
+      receiptId: ALIGNED_RECEIPT_ID,
+      documentId: ALIGNED_DOC_ID,
+      revision: 3,
+      sourceRevision: 1,
+      draftSourceRevision: 1,
+      catalogHandoffCaseRevision: 3,
+      currentHumanCaseRevision: 6,
+      decision: 'METADATA_USE_CLEARED',
+      basis: 'OFFICIAL_RECORD',
+      evidenceReference: 'Official Gazette Issue 4210 — Record #77-2026',
+      evidenceNotes:
+        'Official government publication permitting descriptive bibliographic metadata cataloging at aligned case revision 6.',
+      reviewNotes:
+        'Metadata cataloging cleared for aligned revision 6; binary PDF release remains blocked pending sanitization.',
+    });
+
+    const validatedDecisionV6 = validateSanitizedRightsDecisionDto(
+      decisionAtV6,
+      ALIGNED_RECEIPT_ID
+    );
+    assert.equal(validatedDecisionV6.catalogHandoffCaseRevision, 3);
+    assert.equal(validatedDecisionV6.currentHumanCaseRevision, 6);
+    assert.equal(validatedDecisionV6.isSanitized, false);
+    assert.equal(validatedDecisionV6.isVerifiedSafe, false);
+    assert.equal(validatedDecisionV6.isRightsApproved, false);
+    assert.equal(validatedDecisionV6.isPublished, false);
+    assert.equal(validatedDecisionV6.isReadyForPeia, false);
+
+    const savedV6Response = validateSaveQuarantineRightsDecisionResponseDto({
+      ok: true,
+      status: 'SAVED',
+      decisionSaveOutcome: 'UPDATED',
+      decisionSaved: true,
+      receiptId: ALIGNED_RECEIPT_ID,
+      documentId: ALIGNED_DOC_ID,
+      sourceRevision: 1,
+      catalogHandoffCaseRevision: 3,
+      currentHumanCaseRevision: 6,
+      effectiveCaseRevision: 6,
+      currentRevision: 3,
+      rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+      rightsDecision: decisionAtV6,
+      rightsDecisionIsCurrent: true,
+      requiresFreshHumanRightsReview: false,
+      readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+      isSanitized: false,
+      isVerifiedSafe: false,
+      isRightsApproved: false,
+      isPublished: false,
+      isReadyForPeia: false,
+    });
+    assert.equal(savedV6Response.ok, true);
+    if (savedV6Response.ok) {
+      assert.equal(savedV6Response.status, 'SAVED');
+      assert.equal(savedV6Response.catalogHandoffCaseRevision, 3);
+      assert.equal(savedV6Response.currentHumanCaseRevision, 6);
+      assert.equal(savedV6Response.effectiveCaseRevision, 6);
+      assert.equal(savedV6Response.rightsDecisionIsCurrent, true);
+      assert.equal(savedV6Response.requiresFreshHumanRightsReview, false);
+      assert.equal(
+        savedV6Response.rightsDecision.currentHumanCaseRevision,
+        6
+      );
+      assert.deepEqual(
+        savedV6Response.readiness,
+        QUARANTINE_RIGHTS_READINESS_INDICATORS
+      );
+      assert.equal(savedV6Response.isSanitized, false);
+      assert.equal(savedV6Response.isVerifiedSafe, false);
+      assert.equal(savedV6Response.isRightsApproved, false);
+      assert.equal(savedV6Response.isPublished, false);
+      assert.equal(savedV6Response.isReadyForPeia, false);
+    }
+
+    const getWithCurrentV6 = validateGetQuarantineRightsDecisionResponseDto({
+      ok: true,
+      status: 'READY',
+      receiptId: ALIGNED_RECEIPT_ID,
+      documentId: ALIGNED_DOC_ID,
+      sourceRevision: 1,
+      catalogHandoffCaseRevision: 3,
+      currentHumanCaseRevision: 6,
+      effectiveCaseRevision: 6,
+      currentRevision: 3,
+      rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+      rightsDecision: decisionAtV6,
+      rightsDecisionIsCurrent: true,
+      requiresFreshHumanRightsReview: false,
+      readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+      isSanitized: false,
+      isVerifiedSafe: false,
+      isRightsApproved: false,
+      isPublished: false,
+      isReadyForPeia: false,
+    });
+    assert.equal(getWithCurrentV6.ok, true);
+    if (getWithCurrentV6.ok) {
+      assert.equal(getWithCurrentV6.rightsDecisionIsCurrent, true);
+      assert.equal(getWithCurrentV6.requiresFreshHumanRightsReview, false);
+      assert.equal(
+        getWithCurrentV6.rightsDecision?.currentHumanCaseRevision,
+        6
+      );
+    }
+
+    // CONFLICT response with post-alignment currentDecision (handoff v3, decision v6)
+    const conflictV6Response = validateSaveQuarantineRightsDecisionResponseDto({
+      ok: false,
+      status: 'CONFLICT',
+      decisionSaveOutcome: 'NOT_SAVED',
+      decisionSaved: false,
+      errorCode: 'RIGHTS_DECISION_REVISION_CONFLICT',
+      errorMessage: 'Expected revision 2 but server is at revision 3.',
+      receiptId: ALIGNED_RECEIPT_ID,
+      documentId: ALIGNED_DOC_ID,
+      currentRevision: 3,
+      currentDecision: decisionAtV6,
+      rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+      readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+      isSanitized: false,
+      isVerifiedSafe: false,
+      isRightsApproved: false,
+      isPublished: false,
+      isReadyForPeia: false,
+    });
+    assert.equal(conflictV6Response.ok, false);
+    assert.equal(conflictV6Response.status, 'CONFLICT');
+    if (conflictV6Response.status === 'CONFLICT') {
+      assert.equal(
+        conflictV6Response.currentDecision?.currentHumanCaseRevision,
+        6
+      );
+    }
+
+    // Full client + controller workflow for aligned receipt (handoff v3, stale decision v4 -> ack v6 -> save v6 -> fresh GET v6)
+    let storedAlignedDecision: SanitizedLibraryQuarantineRightsDecisionDto =
+      decisionAtV4;
+    const capturedAlignedPayloads: unknown[] = [];
+
+    const alignedController = new LibraryQuarantineRightsDecisionPanelController(
+      rightsReviewer,
+      {
+        rightsDecisionEnabled: true,
+        getDecisionFn: (receiptId) =>
+          LibraryQuarantineRightsDecisionClient.getQuarantineRightsDecision(
+            receiptId,
+            {
+              isConfigured: true,
+              getAuthenticatedUid: () => 'uid-rights-reviewer',
+              invokeCallable: async (payload) => {
+                capturedAlignedPayloads.push(payload);
+                const isCurrent =
+                  storedAlignedDecision.currentHumanCaseRevision === 6;
+                return {
+                  data: {
+                    ok: true,
+                    status: 'READY',
+                    receiptId: ALIGNED_RECEIPT_ID,
+                    documentId: ALIGNED_DOC_ID,
+                    sourceRevision: 1,
+                    catalogHandoffCaseRevision: 3,
+                    currentHumanCaseRevision: 6,
+                    effectiveCaseRevision: 6,
+                    currentRevision: storedAlignedDecision.revision,
+                    rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+                    rightsDecision: storedAlignedDecision,
+                    rightsDecisionIsCurrent: isCurrent,
+                    requiresFreshHumanRightsReview: !isCurrent,
+                    readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+                    isSanitized: false,
+                    isVerifiedSafe: false,
+                    isRightsApproved: false,
+                    isPublished: false,
+                    isReadyForPeia: false,
+                  },
+                };
+              },
+            }
+          ),
+        saveDecisionFn: (params) =>
+          LibraryQuarantineRightsDecisionClient.saveQuarantineRightsDecision(
+            params,
+            {
+              isConfigured: true,
+              getAuthenticatedUid: () => 'uid-rights-reviewer',
+              invokeCallable: async (payload) => {
+                capturedAlignedPayloads.push(payload);
+                storedAlignedDecision = decisionAtV6;
+                return {
+                  data: {
+                    ok: true,
+                    status: 'SAVED',
+                    decisionSaveOutcome: 'UPDATED',
+                    decisionSaved: true,
+                    receiptId: ALIGNED_RECEIPT_ID,
+                    documentId: ALIGNED_DOC_ID,
+                    sourceRevision: 1,
+                    catalogHandoffCaseRevision: 3,
+                    currentHumanCaseRevision: 6,
+                    effectiveCaseRevision: 6,
+                    currentRevision: 3,
+                    rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+                    rightsDecision: decisionAtV6,
+                    rightsDecisionIsCurrent: true,
+                    requiresFreshHumanRightsReview: false,
+                    readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+                    isSanitized: false,
+                    isVerifiedSafe: false,
+                    isRightsApproved: false,
+                    isPublished: false,
+                    isReadyForPeia: false,
+                  },
+                };
+              },
+            }
+          ),
+      }
+    );
+
+    const openAlignedRes = await alignedController.openPanelForCase(
+      alignedHumanReviewCaseV6
+    );
+    assert.equal(openAlignedRes?.ok, true);
+    const staleSnap = alignedController.getSnapshot();
+    assert.equal(staleSnap.loadError, null);
+    assert.equal(staleSnap.holdCode, null);
+    assert.equal(staleSnap.catalogHandoffCaseRevision, 3);
+    assert.equal(staleSnap.currentHumanCaseRevision, 6);
+    assert.equal(staleSnap.effectiveCaseRevision, 6);
+    assert.equal(staleSnap.rightsDecisionIsCurrent, false);
+    assert.equal(staleSnap.requiresFreshHumanRightsReview, true);
+    assert.equal(staleSnap.stalePreviousDecision?.currentHumanCaseRevision, 4);
+    assert.equal(
+      staleSnap.form.decision,
+      'EVIDENCE_PENDING',
+      'Renewal form for stale post-alignment decision must open blank and never prefill'
+    );
+    assert.equal(staleSnap.form.evidenceReference, '');
+
+    // Saving without acknowledging aligned revision 6 is blocked
+    alignedController.updateFormField('decision', 'METADATA_USE_CLEARED');
+    alignedController.updateFormField('basis', 'OFFICIAL_RECORD');
+    alignedController.updateFormField(
+      'evidenceReference',
+      decisionAtV6.evidenceReference
+    );
+    alignedController.updateFormField(
+      'evidenceNotes',
+      decisionAtV6.evidenceNotes
+    );
+    alignedController.updateFormField('reviewNotes', decisionAtV6.reviewNotes);
+
+    const unackedSave = await alignedController.saveDecision();
+    assert.equal(unackedSave, null);
+    assert.equal(
+      alignedController.getSnapshot().saveError,
+      RIGHTS_DECISION_CLIENT_SAFE_ERRORS.UNACKNOWLEDGED_CASE_REVISION
+    );
+
+    // Acknowledge current aligned case revision 6 and save
+    alignedController.setAcknowledgedCurrentCaseRevision(true);
+    const ackedSave = await alignedController.saveDecision();
+    assert.equal(ackedSave?.ok, true);
+    assert.equal(ackedSave?.status, 'SAVED');
+
+    const finalAlignedSnap = alignedController.getSnapshot();
+    assert.equal(finalAlignedSnap.uncertainState, null);
+    assert.equal(finalAlignedSnap.saveError, null);
+    assert.equal(finalAlignedSnap.loadError, null);
+    assert.equal(finalAlignedSnap.rightsDecisionIsCurrent, true);
+    assert.equal(finalAlignedSnap.requiresFreshHumanRightsReview, false);
+    assert.equal(finalAlignedSnap.stalePreviousDecision, null);
+    assert.equal(finalAlignedSnap.currentRevision, 3);
+    assert.equal(
+      finalAlignedSnap.rightsDecision?.currentHumanCaseRevision,
+      6
+    );
+    assert.equal(
+      finalAlignedSnap.rightsDecision?.catalogHandoffCaseRevision,
+      3
+    );
+    assert.deepEqual(
+      finalAlignedSnap.readiness,
+      QUARANTINE_RIGHTS_READINESS_INDICATORS
+    );
+
+    // 7D. Decision revision below handoff revision -> rejected
+    assert.throws(
+      () =>
+        validateSanitizedRightsDecisionDto({
+          ...decisionAtV6,
+          catalogHandoffCaseRevision: 3,
+          currentHumanCaseRevision: 2,
+        }),
+      /RIGHTS_DECISION_DTO_CONTRACT_INVALID/
+    );
+    assert.throws(
+      () =>
+        validateGetQuarantineRightsDecisionResponseDto({
+          ok: true,
+          status: 'READY',
+          receiptId: ALIGNED_RECEIPT_ID,
+          documentId: ALIGNED_DOC_ID,
+          sourceRevision: 1,
+          catalogHandoffCaseRevision: 3,
+          currentHumanCaseRevision: 6,
+          effectiveCaseRevision: 6,
+          currentRevision: 3,
+          rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+          rightsDecision: {
+            ...decisionAtV6,
+            catalogHandoffCaseRevision: 3,
+            currentHumanCaseRevision: 2,
+          },
+          rightsDecisionIsCurrent: false,
+          requiresFreshHumanRightsReview: true,
+          readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+      /RIGHTS_DECISION_DTO_CONTRACT_INVALID/
+    );
+
+    // 7E. Decision revision above effective aligned case revision -> rejected
+    assert.throws(
+      () =>
+        validateGetQuarantineRightsDecisionResponseDto({
+          ok: true,
+          status: 'READY',
+          receiptId: ALIGNED_RECEIPT_ID,
+          documentId: ALIGNED_DOC_ID,
+          sourceRevision: 1,
+          catalogHandoffCaseRevision: 3,
+          currentHumanCaseRevision: 6,
+          effectiveCaseRevision: 6,
+          currentRevision: 3,
+          rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+          rightsDecision: {
+            ...decisionAtV6,
+            catalogHandoffCaseRevision: 3,
+            currentHumanCaseRevision: 7,
+          },
+          rightsDecisionIsCurrent: false,
+          requiresFreshHumanRightsReview: true,
+          readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+      /RIGHTS_DECISION_GET_CONTRACT_INVALID/
+    );
+    assert.throws(
+      () =>
+        validateSaveQuarantineRightsDecisionResponseDto({
+          ok: true,
+          status: 'SAVED',
+          decisionSaveOutcome: 'UPDATED',
+          decisionSaved: true,
+          receiptId: ALIGNED_RECEIPT_ID,
+          documentId: ALIGNED_DOC_ID,
+          sourceRevision: 1,
+          catalogHandoffCaseRevision: 3,
+          currentHumanCaseRevision: 6,
+          effectiveCaseRevision: 6,
+          currentRevision: 3,
+          rightsScope: LIBRARY_QUARANTINE_RIGHTS_SCOPE,
+          rightsDecision: {
+            ...decisionAtV6,
+            catalogHandoffCaseRevision: 3,
+            currentHumanCaseRevision: 7,
+          },
+          rightsDecisionIsCurrent: true,
+          requiresFreshHumanRightsReview: false,
+          readiness: QUARANTINE_RIGHTS_READINESS_INDICATORS,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        }),
+      /RIGHTS_DECISION_SAVE_CONTRACT_INVALID/
+    );
+
+    // 7F. Malformed, extra-key, or privileged post-alignment DTO -> rejected
+    assert.throws(
+      () =>
+        validateSanitizedRightsDecisionDto({
+          ...decisionAtV6,
+          extraField: 'unexpected',
+        }),
+      /RIGHTS_DECISION_DTO_CONTRACT_INVALID/
+    );
+    for (const escalatedFlag of [
+      'isSanitized',
+      'isVerifiedSafe',
+      'isRightsApproved',
+      'isPublished',
+      'isReadyForPeia',
+    ] as const) {
+      assert.throws(
+        () =>
+          validateSanitizedRightsDecisionDto({
+            ...decisionAtV6,
+            [escalatedFlag]: true,
+          }),
+        /RIGHTS_DECISION_DTO_CONTRACT_INVALID/
+      );
+    }
+
+    console.log(
+      'PASS 7: Post-alignment rights decision DTO & controller contract (LIB-RIGHTS-POST-ALIGN-RC1) verified'
     );
   }
 

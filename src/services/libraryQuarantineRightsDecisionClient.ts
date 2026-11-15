@@ -962,7 +962,8 @@ export function validateSanitizedRightsDecisionDto(
     rawDto.catalogHandoffCaseRevision < 1 ||
     typeof rawDto.currentHumanCaseRevision !== 'number' ||
     !Number.isSafeInteger(rawDto.currentHumanCaseRevision) ||
-    rawDto.currentHumanCaseRevision !== rawDto.catalogHandoffCaseRevision ||
+    rawDto.currentHumanCaseRevision < 1 ||
+    rawDto.currentHumanCaseRevision < rawDto.catalogHandoffCaseRevision ||
     !isValidIsoTimestamp(rawDto.sourceUpdatedAt) ||
     !isValidIsoTimestamp(rawDto.createdAt) ||
     !isValidIsoTimestamp(rawDto.updatedAt)
