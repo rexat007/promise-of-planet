@@ -152,6 +152,18 @@ import {
   type GetLibraryQuarantineAvInspectionStatusResponseDto,
 } from './libraryQuarantineAvExecutionService';
 import type { LibraryQuarantineAvJobInvoker } from './libraryQuarantineAvJobInvoker';
+import {
+  LibraryReviewedSourceReleaseService,
+  LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL,
+  type GetReviewedLibrarySourceReleaseStatusResponseDto,
+  type PublishReviewedLibrarySourceReferenceResponseDto,
+  type ReviewedLibrarySourceReleaseEditorialInput,
+  type ReviewedLibrarySourceReleaseErrorCode,
+  type ReviewedPublicLibraryRightsStatus,
+  type ReviewedPublicLinkBasis,
+  type SanitizedPublishedLibraryDocumentSummaryDto,
+  type SanitizedReviewedLibrarySourceReleaseDto,
+} from './libraryReviewedSourceReleaseService';
 
 export type {
   ListLibraryQuarantineReceiptsResponseDto,
@@ -196,11 +208,20 @@ export type {
   DispatchLibraryQuarantineAvInspectionResponseDto,
   SanitizedLibraryQuarantineAvExecutionDto,
   LibraryQuarantineAvDispatchConfirmationLiteral,
+  GetReviewedLibrarySourceReleaseStatusResponseDto,
+  PublishReviewedLibrarySourceReferenceResponseDto,
+  ReviewedLibrarySourceReleaseEditorialInput,
+  ReviewedLibrarySourceReleaseErrorCode,
+  ReviewedPublicLibraryRightsStatus,
+  ReviewedPublicLinkBasis,
+  SanitizedPublishedLibraryDocumentSummaryDto,
+  SanitizedReviewedLibrarySourceReleaseDto,
 };
 
 export {
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
   LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+  LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL,
 };
 
 export const LIBRARY_REVIEW_WORKBENCH_RELEASE_ENV_VAR =
@@ -227,6 +248,9 @@ export const LIBRARY_ISOLATED_INSPECTION_REQUEST_RELEASE_ENV_VAR =
 export const LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR =
   'POP_LIBRARY_AV_EXECUTION_ENABLED' as const;
 
+export const LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR =
+  'POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED' as const;
+
 export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly workbenchEnabled?: boolean;
   readonly humanCaseReviewEnabled?: boolean;
@@ -236,6 +260,7 @@ export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly binarySafetyCaseEnabled?: boolean;
   readonly isolatedInspectionRequestEnabled?: boolean;
   readonly avExecutionEnabled?: boolean;
+  readonly reviewedSourceReleaseEnabled?: boolean;
   readonly receiptReadDatabase?: LibraryQuarantineAdminReadFirestoreDatabase;
   readonly draftDatabase?: LibraryQuarantineReviewDraftFirestoreDatabase;
   readonly listReceiptsFn?: () => Promise<LibraryQuarantineAdminReadResult>;
@@ -253,6 +278,7 @@ export interface LibraryQuarantineReviewWorkbenchHandlerOptions {
   readonly binarySafetyCaseClock?: () => string;
   readonly isolatedInspectionRequestClock?: () => string;
   readonly avExecutionClock?: () => string;
+  readonly reviewedSourceReleaseClock?: () => string;
 }
 
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
@@ -398,6 +424,21 @@ const DISPATCH_QUARANTINE_AV_INSPECTION_ALLOWED_KEYS: ReadonlySet<string> =
     'expectedSafetyCaseRevision',
     'acknowledgedHumanCaseRevision',
     'confirmation',
+  ]);
+
+const GET_REVIEWED_LIBRARY_SOURCE_RELEASE_STATUS_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set(['action', 'receiptId']);
+
+const PUBLISH_REVIEWED_LIBRARY_SOURCE_REFERENCE_ALLOWED_KEYS: ReadonlySet<string> =
+  new Set([
+    'action',
+    'receiptId',
+    'expectedHumanCaseRevision',
+    'expectedCatalogUpdatedAt',
+    'expectedAlignmentRevision',
+    'expectedRightsDecisionRevision',
+    'confirmation',
+    'input',
   ]);
 
 const LIBRARY_EDITORIAL_CURATION_PERMISSIONS: readonly AdminPermission[] = Object.freeze([
@@ -1376,6 +1417,24 @@ function assertAvExecutionReleaseGatesEnabled(
     throw new HttpsError(
       'failed-precondition',
       'AV_EXECUTION_NOT_RELEASED: Library isolated ClamAV execution feature release gates are not enabled on the server.'
+    );
+  }
+}
+
+function assertReviewedSourceReleaseGatesEnabled(
+  options?: LibraryQuarantineReviewWorkbenchHandlerOptions
+): void {
+  assertRightsDecisionReleaseGatesEnabled(options);
+
+  const explicitlyDisabled =
+    options?.reviewedSourceReleaseEnabled === false ||
+    (options?.reviewedSourceReleaseEnabled === undefined &&
+      process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR] === 'false');
+
+  if (explicitlyDisabled) {
+    throw new HttpsError(
+      'failed-precondition',
+      'REVIEWED_SOURCE_RELEASE_NOT_RELEASED: Library reviewed source release feature is disabled on the server.'
     );
   }
 }
@@ -3047,6 +3106,252 @@ export async function executeManageLibraryDocumentsRequest(
           validatedPayload.acknowledgedHumanCaseRevision as number,
         confirmation:
           validatedPayload.confirmation as LibraryQuarantineAvDispatchConfirmationLiteral,
+      })
+    );
+  }
+
+  if (
+    action === 'getReviewedLibrarySourceReleaseStatus' ||
+    action === 'publishReviewedLibrarySourceReference'
+  ) {
+    assertReviewedSourceReleaseGatesEnabled(quarantineWorkbenchOptions);
+    assertStrictNoSymbolCallerKeys(requestContext?.data, action);
+
+    const allowedKeys =
+      action === 'getReviewedLibrarySourceReleaseStatus'
+        ? GET_REVIEWED_LIBRARY_SOURCE_RELEASE_STATUS_ALLOWED_KEYS
+        : PUBLISH_REVIEWED_LIBRARY_SOURCE_REFERENCE_ALLOWED_KEYS;
+
+    const validatedPayload = assertStrictAllowedCallerKeys(
+      requestContext?.data,
+      allowedKeys,
+      action
+    );
+
+    if (
+      !Object.prototype.hasOwnProperty.call(validatedPayload, 'receiptId') ||
+      !isValidLibraryQuarantineReceiptId(validatedPayload.receiptId)
+    ) {
+      throw new HttpsError(
+        'invalid-argument',
+        'INVALID_RECEIPT_ID: receiptId must be a 32-character lowercase hexadecimal string.'
+      );
+    }
+
+    if (action === 'publishReviewedLibrarySourceReference') {
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedHumanCaseRevision'
+        ) ||
+        typeof validatedPayload.expectedHumanCaseRevision !== 'number' ||
+        !Number.isSafeInteger(validatedPayload.expectedHumanCaseRevision) ||
+        validatedPayload.expectedHumanCaseRevision < 1
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_CASE_REVISION: expectedHumanCaseRevision must be a positive safe integer (>= 1).'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedCatalogUpdatedAt'
+        ) ||
+        typeof validatedPayload.expectedCatalogUpdatedAt !== 'string' ||
+        validatedPayload.expectedCatalogUpdatedAt.trim().length === 0
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_CATALOG_UPDATED_AT: expectedCatalogUpdatedAt must be a non-empty ISO timestamp string.'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedAlignmentRevision'
+        ) ||
+        typeof validatedPayload.expectedAlignmentRevision !== 'number' ||
+        !Number.isSafeInteger(validatedPayload.expectedAlignmentRevision) ||
+        validatedPayload.expectedAlignmentRevision < 0
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_ALIGNMENT_REVISION: expectedAlignmentRevision must be a non-negative safe integer (>= 0).'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'expectedRightsDecisionRevision'
+        ) ||
+        typeof validatedPayload.expectedRightsDecisionRevision !== 'number' ||
+        !Number.isSafeInteger(validatedPayload.expectedRightsDecisionRevision) ||
+        validatedPayload.expectedRightsDecisionRevision < 1
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_EXPECTED_RIGHTS_DECISION_REVISION: expectedRightsDecisionRevision must be a positive safe integer (>= 1).'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          validatedPayload,
+          'confirmation'
+        ) ||
+        validatedPayload.confirmation !==
+          LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'CONFIRMATION_REQUIRED: confirmation must equal CONFIRM_PUBLISH_REVIEWED_SOURCE_REFERENCE.'
+        );
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(validatedPayload, 'input') ||
+        typeof validatedPayload.input !== 'object' ||
+        validatedPayload.input === null ||
+        Array.isArray(validatedPayload.input) ||
+        Object.getOwnPropertySymbols(validatedPayload.input).length > 0
+      ) {
+        throw new HttpsError(
+          'invalid-argument',
+          'INVALID_RELEASE_INPUT_OBJECT: input must be a plain object.'
+        );
+      }
+    }
+
+    assertStrictWorkbenchAuthEnvelope(requestContext);
+
+    const baseAdminRepo: Pick<AdminRepository, 'getAdminByUid'> =
+      quarantineWorkbenchOptions?.bridgeDependencies?.adminRepository ??
+      adminRepo;
+
+    let cachedLookupDone = false;
+    let cachedLookupUid = '';
+    let cachedAdminUser: AdminUser | null = null;
+
+    const requestScopedAdminRepo: AdminRepository = {
+      async getAdminByUid(uid: string): Promise<AdminUser | null> {
+        if (cachedLookupDone && cachedLookupUid === uid) {
+          return cachedAdminUser;
+        }
+        const resolved = await baseAdminRepo.getAdminByUid(uid);
+        cachedLookupDone = true;
+        cachedLookupUid = uid;
+        cachedAdminUser = resolved;
+        return resolved;
+      },
+      async saveAdmin(admin: AdminUser): Promise<AdminUser> {
+        if (
+          typeof (baseAdminRepo as AdminRepository).saveAdmin === 'function'
+        ) {
+          return (baseAdminRepo as AdminRepository).saveAdmin(admin);
+        }
+        throw new Error(
+          `UNSAFE_DIRECT_WRITE_FORBIDDEN: saveAdmin is forbidden in ${action}.`
+        );
+      },
+      async listAdmins(): Promise<AdminUser[]> {
+        return typeof (baseAdminRepo as AdminRepository).listAdmins ===
+          'function'
+          ? (baseAdminRepo as AdminRepository).listAdmins!()
+          : [];
+      },
+    };
+
+    const authorizedActor = await authenticateHumanAdminForLibraryPeiaAction(
+      requestContext,
+      [AdminPermission.Publish],
+      requestScopedAdminRepo
+    );
+
+    const requiredPublishPermissions: readonly AdminPermission[] = [
+      AdminPermission.Review,
+      AdminPermission.ManageRights,
+      AdminPermission.Approve,
+      AdminPermission.Publish,
+    ];
+    for (const reqPerm of requiredPublishPermissions) {
+      if (!AdminAuthorizationService.hasPermission(authorizedActor, reqPerm)) {
+        throw new HttpsError(
+          'permission-denied',
+          `INSUFFICIENT_PERMISSION: Role ${authorizedActor.role} requires ${reqPerm} permission for reviewed source release`
+        );
+      }
+    }
+
+    const explicitPermissions = (
+      authorizedActor as { readonly permissions?: unknown }
+    ).permissions;
+    if (
+      Array.isArray(explicitPermissions) &&
+      !requiredPublishPermissions.every((perm) =>
+        explicitPermissions.includes(perm)
+      )
+    ) {
+      throw new HttpsError(
+        'permission-denied',
+        `INSUFFICIENT_PERMISSION: Role ${authorizedActor.role} lacks required permissions Review, ManageRights, Approve, and Publish`
+      );
+    }
+
+    const verifiedUid = requestContext.auth!.uid.trim();
+    const verifiedToken = requestContext.auth?.token;
+
+    const effectiveDb: LibraryQuarantineReviewDraftFirestoreDatabase =
+      quarantineWorkbenchOptions?.draftDatabase ??
+      (getFirestore() as unknown as LibraryQuarantineReviewDraftFirestoreDatabase);
+
+    const effectiveClock =
+      quarantineWorkbenchOptions?.reviewedSourceReleaseClock ??
+      quarantineWorkbenchOptions?.rightsDecisionClock ??
+      quarantineWorkbenchOptions?.caseAlignmentClock ??
+      quarantineWorkbenchOptions?.catalogHandoffClock ??
+      quarantineWorkbenchOptions?.humanReviewClock ??
+      quarantineWorkbenchOptions?.bridgeDependencies?.clock;
+
+    const releaseService = new LibraryReviewedSourceReleaseService({
+      trustedPrincipalProvider: Object.freeze({
+        resolveAuthenticatedPrincipal: () =>
+          Object.freeze({
+            uid: verifiedUid,
+            ...(verifiedToken !== undefined ? { token: verifiedToken } : {}),
+          }),
+      }),
+      adminRepository: requestScopedAdminRepo,
+      db: effectiveDb,
+      ...(effectiveClock !== undefined ? { clock: effectiveClock } : {}),
+    });
+
+    if (action === 'getReviewedLibrarySourceReleaseStatus') {
+      return releaseService.getReviewedLibrarySourceReleaseStatus(
+        Object.freeze({
+          receiptId: validatedPayload.receiptId,
+        })
+      );
+    }
+
+    return releaseService.publishReviewedLibrarySourceReference(
+      Object.freeze({
+        receiptId: validatedPayload.receiptId,
+        expectedHumanCaseRevision:
+          validatedPayload.expectedHumanCaseRevision as number,
+        expectedCatalogUpdatedAt:
+          validatedPayload.expectedCatalogUpdatedAt as string,
+        expectedAlignmentRevision:
+          validatedPayload.expectedAlignmentRevision as number,
+        expectedRightsDecisionRevision:
+          validatedPayload.expectedRightsDecisionRevision as number,
+        confirmation:
+          validatedPayload.confirmation as typeof LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL,
+        input:
+          validatedPayload.input as ReviewedLibrarySourceReleaseEditorialInput,
       })
     );
   }

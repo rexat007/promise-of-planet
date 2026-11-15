@@ -3,7 +3,9 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  ExternalLink,
   FileText,
+  Globe,
   Lock,
   Loader2,
   RefreshCw,
@@ -42,6 +44,17 @@ import {
 import {
   LibraryQuarantineBinarySafetyCasePanel,
 } from './LibraryQuarantineBinarySafetyCasePanel';
+import {
+  LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL,
+  LibraryQuarantineReviewedSourceReleasePanelController,
+  REVIEWED_PUBLIC_LINK_BASES,
+  REVIEWED_PUBLIC_RIGHTS_STATUSES,
+  canUserPublishReviewedLibrarySourceReference,
+  isLibraryQuarantineReviewedSourceReleaseEnabled,
+  type LibraryQuarantineReviewedSourceReleasePanelSnapshot,
+  type ReviewedPublicLibraryRightsStatus,
+  type ReviewedPublicLinkBasis,
+} from '../../services/libraryReviewedSourceReleaseClient';
 
 /**
  * LIB-FILE-HUMAN-CASEWORK-01 — Human Review Case Modal & State Controller
@@ -980,6 +993,8 @@ export interface LibraryQuarantineHumanReviewModalProps {
   readonly sources?: readonly LibrarySource[];
   readonly catalogHandoffController?: LibraryQuarantineCatalogHandoffPanelController;
   readonly rightsDecisionController?: LibraryQuarantineRightsDecisionPanelController;
+  readonly reviewedSourceReleaseController?: LibraryQuarantineReviewedSourceReleasePanelController;
+  readonly envOverride?: Record<string, unknown>;
 }
 
 export function getHumanReviewCaseStatusLabel(
@@ -1014,6 +1029,8 @@ export function LibraryQuarantineHumanReviewModal({
   sources = [],
   catalogHandoffController,
   rightsDecisionController,
+  reviewedSourceReleaseController,
+  envOverride,
 }: LibraryQuarantineHumanReviewModalProps) {
   const [snapshot, setSnapshot] =
     useState<LibraryQuarantineHumanReviewModalSnapshot>(() =>
@@ -1023,14 +1040,29 @@ export function LibraryQuarantineHumanReviewModal({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const fallbackRightsControllerRef =
     useRef<LibraryQuarantineRightsDecisionPanelController | null>(null);
+  const fallbackReleaseControllerRef =
+    useRef<LibraryQuarantineReviewedSourceReleasePanelController | null>(null);
 
   if (!rightsDecisionController && !fallbackRightsControllerRef.current) {
     fallbackRightsControllerRef.current =
       new LibraryQuarantineRightsDecisionPanelController(currentUser);
   }
 
+  if (
+    !reviewedSourceReleaseController &&
+    !fallbackReleaseControllerRef.current
+  ) {
+    fallbackReleaseControllerRef.current =
+      new LibraryQuarantineReviewedSourceReleasePanelController(currentUser, {
+        enabled: isLibraryQuarantineReviewedSourceReleaseEnabled(envOverride),
+      });
+  }
+
   const effectiveRightsDecisionController =
     rightsDecisionController ?? fallbackRightsControllerRef.current!;
+
+  const effectiveReleaseController =
+    reviewedSourceReleaseController ?? fallbackReleaseControllerRef.current!;
 
   useEffect(() => {
     setSnapshot(controller.getSnapshot());
@@ -1040,8 +1072,13 @@ export function LibraryQuarantineHumanReviewModal({
   }, [controller]);
 
   useEffect(() => {
+    effectiveReleaseController.setCurrentUser(currentUser);
+  }, [effectiveReleaseController, currentUser]);
+
+  useEffect(() => {
     if (!snapshot.isOpen) {
       effectiveRightsDecisionController.resetPanel();
+      effectiveReleaseController.resetPanel();
       return;
     }
     closeButtonRef.current?.focus();
@@ -1062,6 +1099,7 @@ export function LibraryQuarantineHumanReviewModal({
     snapshot.saving,
     controller,
     effectiveRightsDecisionController,
+    effectiveReleaseController,
   ]);
 
   if (!snapshot.isOpen || !snapshot.activeReceipt) {
@@ -1873,7 +1911,675 @@ export function LibraryQuarantineHumanReviewModal({
             )}
           />
         )}
+
+        {/* Inline External Source Release Panel (LIB-PUBLISH-01) */}
+        {!loading && !loadError && (
+          <LibraryQuarantineReviewedSourceReleaseSection
+            controller={effectiveReleaseController}
+            currentUser={currentUser}
+            savedReviewCase={reviewCase}
+            hasUnsavedCaseEdits={Boolean(
+              reviewCase &&
+                (form.status !== reviewCase.status ||
+                  form.titleAr !== reviewCase.titleAr ||
+                  form.titleEn !== reviewCase.titleEn ||
+                  form.issuingOrganization !== reviewCase.issuingOrganization ||
+                  form.summaryAr !== reviewCase.summaryAr ||
+                  form.summaryEn !== reviewCase.summaryEn ||
+                  form.sourceEvidenceNotes !== reviewCase.sourceEvidenceNotes ||
+                  form.rightsEvidenceNotes !== reviewCase.rightsEvidenceNotes ||
+                  form.editorialNotes !== reviewCase.editorialNotes)
+            )}
+            isAr={isAr}
+            envOverride={envOverride}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+interface LibraryQuarantineReviewedSourceReleaseSectionProps {
+  readonly controller: LibraryQuarantineReviewedSourceReleasePanelController;
+  readonly currentUser: AdminUser | null;
+  readonly savedReviewCase: SanitizedLibraryQuarantineHumanReviewCaseDto | null;
+  readonly hasUnsavedCaseEdits: boolean;
+  readonly isAr: boolean;
+  readonly envOverride?: Record<string, unknown>;
+}
+
+function getPublicLinkBasisLabel(
+  basis: ReviewedPublicLinkBasis,
+  isAr: boolean
+): string {
+  switch (basis) {
+    case 'PUBLIC_DOMAIN_FULL_TEXT':
+      return isAr ? 'ملكية عامة — نص كامل' : 'Public Domain — Full Text';
+    case 'OPEN_LICENSE_FULL_TEXT':
+      return isAr ? 'ترخيص مفتوح للنص الكامل' : 'Open License — Full Text';
+    case 'EXPLICIT_PUBLISHER_PERMISSION_FULL_TEXT':
+      return isAr
+        ? 'إذن صريح من الناشر للربط العام'
+        : 'Explicit Publisher Permission — Public Link';
+    case 'OFFICIAL_PUBLIC_SOURCE_LINK':
+      return isAr
+        ? 'رابط مصدر حكومي/رسمي متاح للعامة'
+        : 'Official Public Source Link';
+  }
+}
+
+export function LibraryQuarantineReviewedSourceReleaseSection({
+  controller,
+  currentUser,
+  savedReviewCase,
+  hasUnsavedCaseEdits,
+  isAr,
+  envOverride,
+}: LibraryQuarantineReviewedSourceReleaseSectionProps) {
+  const [state, setState] =
+    useState<LibraryQuarantineReviewedSourceReleasePanelSnapshot>(() =>
+      controller.getSnapshot()
+    );
+
+  const lastLoadedKeyRef = useRef<string>('');
+
+  useEffect(() => {
+    setState(controller.getSnapshot());
+    return controller.subscribe((next) => {
+      setState(next);
+    });
+  }, [controller]);
+
+  const isEnabled =
+    state.enabled || isLibraryQuarantineReviewedSourceReleaseEnabled(envOverride);
+  const canPublish = canUserPublishReviewedLibrarySourceReference(currentUser);
+  const isSavedCaseMetadataRecorded =
+    savedReviewCase !== null && savedReviewCase.status === 'METADATA_RECORDED';
+
+  useEffect(() => {
+    if (!isEnabled || !canPublish || !isSavedCaseMetadataRecorded) {
+      lastLoadedKeyRef.current = '';
+      return;
+    }
+    const loadKey = `${savedReviewCase.receiptId}:${savedReviewCase.revision}`;
+    if (lastLoadedKeyRef.current !== loadKey) {
+      lastLoadedKeyRef.current = loadKey;
+      void controller.openForSavedCase(savedReviewCase);
+    }
+  }, [
+    controller,
+    isEnabled,
+    canPublish,
+    isSavedCaseMetadataRecorded,
+    savedReviewCase,
+  ]);
+
+  if (!isEnabled || !canPublish || !isSavedCaseMetadataRecorded) {
+    return null;
+  }
+
+  const {
+    loading,
+    publishing,
+    readinessStatus,
+    holdCode,
+    holdMessage,
+    form,
+    confirmed,
+    loadError,
+    publishError,
+    lastOutcome,
+    conflictState,
+    uncertainState,
+  } = state;
+
+  const isPublished = readinessStatus?.isPublished === true;
+  const isEligible = readinessStatus?.eligibleForPublish === true;
+  const isNotAuthorizedForLink =
+    holdCode === 'RIGHTS_NOT_AUTHORIZED_FOR_PUBLIC_LINK' ||
+    (readinessStatus !== null &&
+      readinessStatus.rightsAuthorizedForMetadata === false);
+
+  return (
+    <section
+      data-testid="quarantine-reviewed-source-release-panel"
+      aria-labelledby="quarantine-reviewed-source-release-heading"
+      className="p-4 sm:p-5 rounded-2xl border-2 border-emerald-200 dark:border-emerald-900/70 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-4 text-xs"
+      dir={isAr ? 'rtl' : 'ltr'}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2 border-b border-emerald-200/80 dark:border-emerald-900/60 pb-3">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="p-1.5 rounded-lg bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300">
+              <Globe className="h-4 w-4" />
+            </span>
+            <h4
+              id="quarantine-reviewed-source-release-heading"
+              data-testid="quarantine-reviewed-source-release-title"
+              className="text-sm font-extrabold text-gray-900 dark:text-gray-100"
+            >
+              {isAr ? 'إتاحة في المكتبة العامة' : 'Publish to Public Library'}
+            </h4>
+            <span
+              data-testid="quarantine-reviewed-source-release-badge"
+              className={`px-2 py-0.5 rounded-md font-bold text-[11px] border ${
+                isPublished
+                  ? 'bg-emerald-100 text-emerald-900 border-emerald-300 dark:bg-emerald-900/60 dark:text-emerald-200 dark:border-emerald-700'
+                  : isNotAuthorizedForLink
+                    ? 'bg-rose-100 text-rose-900 border-rose-300 dark:bg-rose-950/60 dark:text-rose-200 dark:border-rose-800'
+                    : isEligible
+                      ? 'bg-teal-100 text-teal-900 border-teal-300 dark:bg-teal-950/60 dark:text-teal-200 dark:border-teal-800'
+                      : 'bg-amber-100 text-amber-900 border-amber-300 dark:bg-amber-950/60 dark:text-amber-200 dark:border-amber-800'
+              }`}
+            >
+              {isPublished
+                ? isAr
+                  ? 'متاح في المكتبة العامة'
+                  : 'PUBLISHED PUBLIC LINK'
+                : isNotAuthorizedForLink
+                  ? 'NOT AUTHORIZED FOR PUBLIC LINK'
+                  : isEligible
+                    ? isAr
+                      ? 'جاهز للإتاحة برابط المصدر الأصلي'
+                      : 'ELIGIBLE FOR SOURCE RELEASE'
+                    : isAr
+                      ? 'موقوف لحين استيفاء المتطلبات'
+                      : 'HOLD'}
+            </span>
+          </div>
+          <p className="text-[11px] text-gray-600 dark:text-gray-400 leading-relaxed">
+            {isAr
+              ? 'ينشئ هذا الإجراء سجلاً عاماً مفهرساً مرتبطاً بالرابط الرسمي الموثّق للناشر الأصلي فقط، مع إبقاء مسودة الحجر الداخلية مغلقة ودون أي نسخ أو إتاحة لملفات PDF/DOCX المحجورة.'
+              : 'Publishes a reviewed catalog entry linked strictly to a verified external publisher HTTPS URL. The internal quarantine draft stays locked and quarantined binary files are never copied or exposed.'}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          data-testid="refresh-reviewed-source-release-btn"
+          disabled={loading || publishing}
+          onClick={() => {
+            void controller.reloadStatus();
+          }}
+          className="px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold text-[11px] cursor-pointer disabled:opacity-50 inline-flex items-center gap-1"
+        >
+          <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+          <span>{isAr ? 'تحقق من الجاهزية' : 'Check Readiness'}</span>
+        </button>
+      </div>
+
+      {hasUnsavedCaseEdits && (
+        <div
+          data-testid="reviewed-source-release-unsaved-hold"
+          className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 font-bold"
+        >
+          {isAr
+            ? 'يوجد تعديل غير محفوظ في سجل المراجعة البشرية — احفظ السجل وأجرِ المواءمة قبل الإتاحة العامة.'
+            : 'Unsaved edits exist in the human review case. Save and align before publishing.'}
+        </div>
+      )}
+
+      {loading && (
+        <div
+          data-testid="reviewed-source-release-loading"
+          className="p-4 text-center text-gray-600 dark:text-gray-400 flex items-center justify-center gap-2 font-bold"
+        >
+          <Loader2 className="h-4 w-4 animate-spin text-emerald-700" />
+          <span>
+            {isAr
+              ? 'جاري فحص أهلية الإتاحة العامة وسلسلة الحقوق...'
+              : 'Verifying alignment, source registry, and rights eligibility...'}
+          </span>
+        </div>
+      )}
+
+      {!loading && loadError && (
+        <div
+          data-testid="reviewed-source-release-load-error"
+          role="alert"
+          className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200"
+        >
+          <div className="font-extrabold">
+            {isAr ? 'تعذر فحص حالة الإتاحة العامة' : 'Failed to Load Release Status'}
+          </div>
+          <p className="font-mono text-[11px] mt-1">{loadError}</p>
+        </div>
+      )}
+
+      {!loading && !loadError && holdCode && (
+        <div
+          data-testid="reviewed-source-release-hold-banner"
+          role="alert"
+          className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 text-rose-950 dark:text-rose-100 space-y-1.5"
+        >
+          <div className="font-extrabold flex items-center gap-1.5">
+            <AlertTriangle className="h-4 w-4 text-rose-600 dark:text-rose-400 shrink-0" />
+            <span>
+              {isNotAuthorizedForLink
+                ? isAr
+                  ? 'غير مخوّل للنشر أو الربط العام — NOT AUTHORIZED FOR PUBLIC LINK'
+                  : 'NOT AUTHORIZED FOR PUBLIC LINK'
+                : isAr
+                  ? 'الإتاحة العامة موقوفة لحين استيفاء المتطلبات'
+                  : 'Public Source Release Held'}
+            </span>
+          </div>
+          <div
+            data-testid="reviewed-source-release-hold-code"
+            className="font-mono text-[11px] font-bold"
+            dir="ltr"
+          >
+            {holdCode}
+          </div>
+          {holdMessage && (
+            <p className="text-[11px] leading-relaxed">{holdMessage}</p>
+          )}
+        </div>
+      )}
+
+      {uncertainState && (
+        <div
+          data-testid="reviewed-source-release-uncertain-banner"
+          role="alert"
+          className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border-2 border-amber-400 text-amber-950 dark:text-amber-100 space-y-2"
+        >
+          <div className="font-extrabold flex items-center gap-1.5">
+            <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+            <span>
+              {isAr
+                ? 'نتيجة النشر غير مؤكدة — تم إيقاف إعادة الإرسال التلقائي'
+                : 'Publish Commit Uncertain — Automatic Retry Stopped'}
+            </span>
+          </div>
+          <p className="text-[11px]">{uncertainState.errorMessage}</p>
+          <button
+            type="button"
+            data-testid="verify-reviewed-source-release-btn"
+            disabled={loading || publishing}
+            onClick={() => {
+              void controller.verifyUncertainPublish();
+            }}
+            className="px-3.5 py-2 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-extrabold text-xs cursor-pointer inline-flex items-center gap-1.5"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            <span>{isAr ? 'تحقق من حالة النشر' : 'Verify release status'}</span>
+          </button>
+        </div>
+      )}
+
+      {conflictState && (
+        <div
+          data-testid="reviewed-source-release-conflict-banner"
+          role="alert"
+          className="p-3.5 rounded-xl bg-orange-50 dark:bg-orange-950/40 border border-orange-300 dark:border-orange-800 text-orange-950 dark:text-orange-100 space-y-2"
+        >
+          <div className="font-extrabold">
+            {isAr
+              ? `تعارض في البيانات (${conflictState.errorCode})`
+              : `Release Precondition Conflict (${conflictState.errorCode})`}
+          </div>
+          <p className="text-[11px]">{conflictState.errorMessage}</p>
+          <button
+            type="button"
+            data-testid="reload-reviewed-source-release-conflict-btn"
+            onClick={() => {
+              void controller.reloadStatus();
+            }}
+            className="px-3 py-1.5 rounded-lg bg-orange-700 text-white font-bold text-xs cursor-pointer"
+          >
+            {isAr ? 'تحديث الحالة الحالية' : 'Refresh Current State'}
+          </button>
+        </div>
+      )}
+
+      {!loading &&
+        !loadError &&
+        readinessStatus &&
+        isPublished &&
+        readinessStatus.publicDocument && (
+          <div
+            data-testid="reviewed-source-release-published-summary"
+            className="p-3.5 rounded-xl bg-emerald-100/70 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800 space-y-2 text-emerald-950 dark:text-emerald-100"
+          >
+            <div className="font-extrabold flex items-center gap-1.5">
+              <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-400 shrink-0" />
+              <span>
+                {lastOutcome === 'ALREADY_PUBLISHED'
+                  ? isAr
+                    ? 'السجل منشور مسبقاً في المكتبة العامة'
+                    : 'Already Published in Public Library'
+                  : isAr
+                    ? 'تمت الإتاحة في المكتبة العامة برابط المصدر الموثّق'
+                    : 'Published to Public Library with Verified Publisher Link'}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'معرّف السجل العام: ' : 'Public Document ID: '}
+                </span>
+                <span
+                  data-testid="reviewed-source-release-public-doc-id"
+                  className="font-mono font-bold"
+                  dir="ltr"
+                >
+                  {readinessStatus.publicDocument.id}
+                </span>
+              </div>
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'حالة الحقوق العامة: ' : 'Public Rights Status: '}
+                </span>
+                <span className="font-mono font-bold" dir="ltr">
+                  {readinessStatus.publicDocument.rightsStatus}
+                </span>
+              </div>
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'مسودة الحجر الداخلية: ' : 'Quarantine Draft: '}
+                </span>
+                <span className="font-mono" dir="ltr">
+                  {readinessStatus.quarantineCatalogDocumentId} (
+                  {readinessStatus.quarantineDraftWorkflowState})
+                </span>
+              </div>
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'كشف الملف الثنائي: ' : 'Quarantine Binary Exposed: '}
+                </span>
+                <span className="font-mono" dir="ltr">
+                  {String(readinessStatus.quarantineBinaryExposed)}
+                </span>
+              </div>
+            </div>
+            <div className="pt-1">
+              <a
+                href={readinessStatus.publicDocument.referenceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-testid="reviewed-source-release-public-link"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white dark:bg-gray-900 border border-emerald-400 text-emerald-900 dark:text-emerald-200 font-bold hover:underline break-all"
+                dir="ltr"
+              >
+                <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                <span>{readinessStatus.publicDocument.referenceUrl}</span>
+              </a>
+            </div>
+          </div>
+        )}
+
+      {!loading &&
+        !loadError &&
+        readinessStatus &&
+        !isPublished && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-3 rounded-xl bg-white dark:bg-gray-900/70 border border-gray-200 dark:border-gray-800 text-[11px]">
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'مواءمة الفهرس والحالة: ' : 'Catalog Alignment: '}
+                </span>
+                <span className="font-mono" dir="ltr">
+                  {readinessStatus.catalogAligned ? 'ALIGNED' : 'NOT_ALIGNED'} (v
+                  {readinessStatus.effectiveAlignedCaseRevision})
+                </span>
+              </div>
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'قرار حقوق الفهرسة: ' : 'Rights Decision: '}
+                </span>
+                <span className="font-mono" dir="ltr">
+                  {readinessStatus.currentRightsDecision ?? 'NONE'}
+                </span>
+              </div>
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'حالة توثيق المصدر: ' : 'Source Verification: '}
+                </span>
+                <span className="font-mono" dir="ltr">
+                  {readinessStatus.sourceVerified ? 'Verified' : 'NOT_VERIFIED'}
+                </span>
+              </div>
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'معرّف النشر المتوقع: ' : 'Target Public ID: '}
+                </span>
+                <span className="font-mono" dir="ltr">
+                  {readinessStatus.publicDocumentId}
+                </span>
+              </div>
+            </div>
+
+            {isEligible && !hasUnsavedCaseEdits ? (
+              <div
+                data-testid="reviewed-source-release-form"
+                className="space-y-3"
+              >
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="release-public-rights-status"
+                      className="block font-bold text-gray-700 dark:text-gray-300"
+                    >
+                      {isAr
+                        ? 'تصنيف الحقوق للنشر العام'
+                        : 'Public Rights Classification'}
+                    </label>
+                    <select
+                      id="release-public-rights-status"
+                      data-testid="release-public-rights-status-select"
+                      disabled={publishing}
+                      value={form.publicRightsStatus}
+                      onChange={(e) =>
+                        controller.updateFormField(
+                          'publicRightsStatus',
+                          e.target.value as ReviewedPublicLibraryRightsStatus
+                        )
+                      }
+                      className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-bold"
+                    >
+                      {REVIEWED_PUBLIC_RIGHTS_STATUSES.map((st) => (
+                        <option key={st} value={st}>
+                          {st}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="release-public-link-basis"
+                      className="block font-bold text-gray-700 dark:text-gray-300"
+                    >
+                      {isAr
+                        ? 'الأساس الحقوقي للرابط الكامل'
+                        : 'Public Full-Text Link Authorization Basis'}
+                    </label>
+                    <select
+                      id="release-public-link-basis"
+                      data-testid="release-public-link-basis-select"
+                      disabled={publishing}
+                      value={form.publicLinkBasis}
+                      onChange={(e) =>
+                        controller.updateFormField(
+                          'publicLinkBasis',
+                          e.target.value as ReviewedPublicLinkBasis
+                        )
+                      }
+                      className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-bold"
+                    >
+                      {REVIEWED_PUBLIC_LINK_BASES.map((basis) => (
+                        <option key={basis} value={basis}>
+                          {getPublicLinkBasisLabel(basis, isAr)} ({basis})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label
+                    htmlFor="release-verified-source-url"
+                    className="block font-bold text-gray-700 dark:text-gray-300"
+                  >
+                    {isAr
+                      ? 'رابط الناشر الأصلي الموثّق (HTTPS فقط)'
+                      : 'Verified Original Publisher URL (Strict HTTPS Only)'}
+                  </label>
+                  <input
+                    id="release-verified-source-url"
+                    data-testid="release-verified-source-url-input"
+                    type="url"
+                    dir="ltr"
+                    disabled={publishing}
+                    value={form.verifiedSourceUrl}
+                    onChange={(e) =>
+                      controller.updateFormField(
+                        'verifiedSourceUrl',
+                        e.target.value
+                      )
+                    }
+                    placeholder="https://official-publisher.org/law-document"
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-mono"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="release-evidence-reference"
+                      className="block font-bold text-gray-700 dark:text-gray-300"
+                    >
+                      {isAr
+                        ? 'مرجع سند الحقوق للربط العام'
+                        : 'Full-Text Public Link Evidence Reference'}
+                    </label>
+                    <input
+                      id="release-evidence-reference"
+                      data-testid="release-evidence-reference-input"
+                      type="text"
+                      disabled={publishing}
+                      value={form.rightsEvidenceReference}
+                      onChange={(e) =>
+                        controller.updateFormField(
+                          'rightsEvidenceReference',
+                          e.target.value
+                        )
+                      }
+                      placeholder={
+                        isAr
+                          ? 'مثال: الجريدة الرسمية / خطاب الموافقة...'
+                          : 'e.g., Official Gazette Issue #14 / Written License...'
+                      }
+                      className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="release-evidence-summary"
+                      className="block font-bold text-gray-700 dark:text-gray-300"
+                    >
+                      {isAr
+                        ? 'ملخص التحقق البشري من إتاحة الرابط'
+                        : 'Human Verification Summary for Public Link'}
+                    </label>
+                    <textarea
+                      id="release-evidence-summary"
+                      data-testid="release-evidence-summary-input"
+                      rows={2}
+                      disabled={publishing}
+                      value={form.rightsEvidenceSummary}
+                      onChange={(e) =>
+                        controller.updateFormField(
+                          'rightsEvidenceSummary',
+                          e.target.value
+                        )
+                      }
+                      placeholder={
+                        isAr
+                          ? 'توثيق صريح لصلاحية الربط بالرابط الرسمي الكامل...'
+                          : 'Explicit verification of full-text public linking clearance...'
+                      }
+                      className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+                    />
+                  </div>
+                </div>
+
+                {publishError && (
+                  <div
+                    data-testid="reviewed-source-release-publish-error"
+                    role="alert"
+                    className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200 font-mono text-[11px]"
+                  >
+                    {publishError}
+                  </div>
+                )}
+
+                <label className="flex items-start gap-2 p-2.5 rounded-xl bg-white dark:bg-gray-900/60 border border-emerald-200 dark:border-emerald-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-testid="release-confirmation-checkbox"
+                    disabled={publishing}
+                    checked={confirmed}
+                    onChange={(e) => controller.setConfirmed(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span className="text-[11px] font-bold text-gray-800 dark:text-gray-200">
+                    {isAr
+                      ? `أؤكد إتاحة السجل في المكتبة العامة عبر رابط الناشر الرسمي الموثّق دون إتاحة أي ملف محجور (${LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL}).`
+                      : `I confirm publishing this catalog entry to the public library via its verified official publisher URL without exposing quarantined binaries (${LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL}).`}
+                  </span>
+                </label>
+
+                <button
+                  type="button"
+                  data-testid="publish-reviewed-source-release-btn"
+                  disabled={publishing || !confirmed || uncertainState !== null}
+                  onClick={() => {
+                    void controller.publish();
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-extrabold text-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2 shadow-xs"
+                >
+                  {publishing ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Globe className="h-3.5 w-3.5" />
+                  )}
+                  <span>
+                    {publishing
+                      ? isAr
+                        ? 'جاري الإتاحة في المكتبة العامة...'
+                        : 'Publishing to Public Library...'
+                      : isAr
+                        ? 'إتاحة في المكتبة العامة'
+                        : 'Publish to Public Library'}
+                  </span>
+                </button>
+              </div>
+            ) : (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  data-testid="publish-reviewed-source-release-btn"
+                  disabled={true}
+                  aria-disabled="true"
+                  className="px-4 py-2.5 rounded-xl bg-gray-300 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-extrabold text-xs cursor-not-allowed inline-flex items-center gap-2"
+                >
+                  <Lock className="h-3.5 w-3.5" />
+                  <span>
+                    {isNotAuthorizedForLink
+                      ? isAr
+                        ? 'غير مخوّل للنشر العام — NOT AUTHORIZED FOR PUBLIC LINK'
+                        : 'NOT AUTHORIZED FOR PUBLIC LINK'
+                      : isAr
+                        ? 'إتاحة في المكتبة العامة (موقوف)'
+                        : 'Publish to Public Library (Disabled)'}
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+    </section>
   );
 }
