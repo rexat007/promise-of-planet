@@ -71,6 +71,15 @@ export type LibraryQuarantineCatalogCaseFourFieldKey =
 export const LIBRARY_QUARANTINE_CATALOG_CASE_FOUR_FIELD_KEYS: readonly LibraryQuarantineCatalogCaseFourFieldKey[] =
   Object.freeze(['titleAr', 'titleEn', 'summaryAr', 'summaryEn']);
 
+export const LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS =
+  'UNATTRIBUTED_PRE_FENCE_CATALOG_UPDATE' as const;
+
+export type LibraryQuarantineLegacyCatalogChangeAttributionStatus =
+  typeof LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS;
+
+export const LIBRARY_QUARANTINE_LEGACY_RECOVERY_MAX_CASE_REVISIONS =
+  32 as const;
+
 export interface LibraryQuarantineCatalogCaseFieldComparisonDto {
   readonly caseValue: string;
   readonly catalogValue: string;
@@ -152,6 +161,48 @@ export interface GetLibraryQuarantineCatalogCaseAlignmentHoldDto {
 export type GetLibraryQuarantineCatalogCaseAlignmentResponseDto =
   | GetLibraryQuarantineCatalogCaseAlignmentSuccessDto
   | GetLibraryQuarantineCatalogCaseAlignmentHoldDto;
+
+export interface InspectLibraryQuarantineLegacyCatalogRecoverySuccessDto {
+  readonly ok: true;
+  readonly status: 'INSPECTION_ONLY';
+  readonly receiptId: string;
+  readonly documentId: string;
+  readonly sourceRevision: number;
+  readonly originalHandoffCaseRevision: number;
+  readonly originalHandoffCaseUpdatedAt: string;
+  readonly originalHandoffCreatedAt: string;
+  readonly currentHumanCaseRevision: number;
+  readonly currentHumanCaseUpdatedAt: string;
+  readonly catalogUpdatedAt: string;
+  readonly currentAlignmentRevision: 0;
+  readonly hasAlignmentRecord: false;
+  readonly alignment: null;
+  readonly historicalCatalogChangeAttribution: LibraryQuarantineLegacyCatalogChangeAttributionStatus;
+  readonly historicalChainVerified: true;
+  readonly verifiedHumanReviewEventCount: number;
+  readonly recoveryApplied: false;
+  readonly requiresSeparateHumanAuthorization: true;
+  readonly diff: LibraryQuarantineCatalogCaseFourFieldDiffDto;
+  readonly handoff: SanitizedLibraryQuarantineCatalogHandoffDto;
+  readonly catalogDocument: SanitizedLibraryQuarantineCatalogDocumentDto;
+  readonly humanReviewCase: SanitizedLibraryQuarantineHumanReviewCaseDto;
+  readonly hasRecordedRightsDecision: boolean;
+  readonly recordedRightsDecisionCaseRevision: number | null;
+  readonly rightsDecisionInvalidatedByCaseChange: boolean;
+  readonly requiresFreshRightsReview: boolean;
+  readonly isSanitized: false;
+  readonly isVerifiedSafe: false;
+  readonly isRightsApproved: false;
+  readonly isPublished: false;
+  readonly isReadyForPeia: false;
+}
+
+export type InspectLibraryQuarantineLegacyCatalogRecoveryHoldDto =
+  GetLibraryQuarantineCatalogCaseAlignmentHoldDto;
+
+export type InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto =
+  | InspectLibraryQuarantineLegacyCatalogRecoverySuccessDto
+  | InspectLibraryQuarantineLegacyCatalogRecoveryHoldDto;
 
 export interface AlignLibraryQuarantineCatalogCaseSuccessDto {
   readonly ok: true;
@@ -250,6 +301,11 @@ export interface GetQuarantineCatalogCaseAlignmentCallablePayload {
   readonly receiptId: string;
 }
 
+export interface InspectQuarantineLegacyCatalogRecoveryCallablePayload {
+  readonly action: 'inspectQuarantineLegacyCatalogRecovery';
+  readonly receiptId: string;
+}
+
 export interface AlignQuarantineCatalogCaseCallablePayload {
   readonly action: 'alignQuarantineCatalogCase';
   readonly receiptId: string;
@@ -261,6 +317,7 @@ export interface AlignQuarantineCatalogCaseCallablePayload {
 
 export type LibraryQuarantineCatalogCaseAlignmentCallablePayload =
   | GetQuarantineCatalogCaseAlignmentCallablePayload
+  | InspectQuarantineLegacyCatalogRecoveryCallablePayload
   | AlignQuarantineCatalogCaseCallablePayload;
 
 export type LibraryQuarantineCatalogCaseAlignmentCallableInvoker = (
@@ -275,6 +332,9 @@ export interface LibraryQuarantineCatalogCaseAlignmentClientOptions {
   readonly getAlignmentFn?: (
     receiptId: string
   ) => Promise<GetLibraryQuarantineCatalogCaseAlignmentResponseDto>;
+  readonly inspectLegacyRecoveryFn?: (
+    receiptId: string
+  ) => Promise<InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto>;
   readonly alignCaseFn?: (
     payload: AlignQuarantineCatalogCaseClientRequest
   ) => Promise<AlignLibraryQuarantineCatalogCaseResponseDto>;
@@ -318,6 +378,12 @@ const FORBIDDEN_PRIVATE_KEYS: ReadonlySet<string> = new Set([
   'metageneration',
   'sourceReference',
   'internalNotes',
+  'actorUid',
+  'preRecoveryCatalogTitleAr',
+  'preRecoveryCatalogTitleEn',
+  'preRecoveryCatalogSummaryAr',
+  'preRecoveryCatalogSummaryEn',
+  'legacyUnattributedCatalogUpdateAcknowledgement',
 ]);
 
 const FORBIDDEN_STRING_SUBSTRINGS: readonly string[] = Object.freeze([
@@ -401,6 +467,41 @@ const GET_HOLD_KEYS: readonly string[] = Object.freeze([
   'errorMessage',
   'receiptId',
   'documentId',
+  'isSanitized',
+  'isVerifiedSafe',
+  'isRightsApproved',
+  'isPublished',
+  'isReadyForPeia',
+]);
+
+const INSPECT_LEGACY_RECOVERY_SUCCESS_KEYS: readonly string[] = Object.freeze([
+  'ok',
+  'status',
+  'receiptId',
+  'documentId',
+  'sourceRevision',
+  'originalHandoffCaseRevision',
+  'originalHandoffCaseUpdatedAt',
+  'originalHandoffCreatedAt',
+  'currentHumanCaseRevision',
+  'currentHumanCaseUpdatedAt',
+  'catalogUpdatedAt',
+  'currentAlignmentRevision',
+  'hasAlignmentRecord',
+  'alignment',
+  'historicalCatalogChangeAttribution',
+  'historicalChainVerified',
+  'verifiedHumanReviewEventCount',
+  'recoveryApplied',
+  'requiresSeparateHumanAuthorization',
+  'diff',
+  'handoff',
+  'catalogDocument',
+  'humanReviewCase',
+  'hasRecordedRightsDecision',
+  'recordedRightsDecisionCaseRevision',
+  'rightsDecisionInvalidatedByCaseChange',
+  'requiresFreshRightsReview',
   'isSanitized',
   'isVerifiedSafe',
   'isRightsApproved',
@@ -1554,6 +1655,251 @@ export function validateAlignCatalogCaseResponseDto(
   return null;
 }
 
+export function validateInspectLegacyCatalogRecoveryResponseDto(
+  rawResponse: unknown,
+  expectedReceiptId?: string
+): InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto | null {
+  if (
+    !isPlainRecord(rawResponse) ||
+    containsForbiddenKeyOrStringDeep(rawResponse)
+  ) {
+    return null;
+  }
+
+  if (rawResponse.ok === false && rawResponse.status === 'HOLD') {
+    if (
+      !hasExactKeys(rawResponse, GET_HOLD_KEYS) ||
+      !hasFiveFalseAssuranceFlags(rawResponse) ||
+      typeof rawResponse.errorCode !== 'string' ||
+      rawResponse.errorCode.trim().length === 0 ||
+      typeof rawResponse.errorMessage !== 'string' ||
+      rawResponse.errorMessage.trim().length === 0
+    ) {
+      return null;
+    }
+
+    const receiptId = rawResponse.receiptId;
+    if (
+      receiptId !== null &&
+      (typeof receiptId !== 'string' || !RECEIPT_ID_REGEX.test(receiptId))
+    ) {
+      return null;
+    }
+    if (
+      expectedReceiptId !== undefined &&
+      RECEIPT_ID_REGEX.test(expectedReceiptId) &&
+      receiptId !== null &&
+      receiptId !== expectedReceiptId
+    ) {
+      return null;
+    }
+
+    const documentId = rawResponse.documentId;
+    if (documentId !== null) {
+      if (
+        typeof documentId !== 'string' ||
+        !/^qcat-[0-9a-f]{32}$/.test(documentId)
+      ) {
+        return null;
+      }
+      if (
+        receiptId !== null &&
+        documentId !== deriveQuarantineCatalogDocumentId(receiptId)
+      ) {
+        return null;
+      }
+    }
+
+    return Object.freeze({
+      ok: false as const,
+      status: 'HOLD' as const,
+      errorCode: rawResponse.errorCode,
+      errorMessage: rawResponse.errorMessage,
+      receiptId,
+      documentId,
+      isSanitized: false as const,
+      isVerifiedSafe: false as const,
+      isRightsApproved: false as const,
+      isPublished: false as const,
+      isReadyForPeia: false as const,
+    });
+  }
+
+  if (rawResponse.ok !== true || rawResponse.status !== 'INSPECTION_ONLY') {
+    return null;
+  }
+
+  if (
+    !hasExactKeys(rawResponse, INSPECT_LEGACY_RECOVERY_SUCCESS_KEYS) ||
+    !hasFiveFalseAssuranceFlags(rawResponse)
+  ) {
+    return null;
+  }
+
+  const receiptId = rawResponse.receiptId;
+  if (typeof receiptId !== 'string' || !RECEIPT_ID_REGEX.test(receiptId)) {
+    return null;
+  }
+  if (expectedReceiptId !== undefined && receiptId !== expectedReceiptId) {
+    return null;
+  }
+
+  const expectedDocumentId = deriveQuarantineCatalogDocumentId(receiptId);
+  if (rawResponse.documentId !== expectedDocumentId) {
+    return null;
+  }
+
+  if (
+    rawResponse.currentAlignmentRevision !== 0 ||
+    rawResponse.hasAlignmentRecord !== false ||
+    rawResponse.alignment !== null ||
+    rawResponse.historicalCatalogChangeAttribution !==
+      LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS ||
+    rawResponse.historicalChainVerified !== true ||
+    rawResponse.recoveryApplied !== false ||
+    rawResponse.requiresSeparateHumanAuthorization !== true
+  ) {
+    return null;
+  }
+
+  if (
+    typeof rawResponse.sourceRevision !== 'number' ||
+    !Number.isSafeInteger(rawResponse.sourceRevision) ||
+    rawResponse.sourceRevision < 1 ||
+    typeof rawResponse.originalHandoffCaseRevision !== 'number' ||
+    !Number.isSafeInteger(rawResponse.originalHandoffCaseRevision) ||
+    rawResponse.originalHandoffCaseRevision < 1 ||
+    typeof rawResponse.currentHumanCaseRevision !== 'number' ||
+    !Number.isSafeInteger(rawResponse.currentHumanCaseRevision) ||
+    rawResponse.currentHumanCaseRevision <
+      rawResponse.originalHandoffCaseRevision ||
+    rawResponse.currentHumanCaseRevision >
+      LIBRARY_QUARANTINE_LEGACY_RECOVERY_MAX_CASE_REVISIONS ||
+    typeof rawResponse.verifiedHumanReviewEventCount !== 'number' ||
+    !Number.isSafeInteger(rawResponse.verifiedHumanReviewEventCount) ||
+    rawResponse.verifiedHumanReviewEventCount !==
+      rawResponse.currentHumanCaseRevision ||
+    !isValidIsoTimestamp(rawResponse.originalHandoffCaseUpdatedAt) ||
+    !isValidIsoTimestamp(rawResponse.originalHandoffCreatedAt) ||
+    !isValidIsoTimestamp(rawResponse.currentHumanCaseUpdatedAt) ||
+    !isValidIsoTimestamp(rawResponse.catalogUpdatedAt) ||
+    typeof rawResponse.hasRecordedRightsDecision !== 'boolean' ||
+    typeof rawResponse.rightsDecisionInvalidatedByCaseChange !== 'boolean' ||
+    typeof rawResponse.requiresFreshRightsReview !== 'boolean'
+  ) {
+    return null;
+  }
+
+  if (
+    Date.parse(rawResponse.originalHandoffCreatedAt) <
+      Date.parse(rawResponse.originalHandoffCaseUpdatedAt) ||
+    rawResponse.catalogUpdatedAt === rawResponse.originalHandoffCreatedAt ||
+    Date.parse(rawResponse.catalogUpdatedAt) <=
+      Date.parse(rawResponse.originalHandoffCreatedAt) ||
+    Date.parse(rawResponse.currentHumanCaseUpdatedAt) <
+      Date.parse(rawResponse.originalHandoffCaseUpdatedAt) ||
+    (rawResponse.currentHumanCaseRevision ===
+      rawResponse.originalHandoffCaseRevision &&
+      rawResponse.currentHumanCaseUpdatedAt !==
+        rawResponse.originalHandoffCaseUpdatedAt)
+  ) {
+    return null;
+  }
+
+  const diff = validateCatalogCaseFourFieldDiffDto(rawResponse.diff);
+  const handoff = validateHandoffSafe(rawResponse.handoff, receiptId);
+  const catalogDocument = validateCatalogDocumentSafe(
+    rawResponse.catalogDocument,
+    receiptId
+  );
+  const humanReviewCase = validateHumanReviewCaseSafe(
+    rawResponse.humanReviewCase,
+    receiptId
+  );
+
+  if (!diff || !handoff || !catalogDocument || !humanReviewCase) {
+    return null;
+  }
+
+  if (
+    humanReviewCase.status !== 'METADATA_RECORDED' ||
+    rawResponse.sourceRevision !== handoff.sourceRevision ||
+    humanReviewCase.sourceRevision !== rawResponse.sourceRevision ||
+    rawResponse.originalHandoffCaseRevision !== handoff.caseRevision ||
+    rawResponse.originalHandoffCaseUpdatedAt !== handoff.caseUpdatedAt ||
+    rawResponse.originalHandoffCreatedAt !== handoff.createdAt ||
+    rawResponse.currentHumanCaseRevision !== humanReviewCase.revision ||
+    rawResponse.currentHumanCaseUpdatedAt !== humanReviewCase.updatedAt ||
+    rawResponse.catalogUpdatedAt !== catalogDocument.updatedAt ||
+    catalogDocument.createdAt !== handoff.createdAt ||
+    catalogDocument.organizationId !== handoff.organizationId ||
+    catalogDocument.sourceId !== handoff.sourceId ||
+    !diffMatchesCaseAndCatalog(diff, humanReviewCase, catalogDocument)
+  ) {
+    return null;
+  }
+
+  if (!rawResponse.hasRecordedRightsDecision) {
+    if (
+      rawResponse.recordedRightsDecisionCaseRevision !== null ||
+      rawResponse.rightsDecisionInvalidatedByCaseChange !== false ||
+      rawResponse.requiresFreshRightsReview !== true
+    ) {
+      return null;
+    }
+  } else {
+    if (
+      typeof rawResponse.recordedRightsDecisionCaseRevision !== 'number' ||
+      !Number.isSafeInteger(rawResponse.recordedRightsDecisionCaseRevision) ||
+      rawResponse.recordedRightsDecisionCaseRevision < 1 ||
+      rawResponse.recordedRightsDecisionCaseRevision >
+        rawResponse.originalHandoffCaseRevision ||
+      rawResponse.rightsDecisionInvalidatedByCaseChange !== true ||
+      rawResponse.requiresFreshRightsReview !== true
+    ) {
+      return null;
+    }
+  }
+
+  return Object.freeze({
+    ok: true as const,
+    status: 'INSPECTION_ONLY' as const,
+    receiptId,
+    documentId: expectedDocumentId,
+    sourceRevision: rawResponse.sourceRevision,
+    originalHandoffCaseRevision: rawResponse.originalHandoffCaseRevision,
+    originalHandoffCaseUpdatedAt: rawResponse.originalHandoffCaseUpdatedAt,
+    originalHandoffCreatedAt: rawResponse.originalHandoffCreatedAt,
+    currentHumanCaseRevision: rawResponse.currentHumanCaseRevision,
+    currentHumanCaseUpdatedAt: rawResponse.currentHumanCaseUpdatedAt,
+    catalogUpdatedAt: rawResponse.catalogUpdatedAt,
+    currentAlignmentRevision: 0 as const,
+    hasAlignmentRecord: false as const,
+    alignment: null,
+    historicalCatalogChangeAttribution:
+      LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS,
+    historicalChainVerified: true as const,
+    verifiedHumanReviewEventCount: rawResponse.verifiedHumanReviewEventCount,
+    recoveryApplied: false as const,
+    requiresSeparateHumanAuthorization: true as const,
+    diff,
+    handoff,
+    catalogDocument,
+    humanReviewCase,
+    hasRecordedRightsDecision: rawResponse.hasRecordedRightsDecision,
+    recordedRightsDecisionCaseRevision:
+      rawResponse.recordedRightsDecisionCaseRevision as number | null,
+    rightsDecisionInvalidatedByCaseChange:
+      rawResponse.rightsDecisionInvalidatedByCaseChange,
+    requiresFreshRightsReview: rawResponse.requiresFreshRightsReview,
+    isSanitized: false as const,
+    isVerifiedSafe: false as const,
+    isRightsApproved: false as const,
+    isPublished: false as const,
+    isReadyForPeia: false as const,
+  });
+}
+
 export function validateGetQuarantineCatalogCaseAlignmentResponseDto(
   raw: unknown,
   expectedReceiptId?: string
@@ -1565,6 +1911,22 @@ export function validateGetQuarantineCatalogCaseAlignmentResponseDto(
   if (!validated) {
     throw new Error(
       'RESPONSE_VALIDATION_FAILED: Server response for getQuarantineCatalogCaseAlignment failed strict DTO validation.'
+    );
+  }
+  return validated;
+}
+
+export function validateInspectQuarantineLegacyCatalogRecoveryResponseDto(
+  raw: unknown,
+  expectedReceiptId?: string
+): InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto {
+  const validated = validateInspectLegacyCatalogRecoveryResponseDto(
+    raw,
+    expectedReceiptId
+  );
+  if (!validated) {
+    throw new Error(
+      'RESPONSE_VALIDATION_FAILED: Server response for inspectQuarantineLegacyCatalogRecovery failed strict DTO validation.'
     );
   }
   return validated;
@@ -1775,6 +2137,111 @@ export async function getQuarantineCatalogCaseAlignmentClient(
   }
 }
 
+export async function inspectQuarantineLegacyCatalogRecoveryClient(
+  receiptId: string,
+  options?: LibraryQuarantineCatalogCaseAlignmentClientOptions
+): Promise<InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto> {
+  const safeReceiptId = typeof receiptId === 'string' ? receiptId.trim() : '';
+
+  if (
+    !areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled(options?.envOverride)
+  ) {
+    return makeClientGetHoldDto(
+      safeReceiptId,
+      'FEATURE_NOT_RELEASED',
+      'Catalog case alignment is not enabled in this environment.'
+    );
+  }
+
+  if (
+    options?.currentUser !== undefined &&
+    !canCurrentAdminAlignQuarantineCatalogDraft(options.currentUser)
+  ) {
+    return makeClientGetHoldDto(
+      safeReceiptId,
+      'INSUFFICIENT_PERMISSIONS',
+      'Current administrator lacks Library Review and Create permissions for catalog case alignment.'
+    );
+  }
+
+  if (!RECEIPT_ID_REGEX.test(safeReceiptId)) {
+    return makeClientGetHoldDto(
+      safeReceiptId,
+      'INVALID_RECEIPT_ID',
+      'receiptId must be a 32-character lowercase hexadecimal string.'
+    );
+  }
+
+  if (options?.inspectLegacyRecoveryFn) {
+    try {
+      const rawResponse = await options.inspectLegacyRecoveryFn(safeReceiptId);
+      const validated = validateInspectLegacyCatalogRecoveryResponseDto(
+        rawResponse,
+        safeReceiptId
+      );
+      if (!validated) {
+        return makeClientGetHoldDto(
+          safeReceiptId,
+          'RESPONSE_VALIDATION_FAILED',
+          'Server response for inspectQuarantineLegacyCatalogRecovery failed strict DTO validation.'
+        );
+      }
+      return validated;
+    } catch (err: unknown) {
+      const rawMessage =
+        err instanceof Error && err.message.trim().length > 0
+          ? err.message.trim()
+          : '';
+      const message =
+        rawMessage.length > 0 && !containsForbiddenKeyOrStringDeep(rawMessage)
+          ? rawMessage
+          : 'Callable inspectQuarantineLegacyCatalogRecovery request failed.';
+      const errorCode =
+        rawMessage === 'BACKEND_UNAVAILABLE'
+          ? 'BACKEND_UNAVAILABLE'
+          : 'CALLABLE_REQUEST_FAILED';
+      return makeClientGetHoldDto(safeReceiptId, errorCode, message);
+    }
+  }
+
+  const payload: InspectQuarantineLegacyCatalogRecoveryCallablePayload =
+    Object.freeze({
+      action: 'inspectQuarantineLegacyCatalogRecovery',
+      receiptId: safeReceiptId,
+    });
+
+  try {
+    const invoker = options?.invokeCallable ?? createDefaultCallableInvoker();
+    const rawResponse = await invoker(payload);
+    const validated = validateInspectLegacyCatalogRecoveryResponseDto(
+      rawResponse,
+      safeReceiptId
+    );
+    if (!validated) {
+      return makeClientGetHoldDto(
+        safeReceiptId,
+        'RESPONSE_VALIDATION_FAILED',
+        'Server response for inspectQuarantineLegacyCatalogRecovery failed strict DTO validation.'
+      );
+    }
+    return validated;
+  } catch (err: unknown) {
+    const rawMessage =
+      err instanceof Error && err.message.trim().length > 0
+        ? err.message.trim()
+        : '';
+    const message =
+      rawMessage.length > 0 && !containsForbiddenKeyOrStringDeep(rawMessage)
+        ? rawMessage
+        : 'Callable inspectQuarantineLegacyCatalogRecovery request failed.';
+    const errorCode =
+      rawMessage === 'BACKEND_UNAVAILABLE'
+        ? 'BACKEND_UNAVAILABLE'
+        : 'CALLABLE_REQUEST_FAILED';
+    return makeClientGetHoldDto(safeReceiptId, errorCode, message);
+  }
+}
+
 export interface AlignQuarantineCatalogCaseClientRequest {
   readonly receiptId: string;
   readonly expectedCaseRevision?: number;
@@ -1974,13 +2441,37 @@ export interface LibraryQuarantineCatalogCaseAlignmentPanelState {
   } | null;
 }
 
+export type LibraryQuarantineLegacyRecoveryInspectionPhase =
+  | 'idle'
+  | 'inspecting'
+  | 'inspected'
+  | 'hold';
+
+export interface LibraryQuarantineLegacyRecoveryInspectionState {
+  readonly phase: LibraryQuarantineLegacyRecoveryInspectionPhase;
+  readonly receiptId: string | null;
+  readonly caseRevision: number | null;
+  readonly caseUpdatedAt: string | null;
+  readonly inFlight: boolean;
+  readonly evidence: InspectLibraryQuarantineLegacyCatalogRecoverySuccessDto | null;
+  readonly holdState: {
+    readonly errorCode: string;
+    readonly errorMessage: string;
+  } | null;
+}
+
 export class LibraryQuarantineCatalogCaseAlignmentPanelController {
   private state: LibraryQuarantineCatalogCaseAlignmentPanelState;
+  private inspectionState: LibraryQuarantineLegacyRecoveryInspectionState;
   private readonly options: LibraryQuarantineCatalogCaseAlignmentClientOptions;
   private readonly listeners: Set<
     (state: LibraryQuarantineCatalogCaseAlignmentPanelState) => void
   > = new Set();
+  private readonly inspectionListeners: Set<
+    (state: LibraryQuarantineLegacyRecoveryInspectionState) => void
+  > = new Set();
   private requestEpoch = 0;
+  private inspectionEpoch = 0;
 
   constructor(
     currentUserOrOptions?:
@@ -2016,6 +2507,7 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
       };
     }
     this.state = this.createInitialState();
+    this.inspectionState = this.createInitialInspectionState();
   }
 
   public isCaseAlignmentEnabled(): boolean {
@@ -2052,12 +2544,294 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
     });
   }
 
+  private createInitialInspectionState(): LibraryQuarantineLegacyRecoveryInspectionState {
+    return Object.freeze({
+      phase: 'idle',
+      receiptId: null,
+      caseRevision: null,
+      caseUpdatedAt: null,
+      inFlight: false,
+      evidence: null,
+      holdState: null,
+    });
+  }
+
   public getState(): LibraryQuarantineCatalogCaseAlignmentPanelState {
     return this.state;
   }
 
   public getSnapshot(): LibraryQuarantineCatalogCaseAlignmentPanelState {
     return this.getState();
+  }
+
+  public getHistoricalInspectionState(): LibraryQuarantineLegacyRecoveryInspectionState {
+    return this.inspectionState;
+  }
+
+  public subscribeHistoricalInspection(
+    listener: (state: LibraryQuarantineLegacyRecoveryInspectionState) => void
+  ): () => void {
+    this.inspectionListeners.add(listener);
+    return () => {
+      this.inspectionListeners.delete(listener);
+    };
+  }
+
+  private setInspectionState(
+    next: LibraryQuarantineLegacyRecoveryInspectionState
+  ): void {
+    this.inspectionState = Object.freeze(next);
+    for (const listener of this.inspectionListeners) {
+      listener(this.inspectionState);
+    }
+    for (const listener of this.listeners) {
+      listener(this.state);
+    }
+  }
+
+  public clearHistoricalInspectionState(): void {
+    this.inspectionEpoch += 1;
+    if (
+      this.inspectionState.phase !== 'idle' ||
+      this.inspectionState.inFlight ||
+      this.inspectionState.evidence !== null ||
+      this.inspectionState.holdState !== null ||
+      this.inspectionState.receiptId !== null
+    ) {
+      this.setInspectionState(this.createInitialInspectionState());
+    }
+  }
+
+  public canInspectHistoricalRecoveryEvidence(
+    contextOverride?: {
+      readonly savedCase?: SanitizedLibraryQuarantineHumanReviewCaseDto | null;
+      readonly currentUser?: AdminUser | null;
+      readonly envOverride?: Record<string, unknown>;
+      readonly hasUnsavedCaseEdits?: boolean;
+    }
+  ): boolean {
+    const effectiveEnv = contextOverride?.envOverride ?? this.options.envOverride;
+    const enabled =
+      contextOverride?.envOverride !== undefined
+        ? areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled(effectiveEnv)
+        : this.isCaseAlignmentEnabled();
+    if (!enabled) {
+      return false;
+    }
+
+    const effectiveUser =
+      contextOverride?.currentUser !== undefined
+        ? contextOverride.currentUser
+        : this.options.currentUser;
+    if (
+      effectiveUser !== undefined &&
+      !canCurrentAdminAlignQuarantineCatalogDraft(effectiveUser)
+    ) {
+      return false;
+    }
+
+    const effectiveCase =
+      contextOverride?.savedCase !== undefined
+        ? contextOverride.savedCase
+        : this.state.savedCase;
+    if (!effectiveCase || effectiveCase.status !== 'METADATA_RECORDED') {
+      return false;
+    }
+
+    const effectiveUnsavedEdits =
+      contextOverride?.hasUnsavedCaseEdits !== undefined
+        ? contextOverride.hasUnsavedCaseEdits
+        : this.state.hasUnsavedCaseEdits;
+    if (effectiveUnsavedEdits) {
+      return false;
+    }
+
+    if (
+      this.state.inFlight ||
+      this.isUncertainLatched() ||
+      this.isConflictLatched()
+    ) {
+      return false;
+    }
+
+    if (
+      this.state.phase !== 'hold' ||
+      this.state.holdState === null ||
+      this.state.holdState.errorCode !== 'INCONSISTENT_ALIGNMENT_STATE'
+    ) {
+      return false;
+    }
+
+    if (
+      !this.state.receiptId ||
+      this.state.receiptId !== effectiveCase.receiptId
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  public syncHistoricalInspectionContext(context: {
+    readonly savedCase: SanitizedLibraryQuarantineHumanReviewCaseDto | null;
+    readonly currentUser?: AdminUser | null;
+    readonly envOverride?: Record<string, unknown>;
+    readonly hasUnsavedCaseEdits?: boolean;
+  }): void {
+    if (!this.canInspectHistoricalRecoveryEvidence(context)) {
+      this.clearHistoricalInspectionState();
+      return;
+    }
+    const savedCase = context.savedCase;
+    if (!savedCase) {
+      this.clearHistoricalInspectionState();
+      return;
+    }
+    if (
+      this.inspectionState.phase !== 'idle' &&
+      (this.inspectionState.receiptId !== savedCase.receiptId ||
+        this.inspectionState.caseRevision !== savedCase.revision ||
+        this.inspectionState.caseUpdatedAt !== savedCase.updatedAt)
+    ) {
+      this.clearHistoricalInspectionState();
+    }
+  }
+
+  public async inspectHistoricalRecoveryEvidence(
+    savedCaseOverride?: SanitizedLibraryQuarantineHumanReviewCaseDto | null
+  ): Promise<InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto | null> {
+    if (this.inspectionState.inFlight || this.state.inFlight) {
+      return null;
+    }
+
+    const effectiveSavedCase =
+      savedCaseOverride !== undefined ? savedCaseOverride : this.state.savedCase;
+
+    if (
+      !this.canInspectHistoricalRecoveryEvidence({
+        savedCase: effectiveSavedCase,
+      }) ||
+      !effectiveSavedCase
+    ) {
+      return null;
+    }
+
+    const receiptId = effectiveSavedCase.receiptId;
+    const caseRevision = effectiveSavedCase.revision;
+    const caseUpdatedAt = effectiveSavedCase.updatedAt;
+    const alignmentEpochAtStart = this.requestEpoch;
+    const inspectionEpoch = ++this.inspectionEpoch;
+
+    this.setInspectionState({
+      phase: 'inspecting',
+      receiptId,
+      caseRevision,
+      caseUpdatedAt,
+      inFlight: true,
+      evidence: null,
+      holdState: null,
+    });
+
+    let response: InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto;
+    try {
+      response = await inspectQuarantineLegacyCatalogRecoveryClient(
+        receiptId,
+        this.options
+      );
+    } catch (err: unknown) {
+      const rawMessage =
+        err instanceof Error && err.message.trim().length > 0
+          ? err.message.trim()
+          : '';
+      const safeMessage =
+        rawMessage.length > 0 && !containsForbiddenKeyOrStringDeep(rawMessage)
+          ? rawMessage
+          : 'Callable inspectQuarantineLegacyCatalogRecovery request failed.';
+      response = makeClientGetHoldDto(
+        receiptId,
+        rawMessage === 'BACKEND_UNAVAILABLE'
+          ? 'BACKEND_UNAVAILABLE'
+          : 'CALLABLE_REQUEST_FAILED',
+        safeMessage
+      );
+    }
+
+    const currentSavedCase =
+      this.state.savedCase !== null ? this.state.savedCase : effectiveSavedCase;
+
+    if (
+      inspectionEpoch !== this.inspectionEpoch ||
+      alignmentEpochAtStart !== this.requestEpoch ||
+      this.state.receiptId !== receiptId ||
+      !this.canInspectHistoricalRecoveryEvidence({
+        savedCase: currentSavedCase,
+      }) ||
+      currentSavedCase.receiptId !== receiptId ||
+      currentSavedCase.revision !== caseRevision ||
+      currentSavedCase.updatedAt !== caseUpdatedAt
+    ) {
+      return response;
+    }
+
+    if (!response.ok || response.receiptId !== receiptId) {
+      const errorCode = !response.ok
+        ? response.errorCode
+        : 'RESPONSE_VALIDATION_FAILED';
+      const errorMessage = !response.ok
+        ? response.errorMessage
+        : 'Server response receiptId did not match active receiptId.';
+      this.setInspectionState({
+        phase: 'hold',
+        receiptId,
+        caseRevision,
+        caseUpdatedAt,
+        inFlight: false,
+        evidence: null,
+        holdState: Object.freeze({
+          errorCode,
+          errorMessage,
+        }),
+      });
+      return response;
+    }
+
+    if (
+      response.currentHumanCaseRevision !== caseRevision ||
+      response.currentHumanCaseUpdatedAt !== caseUpdatedAt
+    ) {
+      this.setInspectionState({
+        phase: 'hold',
+        receiptId,
+        caseRevision,
+        caseUpdatedAt,
+        inFlight: false,
+        evidence: null,
+        holdState: Object.freeze({
+          errorCode: 'STALE_CASE_CONTEXT',
+          errorMessage:
+            'Inspected historical evidence revision or timestamp does not match the currently loaded human review case.',
+        }),
+      });
+      return response;
+    }
+
+    this.setInspectionState({
+      phase: 'inspected',
+      receiptId,
+      caseRevision,
+      caseUpdatedAt,
+      inFlight: false,
+      evidence: response,
+      holdState: null,
+    });
+
+    return response;
+  }
+
+  public async inspectLegacyCatalogRecovery(
+    savedCaseOverride?: SanitizedLibraryQuarantineHumanReviewCaseDto | null
+  ): Promise<InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto | null> {
+    return this.inspectHistoricalRecoveryEvidence(savedCaseOverride);
   }
 
   public setConfirmReconciliation(confirmed: boolean): void {
@@ -2088,6 +2862,7 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
 
   public reset(): void {
     this.requestEpoch += 1;
+    this.clearHistoricalInspectionState();
     this.setState(this.createInitialState());
   }
 
@@ -2150,6 +2925,9 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
 
   public setHasUnsavedCaseEdits(hasUnsavedCaseEdits: boolean): void {
     const dirty = hasUnsavedCaseEdits === true;
+    if (dirty) {
+      this.clearHistoricalInspectionState();
+    }
     const canClearUnsavedHold =
       !dirty &&
       !this.isUncertainLatched() &&
@@ -2174,6 +2952,7 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
     savedCase: SanitizedLibraryQuarantineHumanReviewCaseDto | null,
     options?: { readonly hasUnsavedCaseEdits?: boolean }
   ): Promise<LibraryQuarantineCatalogCaseAlignmentPanelState> {
+    this.clearHistoricalInspectionState();
     if (!savedCase || savedCase.status !== 'METADATA_RECORDED') {
       this.reset();
       return this.state;
@@ -2586,6 +3365,7 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
   }
 
   public async verifyAlignmentStatus(): Promise<GetLibraryQuarantineCatalogCaseAlignmentResponseDto | null> {
+    this.clearHistoricalInspectionState();
     if (this.state.inFlight || !this.state.receiptId) {
       return null;
     }
@@ -2737,11 +3517,15 @@ export class LibraryQuarantineCatalogCaseAlignmentPanelController {
 
 export type GetQuarantineCatalogCaseAlignmentResponseDto =
   GetLibraryQuarantineCatalogCaseAlignmentResponseDto;
+export type InspectQuarantineLegacyCatalogRecoveryResponseDto =
+  InspectLibraryQuarantineLegacyCatalogRecoveryResponseDto;
 export type AlignQuarantineCatalogCaseResponseDto =
   AlignLibraryQuarantineCatalogCaseResponseDto;
 
 export const LibraryQuarantineCatalogCaseAlignmentClient = Object.freeze({
   getQuarantineCatalogCaseAlignment: getQuarantineCatalogCaseAlignmentClient,
+  inspectQuarantineLegacyCatalogRecovery:
+    inspectQuarantineLegacyCatalogRecoveryClient,
   alignQuarantineCatalogCase: alignQuarantineCatalogCaseClient,
   areReleaseFlagsEnabled: areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled,
   canCurrentAdminAlign: canCurrentAdminAlignQuarantineCatalogDraft,

@@ -11,12 +11,14 @@ import {
 import type { AdminUser } from '../../types/admin';
 import type { SanitizedLibraryQuarantineHumanReviewCaseDto } from '../../services/libraryQuarantineHumanReviewClient';
 import {
+  LIBRARY_QUARANTINE_CATALOG_CASE_FOUR_FIELD_KEYS,
   LibraryQuarantineCatalogCaseAlignmentPanelController,
   areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled,
   canCurrentAdminAlignQuarantineCatalogDraft,
   type GetLibraryQuarantineCatalogCaseAlignmentSuccessDto,
   type LibraryQuarantineCatalogCaseAlignmentPanelState,
   type LibraryQuarantineCatalogCaseFourFieldKey,
+  type LibraryQuarantineLegacyRecoveryInspectionState,
 } from '../../services/libraryQuarantineCatalogCaseAlignmentClient';
 
 export interface LibraryQuarantineCatalogCaseAlignmentPanelProps {
@@ -60,12 +62,42 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
     useState<LibraryQuarantineCatalogCaseAlignmentPanelState>(() =>
       controller.getState()
     );
+  const [inspectionState, setInspectionState] =
+    useState<LibraryQuarantineLegacyRecoveryInspectionState>(() =>
+      typeof controller.getHistoricalInspectionState === 'function'
+        ? controller.getHistoricalInspectionState()
+        : {
+            phase: 'idle',
+            receiptId: null,
+            caseRevision: null,
+            caseUpdatedAt: null,
+            inFlight: false,
+            evidence: null,
+            holdState: null,
+          }
+    );
 
   useEffect(() => {
     setState(controller.getState());
-    return controller.subscribe((nextState) => {
+    if (typeof controller.getHistoricalInspectionState === 'function') {
+      setInspectionState(controller.getHistoricalInspectionState());
+    }
+    const unsubscribeAlignment = controller.subscribe((nextState) => {
       setState(nextState);
+      if (typeof controller.getHistoricalInspectionState === 'function') {
+        setInspectionState(controller.getHistoricalInspectionState());
+      }
     });
+    const unsubscribeInspection =
+      typeof controller.subscribeHistoricalInspection === 'function'
+        ? controller.subscribeHistoricalInspection((nextInspectionState) => {
+            setInspectionState(nextInspectionState);
+          })
+        : () => {};
+    return () => {
+      unsubscribeAlignment();
+      unsubscribeInspection();
+    };
   }, [controller]);
 
   useEffect(() => {
@@ -78,6 +110,26 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
       : typeof controller.isCaseAlignmentEnabled === 'function'
       ? controller.isCaseAlignmentEnabled()
       : areLibraryQuarantineCaseAlignmentReleaseFlagsEnabled(envOverride);
+
+  useEffect(() => {
+    if (typeof controller.syncHistoricalInspectionContext === 'function') {
+      controller.syncHistoricalInspectionContext({
+        savedCase: savedReviewCase,
+        currentUser,
+        envOverride,
+        hasUnsavedCaseEdits,
+      });
+    }
+  }, [
+    controller,
+    currentUser,
+    envOverride,
+    hasUnsavedCaseEdits,
+    savedReviewCase?.receiptId,
+    savedReviewCase?.status,
+    savedReviewCase?.revision,
+    savedReviewCase?.updatedAt,
+  ]);
 
   useEffect(() => {
     if (
@@ -133,6 +185,53 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
   const snapshot = state.snapshot;
   const isUncertain = state.phase === 'uncertain';
   const isAligning = state.phase === 'aligning' || state.inFlight;
+  const hasAnyUnsavedCaseEdits =
+    Boolean(hasUnsavedCaseEdits) || Boolean(state.hasUnsavedCaseEdits);
+
+  const canInspectHistoricalEvidence =
+    state.phase === 'hold' &&
+    state.holdState !== null &&
+    state.holdState.errorCode === 'INCONSISTENT_ALIGNMENT_STATE' &&
+    state.uncertainState === null &&
+    state.conflictState === null &&
+    !state.inFlight &&
+    !hasAnyUnsavedCaseEdits &&
+    state.receiptId === savedReviewCase.receiptId;
+
+  const latestInspectionState =
+    typeof controller.getHistoricalInspectionState === 'function'
+      ? controller.getHistoricalInspectionState()
+      : inspectionState;
+
+  const isInspectionContextValid =
+    canInspectHistoricalEvidence &&
+    latestInspectionState.receiptId === savedReviewCase.receiptId &&
+    latestInspectionState.caseRevision === savedReviewCase.revision &&
+    latestInspectionState.caseUpdatedAt === savedReviewCase.updatedAt;
+
+  const activeInspectionEvidence =
+    isInspectionContextValid &&
+    latestInspectionState.phase === 'inspected' &&
+    latestInspectionState.evidence !== null &&
+    latestInspectionState.evidence.receiptId === savedReviewCase.receiptId &&
+    latestInspectionState.evidence.currentHumanCaseRevision ===
+      savedReviewCase.revision &&
+    latestInspectionState.evidence.currentHumanCaseUpdatedAt ===
+      savedReviewCase.updatedAt
+      ? latestInspectionState.evidence
+      : null;
+
+  const activeInspectionHoldState =
+    isInspectionContextValid &&
+    latestInspectionState.phase === 'hold' &&
+    latestInspectionState.holdState !== null
+      ? latestInspectionState.holdState
+      : null;
+
+  const isInspectingHistoricalEvidence =
+    isInspectionContextValid &&
+    (latestInspectionState.phase === 'inspecting' ||
+      latestInspectionState.inFlight);
 
   const handleOpenOrRetryClick = async () => {
     const nextState = await controller.openPanelForCase(savedReviewCase, {
@@ -141,6 +240,17 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
     if (nextState.snapshot && onAlignmentReconciled) {
       onAlignmentReconciled(nextState.snapshot);
     }
+  };
+
+  const handleInspectHistoricalEvidenceClick = async () => {
+    if (
+      !canInspectHistoricalEvidence ||
+      isInspectingHistoricalEvidence ||
+      typeof controller.inspectHistoricalRecoveryEvidence !== 'function'
+    ) {
+      return;
+    }
+    await controller.inspectHistoricalRecoveryEvidence(savedReviewCase);
   };
 
   const handleVerifyClick = async () => {
@@ -306,13 +416,44 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
                 ? 'تعذر إظهار مقارنة الحقول بسبب توقف الفحص احترازياً دون أي كتابة على المسودة أو سجل المراجعة. يمكنك إعادة فحص المواءمة للقراءة فقط.'
                 : 'Field comparison was held fail-closed with zero writes to the catalog draft or human review case. You can retry the read-only alignment check below.'}
             </p>
-            <div className="flex justify-end">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {canInspectHistoricalEvidence && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleInspectHistoricalEvidenceClick();
+                  }}
+                  disabled={state.inFlight || isInspectingHistoricalEvidence}
+                  data-testid="inspect-quarantine-legacy-catalog-recovery-btn"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400 bg-amber-100 px-3 py-1.5 text-xs font-semibold text-amber-950 hover:bg-amber-200 disabled:opacity-50"
+                >
+                  {isInspectingHistoricalEvidence ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>
+                        {isAr
+                          ? 'جاري فحص الأدلة التاريخية... / Inspecting Historical Evidence...'
+                          : 'Inspecting Historical Evidence... / جاري فحص الأدلة التاريخية...'}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldAlert className="w-3.5 h-3.5 text-amber-800" />
+                      <span>
+                        {isAr
+                          ? 'فحص الأدلة التاريخية / Inspect Historical Evidence'
+                          : 'Inspect Historical Evidence / فحص الأدلة التاريخية'}
+                      </span>
+                    </>
+                  )}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {
                   void handleOpenOrRetryClick();
                 }}
-                disabled={state.inFlight}
+                disabled={state.inFlight || isInspectingHistoricalEvidence}
                 data-testid="retry-quarantine-catalog-case-alignment-btn"
                 className="inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-900 hover:bg-red-100 disabled:opacity-50"
               >
@@ -323,6 +464,342 @@ export const LibraryQuarantineCatalogCaseAlignmentPanel: React.FC<
                     : 'Retry Alignment Check (Read-Only)'}
                 </span>
               </button>
+            </div>
+          </div>
+        )}
+
+        {isInspectingHistoricalEvidence && (
+          <div
+            className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-950"
+            data-testid="quarantine-legacy-recovery-inspection-loading"
+          >
+            <Loader2 className="w-4 h-4 animate-spin text-amber-700 shrink-0" />
+            <span>
+              {isAr
+                ? 'جاري فحص الأدلة التاريخية وسلسلة المراجعة البشرية (قراءة فقط — صفر كتابة)... / Verifying historical catalog discrepancy and human-review audit chain (read-only — zero writes)...'
+                : 'Verifying historical catalog discrepancy and human-review audit chain (read-only — zero writes)...'}
+            </span>
+          </div>
+        )}
+
+        {activeInspectionHoldState && (
+          <div
+            className="rounded-lg border border-amber-400 bg-amber-50 p-3 text-xs text-amber-950 space-y-1.5"
+            role="alert"
+            data-testid="quarantine-legacy-recovery-inspection-hold-banner"
+          >
+            <div className="flex items-center gap-1.5 font-bold">
+              <ShieldAlert className="w-4 h-4 text-amber-800 shrink-0" />
+              <span>
+                {isAr
+                  ? `تعذر إتمام فحص الأدلة التاريخية (قراءة فقط — لم يتم أي تعديل) / Historical Evidence Inspection Hold (${activeInspectionHoldState.errorCode})`
+                  : `Historical Evidence Inspection Hold — Read-Only Failure (${activeInspectionHoldState.errorCode})`}
+              </span>
+            </div>
+            <p className="text-amber-900">
+              {activeInspectionHoldState.errorMessage}
+            </p>
+            <p className="text-[11px] text-amber-800">
+              {isAr
+                ? 'فشل أو عدم توفر مسار الفحص التاريخي للقراءة فقط؛ لم يتم عرض أي بيانات افتراضية ولم يتم إجراء أي تعديل أو استعادة.'
+                : 'Read-only historical inspection failed or is unavailable; no simulated evidence is shown and zero writes or recovery actions were performed.'}
+            </p>
+          </div>
+        )}
+
+        {activeInspectionEvidence && (
+          <div
+            className="rounded-lg border border-amber-300 bg-white p-4 space-y-4 text-xs text-slate-900"
+            data-testid="quarantine-legacy-recovery-inspection-section"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200 pb-3">
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0" />
+                  <h6 className="font-bold text-amber-950">
+                    {isAr
+                      ? 'تقرير فحص الأدلة التاريخية (قراءة فقط — بدون تطبيق استعادة) / Read-Only Historical Recovery Evidence Inspection'
+                      : 'Read-Only Historical Recovery Evidence Inspection / تقرير فحص الأدلة التاريخية (قراءة فقط)'}
+                  </h6>
+                  <span
+                    className="inline-flex items-center rounded border border-amber-300 bg-amber-100 px-2 py-0.5 text-[11px] font-mono font-semibold text-amber-950"
+                    data-testid="quarantine-legacy-recovery-inspection-status-badge"
+                  >
+                    INSPECTION_ONLY
+                  </span>
+                  <span
+                    className="inline-flex items-center rounded border border-red-300 bg-red-50 px-2 py-0.5 text-[11px] font-mono font-semibold text-red-900"
+                    data-testid="quarantine-legacy-recovery-attribution-badge"
+                  >
+                    {activeInspectionEvidence.historicalCatalogChangeAttribution}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-700">
+                  {isAr
+                    ? 'يعرض هذا القسم الأدلة التاريخية الفعلية لتعارض المسودة المحجورة مع ملف المراجعة البشري للقراءة فقط دون إنشاء أو اعتماد أو تطبيق أي استعادة.'
+                    : 'This section displays verified read-only historical evidence for the quarantined catalog draft discrepancy without creating, approving, or applying any recovery.'}
+                </p>
+              </div>
+              <div
+                className="flex flex-wrap items-center gap-1.5 text-[11px]"
+                data-testid="quarantine-legacy-recovery-posture-badges"
+              >
+                <span className="rounded border border-slate-300 bg-slate-100 px-2 py-0.5 font-semibold text-slate-800">
+                  status: Draft
+                </span>
+                <span className="rounded border border-slate-300 bg-slate-100 px-2 py-0.5 font-semibold text-slate-800">
+                  publishingStatus: ReviewRequired
+                </span>
+                <span className="rounded border border-slate-300 bg-slate-100 px-2 py-0.5 font-mono text-slate-800">
+                  recoveryApplied: false
+                </span>
+                <span className="rounded border border-slate-300 bg-slate-100 px-2 py-0.5 font-mono text-slate-800">
+                  isPublished: false
+                </span>
+                <span className="rounded border border-slate-300 bg-slate-100 px-2 py-0.5 font-mono text-slate-800">
+                  isRightsApproved: false
+                </span>
+                <span className="rounded border border-slate-300 bg-slate-100 px-2 py-0.5 font-mono text-slate-800">
+                  isVerifiedSafe: false
+                </span>
+                <span className="rounded border border-slate-300 bg-slate-100 px-2 py-0.5 font-mono text-slate-800">
+                  isSanitized: false
+                </span>
+                <span className="rounded border border-slate-300 bg-slate-100 px-2 py-0.5 font-mono text-slate-800">
+                  isReadyForPeia: false
+                </span>
+              </div>
+            </div>
+
+            <div
+              className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-1.5 text-amber-950"
+              data-testid="quarantine-legacy-recovery-attribution-notice"
+            >
+              <div className="font-bold">
+                {isAr
+                  ? 'تنبيه عدم توفر هوية المحرر والمسوغ للتعديل التاريخي على مسودة الفهرس / Unattributed Pre-Fence Catalog Modification Notice'
+                  : 'Unattributed Pre-Fence Catalog Modification Notice / تنبيه عدم توفر هوية المحرر والمسوغ'}
+              </div>
+              <p className="text-[11px] text-amber-900">
+                {isAr
+                  ? `تم تعديل مسودة الفهرس (${activeInspectionEvidence.documentId}) بتاريخ ${activeInspectionEvidence.catalogUpdatedAt} بعد ترحيل الفهرس الأصلي (${activeInspectionEvidence.originalHandoffCreatedAt}) وقبل تفعيل حاجز الكتابة دون سجل مواءمة؛ هوية المحرر ومسوغ التعديل السابق غير معروفين (${activeInspectionEvidence.historicalCatalogChangeAttribution}).`
+                  : `The catalog draft (${activeInspectionEvidence.documentId}) was modified at ${activeInspectionEvidence.catalogUpdatedAt} after original catalog handoff creation (${activeInspectionEvidence.originalHandoffCreatedAt}) without an alignment record; the previous catalog modification author and justification are unknown (${activeInspectionEvidence.historicalCatalogChangeAttribution}).`}
+              </p>
+              <p
+                className="text-[11px] font-semibold text-amber-950"
+                data-testid="quarantine-legacy-recovery-authorization-notice"
+              >
+                {isAr
+                  ? 'اكتمل الفحص للقراءة فقط (INSPECTION_ONLY) ولم يتم تطبيق أي استعادة (recoveryApplied: false). يتطلب أي إجراء استعادة مستقبلي تفويضاً بشرياً منفصلاً ومستقلاً (requiresSeparateHumanAuthorization: true).'
+                  : 'Read-only inspection is complete (INSPECTION_ONLY) and recovery has NOT been applied (recoveryApplied: false). Separate human authorization is required before any future recovery (requiresSeparateHumanAuthorization: true).'}
+              </p>
+            </div>
+
+            <div
+              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5"
+              data-testid="quarantine-legacy-recovery-provenance-grid"
+            >
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div className="text-[11px] text-slate-500">
+                  {isAr
+                    ? 'مراجعة الترحيل الأصلي للفهرس / Original Handoff Revision & Timestamp'
+                    : 'Original Handoff Revision & Timestamp'}
+                </div>
+                <div
+                  className="font-mono font-semibold text-slate-900 mt-0.5"
+                  data-testid="quarantine-legacy-recovery-handoff-provenance"
+                >
+                  v{activeInspectionEvidence.originalHandoffCaseRevision} | caseUpdatedAt:{' '}
+                  {activeInspectionEvidence.originalHandoffCaseUpdatedAt} | handoffCreatedAt:{' '}
+                  {activeInspectionEvidence.originalHandoffCreatedAt}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div className="text-[11px] text-slate-500">
+                  {isAr
+                    ? 'الطابع الزمني التاريخي لتحديث مسودة الفهرس / Historical Catalog updatedAt'
+                    : 'Historical Catalog updatedAt'}
+                </div>
+                <div
+                  className="font-mono font-semibold text-red-900 mt-0.5"
+                  data-testid="quarantine-legacy-recovery-catalog-updated-at"
+                >
+                  {activeInspectionEvidence.catalogUpdatedAt}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div className="text-[11px] text-slate-500">
+                  {isAr
+                    ? 'مراجعة ملف المراجعة البشري الحالية / Current Case Revision & Timestamp'
+                    : 'Current Case Revision & Timestamp'}
+                </div>
+                <div
+                  className="font-mono font-semibold text-indigo-950 mt-0.5"
+                  data-testid="quarantine-legacy-recovery-current-case-provenance"
+                >
+                  v{activeInspectionEvidence.currentHumanCaseRevision} |{' '}
+                  {activeInspectionEvidence.currentHumanCaseUpdatedAt}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div className="text-[11px] text-slate-500">
+                  {isAr
+                    ? 'أحداث المراجعة البشرية المتحقق منها / Verified Human-Review Event Count'
+                    : 'Verified Human-Review Event Count'}
+                </div>
+                <div
+                  className="font-mono font-semibold text-emerald-900 mt-0.5"
+                  data-testid="quarantine-legacy-recovery-verified-event-count"
+                >
+                  {activeInspectionEvidence.verifiedHumanReviewEventCount} (historicalChainVerified: true)
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div className="text-[11px] text-slate-500">
+                  {isAr
+                    ? 'سجل المواءمة الحالي / Alignment Record State'
+                    : 'Alignment Record State'}
+                </div>
+                <div
+                  className="font-mono font-semibold text-slate-900 mt-0.5"
+                  data-testid="quarantine-legacy-recovery-alignment-record-state"
+                >
+                  currentAlignmentRevision: {activeInspectionEvidence.currentAlignmentRevision} | hasAlignmentRecord: false
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div className="text-[11px] text-slate-500">
+                  {isAr
+                    ? 'معرف الإيصال والمسودة ومراجعة المصدر / Receipt, Document & Source Revision'
+                    : 'Receipt, Document & Source Revision'}
+                </div>
+                <div
+                  className="font-mono font-semibold text-slate-900 mt-0.5 break-all"
+                  data-testid="quarantine-legacy-recovery-document-identity"
+                >
+                  {activeInspectionEvidence.documentId} (source v{activeInspectionEvidence.sourceRevision})
+                </div>
+              </div>
+            </div>
+
+            {!activeInspectionEvidence.diff.hasAnyDifference && (
+              <div
+                className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-[11px] text-indigo-950 font-medium"
+                data-testid="quarantine-legacy-recovery-zero-text-diff-banner"
+              >
+                {isAr
+                  ? 'لا يوجد أي اختلاف نصي في الحقول الأربعة الثنائية اللغة (hasAnyDifference: false) بين ملف المراجعة البشري المحفوظ حالياً ومسودة الفهرس؛ التعارض التاريخي ناتج عن تحديث غير منسوب للطابع الزمني لمسودة الفهرس وتقدم مراجعة الحالة دون سجل مواءمة.'
+                  : 'Zero text differences across all four bilingual editorial fields (hasAnyDifference: false) between the current saved human review case and the catalog draft; the discrepancy is due to the unattributed catalog updatedAt timestamp and case revision advancement without an alignment record.'}
+              </div>
+            )}
+
+            <div
+              className="space-y-2.5"
+              data-testid="quarantine-legacy-recovery-four-field-comparison"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h6 className="font-bold text-slate-900">
+                  {isAr
+                    ? 'مقارنة الحقول التحريرية الأربعة (قراءة فقط) / Four Bilingual Editorial Fields Side-by-Side (Read-Only)'
+                    : 'Four Bilingual Editorial Fields Side-by-Side (Read-Only)'}
+                </h6>
+                <span
+                  className="rounded border border-slate-300 bg-slate-100 px-2 py-0.5 text-[11px] font-mono text-slate-800"
+                  data-testid="quarantine-legacy-recovery-diff-summary-badge"
+                >
+                  hasAnyDifference: {String(activeInspectionEvidence.diff.hasAnyDifference)}
+                </span>
+              </div>
+
+              {LIBRARY_QUARANTINE_CATALOG_CASE_FOUR_FIELD_KEYS.map(
+                (fieldKey) => {
+                  const fieldComparison =
+                    activeInspectionEvidence.diff.fields[fieldKey];
+                  const label = FIELD_LABELS[fieldKey];
+                  const isRTLField =
+                    fieldKey === 'titleAr' || fieldKey === 'summaryAr';
+                  return (
+                    <div
+                      key={fieldKey}
+                      className={`rounded-lg border p-3 space-y-2 ${
+                        fieldComparison.changed
+                          ? 'border-amber-300 bg-amber-50/40'
+                          : 'border-slate-200 bg-slate-50/60'
+                      }`}
+                      data-testid={`quarantine-legacy-recovery-diff-row-${fieldKey}`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-slate-900">
+                          {label.ar} / {label.en}
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-semibold ${
+                            fieldComparison.changed
+                              ? 'border border-amber-300 bg-amber-100 text-amber-950'
+                              : 'border border-emerald-300 bg-emerald-100 text-emerald-900'
+                          }`}
+                          data-testid={`quarantine-legacy-recovery-diff-badge-${fieldKey}`}
+                        >
+                          {fieldComparison.changed ? (
+                            <>
+                              <AlertTriangle className="w-3 h-3" />
+                              <span>
+                                {isAr
+                                  ? 'مختلف نصياً / Text Differs (changed: true)'
+                                  : 'Text Differs / مختلف نصياً (changed: true)'}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>
+                                {isAr
+                                  ? 'متطابق نصياً / Identical Text (changed: false)'
+                                  : 'Identical Text / متطابق نصياً (changed: false)'}
+                              </span>
+                            </>
+                          )}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                        <div className="rounded border border-indigo-200 bg-white p-2.5 space-y-1">
+                          <div className="text-[11px] font-semibold text-indigo-900">
+                            {isAr
+                              ? `ملف المراجعة البشري المحفوظ حالياً (v${activeInspectionEvidence.currentHumanCaseRevision}) / Current Saved Human Review Case`
+                              : `Current Saved Human Review Case (v${activeInspectionEvidence.currentHumanCaseRevision})`}
+                          </div>
+                          <div
+                            dir={isRTLField ? 'rtl' : 'ltr'}
+                            className="text-xs text-slate-900 whitespace-pre-wrap break-words"
+                            data-testid={`quarantine-legacy-recovery-case-value-${fieldKey}`}
+                          >
+                            {fieldComparison.caseValue}
+                          </div>
+                        </div>
+                        <div className="rounded border border-slate-300 bg-white p-2.5 space-y-1">
+                          <div className="text-[11px] font-semibold text-slate-700">
+                            {isAr
+                              ? `مسودة الفهرس الحالية (${activeInspectionEvidence.documentId}) / Current Catalog Draft`
+                              : `Current Catalog Draft (${activeInspectionEvidence.documentId})`}
+                          </div>
+                          <div
+                            dir={isRTLField ? 'rtl' : 'ltr'}
+                            className="text-xs text-slate-900 whitespace-pre-wrap break-words"
+                            data-testid={`quarantine-legacy-recovery-catalog-value-${fieldKey}`}
+                          >
+                            {fieldComparison.catalogValue}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+              )}
             </div>
           </div>
         )}
