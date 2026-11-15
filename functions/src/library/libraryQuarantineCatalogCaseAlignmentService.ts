@@ -27,23 +27,29 @@ import {
 } from './firestoreLibraryQuarantineReviewDraftStore';
 import {
   LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+  LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION,
   verifyReceiptAndDraftEligibleForHumanReviewCase,
   type LibraryQuarantineFirestoreDocumentData,
   type LibraryQuarantineHumanReviewCaseErrorCode,
 } from './firestoreLibraryQuarantineHumanReviewCaseStore';
 import {
   SanitizedLibraryQuarantineHumanReviewCaseDto,
+  deriveLibraryQuarantineHumanReviewEventId,
   toSanitizedLibraryQuarantineHumanReviewCaseDto,
   validatePersistedLibraryQuarantineHumanReviewCase,
+  validatePersistedLibraryQuarantineHumanReviewEvent,
   type LibraryQuarantinePersistedHumanReviewCase,
+  type LibraryQuarantinePersistedHumanReviewEvent,
 } from './libraryQuarantineHumanReviewCaseContract';
 import {
   LIBRARY_DOCUMENTS_COLLECTION,
   LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION,
+  LIBRARY_QUARANTINE_CATALOG_HANDOFF_EVENTS_COLLECTION,
   deriveQuarantineCatalogDocumentId,
   toSanitizedLibraryQuarantineCatalogHandoffDto,
   validatePersistedCatalogDraftDocument,
   validatePersistedLibraryQuarantineCatalogHandoff,
+  validatePersistedLibraryQuarantineCatalogHandoffEvent,
   type LibraryQuarantinePersistedCatalogHandoff,
   type SanitizedLibraryQuarantineCatalogDocumentDto,
   type SanitizedLibraryQuarantineCatalogHandoffDto,
@@ -76,8 +82,23 @@ export const LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENTS_COLLECTION =
 export const LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL =
   'APPLY_CASE_METADATA' as const;
 
+export const LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL =
+  'ACKNOWLEDGE_UNATTRIBUTED_LEGACY_CATALOG_CHANGE' as const;
+
 export const LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON =
   'HUMAN_CASE_METADATA_REALIGNED' as const;
+
+export const LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON =
+  'LEGACY_UNATTRIBUTED_CATALOG_CHANGE_FORWARD_RECONCILED' as const;
+
+export const LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS =
+  'UNATTRIBUTED_PRE_FENCE_CATALOG_UPDATE' as const;
+
+export const LIBRARY_QUARANTINE_LEGACY_RECOVERY_MAX_CASE_REVISIONS = 32 as const;
+
+export type LibraryQuarantineCatalogCaseAlignmentEventReason =
+  | typeof LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON
+  | typeof LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON;
 
 export type LibraryQuarantineCatalogCaseAlignmentState =
   | 'ALIGNED'
@@ -167,14 +188,13 @@ export interface SanitizedLibraryQuarantineCatalogCaseAlignmentDto {
   readonly isReadyForPeia: false;
 }
 
-export interface LibraryQuarantinePersistedCatalogCaseAlignmentEvent {
+interface LibraryQuarantinePersistedCatalogCaseAlignmentEventBase {
   readonly schemaVersion: typeof LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION;
   readonly eventId: string;
   readonly receiptId: string;
   readonly documentId: string;
   readonly alignmentRevision: number;
   readonly previousAlignmentRevision: number;
-  readonly reason: typeof LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON;
   readonly sourceRevision: number;
   readonly sourceUpdatedAt: string;
   readonly sourceSha256: string;
@@ -191,6 +211,27 @@ export interface LibraryQuarantinePersistedCatalogCaseAlignmentEvent {
   readonly isPublished: false;
   readonly isReadyForPeia: false;
 }
+
+export interface LibraryQuarantinePersistedNormalCatalogCaseAlignmentEvent
+  extends LibraryQuarantinePersistedCatalogCaseAlignmentEventBase {
+  readonly reason: typeof LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON;
+}
+
+export interface LibraryQuarantinePersistedLegacyRecoveryCatalogCaseAlignmentEvent
+  extends LibraryQuarantinePersistedCatalogCaseAlignmentEventBase {
+  readonly alignmentRevision: 1;
+  readonly previousAlignmentRevision: 0;
+  readonly reason: typeof LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON;
+  readonly historicalCatalogChangeAttribution: typeof LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS;
+  readonly preRecoveryCatalogTitleAr: string;
+  readonly preRecoveryCatalogTitleEn: string;
+  readonly preRecoveryCatalogSummaryAr: string;
+  readonly preRecoveryCatalogSummaryEn: string;
+}
+
+export type LibraryQuarantinePersistedCatalogCaseAlignmentEvent =
+  | LibraryQuarantinePersistedNormalCatalogCaseAlignmentEvent
+  | LibraryQuarantinePersistedLegacyRecoveryCatalogCaseAlignmentEvent;
 
 export interface LibraryQuarantineCatalogCaseFieldDiffDto {
   readonly caseValue: string;
@@ -402,6 +443,15 @@ const PERSISTED_ALIGNMENT_EVENT_ALLOWED_KEYS = new Set<string>([
   'isReadyForPeia',
 ]);
 
+const PERSISTED_LEGACY_RECOVERY_ALIGNMENT_EVENT_ALLOWED_KEYS = new Set<string>([
+  ...PERSISTED_ALIGNMENT_EVENT_ALLOWED_KEYS,
+  'historicalCatalogChangeAttribution',
+  'preRecoveryCatalogTitleAr',
+  'preRecoveryCatalogTitleEn',
+  'preRecoveryCatalogSummaryAr',
+  'preRecoveryCatalogSummaryEn',
+]);
+
 const ALLOWED_GET_INPUT_KEYS = new Set<string>(['receiptId']);
 
 const ALLOWED_ALIGN_INPUT_KEYS = new Set<string>([
@@ -410,6 +460,7 @@ const ALLOWED_ALIGN_INPUT_KEYS = new Set<string>([
   'expectedCatalogUpdatedAt',
   'expectedAlignmentRevision',
   'confirmation',
+  'legacyUnattributedCatalogUpdateAcknowledgement',
 ]);
 
 const ALLOWED_PRINCIPAL_KEYS = new Set<string>(['uid', 'token']);
@@ -838,28 +889,54 @@ export function validatePersistedLibraryQuarantineCatalogCaseAlignmentEvent(
       readonly errorCode: LibraryQuarantineCatalogCaseAlignmentErrorCode;
       readonly errorMessage: string;
     } {
-  if (
-    !isPlainRecord(raw) ||
-    !hasOnlyAllowedKeys(raw, PERSISTED_ALIGNMENT_EVENT_ALLOWED_KEYS) ||
-    Object.keys(raw).length !== PERSISTED_ALIGNMENT_EVENT_ALLOWED_KEYS.size
-  ) {
+  if (!isPlainRecord(raw)) {
     return {
       ok: false,
       errorCode: 'INVALID_PERSISTED_ALIGNMENT_SCHEMA',
       errorMessage:
-        'Persisted quarantine catalog case alignment event does not match the strict 22-key schema.',
+        'Persisted quarantine catalog case alignment event must be a plain object.',
+    };
+  }
+
+  const isNormalEvent =
+    raw.reason === LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON;
+  const isLegacyRecoveryEvent =
+    raw.reason === LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON;
+
+  if (!isNormalEvent && !isLegacyRecoveryEvent) {
+    return {
+      ok: false,
+      errorCode: 'INVALID_PERSISTED_ALIGNMENT_SCHEMA',
+      errorMessage:
+        'Persisted catalog case alignment event has an unsupported reason.',
+    };
+  }
+
+  const allowedKeys = isLegacyRecoveryEvent
+    ? PERSISTED_LEGACY_RECOVERY_ALIGNMENT_EVENT_ALLOWED_KEYS
+    : PERSISTED_ALIGNMENT_EVENT_ALLOWED_KEYS;
+
+  if (
+    !hasOnlyAllowedKeys(raw, allowedKeys) ||
+    Object.keys(raw).length !== allowedKeys.size
+  ) {
+    return {
+      ok: false,
+      errorCode: 'INVALID_PERSISTED_ALIGNMENT_SCHEMA',
+      errorMessage: isLegacyRecoveryEvent
+        ? 'Persisted legacy recovery catalog case alignment event does not match the strict 27-key schema.'
+        : 'Persisted quarantine catalog case alignment event does not match the strict 22-key schema.',
     };
   }
 
   if (
-    raw.schemaVersion !== LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION ||
-    raw.reason !== LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON
+    raw.schemaVersion !== LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION
   ) {
     return {
       ok: false,
       errorCode: 'INVALID_PERSISTED_ALIGNMENT_SCHEMA',
       errorMessage:
-        'Persisted catalog case alignment event has invalid schemaVersion or reason.',
+        'Persisted catalog case alignment event has invalid schemaVersion.',
     };
   }
 
@@ -966,6 +1043,73 @@ export function validatePersistedLibraryQuarantineCatalogCaseAlignmentEvent(
     };
   }
 
+  if (isLegacyRecoveryEvent) {
+    if (
+      raw.alignmentRevision !== 1 ||
+      raw.previousAlignmentRevision !== 0 ||
+      raw.fromCaseRevision !== raw.originalHandoffCaseRevision ||
+      Date.parse(raw.toCatalogUpdatedAt) <
+        Date.parse(raw.fromCatalogUpdatedAt) ||
+      raw.historicalCatalogChangeAttribution !==
+        LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS ||
+      typeof raw.preRecoveryCatalogTitleAr !== 'string' ||
+      raw.preRecoveryCatalogTitleAr.trim() !== raw.preRecoveryCatalogTitleAr ||
+      !isSafeEditorialText(raw.preRecoveryCatalogTitleAr, 300, false) ||
+      typeof raw.preRecoveryCatalogTitleEn !== 'string' ||
+      raw.preRecoveryCatalogTitleEn.trim() !== raw.preRecoveryCatalogTitleEn ||
+      !isSafeEditorialText(raw.preRecoveryCatalogTitleEn, 300, false) ||
+      typeof raw.preRecoveryCatalogSummaryAr !== 'string' ||
+      raw.preRecoveryCatalogSummaryAr.trim() !==
+        raw.preRecoveryCatalogSummaryAr ||
+      !isSafeEditorialText(raw.preRecoveryCatalogSummaryAr, 2000, true) ||
+      typeof raw.preRecoveryCatalogSummaryEn !== 'string' ||
+      raw.preRecoveryCatalogSummaryEn.trim() !==
+        raw.preRecoveryCatalogSummaryEn ||
+      !isSafeEditorialText(raw.preRecoveryCatalogSummaryEn, 2000, true)
+    ) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_PERSISTED_ALIGNMENT_SCHEMA',
+        errorMessage:
+          'Persisted legacy recovery catalog case alignment event failed strict recovery field validation.',
+      };
+    }
+
+    return {
+      ok: true,
+      alignmentEvent: Object.freeze({
+        schemaVersion: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
+        eventId: raw.eventId,
+        receiptId: raw.receiptId,
+        documentId: raw.documentId,
+        alignmentRevision: 1,
+        previousAlignmentRevision: 0,
+        reason: LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON,
+        historicalCatalogChangeAttribution:
+          LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS,
+        preRecoveryCatalogTitleAr: raw.preRecoveryCatalogTitleAr,
+        preRecoveryCatalogTitleEn: raw.preRecoveryCatalogTitleEn,
+        preRecoveryCatalogSummaryAr: raw.preRecoveryCatalogSummaryAr,
+        preRecoveryCatalogSummaryEn: raw.preRecoveryCatalogSummaryEn,
+        sourceRevision: raw.sourceRevision,
+        sourceUpdatedAt: raw.sourceUpdatedAt,
+        sourceSha256: raw.sourceSha256,
+        originalHandoffCaseRevision: raw.originalHandoffCaseRevision,
+        fromCaseRevision: raw.fromCaseRevision,
+        toCaseRevision: raw.toCaseRevision,
+        fromCatalogUpdatedAt: raw.fromCatalogUpdatedAt,
+        toCatalogUpdatedAt: raw.toCatalogUpdatedAt,
+        actorUid: raw.actorUid,
+        recordedAt: raw.recordedAt,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      }),
+    };
+  }
+
   return {
     ok: true,
     alignmentEvent: Object.freeze({
@@ -1063,7 +1207,8 @@ function verifyAlignmentChainSnapshots(
   handoffSnap: LibraryQuarantineFirestoreDocumentSnapshot,
   docSnap: LibraryQuarantineFirestoreDocumentSnapshot,
   alignmentSnap: LibraryQuarantineFirestoreDocumentSnapshot,
-  rightsDecisionSnap: LibraryQuarantineFirestoreDocumentSnapshot
+  rightsDecisionSnap: LibraryQuarantineFirestoreDocumentSnapshot,
+  options?: { readonly allowLegacyUnattributedRecovery?: boolean }
 ):
   | { readonly ok: true; readonly snapshot: VerifiedAlignmentChainSnapshot }
   | {
@@ -1238,6 +1383,7 @@ function verifyAlignmentChainSnapshots(
   let currentAlignmentRevision = 0;
   let effectiveAlignedCaseRevision = catalogHandoff.caseRevision;
   let effectiveAlignedCaseUpdatedAt = catalogHandoff.caseUpdatedAt;
+  let isUnattributedLegacyCatalogDrift = false;
 
   if (alignmentSnap.exists) {
     const alignmentCheck = validatePersistedLibraryQuarantineCatalogCaseAlignment(
@@ -1281,12 +1427,19 @@ function verifyAlignmentChainSnapshots(
     effectiveAlignedCaseUpdatedAt = alignment.alignedHumanCaseUpdatedAt;
   } else {
     if (sanitizedCatalogDocument.updatedAt !== catalogHandoff.createdAt) {
-      return {
-        ok: false,
-        errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
-        errorMessage:
-          'Catalog document was modified without a corresponding catalog case alignment overlay.',
-      };
+      if (
+        !options?.allowLegacyUnattributedRecovery ||
+        Date.parse(sanitizedCatalogDocument.updatedAt) <=
+          Date.parse(catalogHandoff.createdAt)
+      ) {
+        return {
+          ok: false,
+          errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+          errorMessage:
+            'Catalog document was modified without a corresponding catalog case alignment overlay.',
+        };
+      }
+      isUnattributedLegacyCatalogDrift = true;
     }
   }
 
@@ -1303,7 +1456,20 @@ function verifyAlignmentChainSnapshots(
   }
 
   let alignmentState: LibraryQuarantineCatalogCaseAlignmentState;
-  if (humanReviewCase.revision === effectiveAlignedCaseRevision) {
+  if (isUnattributedLegacyCatalogDrift) {
+    if (
+      humanReviewCase.revision === effectiveAlignedCaseRevision &&
+      humanReviewCase.updatedAt !== effectiveAlignedCaseUpdatedAt
+    ) {
+      return {
+        ok: false,
+        errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+        errorMessage:
+          'Human review case timestamp diverges from handoff provenance at identical revision.',
+      };
+    }
+    alignmentState = 'NEEDS_REALIGNMENT';
+  } else if (humanReviewCase.revision === effectiveAlignedCaseRevision) {
     if (
       humanReviewCase.updatedAt !== effectiveAlignedCaseUpdatedAt ||
       diff.hasAnyDifference
@@ -1396,6 +1562,201 @@ function verifyAlignmentChainSnapshots(
       requiresFreshRightsReview,
     }),
   };
+}
+
+function verifyLegacyRecoveryHistoricalAuditChain(
+  receiptId: string,
+  snapshot: VerifiedAlignmentChainSnapshot,
+  handoffEventSnap: LibraryQuarantineFirestoreDocumentSnapshot,
+  humanReviewEventSnaps: ReadonlyArray<LibraryQuarantineFirestoreDocumentSnapshot>
+):
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly errorCode: LibraryQuarantineCatalogCaseAlignmentErrorCode;
+      readonly errorMessage: string;
+    } {
+  if (!handoffEventSnap.exists) {
+    return {
+      ok: false,
+      errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+      errorMessage:
+        'Original quarantine catalog handoff audit event is missing.',
+    };
+  }
+
+  const handoffEventValidation =
+    validatePersistedLibraryQuarantineCatalogHandoffEvent(
+      handoffEventSnap.data(),
+      receiptId
+    );
+  if (!handoffEventValidation.ok) {
+    return {
+      ok: false,
+      errorCode:
+        handoffEventValidation.errorCode === 'SECURITY_POSTURE_VIOLATION'
+          ? 'SECURITY_POSTURE_VIOLATION'
+          : 'INVALID_PERSISTED_HANDOFF_SCHEMA',
+      errorMessage:
+        'Original quarantine catalog handoff audit event failed schema validation.',
+    };
+  }
+
+  const handoffEvent = handoffEventValidation.handoffEvent;
+  const handoff = snapshot.catalogHandoff;
+  if (
+    handoffEvent.documentId !== handoff.documentId ||
+    handoffEvent.sourceRevision !== handoff.sourceRevision ||
+    handoffEvent.sourceUpdatedAt !== handoff.sourceUpdatedAt ||
+    handoffEvent.sourceSha256 !== handoff.sourceSha256 ||
+    handoffEvent.draftSourceRevision !== handoff.draftSourceRevision ||
+    handoffEvent.caseRevision !== handoff.caseRevision ||
+    handoffEvent.caseUpdatedAt !== handoff.caseUpdatedAt ||
+    handoffEvent.organizationId !== handoff.organizationId ||
+    handoffEvent.sourceId !== handoff.sourceId ||
+    handoffEvent.actorUid !== handoff.createdBy ||
+    handoffEvent.recordedAt !== handoff.createdAt
+  ) {
+    return {
+      ok: false,
+      errorCode: 'HANDOFF_SOURCE_MISMATCH',
+      errorMessage:
+        'Original quarantine catalog handoff audit event does not match persisted handoff record.',
+    };
+  }
+
+  const totalRevisions = snapshot.humanReviewCase.revision;
+  if (humanReviewEventSnaps.length !== totalRevisions) {
+    return {
+      ok: false,
+      errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+      errorMessage:
+        'Incomplete historical human review audit event snapshot list.',
+    };
+  }
+
+  let previousEvent: LibraryQuarantinePersistedHumanReviewEvent | null = null;
+  for (let rev = 1; rev <= totalRevisions; rev += 1) {
+    const expectedEventId = deriveLibraryQuarantineHumanReviewEventId(
+      receiptId,
+      rev
+    );
+    const evSnap = humanReviewEventSnaps[rev - 1];
+    if (!evSnap || !evSnap.exists) {
+      return {
+        ok: false,
+        errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+        errorMessage: `Historical human review audit event ${expectedEventId} is missing.`,
+      };
+    }
+
+    const evValidation = validatePersistedLibraryQuarantineHumanReviewEvent(
+      evSnap.data(),
+      expectedEventId
+    );
+    if (!evValidation.ok) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_HUMAN_REVIEW_CASE',
+        errorMessage: `Historical human review audit event ${expectedEventId} failed strict schema validation.`,
+      };
+    }
+
+    const ev = evValidation.reviewEvent;
+    const expectedEventType = rev === 1 ? 'CREATED' : 'UPDATED';
+    if (
+      ev.receiptId !== receiptId ||
+      ev.revision !== rev ||
+      ev.previousRevision !== rev - 1 ||
+      ev.eventType !== expectedEventType
+    ) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_HUMAN_REVIEW_CASE',
+        errorMessage: `Historical human review audit event ${expectedEventId} has invalid revision progression.`,
+      };
+    }
+
+    if (
+      ev.sourceRevision !== snapshot.receiptEnvelope.revision ||
+      ev.sourceUpdatedAt !== snapshot.receiptEnvelope.receipt.updatedAt ||
+      ev.sourceSha256 !== snapshot.receiptEnvelope.receipt.sha256 ||
+      ev.draftSourceRevision !== snapshot.reviewDraft.sourceRevision
+    ) {
+      return {
+        ok: false,
+        errorCode: 'CASE_SOURCE_MISMATCH',
+        errorMessage: `Historical human review audit event ${expectedEventId} provenance does not match quarantine source.`,
+      };
+    }
+
+    if (rev === 1) {
+      if (
+        ev.recordedAt !== snapshot.humanReviewCase.createdAt ||
+        ev.actorUid !== snapshot.humanReviewCase.createdBy
+      ) {
+        return {
+          ok: false,
+          errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+          errorMessage:
+            'Initial human review audit event does not match human review case creation metadata.',
+        };
+      }
+    } else if (
+      previousEvent &&
+      Date.parse(ev.recordedAt) < Date.parse(previousEvent.recordedAt)
+    ) {
+      return {
+        ok: false,
+        errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+        errorMessage:
+          'Historical human review audit event chronology is non-monotonic.',
+      };
+    }
+
+    if (rev === handoff.caseRevision) {
+      if (
+        ev.recordedAt !== handoff.caseUpdatedAt ||
+        ev.status !== 'METADATA_RECORDED' ||
+        Date.parse(handoff.createdAt) < Date.parse(ev.recordedAt)
+      ) {
+        return {
+          ok: false,
+          errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+          errorMessage:
+            'Historical human review audit event at handoff revision does not match handoff provenance.',
+        };
+      }
+    }
+
+    if (rev === totalRevisions) {
+      const currentCase = snapshot.humanReviewCase;
+      if (
+        ev.recordedAt !== currentCase.updatedAt ||
+        ev.actorUid !== currentCase.updatedBy ||
+        ev.status !== currentCase.status ||
+        ev.titleAr !== currentCase.titleAr ||
+        ev.titleEn !== currentCase.titleEn ||
+        ev.issuingOrganization !== currentCase.issuingOrganization ||
+        ev.summaryAr !== currentCase.summaryAr ||
+        ev.summaryEn !== currentCase.summaryEn ||
+        ev.sourceEvidenceNotes !== currentCase.sourceEvidenceNotes ||
+        ev.rightsEvidenceNotes !== currentCase.rightsEvidenceNotes ||
+        ev.editorialNotes !== currentCase.editorialNotes
+      ) {
+        return {
+          ok: false,
+          errorCode: 'INCONSISTENT_ALIGNMENT_STATE',
+          errorMessage:
+            'Latest human review audit event does not match current saved human review case.',
+        };
+      }
+    }
+
+    previousEvent = ev;
+  }
+
+  return { ok: true };
 }
 
 class PreWriteAlignmentHoldError extends Error {
@@ -1875,6 +2236,25 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
       );
     }
 
+    const hasLegacyRecoveryAckKey = Object.prototype.hasOwnProperty.call(
+      rawInput,
+      'legacyUnattributedCatalogUpdateAcknowledgement'
+    );
+    let isLegacyRecoveryRequested = false;
+    if (hasLegacyRecoveryAckKey) {
+      if (
+        rawInput.legacyUnattributedCatalogUpdateAcknowledgement !==
+        LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL
+      ) {
+        return makeAlignHoldDto(
+          receiptId,
+          'CONFIRMATION_REQUIRED',
+          'Explicit legacyUnattributedCatalogUpdateAcknowledgement literal ACKNOWLEDGE_UNATTRIBUTED_LEGACY_CATALOG_CHANGE is required for legacy recovery.'
+        );
+      }
+      isLegacyRecoveryRequested = true;
+    }
+
     const expectedCaseRevision = rawInput.expectedCaseRevision;
     const expectedCatalogUpdatedAt = rawInput.expectedCatalogUpdatedAt;
     const expectedAlignmentRevision = rawInput.expectedAlignmentRevision;
@@ -1975,7 +2355,7 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
           );
         }
 
-        // Read all 8 point references before any write
+        // Read all 8 base point references before any write
         const [
           receiptSnap,
           draftSnap,
@@ -1996,6 +2376,15 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
           tx.get(rightsDecisionRef),
         ]);
 
+        if (isLegacyRecoveryRequested) {
+          if (alignmentSnap.exists || expectedAlignmentRevision !== 0) {
+            throw new PreWriteAlignmentHoldError(
+              'INCONSISTENT_ALIGNMENT_STATE',
+              'Exceptional legacy recovery is forbidden when a catalog case alignment record already exists.'
+            );
+          }
+        }
+
         const verified = verifyAlignmentChainSnapshots(
           receiptId,
           receiptSnap,
@@ -2004,7 +2393,8 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
           handoffSnap,
           docSnap,
           alignmentSnap,
-          rightsDecisionSnap
+          rightsDecisionSnap,
+          { allowLegacyUnattributedRecovery: isLegacyRecoveryRequested }
         );
         if (!verified.ok) {
           throw new PreWriteAlignmentHoldError(
@@ -2014,6 +2404,24 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
         }
 
         const s = verified.snapshot;
+
+        if (isLegacyRecoveryRequested) {
+          if (s.sanitizedCatalogDocument.updatedAt === s.catalogHandoff.createdAt) {
+            throw new PreWriteAlignmentHoldError(
+              'INVALID_ALIGNMENT_PAYLOAD',
+              'Exceptional legacy recovery acknowledgement is not permitted for an unmodified catalog handoff draft.'
+            );
+          }
+          if (
+            s.humanReviewCase.revision >
+            LIBRARY_QUARANTINE_LEGACY_RECOVERY_MAX_CASE_REVISIONS
+          ) {
+            throw new PreWriteAlignmentHoldError(
+              'INCONSISTENT_ALIGNMENT_STATE',
+              `Human review case revision exceeds the bounded legacy recovery verification limit (${LIBRARY_QUARANTINE_LEGACY_RECOVERY_MAX_CASE_REVISIONS}).`
+            );
+          }
+        }
 
         // Optimistic concurrency check on all 3 CAS tokens
         if (
@@ -2035,8 +2443,12 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
           );
         }
 
-        // Idempotent ALREADY_ALIGNED path (0 writes)
-        if (s.alignmentState === 'ALIGNED' && !s.diff.hasAnyDifference) {
+        // Idempotent ALREADY_ALIGNED path (0 writes) — never taken during exceptional legacy recovery
+        if (
+          !isLegacyRecoveryRequested &&
+          s.alignmentState === 'ALIGNED' &&
+          !s.diff.hasAnyDifference
+        ) {
           return Object.freeze({
             outcome: 'ALREADY_ALIGNED' as const,
             sourceRevision: s.receiptEnvelope.revision,
@@ -2064,6 +2476,38 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
             'ALIGNMENT_EVENT_ALREADY_EXISTS',
             'Target catalog case alignment audit event already exists.'
           );
+        }
+
+        if (isLegacyRecoveryRequested) {
+          const handoffEventRef = this.db
+            .collection(LIBRARY_QUARANTINE_CATALOG_HANDOFF_EVENTS_COLLECTION)
+            .doc(receiptId);
+          const humanReviewEventRefs = Array.from(
+            { length: s.humanReviewCase.revision },
+            (_, idx) =>
+              this.db
+                .collection(LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION)
+                .doc(deriveLibraryQuarantineHumanReviewEventId(receiptId, idx + 1))
+          );
+
+          const [handoffEventSnap, ...humanReviewEventSnaps] =
+            await Promise.all([
+              tx.get(handoffEventRef),
+              ...humanReviewEventRefs.map((ref) => tx.get(ref)),
+            ]);
+
+          const auditVerification = verifyLegacyRecoveryHistoricalAuditChain(
+            receiptId,
+            s,
+            handoffEventSnap,
+            humanReviewEventSnaps
+          );
+          if (!auditVerification.ok) {
+            throw new PreWriteAlignmentHoldError(
+              auditVerification.errorCode,
+              auditVerification.errorMessage
+            );
+          }
         }
 
         // Strict validation of the 4 editorial fields from humanReviewCase (no guessing or auto-translation)
@@ -2173,31 +2617,66 @@ export class LibraryQuarantineCatalogCaseAlignmentService {
           );
         }
 
-        const nextEvent: LibraryQuarantinePersistedCatalogCaseAlignmentEvent = {
-          schemaVersion:
-            LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
-          eventId: targetEventId,
-          receiptId,
-          documentId,
-          alignmentRevision: targetAlignmentRevision,
-          previousAlignmentRevision: expectedAlignmentRevision,
-          reason: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON,
-          sourceRevision: s.receiptEnvelope.revision,
-          sourceUpdatedAt: s.receiptEnvelope.receipt.updatedAt,
-          sourceSha256: s.receiptEnvelope.receipt.sha256,
-          originalHandoffCaseRevision: s.catalogHandoff.caseRevision,
-          fromCaseRevision: s.effectiveAlignedCaseRevision,
-          toCaseRevision: s.humanReviewCase.revision,
-          fromCatalogUpdatedAt: s.sanitizedCatalogDocument.updatedAt,
-          toCatalogUpdatedAt: nowIso,
-          actorUid: authResult.actorUid,
-          recordedAt: nowIso,
-          isSanitized: false,
-          isVerifiedSafe: false,
-          isRightsApproved: false,
-          isPublished: false,
-          isReadyForPeia: false,
-        };
+        const nextEvent: LibraryQuarantinePersistedCatalogCaseAlignmentEvent =
+          isLegacyRecoveryRequested
+            ? {
+                schemaVersion:
+                  LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
+                eventId: targetEventId,
+                receiptId,
+                documentId,
+                alignmentRevision: 1,
+                previousAlignmentRevision: 0,
+                reason: LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON,
+                historicalCatalogChangeAttribution:
+                  LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS,
+                preRecoveryCatalogTitleAr: s.rawCatalogDocument.titleAr.trim(),
+                preRecoveryCatalogTitleEn: s.rawCatalogDocument.titleEn.trim(),
+                preRecoveryCatalogSummaryAr:
+                  s.rawCatalogDocument.summaryAr.trim(),
+                preRecoveryCatalogSummaryEn:
+                  s.rawCatalogDocument.summaryEn.trim(),
+                sourceRevision: s.receiptEnvelope.revision,
+                sourceUpdatedAt: s.receiptEnvelope.receipt.updatedAt,
+                sourceSha256: s.receiptEnvelope.receipt.sha256,
+                originalHandoffCaseRevision: s.catalogHandoff.caseRevision,
+                fromCaseRevision: s.catalogHandoff.caseRevision,
+                toCaseRevision: s.humanReviewCase.revision,
+                fromCatalogUpdatedAt: s.sanitizedCatalogDocument.updatedAt,
+                toCatalogUpdatedAt: nowIso,
+                actorUid: authResult.actorUid,
+                recordedAt: nowIso,
+                isSanitized: false,
+                isVerifiedSafe: false,
+                isRightsApproved: false,
+                isPublished: false,
+                isReadyForPeia: false,
+              }
+            : {
+                schemaVersion:
+                  LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
+                eventId: targetEventId,
+                receiptId,
+                documentId,
+                alignmentRevision: targetAlignmentRevision,
+                previousAlignmentRevision: expectedAlignmentRevision,
+                reason: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON,
+                sourceRevision: s.receiptEnvelope.revision,
+                sourceUpdatedAt: s.receiptEnvelope.receipt.updatedAt,
+                sourceSha256: s.receiptEnvelope.receipt.sha256,
+                originalHandoffCaseRevision: s.catalogHandoff.caseRevision,
+                fromCaseRevision: s.effectiveAlignedCaseRevision,
+                toCaseRevision: s.humanReviewCase.revision,
+                fromCatalogUpdatedAt: s.sanitizedCatalogDocument.updatedAt,
+                toCatalogUpdatedAt: nowIso,
+                actorUid: authResult.actorUid,
+                recordedAt: nowIso,
+                isSanitized: false,
+                isVerifiedSafe: false,
+                isRightsApproved: false,
+                isPublished: false,
+                isReadyForPeia: false,
+              };
 
         const eventValidation =
           validatePersistedLibraryQuarantineCatalogCaseAlignmentEvent(

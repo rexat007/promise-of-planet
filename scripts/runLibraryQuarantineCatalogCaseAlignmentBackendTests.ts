@@ -111,28 +111,40 @@ import {
 } from '../functions/src/library/firestoreLibraryQuarantineReviewDraftStore';
 import {
   LIBRARY_QUARANTINE_HUMAN_REVIEW_CASE_SCHEMA_VERSION,
+  LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENT_SCHEMA_VERSION,
+  deriveLibraryQuarantineHumanReviewEventId,
   type LibraryQuarantinePersistedHumanReviewCase,
+  type LibraryQuarantinePersistedHumanReviewEvent,
 } from '../functions/src/library/libraryQuarantineHumanReviewCaseContract';
-import { LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION } from '../functions/src/library/firestoreLibraryQuarantineHumanReviewCaseStore';
+import {
+  LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+  LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION,
+} from '../functions/src/library/firestoreLibraryQuarantineHumanReviewCaseStore';
 import {
   LIBRARY_DOCUMENTS_COLLECTION,
   LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION,
+  LIBRARY_QUARANTINE_CATALOG_HANDOFF_EVENTS_COLLECTION,
   LIBRARY_QUARANTINE_CATALOG_HANDOFF_SCHEMA_VERSION,
   deriveQuarantineCatalogDocumentId,
   type LibraryQuarantinePersistedCatalogHandoff,
+  type LibraryQuarantinePersistedCatalogHandoffEvent,
 } from '../functions/src/library/libraryQuarantineCatalogHandoffService';
 import {
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENTS_COLLECTION,
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+  LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON,
+  LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+  LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON,
+  LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS,
   LibraryQuarantineCatalogCaseAlignmentService,
-  isAuthorizedHumanLibraryCatalogAligner,
   deriveLibraryQuarantineCatalogCaseAlignmentEventId,
+  validatePersistedLibraryQuarantineCatalogCaseAlignmentEvent,
   type LibraryQuarantinePersistedCatalogCaseAlignment,
   type LibraryQuarantinePersistedCatalogCaseAlignmentEvent,
-  type AlignQuarantineCatalogCaseResponseDto,
-  type GetQuarantineCatalogCaseAlignmentResponseDto,
+  type LibraryQuarantinePersistedLegacyRecoveryCatalogCaseAlignmentEvent,
+  type LibraryQuarantinePersistedNormalCatalogCaseAlignmentEvent,
 } from '../functions/src/library/libraryQuarantineCatalogCaseAlignmentService';
 
 const require = createRequire(import.meta.url);
@@ -1031,8 +1043,834 @@ async function runTests(): Promise<void> {
     );
   }
 
+  // =========================================================================
+  // PASS 8: LIB-QCAT-LEGACY-R2A-SERVER-GUARD — Exceptional Forward-Recovery Guard
+  // =========================================================================
+  {
+    const incidentReceiptId = '1183ac250d0404e921d2aeadbec1b76c';
+    const incidentDocId = deriveQuarantineCatalogDocumentId(incidentReceiptId);
+    const sourceIso = '2026-11-13T13:00:00.000Z';
+    const handoffCaseUpdatedAt = '2026-11-13T13:26:28.891Z';
+    const handoffCreatedAt = '2026-11-13T14:09:18.983Z';
+    const legacyCatalogUpdatedAt = '2026-11-13T17:48:23.574Z';
+    const rev6UpdatedAt = '2026-11-14T14:44:40.569Z';
+    const recoveryClockIso = '2026-11-14T18:00:00.000Z';
+    const sha256 = 'a'.repeat(64);
+
+    const buildIncidentFixture = (): InMemoryAlignmentFirestoreDatabase => {
+      const db = new InMemoryAlignmentFirestoreDatabase();
+
+      const receipt: LibraryQuarantineInternalReceipt = {
+        receiptId: incidentReceiptId,
+        uploaderUid: ownerAdmin.id,
+        originalFilename: 'marine-protection-framework-2026.pdf',
+        sanitizedFilename: 'marine-protection-framework-2026.pdf',
+        format: 'PDF',
+        canonicalExtension: 'pdf',
+        canonicalMimeType: 'application/pdf',
+        byteSize: 204800,
+        sha256,
+        storagePath: `library/quarantine/${incidentReceiptId}/source.pdf`,
+        state: LibraryQuarantineReceiptState.Quarantined,
+        generation: '1731500000001',
+        deepInspectionStatus: 'PDF_REQUIRES_ISOLATED_PARSER',
+        reconciliationReason: null,
+        rejectionReasonCode: null,
+        createdAt: sourceIso,
+        updatedAt: sourceIso,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      };
+
+      const envelope: LibraryQuarantinePersistedReceiptEnvelope = {
+        schemaVersion: LIBRARY_QUARANTINE_RECEIPT_SCHEMA_VERSION,
+        revision: 1,
+        state: receipt.state,
+        receipt,
+      };
+
+      const draft: LibraryQuarantinePersistedReviewDraft = {
+        schemaVersion: LIBRARY_QUARANTINE_REVIEW_DRAFT_SCHEMA_VERSION,
+        receiptId: incidentReceiptId,
+        sourceRevision: 1,
+        sourceUpdatedAt: sourceIso,
+        sourceSha256: sha256,
+        format: 'PDF',
+        uploaderUid: ownerAdmin.id,
+        reviewState: LIBRARY_QUARANTINE_REVIEW_DRAFT_STATE,
+        createdBy: ownerAdmin.id,
+        createdAt: sourceIso,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      };
+
+      // Exact matching 4 editorial fields between rev 6 human case and legacy-updated qcat draft
+      const alignedTitleAr = 'إطار حماية البيئة البحرية والساحلية 2026';
+      const alignedTitleEn = 'Marine and Coastal Environmental Protection Framework 2026';
+      const alignedSummaryAr = 'وثيقة مرجعية محدثة لحماية النظم البيئية البحرية والساحلية.';
+      const alignedSummaryEn = 'Updated reference framework for marine and coastal ecosystem protection.';
+
+      const humanCaseRev6: LibraryQuarantinePersistedHumanReviewCase = {
+        schemaVersion: LIBRARY_QUARANTINE_HUMAN_REVIEW_CASE_SCHEMA_VERSION,
+        receiptId: incidentReceiptId,
+        revision: 6,
+        sourceRevision: 1,
+        sourceUpdatedAt: sourceIso,
+        sourceSha256: sha256,
+        draftSourceRevision: 1,
+        status: 'METADATA_RECORDED',
+        titleAr: alignedTitleAr,
+        titleEn: alignedTitleEn,
+        issuingOrganization: 'Ministry of Environment',
+        summaryAr: alignedSummaryAr,
+        summaryEn: alignedSummaryEn,
+        sourceEvidenceNotes: 'Verified official ministry publication record.',
+        rightsEvidenceNotes: 'Institutional open review copy.',
+        editorialNotes: 'Finalized bilingual metadata at revision 6.',
+        createdBy: ownerAdmin.id,
+        createdAt: '2026-11-13T13:20:32.398Z',
+        updatedBy: ownerAdmin.id,
+        updatedAt: rev6UpdatedAt,
+      };
+
+      const catalogHandoff: LibraryQuarantinePersistedCatalogHandoff = {
+        schemaVersion: LIBRARY_QUARANTINE_CATALOG_HANDOFF_SCHEMA_VERSION,
+        receiptId: incidentReceiptId,
+        documentId: incidentDocId,
+        sourceRevision: 1,
+        sourceUpdatedAt: sourceIso,
+        sourceSha256: sha256,
+        draftSourceRevision: 1,
+        caseRevision: 3,
+        caseUpdatedAt: handoffCaseUpdatedAt,
+        organizationId: 'org-environment',
+        sourceId: 'src-gazette',
+        createdAt: handoffCreatedAt,
+        createdBy: ownerAdmin.id,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      };
+
+      const catalogHandoffEvent: LibraryQuarantinePersistedCatalogHandoffEvent = {
+        schemaVersion: LIBRARY_QUARANTINE_CATALOG_HANDOFF_SCHEMA_VERSION,
+        eventId: incidentReceiptId,
+        receiptId: incidentReceiptId,
+        documentId: incidentDocId,
+        eventType: 'CATALOG_DRAFT_CREATED',
+        sourceRevision: 1,
+        sourceUpdatedAt: sourceIso,
+        sourceSha256: sha256,
+        draftSourceRevision: 1,
+        caseRevision: 3,
+        caseUpdatedAt: handoffCaseUpdatedAt,
+        organizationId: 'org-environment',
+        sourceId: 'src-gazette',
+        actorUid: ownerAdmin.id,
+        recordedAt: handoffCreatedAt,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      };
+
+      const catalogDoc = {
+        id: incidentDocId,
+        titleAr: alignedTitleAr,
+        titleEn: alignedTitleEn,
+        documentType: LibraryDocumentType.InstitutionalReport,
+        organizationId: 'org-environment',
+        sourceId: 'src-gazette',
+        geographyAr: 'وطني',
+        geographyEn: 'National',
+        publicationDate: '2026-11-01',
+        language: 'bilingual' as const,
+        summaryAr: alignedSummaryAr,
+        summaryEn: alignedSummaryEn,
+        rightsStatus: LibraryRightsStatus.ReviewRequired,
+        workflowState: WorkflowState.Draft,
+        legalStatusDescriptionAr: 'مسودة قيد المراجعة',
+        legalStatusDescriptionEn: 'Draft under review',
+        createdAt: handoffCreatedAt,
+        updatedAt: legacyCatalogUpdatedAt,
+        topicsAr: ['البيئة البحرية'],
+        topicsEn: ['Marine Environment'],
+        environmentalDomains: ['Biodiversity'],
+        versions: [
+          {
+            id: `ver-${incidentDocId}-1`,
+            documentId: incidentDocId,
+            versionNumber: '1.0',
+            publishedDate: '2026-11-01',
+            changeDescriptionAr: 'مسودة فهرس أولية من الحجر',
+            changeDescriptionEn: 'Initial quarantine catalog draft',
+          },
+        ],
+        workflowHistory: [],
+      };
+
+      const historicalEventSpecs: ReadonlyArray<{
+        readonly revision: number;
+        readonly previousRevision: number;
+        readonly recordedAt: string;
+        readonly eventType: 'CREATED' | 'UPDATED';
+        readonly status: 'IN_REVIEW' | 'METADATA_RECORDED';
+      }> = [
+        {
+          revision: 1,
+          previousRevision: 0,
+          recordedAt: '2026-11-13T13:20:32.398Z',
+          eventType: 'CREATED',
+          status: 'IN_REVIEW',
+        },
+        {
+          revision: 2,
+          previousRevision: 1,
+          recordedAt: '2026-11-13T13:25:12.695Z',
+          eventType: 'UPDATED',
+          status: 'IN_REVIEW',
+        },
+        {
+          revision: 3,
+          previousRevision: 2,
+          recordedAt: '2026-11-13T13:26:28.891Z',
+          eventType: 'UPDATED',
+          status: 'METADATA_RECORDED',
+        },
+        {
+          revision: 4,
+          previousRevision: 3,
+          recordedAt: '2026-11-14T14:15:40.916Z',
+          eventType: 'UPDATED',
+          status: 'METADATA_RECORDED',
+        },
+        {
+          revision: 5,
+          previousRevision: 4,
+          recordedAt: '2026-11-14T14:38:08.534Z',
+          eventType: 'UPDATED',
+          status: 'METADATA_RECORDED',
+        },
+        {
+          revision: 6,
+          previousRevision: 5,
+          recordedAt: '2026-11-14T14:44:40.569Z',
+          eventType: 'UPDATED',
+          status: 'METADATA_RECORDED',
+        },
+      ];
+
+      db.seedDoc(LIBRARY_QUARANTINE_RECEIPT_COLLECTION, incidentReceiptId, envelope);
+      db.seedDoc(LIBRARY_QUARANTINE_REVIEW_DRAFT_COLLECTION, incidentReceiptId, draft);
+      db.seedDoc(
+        LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+        incidentReceiptId,
+        humanCaseRev6
+      );
+      db.seedDoc(
+        LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION,
+        incidentReceiptId,
+        catalogHandoff
+      );
+      db.seedDoc(
+        LIBRARY_QUARANTINE_CATALOG_HANDOFF_EVENTS_COLLECTION,
+        incidentReceiptId,
+        catalogHandoffEvent
+      );
+      db.seedDoc(LIBRARY_DOCUMENTS_COLLECTION, incidentDocId, catalogDoc);
+
+      for (const spec of historicalEventSpecs) {
+        const evId = deriveLibraryQuarantineHumanReviewEventId(
+          incidentReceiptId,
+          spec.revision
+        );
+        const evDoc: LibraryQuarantinePersistedHumanReviewEvent = {
+          schemaVersion: LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENT_SCHEMA_VERSION,
+          eventId: evId,
+          receiptId: incidentReceiptId,
+          revision: spec.revision,
+          previousRevision: spec.previousRevision,
+          eventType: spec.eventType,
+          sourceRevision: 1,
+          sourceUpdatedAt: sourceIso,
+          sourceSha256: sha256,
+          draftSourceRevision: 1,
+          status: spec.status,
+          titleAr: alignedTitleAr,
+          titleEn: alignedTitleEn,
+          issuingOrganization: 'Ministry of Environment',
+          summaryAr: alignedSummaryAr,
+          summaryEn: alignedSummaryEn,
+          sourceEvidenceNotes: 'Verified official ministry publication record.',
+          rightsEvidenceNotes: 'Institutional open review copy.',
+          editorialNotes:
+            spec.revision === 6
+              ? 'Finalized bilingual metadata at revision 6.'
+              : `Revision ${spec.revision} note.`,
+          actorUid: ownerAdmin.id,
+          recordedAt: spec.recordedAt,
+        };
+        db.seedDoc(LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION, evId, evDoc);
+      }
+
+      return db;
+    };
+
+    const adminRepo = new InMemoryAdminRepo(defaultAdmins);
+    const makeServiceForDb = (
+      db: InMemoryAlignmentFirestoreDatabase,
+      actor: AdminUser = ownerAdmin,
+      clockIso: string = recoveryClockIso
+    ) =>
+      new LibraryQuarantineCatalogCaseAlignmentService({
+        trustedPrincipalProvider: {
+          resolveAuthenticatedPrincipal: () => ({
+            uid: actor.id,
+            token: { email: actor.email },
+          }),
+        },
+        adminRepository: adminRepo,
+        db,
+        clock: () => clockIso,
+      });
+
+    // 8.1: GET on historical unattributed state -> HOLD (INCONSISTENT_ALIGNMENT_STATE), 7 point reads, 0 writes
+    {
+      const db = buildIncidentFixture();
+      const service = makeServiceForDb(db);
+      db.resetCounters();
+
+      const getRes = await service.getQuarantineCatalogCaseAlignment({
+        receiptId: incidentReceiptId,
+      });
+      assert.equal(getRes.ok, false);
+      if (!getRes.ok) {
+        assert.equal(getRes.status, 'HOLD');
+        assert.equal(getRes.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+      }
+      assert.equal(db.pointGetCalls, 7);
+      assert.equal(db.transactionCount, 0);
+    }
+
+    // 8.2: Ordinary alignQuarantineCatalogCase (no legacy acknowledgement) -> HOLD (INCONSISTENT_ALIGNMENT_STATE), 0 writes
+    {
+      const db = buildIncidentFixture();
+      const service = makeServiceForDb(db);
+      db.resetCounters();
+
+      const ordinaryAlignRes = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+      });
+      assert.equal(ordinaryAlignRes.ok, false);
+      if (!ordinaryAlignRes.ok) {
+        assert.equal(ordinaryAlignRes.status, 'HOLD');
+        assert.equal(ordinaryAlignRes.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+      }
+      assert.equal(db.txGetCalls, 8);
+      assert.equal(db.txCreateCalls, 0);
+      assert.equal(db.txUpdateCalls, 0);
+    }
+
+    // 8.3: Invalid or empty legacyUnattributedCatalogUpdateAcknowledgement -> HOLD (CONFIRMATION_REQUIRED), 0 reads, 0 writes
+    {
+      const db = buildIncidentFixture();
+      const service = makeServiceForDb(db);
+
+      for (const badAck of ['', 'WRONG_ACK', null, undefined, 123]) {
+        db.resetCounters();
+        const badAckRes = await service.alignQuarantineCatalogCase({
+          receiptId: incidentReceiptId,
+          expectedCaseRevision: 6,
+          expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+          expectedAlignmentRevision: 0,
+          confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+          legacyUnattributedCatalogUpdateAcknowledgement: badAck,
+        });
+        assert.equal(badAckRes.ok, false);
+        if (!badAckRes.ok) {
+          assert.equal(badAckRes.status, 'HOLD');
+          assert.equal(badAckRes.errorCode, 'CONFIRMATION_REQUIRED');
+        }
+        assert.equal(db.pointGetCalls, 0);
+        assert.equal(db.transactionCount, 0);
+        assert.equal(db.txCreateCalls, 0);
+        assert.equal(db.txUpdateCalls, 0);
+      }
+    }
+
+    // 8.4: Acknowledgement supplied on a normal unmodified handoff draft -> HOLD (INVALID_ALIGNMENT_PAYLOAD), 0 writes
+    {
+      const db = new InMemoryAlignmentFirestoreDatabase();
+      const seededNormal = makeSeededRecord(buildHexReceiptId(80), 2);
+      seedDatabaseWithRecord(db, seededNormal);
+      const service = makeServiceForDb(db);
+      db.resetCounters();
+
+      const res = await service.alignQuarantineCatalogCase({
+        receiptId: seededNormal.receiptId,
+        expectedCaseRevision: 2,
+        expectedCatalogUpdatedAt: seededNormal.catalogDoc.updatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(res.ok, false);
+      if (!res.ok) {
+        assert.equal(res.status, 'HOLD');
+        assert.equal(res.errorCode, 'INVALID_ALIGNMENT_PAYLOAD');
+      }
+      assert.equal(db.txCreateCalls, 0);
+      assert.equal(db.txUpdateCalls, 0);
+    }
+
+    // 8.5: Acknowledgement supplied when an alignment doc already exists (alignmentRevision >= 1) -> HOLD (INCONSISTENT_ALIGNMENT_STATE), 0 writes
+    {
+      const db = new InMemoryAlignmentFirestoreDatabase();
+      const seededAligned = makeSeededRecord(buildHexReceiptId(81), 2);
+      seedDatabaseWithRecord(db, seededAligned);
+      const service = makeServiceForDb(db);
+
+      const firstAlign = await service.alignQuarantineCatalogCase({
+        receiptId: seededAligned.receiptId,
+        expectedCaseRevision: 2,
+        expectedCatalogUpdatedAt: seededAligned.catalogDoc.updatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+      });
+      assert.equal(firstAlign.ok, true);
+
+      const updatedDoc = db.getRawDoc(
+        LIBRARY_DOCUMENTS_COLLECTION,
+        seededAligned.docId
+      ) as unknown as LibraryDocument;
+
+      db.resetCounters();
+      const resWithExistingAlignment = await service.alignQuarantineCatalogCase({
+        receiptId: seededAligned.receiptId,
+        expectedCaseRevision: 2,
+        expectedCatalogUpdatedAt: updatedDoc.updatedAt,
+        expectedAlignmentRevision: 1,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(resWithExistingAlignment.ok, false);
+      if (!resWithExistingAlignment.ok) {
+        assert.equal(resWithExistingAlignment.status, 'HOLD');
+        assert.equal(resWithExistingAlignment.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+      }
+      assert.equal(db.txCreateCalls, 0);
+      assert.equal(db.txUpdateCalls, 0);
+    }
+
+    // 8.6: Missing or invalid handoff audit event -> HOLD, 0 writes
+    {
+      const dbMissingHandoffEv = buildIncidentFixture();
+      // Corrupt handoff event
+      dbMissingHandoffEv.seedDoc(
+        LIBRARY_QUARANTINE_CATALOG_HANDOFF_EVENTS_COLLECTION,
+        incidentReceiptId,
+        { invalid: true }
+      );
+      const service = makeServiceForDb(dbMissingHandoffEv);
+      dbMissingHandoffEv.resetCounters();
+
+      const res = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(res.ok, false);
+      if (!res.ok) {
+        assert.equal(res.status, 'HOLD');
+        assert.equal(res.errorCode, 'INVALID_PERSISTED_HANDOFF_SCHEMA');
+      }
+      assert.equal(dbMissingHandoffEv.txCreateCalls, 0);
+      assert.equal(dbMissingHandoffEv.txUpdateCalls, 0);
+    }
+
+    // 8.7: Missing historical human-review event (<receiptId>_1 .. <receiptId>_6) -> HOLD, 0 writes
+    {
+      const dbMissingRev4 = buildIncidentFixture();
+      // Advance case to rev 7 without seeding <receiptId>_7
+      const caseDoc = dbMissingRev4.getRawDoc(
+        LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+        incidentReceiptId
+      )!;
+      dbMissingRev4.seedDoc(
+        LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+        incidentReceiptId,
+        {
+          ...caseDoc,
+          revision: 7,
+        }
+      );
+      const service = makeServiceForDb(dbMissingRev4);
+      dbMissingRev4.resetCounters();
+
+      const res = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 7,
+        expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(res.ok, false);
+      if (!res.ok) {
+        assert.equal(res.status, 'HOLD');
+        assert.equal(res.errorCode, 'INCONSISTENT_ALIGNMENT_STATE');
+      }
+      assert.equal(dbMissingRev4.txCreateCalls, 0);
+      assert.equal(dbMissingRev4.txUpdateCalls, 0);
+    }
+
+    // 8.8: Tampered or source-mismatched historical human-review event -> HOLD, 0 writes
+    {
+      const dbTamperedEv = buildIncidentFixture();
+      const rev4Id = deriveLibraryQuarantineHumanReviewEventId(incidentReceiptId, 4);
+      const rev4Doc = dbTamperedEv.getRawDoc(
+        LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION,
+        rev4Id
+      )!;
+      dbTamperedEv.seedDoc(
+        LIBRARY_QUARANTINE_HUMAN_REVIEW_EVENTS_COLLECTION,
+        rev4Id,
+        {
+          ...rev4Doc,
+          sourceRevision: 99,
+          draftSourceRevision: 99,
+        }
+      );
+      const service = makeServiceForDb(dbTamperedEv);
+      dbTamperedEv.resetCounters();
+
+      const res = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(res.ok, false);
+      if (!res.ok) {
+        assert.equal(res.status, 'HOLD');
+        assert.equal(res.errorCode, 'CASE_SOURCE_MISMATCH');
+      }
+      assert.equal(dbTamperedEv.txCreateCalls, 0);
+      assert.equal(dbTamperedEv.txUpdateCalls, 0);
+    }
+
+    // 8.9: Stale expectedCaseRevision or stale expectedCatalogUpdatedAt during recovery -> CONFLICT, 0 writes
+    {
+      const db = buildIncidentFixture();
+      const service = makeServiceForDb(db);
+
+      db.resetCounters();
+      const staleCaseRes = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 5, // Stale
+        expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(staleCaseRes.ok, false);
+      if (!staleCaseRes.ok) {
+        assert.equal(staleCaseRes.status, 'CONFLICT');
+        assert.equal(staleCaseRes.errorCode, 'ALIGNMENT_REVISION_CONFLICT');
+      }
+      assert.equal(db.txCreateCalls, 0);
+      assert.equal(db.txUpdateCalls, 0);
+
+      db.resetCounters();
+      const staleCatalogRes = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: handoffCreatedAt, // Stale
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(staleCatalogRes.ok, false);
+      if (!staleCatalogRes.ok) {
+        assert.equal(staleCatalogRes.status, 'CONFLICT');
+        assert.equal(staleCatalogRes.errorCode, 'ALIGNMENT_REVISION_CONFLICT');
+      }
+      assert.equal(db.txCreateCalls, 0);
+      assert.equal(db.txUpdateCalls, 0);
+    }
+
+    // 8.10 & 8.11: Successful authorized forward recovery for exact production incident shape + post-recovery lifecycle
+    {
+      const db = buildIncidentFixture();
+      const service = makeServiceForDb(db, ownerAdmin, recoveryClockIso);
+      db.resetCounters();
+
+      const recoveryRes = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+
+      assert.equal(recoveryRes.ok, true);
+      if (recoveryRes.ok) {
+        // Must NEVER take the 0-write ALREADY_ALIGNED shortcut even though all 4 fields matched
+        assert.equal(recoveryRes.status, 'ALIGNED');
+        assert.equal(recoveryRes.alignmentOutcome, 'ALIGNED');
+        assert.equal(recoveryRes.alignmentSaved, true);
+        assert.equal(recoveryRes.alignmentState, 'ALIGNED');
+        assert.equal(recoveryRes.originalHandoffCaseRevision, 3);
+        assert.equal(recoveryRes.effectiveAlignedCaseRevision, 6);
+        assert.equal(recoveryRes.currentHumanCaseRevision, 6);
+        assert.equal(recoveryRes.currentAlignmentRevision, 1);
+        assert.equal(recoveryRes.catalogUpdatedAt, recoveryClockIso);
+        assert.equal(recoveryRes.diff.hasAnyDifference, false);
+        assert.equal(recoveryRes.isSanitized, false);
+        assert.equal(recoveryRes.isVerifiedSafe, false);
+        assert.equal(recoveryRes.isRightsApproved, false);
+        assert.equal(recoveryRes.isPublished, false);
+        assert.equal(recoveryRes.isReadyForPeia, false);
+      }
+
+      // 8 base reads + 1 handoff event read + 6 historical human-review event reads = 15 deterministic point reads
+      assert.equal(db.transactionCount, 1);
+      assert.equal(db.txGetCalls, 15);
+      assert.equal(db.txUpdateCalls, 1);
+      assert.equal(db.txCreateCalls, 2);
+      assert.equal(db.txSetCalls, 0);
+
+      // Verify persisted alignment record at alignmentRevision = 1, alignedHumanCaseRevision = 6
+      const persistedAlignment = db.getRawDoc(
+        LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
+        incidentReceiptId
+      ) as unknown as LibraryQuarantinePersistedCatalogCaseAlignment;
+      assert.equal(persistedAlignment.alignmentRevision, 1);
+      assert.equal(persistedAlignment.alignedHumanCaseRevision, 6);
+      assert.equal(persistedAlignment.originalHandoffCaseRevision, 3);
+      assert.equal(persistedAlignment.documentUpdatedAt, recoveryClockIso);
+      assert.equal(persistedAlignment.isPublished, false);
+
+      // Verify persisted recovery event has strict 27-key legacy recovery schema
+      const recoveryEventId = deriveLibraryQuarantineCatalogCaseAlignmentEventId(
+        incidentReceiptId,
+        1
+      );
+      const rawRecoveryEvent = db.getRawDoc(
+        LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENTS_COLLECTION,
+        recoveryEventId
+      )!;
+      assert.equal(Object.keys(rawRecoveryEvent).length, 27);
+      const validatedRecoveryEvent =
+        validatePersistedLibraryQuarantineCatalogCaseAlignmentEvent(
+          rawRecoveryEvent,
+          incidentReceiptId,
+          1
+        );
+      assert.equal(validatedRecoveryEvent.ok, true);
+      if (validatedRecoveryEvent.ok) {
+        const ev =
+          validatedRecoveryEvent.alignmentEvent as LibraryQuarantinePersistedLegacyRecoveryCatalogCaseAlignmentEvent;
+        assert.equal(
+          ev.reason,
+          LIBRARY_QUARANTINE_LEGACY_RECOVERY_ALIGNMENT_EVENT_REASON
+        );
+        assert.equal(
+          ev.historicalCatalogChangeAttribution,
+          LIBRARY_QUARANTINE_LEGACY_CATALOG_CHANGE_ATTRIBUTION_STATUS
+        );
+        assert.equal(ev.fromCaseRevision, 3);
+        assert.equal(ev.toCaseRevision, 6);
+        assert.equal(ev.fromCatalogUpdatedAt, legacyCatalogUpdatedAt);
+        assert.equal(ev.toCatalogUpdatedAt, recoveryClockIso);
+        assert.equal(
+          ev.preRecoveryCatalogTitleAr,
+          'إطار حماية البيئة البحرية والساحلية 2026'
+        );
+        assert.equal(
+          ev.preRecoveryCatalogTitleEn,
+          'Marine and Coastal Environmental Protection Framework 2026'
+        );
+        assert.equal(
+          ev.preRecoveryCatalogSummaryAr,
+          'وثيقة مرجعية محدثة لحماية النظم البيئية البحرية والساحلية.'
+        );
+        assert.equal(
+          ev.preRecoveryCatalogSummaryEn,
+          'Updated reference framework for marine and coastal ecosystem protection.'
+        );
+      }
+
+      // Verify catalog document remains Draft / ReviewRequired
+      const updatedQcatDoc = db.getRawDoc(
+        LIBRARY_DOCUMENTS_COLLECTION,
+        incidentDocId
+      ) as unknown as LibraryDocument;
+      assert.equal(updatedQcatDoc.workflowState, WorkflowState.Draft);
+      assert.equal(updatedQcatDoc.rightsStatus, LibraryRightsStatus.ReviewRequired);
+      assert.equal(updatedQcatDoc.updatedAt, recoveryClockIso);
+
+      // 8.11a: Subsequent getQuarantineCatalogCaseAlignment returns READY (ALIGNED) with 7 point reads
+      db.resetCounters();
+      const postGetRes = await service.getQuarantineCatalogCaseAlignment({
+        receiptId: incidentReceiptId,
+      });
+      assert.equal(postGetRes.ok, true);
+      if (postGetRes.ok) {
+        assert.equal(postGetRes.status, 'READY');
+        assert.equal(postGetRes.alignmentState, 'ALIGNED');
+        assert.equal(postGetRes.currentAlignmentRevision, 1);
+        assert.equal(postGetRes.effectiveAlignedCaseRevision, 6);
+      }
+      assert.equal(db.pointGetCalls, 7);
+
+      // 8.11b: Subsequent normal alignQuarantineCatalogCase at rev 6 returns ALREADY_ALIGNED with 0 writes
+      db.resetCounters();
+      const postNormalIdempotentRes = await service.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: recoveryClockIso,
+        expectedAlignmentRevision: 1,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+      });
+      assert.equal(postNormalIdempotentRes.ok, true);
+      if (postNormalIdempotentRes.ok) {
+        assert.equal(postNormalIdempotentRes.status, 'ALREADY_ALIGNED');
+      }
+      assert.equal(db.txGetCalls, 8);
+      assert.equal(db.txCreateCalls, 0);
+      assert.equal(db.txUpdateCalls, 0);
+
+      // 8.11c: Subsequent human-review revision 7 followed by normal alignQuarantineCatalogCase writes alignmentRevision = 2 with normal 22-key event
+      const rev7Iso = '2026-11-15T09:00:00.000Z';
+      const align2ClockIso = '2026-11-15T09:05:00.000Z';
+      const currentCase = db.getRawDoc(
+        LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+        incidentReceiptId
+      )!;
+      db.seedDoc(
+        LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+        incidentReceiptId,
+        {
+          ...currentCase,
+          revision: 7,
+          titleEn: 'Marine and Coastal Environmental Protection Framework 2026 (Rev 7)',
+          updatedAt: rev7Iso,
+        }
+      );
+
+      const serviceRev7 = makeServiceForDb(db, ownerAdmin, align2ClockIso);
+      db.resetCounters();
+      const normalAlignRev7Res = await serviceRev7.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 7,
+        expectedCatalogUpdatedAt: recoveryClockIso,
+        expectedAlignmentRevision: 1,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+      });
+      assert.equal(normalAlignRev7Res.ok, true);
+      if (normalAlignRev7Res.ok) {
+        assert.equal(normalAlignRev7Res.status, 'ALIGNED');
+        assert.equal(normalAlignRev7Res.currentAlignmentRevision, 2);
+        assert.equal(normalAlignRev7Res.effectiveAlignedCaseRevision, 7);
+      }
+      assert.equal(db.txGetCalls, 8);
+      assert.equal(db.txUpdateCalls, 2); // qcat doc + alignment doc
+      assert.equal(db.txCreateCalls, 1); // event _2
+
+      const event2Id = deriveLibraryQuarantineCatalogCaseAlignmentEventId(
+        incidentReceiptId,
+        2
+      );
+      const rawEvent2 = db.getRawDoc(
+        LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENTS_COLLECTION,
+        event2Id
+      )!;
+      assert.equal(Object.keys(rawEvent2).length, 22);
+      const validatedEvent2 =
+        validatePersistedLibraryQuarantineCatalogCaseAlignmentEvent(
+          rawEvent2,
+          incidentReceiptId,
+          2
+        );
+      assert.equal(validatedEvent2.ok, true);
+      if (validatedEvent2.ok) {
+        const ev2 =
+          validatedEvent2.alignmentEvent as LibraryQuarantinePersistedNormalCatalogCaseAlignmentEvent;
+        assert.equal(
+          ev2.reason,
+          LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_EVENT_REASON
+        );
+        assert.equal(ev2.fromCaseRevision, 6);
+        assert.equal(ev2.toCaseRevision, 7);
+      }
+    }
+
+    // 8.12: Unauthorized caller attempting recovery -> denied before any Firestore reads or writes
+    {
+      const db = buildIncidentFixture();
+      const unauthorizedService = makeServiceForDb(
+        db,
+        rightsReviewerOnly,
+        recoveryClockIso
+      );
+      db.resetCounters();
+
+      const unauthRes = await unauthorizedService.alignQuarantineCatalogCase({
+        receiptId: incidentReceiptId,
+        expectedCaseRevision: 6,
+        expectedCatalogUpdatedAt: legacyCatalogUpdatedAt,
+        expectedAlignmentRevision: 0,
+        confirmation: LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_CONFIRMATION_LITERAL,
+        legacyUnattributedCatalogUpdateAcknowledgement:
+          LIBRARY_QUARANTINE_LEGACY_UNATTRIBUTED_CATALOG_CHANGE_ACKNOWLEDGEMENT_LITERAL,
+      });
+      assert.equal(unauthRes.ok, false);
+      if (!unauthRes.ok) {
+        assert.equal(unauthRes.status, 'HOLD');
+        assert.equal(unauthRes.errorCode, 'UNAUTHORIZED_ALIGNMENT_ACTOR');
+      }
+      assert.equal(db.pointGetCalls, 0);
+      assert.equal(db.transactionCount, 0);
+      assert.equal(db.txGetCalls, 0);
+      assert.equal(db.txCreateCalls, 0);
+      assert.equal(db.txUpdateCalls, 0);
+    }
+
+    console.log(
+      'PASS 8: Exceptional server-side legacy unattributed catalog draft recovery guard and historical audit chain verification passed.'
+    );
+  }
+
   console.log(
-    '\nALL LIB-FILE-CASE-ALIGNMENT-01 BACKEND TESTS PASSED (7/7).'
+    '\nALL LIB-FILE-CASE-ALIGNMENT-01 BACKEND TESTS PASSED (8/8).'
   );
 }
 
