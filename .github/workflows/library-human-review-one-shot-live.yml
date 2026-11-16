@@ -1220,7 +1220,7 @@ jobs:
               fs.appendFileSync(process.env.GITHUB_ENV, `VERIFIED_AV_WORKER_SA=${workerSa}\n`);
               fs.appendFileSync(process.env.GITHUB_ENV, `VERIFIED_MANAGE_FN_SA=${manageFnSa}\n`);
               console.log(`Verified live Cloud Run AV Worker prerequisites: schema=${normJob.schemaVersion}, job=${normJob.jobIdentifier}, image=${jobImage} (uploaded=${uploadIso}), workerSA=${workerSa}, manageFnSA=${manageFnSa} (run.jobs.runWithOverrides verified).`);
-            PREFLIGHT_AV_ENABLE_EOF
+          PREFLIGHT_AV_ENABLE_EOF
           fi
 
       - name: Write Transient Project-Scoped Functions Dotenv (Runner Only, Post-Preflight)
