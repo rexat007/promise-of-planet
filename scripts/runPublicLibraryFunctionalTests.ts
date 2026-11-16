@@ -4839,8 +4839,11 @@ const scenario = JSON.parse(fs.readFileSync(${JSON.stringify(scenarioPath)}, "ut
 fs.appendFileSync(${JSON.stringify(logPath)}, args.join(" ") + "\\n");
 
 const joined = args.join(" ");
-if (args[0] === "run" && args[1] === "jobs" && args[2] === "deploy") {
-  console.error("FORBIDDEN_MUTATION: deploy called in preflight test");
+if (
+  (args[0] === "run" && args[1] === "jobs" && args[2] === "deploy") ||
+  (args[0] === "run" && args[1] === "jobs" && args[2] === "execute")
+) {
+  console.error("FORBIDDEN_MUTATION: deploy/execute called in preflight test");
   process.exit(99);
 }
 if (joined.startsWith("auth print-access-token")) {
@@ -4865,6 +4868,10 @@ if (joined.startsWith("services list")) {
   process.exit(0);
 }
 if (joined.startsWith("artifacts repositories describe")) {
+  if (scenario.missingArRepo) {
+    console.error("NOT_FOUND: Requested entity was not found.");
+    process.exit(1);
+  }
   process.stdout.write(JSON.stringify({
     name: "projects/promiseofplanet-bb325/locations/us-central1/repositories/pop-quarantine-workers",
     format: "DOCKER"
@@ -4881,6 +4888,10 @@ if (joined.startsWith("artifacts docker images describe")) {
   process.exit(0);
 }
 if (joined.startsWith("iam service-accounts describe")) {
+  if (scenario.missingWorkerSa) {
+    console.error("ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account");
+    process.exit(1);
+  }
   process.stdout.write(JSON.stringify({
     email: "pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com",
     disabled: false
@@ -4898,17 +4909,22 @@ if (joined.startsWith("storage buckets describe")) {
   process.exit(0);
 }
 if (joined.startsWith("storage buckets get-iam-policy gs://promiseofplanet-bb325-library-quarantine")) {
-  process.stdout.write(JSON.stringify({
-    bindings: [
-      {
-        role: scenario.workerStorageRole || "roles/storage.objectViewer",
-        members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
-      }
-    ]
-  }));
+  const bindings = scenario.omitBucketWorkerRole
+    ? []
+    : [
+        {
+          role: scenario.workerStorageRole || "roles/storage.objectViewer",
+          members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
+        }
+      ];
+  process.stdout.write(JSON.stringify({ bindings }));
   process.exit(0);
 }
 if (joined.startsWith("storage buckets get-iam-policy gs://promiseofplanet-bb325.firebasestorage.app")) {
+  if (scenario.defaultBucketError) {
+    console.error(scenario.defaultBucketError);
+    process.exit(1);
+  }
   process.stdout.write(JSON.stringify({ bindings: [] }));
   process.exit(0);
 }
@@ -4917,14 +4933,19 @@ if (joined.startsWith("projects get-iam-policy")) {
     console.error("ERROR: (gcloud.projects.get-iam-policy) PERMISSION_DENIED: 403 Forbidden");
     process.exit(1);
   }
-  process.stdout.write(JSON.stringify({
-    bindings: [
-      {
-        role: "roles/datastore.user",
-        members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
-      }
-    ]
-  }));
+  const bindings = [
+    {
+      role: "roles/datastore.user",
+      members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
+    }
+  ];
+  if (scenario.projectWideStorageViewer) {
+    bindings.push({
+      role: "roles/storage.objectViewer",
+      members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
+    });
+  }
+  process.stdout.write(JSON.stringify({ bindings }));
   process.exit(0);
 }
 if (joined.startsWith("functions describe manageLibraryDocuments")) {
@@ -4941,6 +4962,10 @@ if (joined.startsWith("functions describe manageLibraryDocuments")) {
   process.exit(0);
 }
 if (joined.startsWith("run jobs describe")) {
+  if (scenario.jobDescribeError) {
+    console.error(scenario.jobDescribeError);
+    process.exit(1);
+  }
   if (scenario.jobMissing) {
     console.error("ERROR: (gcloud.run.jobs.describe) NOT_FOUND: 404 Resource not found");
     process.exit(1);
@@ -5028,12 +5053,60 @@ globalThis.fetch = async (url, opts) => {
 };
 `;
 
-      // Scenario 38a: Job missing yet (PENDING_RESOURCE_CREATION) -> preflight passes for initial deploy, marks PENDING_RESOURCE_CREATION
-      fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: true }));
       fs.writeFileSync(logPath, '');
+
+      // Scenario 38a: Real GitHub Actions Cloud Run NOT_FOUND message verbatim -> PENDING_RESOURCE_CREATION
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobDescribeError:
+            'NOT_FOUND: ERROR: (gcloud.run.jobs.describe) Cannot find job [pop-library-quarantine-av-worker].',
+        })
+      );
+      const res38aReal = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const env38aReal = fs.readFileSync(ghEnv, 'utf8');
+      const result38aReal = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
+
+      // Scenario 38a-legacy: Earlier simulated 404 Resource not found message -> PENDING_RESOURCE_CREATION
+      fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: true }));
       const res38a = runNodeScript(mockedFetchPreamble + avPreflightJs);
       const env38a = fs.readFileSync(ghEnv, 'utf8');
-      const calls38a = fs.readFileSync(logPath, 'utf8');
+
+      // Scenario 38a-permPrecedence: 403/PERMISSION_DENIED with ambiguous not-found text -> UNKNOWN (NOT PENDING_RESOURCE_CREATION)
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobDescribeError:
+            'ERROR: (gcloud.run.jobs.describe) PERMISSION_DENIED: 403 Forbidden: Cannot find job [pop-library-quarantine-av-worker]',
+        })
+      );
+      const res38PermPrec = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const result38PermPrec = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
+
+      // Scenario 38a-genericErr: Generic runtime exception on job describe -> NOT classified as missing job (FAIL, not PENDING_RESOURCE_CREATION)
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobDescribeError: 'ERROR: (gcloud.run.jobs.describe) Socket timeout connecting to run.googleapis.com',
+        })
+      );
+      const res38GenericErr = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const result38GenericErr = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
+
+      // Scenario 38-existingPass: Existing job with valid caller permissions -> PASS (ALL_CLOUD_PREREQUISITES_VERIFIED)
+      fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: false }));
+      const res38ExistingPass = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const env38ExistingPass = fs.readFileSync(ghEnv, 'utf8');
+
+      // Scenario 38-missingAr: Missing Artifact Registry repository -> FAIL before push
+      fs.writeFileSync(scenarioPath, JSON.stringify({ missingArRepo: true }));
+      const res38MissingAr = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const result38MissingAr = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
+
+      // Scenario 38-missingSa: Missing worker service account -> FAIL before deployment
+      fs.writeFileSync(scenarioPath, JSON.stringify({ missingWorkerSa: true }));
+      const res38MissingSa = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const result38MissingSa = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
 
       // Scenario 38b: Existing job with ONLY roles/run.invoker -> MUST FAIL CLOSED before deploy
       fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: false, callerRole: 'roles/run.invoker' }));
@@ -5043,6 +5116,62 @@ globalThis.fetch = async (url, opts) => {
       fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: false, forbidProjectIam: true }));
       const res38c = runNodeScript(mockedFetchPreamble + avPreflightJs);
       const env38c = fs.readFileSync(ghEnv, 'utf8');
+
+      // Scenario 38-defaultBucket403: Unreadable default bucket IAM (403) -> MUST fail closed as UNKNOWN, never silent PASS
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobMissing: false,
+          defaultBucketError:
+            'ERROR: (gcloud.storage.buckets.get-iam-policy) HTTPError 403: Caller does not have storage.buckets.getIamPolicy access',
+        })
+      );
+      const res38Default403 = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const result38Default403 = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
+
+      // Scenario 38-defaultBucketUnknownErr: Unreadable default bucket IAM (unknown error) -> MUST fail closed as UNKNOWN
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobMissing: false,
+          defaultBucketError: 'ERROR: upstream TLS handshake reset',
+        })
+      );
+      const res38DefaultErr = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const result38DefaultErr = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
+
+      // Scenario 38-defaultBucketNonexistent: Explicitly confirmed nonexistent default bucket (NOT_FOUND) -> PASS
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobMissing: false,
+          defaultBucketError: 'ERROR: (gcloud.storage.buckets.get-iam-policy) HTTPError 404: The specified bucket does not exist.',
+        })
+      );
+      const res38DefaultNonexistent = runNodeScript(mockedFetchPreamble + avPreflightJs);
+
+      // Scenario 38-projViewerOnly: Project-wide roles/storage.objectViewer WITHOUT bucket binding -> MUST FAIL
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobMissing: false,
+          omitBucketWorkerRole: true,
+          projectWideStorageViewer: true,
+        })
+      );
+      const res38ProjViewerOnly = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const result38ProjViewerOnly = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
+
+      // Scenario 38-projViewerWithBucket: Project-wide roles/storage.objectViewer EVEN WITH bucket binding -> MUST FAIL
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobMissing: false,
+          omitBucketWorkerRole: false,
+          projectWideStorageViewer: true,
+        })
+      );
+      const res38ProjViewerBoth = runNodeScript(mockedFetchPreamble + avPreflightJs);
 
       // Scenario 38d: Firebase av_execution_mode=enabled with STALE (>7d) worker image -> MUST FAIL CLOSED
       fs.writeFileSync(
@@ -5138,12 +5267,81 @@ globalThis.fetch = async (url, opts) => {
       // Must fail if expected mode=disabled receives enabled env vars!
       const rbMismatchFail = runNodeScript(liveReadbackManageJs, { AV_EXECUTION_MODE: 'disabled' });
 
+      const allGcloudCalls = fs.readFileSync(logPath, 'utf8');
+      const noMutationsInvoked =
+        !allGcloudCalls.includes('run jobs deploy') &&
+        !allGcloudCalls.includes('run jobs execute') &&
+        !allGcloudCalls.includes('docker push') &&
+        !allGcloudCalls.includes('firebase deploy');
+
+      const realNotFoundHandled =
+        res38aReal.status === 0 &&
+        env38aReal.includes('READY_FOR_INITIAL_JOB_DEPLOY_CALLER_IAM_PENDING_POST_CREATE') &&
+        result38aReal.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Existing Cloud Run Job Configuration' && r.status === 'PENDING_RESOURCE_CREATION'
+        ) &&
+        result38aReal.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Caller run.jobs.runWithOverrides (manageLibraryDocuments)' &&
+            r.status === 'PENDING_RESOURCE_CREATION'
+        );
+
+      const permPrecedenceAndGenericOk =
+        res38PermPrec.status !== 0 &&
+        result38PermPrec.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Existing Cloud Run Job Configuration' && r.status === 'UNKNOWN'
+        ) &&
+        res38GenericErr.status !== 0 &&
+        result38GenericErr.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Existing Cloud Run Job Configuration' && r.status === 'FAIL'
+        );
+
+      const storageLeastPrivilegeClosed =
+        res38Default403.status !== 0 &&
+        result38Default403.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Worker GCS Read-Only IAM' && r.status === 'UNKNOWN'
+        ) &&
+        res38DefaultErr.status !== 0 &&
+        result38DefaultErr.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Worker GCS Read-Only IAM' && r.status === 'UNKNOWN'
+        ) &&
+        res38DefaultNonexistent.status === 0 &&
+        res38ProjViewerOnly.status !== 0 &&
+        result38ProjViewerOnly.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Worker GCS Read-Only IAM' && r.status === 'FAIL'
+        ) &&
+        res38ProjViewerBoth.status !== 0;
+
+      const missingPrereqsAndExistingOk =
+        res38ExistingPass.status === 0 &&
+        env38ExistingPass.includes('ALL_CLOUD_PREREQUISITES_VERIFIED') &&
+        res38MissingAr.status !== 0 &&
+        result38MissingAr.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Artifact Registry Repository' && r.status === 'FAIL'
+        ) &&
+        res38MissingSa.status !== 0 &&
+        result38MissingSa.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Target Worker Service Account' && r.status === 'FAIL'
+        );
+
       assertCheck(
         '38',
-        'Mocked-gcloud workflow scripts handle PENDING_RESOURCE_CREATION, reject roles/run.invoker and stale >7d images, fail closed on 403 UNKNOWN, and verify dotenv + 3-function readbacks',
-        res38a.status === 0 &&
+        'Mocked-gcloud workflow scripts handle real Cloud Run NOT_FOUND verbatim, 403 precedence, missing AR/SA, fail-closed default bucket, reject project-wide Storage Object Viewer, and verify dotenv + 3-function readbacks',
+        noMutationsInvoked &&
+          realNotFoundHandled &&
+          permPrecedenceAndGenericOk &&
+          storageLeastPrivilegeClosed &&
+          missingPrereqsAndExistingOk &&
+          res38a.status === 0 &&
           env38a.includes('READY_FOR_INITIAL_JOB_DEPLOY_CALLER_IAM_PENDING_POST_CREATE') &&
-          !calls38a.includes('run jobs deploy') &&
           res38b.status !== 0 &&
           res38c.status !== 0 &&
           env38c.includes('UNVERIFIED_INSUFFICIENT_PERMISSIONS') &&

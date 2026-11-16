@@ -256,12 +256,28 @@ jobs:
             }
 
             function classifyGcloudError(stderr) {
-              const lower = stderr.toLowerCase();
-              if (lower.includes("not found") || lower.includes("404") || lower.includes("does not exist")) {
-                return "NOT_FOUND";
-              }
-              if (lower.includes("permission") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) {
+              const raw = typeof stderr === "string" ? stderr : String(stderr || "");
+              const lower = raw.toLowerCase();
+              // Permission / auth errors strictly take precedence over any ambiguous not-found text
+              if (
+                lower.includes("permission_denied") ||
+                lower.includes("permission denied") ||
+                lower.includes("permission") ||
+                /\b403\b/.test(lower) ||
+                lower.includes("unauthorized") ||
+                lower.includes("unauthenticated") ||
+                lower.includes("forbidden")
+              ) {
                 return "PERMISSION_DENIED";
+              }
+              if (
+                /\bnot_found\b/i.test(raw) ||
+                lower.includes("cannot find job") ||
+                lower.includes("not found") ||
+                /\b404\b/.test(lower) ||
+                lower.includes("does not exist")
+              ) {
+                return "NOT_FOUND";
               }
               return "ERROR";
             }
@@ -472,7 +488,7 @@ jobs:
               if (!bucketMetaRes.ok || !bucketIamRes.ok) {
                 const combinedErr = `${bucketMetaRes.ok ? "" : bucketMetaRes.stderr} ${bucketIamRes.ok ? "" : bucketIamRes.stderr}`;
                 const kind = classifyGcloudError(combinedErr);
-                addRow("Quarantine Bucket & Worker GCS Read IAM", kind === "PERMISSION_DENIED" ? "UNKNOWN" : "FAIL", combinedErr.slice(0, 180));
+                addRow("Quarantine Bucket & Worker GCS Read IAM", kind === "NOT_FOUND" ? "FAIL" : "UNKNOWN", combinedErr.slice(0, 180));
               } else {
                 const bMeta = parseJsonSafe(bucketMetaRes.stdout);
                 const bIam = parseJsonSafe(bucketIamRes.stdout);
@@ -505,47 +521,78 @@ jobs:
                   addRow("Quarantine Bucket Privacy Posture", "PASS", `bucket=${BUCKET_NAME}, UBLA=true, PAP=enforced, publicPrincipals=0`);
                 }
 
-                // Check worker read-only access on quarantine bucket (bucket bindings or project bindings) & ensure NOT bound on forbidden default bucket
+                // Check bucket-scoped-only read-only access on quarantine bucket, reject project-wide storage grants, and fail closed on unreadable forbidden default bucket
                 if (!WORKER_SA || !isValidWorkerSaSyntax) {
                   addRow("Worker GCS Read-Only IAM", "FAIL", "Invalid or missing worker_service_account.");
                 } else {
-                  const candidateRoles = [...workerBucketRoles];
+                  const bucketClassifications = workerBucketRoles.map((r) => ({ role: r, cls: roleGrantsBucketObjectReadOnly(r) }));
+                  const hasOverprivilegedBucket = bucketClassifications.some((c) => c.cls === "OVERPRIVILEGED");
+                  const hasReadOnlyBucket = bucketClassifications.some((c) => c.cls === "READ_ONLY");
+                  const hasUnknownBucket = bucketClassifications.some((c) => c.cls === "UNKNOWN");
+
+                  // Project-wide storage roles (including Storage Object Viewer) violate bucket-scoped-only least privilege
+                  const projectWideStorageRoles = [];
+                  let projectStorageUnknown = false;
                   if (projPolicy && Array.isArray(projPolicy.bindings)) {
                     for (const b of projPolicy.bindings) {
                       if (Array.isArray(b.members) && b.members.includes(`serviceAccount:${WORKER_SA}`)) {
-                        candidateRoles.push(b.role);
+                        const r = String(b.role || "");
+                        if (r.startsWith("roles/storage.") || ["roles/viewer", "roles/editor", "roles/owner"].includes(r)) {
+                          projectWideStorageRoles.push(r);
+                        } else if (r.startsWith(`projects/${PROJECT_ID}/roles/`)) {
+                          const perms = getCustomRolePermissions(r);
+                          if (!perms) {
+                            projectStorageUnknown = true;
+                          } else if (perms.some((p) => String(p).startsWith("storage.objects.") || String(p).startsWith("storage.buckets."))) {
+                            projectWideStorageRoles.push(r);
+                          }
+                        }
                       }
                     }
                   }
-                  const classifications = candidateRoles.map((r) => ({ role: r, cls: roleGrantsBucketObjectReadOnly(r) }));
-                  const hasOverprivileged = classifications.some((c) => c.cls === "OVERPRIVILEGED");
-                  const hasReadOnly = classifications.some((c) => c.cls === "READ_ONLY");
-                  const hasUnknown = classifications.some((c) => c.cls === "UNKNOWN");
 
-                  // Check forbidden default bucket IAM if readable
+                  // Inspect forbidden default bucket IAM fail-closed; distinguish explicitly confirmed nonexistent default bucket from 403/unknown error
                   let defaultBucketLeak = false;
+                  let defaultBucketStatus = "VERIFIED_NO_BINDINGS";
+                  let defaultBucketDetail = `confirmed no worker IAM bindings on ${FORBIDDEN_BUCKET}`;
                   const defIamRes = runGcloud(["storage", "buckets", "get-iam-policy", `gs://${FORBIDDEN_BUCKET}`, "--format=json"]);
                   if (defIamRes.ok) {
                     const defIam = parseJsonSafe(defIamRes.stdout);
-                    if (defIam && Array.isArray(defIam.bindings)) {
+                    if (!defIam || !Array.isArray(defIam.bindings)) {
+                      defaultBucketStatus = "UNKNOWN";
+                      defaultBucketDetail = `malformed IAM policy JSON for forbidden default bucket ${FORBIDDEN_BUCKET}`;
+                    } else {
                       for (const b of defIam.bindings) {
                         if (Array.isArray(b.members) && b.members.includes(`serviceAccount:${WORKER_SA}`)) {
                           defaultBucketLeak = true;
                         }
                       }
                     }
+                  } else {
+                    const defErrKind = classifyGcloudError(defIamRes.stderr);
+                    if (defErrKind === "NOT_FOUND") {
+                      defaultBucketStatus = "CONFIRMED_NONEXISTENT";
+                      defaultBucketDetail = `confirmed nonexistent default bucket ${FORBIDDEN_BUCKET} (${defIamRes.stderr.slice(0, 120)})`;
+                    } else {
+                      defaultBucketStatus = "UNKNOWN";
+                      defaultBucketDetail = `unreadable IAM policy on ${FORBIDDEN_BUCKET} (${defErrKind}): ${defIamRes.stderr.slice(0, 140)}`;
+                    }
                   }
 
                   if (defaultBucketLeak) {
                     addRow("Worker GCS Read-Only IAM", "FAIL", `${WORKER_SA} must NOT have IAM bindings on forbidden default bucket ${FORBIDDEN_BUCKET}`);
-                  } else if (hasOverprivileged) {
-                    addRow("Worker GCS Read-Only IAM", "FAIL", `Worker SA holds over-privileged write/admin storage role(s): ${classifications.filter((c) => c.cls === "OVERPRIVILEGED").map((c) => c.role).join(", ")}`);
-                  } else if (hasReadOnly) {
-                    addRow("Worker GCS Read-Only IAM", "PASS", `Verified read-only storage role(s) on ${BUCKET_NAME}: ${classifications.filter((c) => c.cls === "READ_ONLY").map((c) => c.role).join(", ")}`);
-                  } else if (hasUnknown || !projPolicy) {
-                    addRow("Worker GCS Read-Only IAM", "UNKNOWN", `No bucket-level read-only role found on ${BUCKET_NAME} and project IAM or custom role could not be fully inspected.`);
+                  } else if (projectWideStorageRoles.length > 0) {
+                    addRow("Worker GCS Read-Only IAM", "FAIL", `Overly broad project-wide storage role(s) (${projectWideStorageRoles.join(", ")}) do not satisfy bucket-scoped-only least privilege on ${BUCKET_NAME}`);
+                  } else if (hasOverprivilegedBucket) {
+                    addRow("Worker GCS Read-Only IAM", "FAIL", `Worker SA holds over-privileged write/admin storage role(s) on ${BUCKET_NAME}: ${bucketClassifications.filter((c) => c.cls === "OVERPRIVILEGED").map((c) => c.role).join(", ")}`);
+                  } else if (defaultBucketStatus === "UNKNOWN") {
+                    addRow("Worker GCS Read-Only IAM", "UNKNOWN", `Fail-closed: ${defaultBucketDetail}`);
+                  } else if (hasUnknownBucket || projectStorageUnknown || !projPolicy) {
+                    addRow("Worker GCS Read-Only IAM", "UNKNOWN", `Unable to complete bucket-scoped & project-wide storage IAM inspection for ${WORKER_SA}.`);
+                  } else if (!hasReadOnlyBucket) {
+                    addRow("Worker GCS Read-Only IAM", "FAIL", `${WORKER_SA} lacks bucket-scoped read-only role (e.g. roles/storage.objectViewer) on ${BUCKET_NAME}`);
                   } else {
-                    addRow("Worker GCS Read-Only IAM", "FAIL", `${WORKER_SA} lacks read-only object role (e.g. roles/storage.objectViewer) on ${BUCKET_NAME}`);
+                    addRow("Worker GCS Read-Only IAM", "PASS", `Verified bucket-scoped-only read-only role(s) on ${BUCKET_NAME}: ${bucketClassifications.filter((c) => c.cls === "READ_ONLY").map((c) => c.role).join(", ")} (${defaultBucketDetail})`);
                   }
                 }
               }
