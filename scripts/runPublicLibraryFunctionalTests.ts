@@ -4881,13 +4881,53 @@ if (joined.startsWith("artifacts repositories describe")) {
   }));
   process.exit(0);
 }
-if (joined.startsWith("artifacts docker images describe")) {
-  process.stdout.write(JSON.stringify({
-    image_summary: {
-      digest: scenario.imageDigest || "sha256:abc123",
-      uploadTime: scenario.imageUploadIso || new Date().toISOString()
-    }
-  }));
+if (joined.startsWith("artifacts docker images list")) {
+  if (!args.includes("--include-tags") || !args.includes("--format=json")) {
+    console.error("Missing required flags on artifacts docker images list: " + joined);
+    process.exit(98);
+  }
+  if (!args.includes("us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers")) {
+    console.error("Expected Artifact Registry repo URI in list args: " + joined);
+    process.exit(97);
+  }
+  if (scenario.imageListError) {
+    console.error(scenario.imageListError);
+    process.exit(1);
+  }
+  if (scenario.imageListPayload !== undefined) {
+    process.stdout.write(JSON.stringify(scenario.imageListPayload));
+    process.exit(0);
+  }
+  const basePkg = "us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker";
+  const cTime = scenario.imageCreateTime === null ? undefined : (scenario.imageCreateTime || new Date().toISOString());
+  const v1Record = {
+    package: basePkg,
+    version: "sha256:320da466f629670e39fcb16d51af8968f3f48b9b4c0da778379d3e0fcd7fbcdc",
+    tags: ["v1"],
+    ...(cTime !== undefined ? { createTime: cTime } : { uploadTime: new Date().toISOString(), updateTime: new Date().toISOString() }),
+  };
+  const v2Record = {
+    package: basePkg,
+    version: scenario.imageDigest || "sha256:abc123",
+    tags: ["v2"],
+    ...(cTime !== undefined ? { createTime: cTime } : { uploadTime: new Date().toISOString(), updateTime: new Date().toISOString() }),
+  };
+  process.stdout.write(JSON.stringify([
+    {
+      package: basePkg,
+      version: "sha256:000000000000000000000000000000000000000000000000000000000000dead",
+      tags: ["latest"],
+      createTime: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    },
+    {
+      package: basePkg + "-other",
+      version: "sha256:320da466f629670e39fcb16d51af8968f3f48b9b4c0da778379d3e0fcd7fbcdc",
+      tags: ["other"],
+      createTime: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    },
+    v1Record,
+    v2Record,
+  ]));
   process.exit(0);
 }
 if (joined.startsWith("iam service-accounts describe")) {
@@ -5405,7 +5445,7 @@ globalThis.fetch = async (url, opts) => {
         scenarioPath,
         JSON.stringify({
           jobMissing: false,
-          imageUploadIso: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+          imageCreateTime: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
         })
       );
       const res38d = runNodeScript(liveAvEnablePreflightJs);
@@ -5416,7 +5456,7 @@ globalThis.fetch = async (url, opts) => {
         JSON.stringify({
           jobMissing: false,
           jobPayload: buildV2Job(),
-          imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+          imageCreateTime: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
         })
       );
       const res38e = runNodeScript(liveAvEnablePreflightJs);
@@ -5427,7 +5467,7 @@ globalThis.fetch = async (url, opts) => {
         JSON.stringify({
           workerSa: LIVE_V1_WORKER_SA,
           jobPayload: buildV1Job(),
-          imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+          imageCreateTime: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
         })
       );
       const res38eV1 = runNodeScript(liveAvEnablePreflightJs);
@@ -5438,7 +5478,7 @@ globalThis.fetch = async (url, opts) => {
         JSON.stringify({
           workerSa: LIVE_V1_WORKER_SA,
           jobPayload: buildV1Job({ timeoutSeconds: 600 }),
-          imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+          imageCreateTime: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
         })
       );
       const res38V1NumericTimeoutPreflight = runNodeScript(mockedFetchPreamble + avPreflightJs, {
@@ -5451,6 +5491,91 @@ globalThis.fetch = async (url, opts) => {
         workerSa: LIVE_V1_WORKER_SA,
         expectedImage: LIVE_V1_IMAGE,
       });
+
+      // Artifact Registry list image/digest/createTime fail-closed scenarios
+      const liveImageBase =
+        'us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker';
+      const liveImageDigest = 'sha256:320da466f629670e39fcb16d51af8968f3f48b9b4c0da778379d3e0fcd7fbcdc';
+      const freshCreateIso = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          imageListPayload: [],
+        })
+      );
+      const res38ImgMissing = runNodeScript(liveAvEnablePreflightJs);
+
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          imageListPayload: [
+            { package: liveImageBase, version: 'sha256:deadbeef', tags: ['latest'], createTime: freshCreateIso },
+          ],
+        })
+      );
+      const res38ImgDigestMismatch = runNodeScript(liveAvEnablePreflightJs);
+
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          imageCreateTime: null,
+        })
+      );
+      const res38ImgMissingCreateTime = runNodeScript(liveAvEnablePreflightJs);
+
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          imageCreateTime: 'not-a-valid-date',
+        })
+      );
+      const res38ImgInvalidCreateTime = runNodeScript(liveAvEnablePreflightJs);
+
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          imageCreateTime: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        })
+      );
+      const res38ImgFutureCreateTime = runNodeScript(liveAvEnablePreflightJs);
+
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          imageListError: 'ERROR: (gcloud.artifacts.docker.images.list) PERMISSION_DENIED: mock query failure',
+        })
+      );
+      const res38ImgListQueryFail = runNodeScript(liveAvEnablePreflightJs);
+
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          imageListPayload: [
+            { package: liveImageBase, version: liveImageDigest, createTime: freshCreateIso },
+            {
+              package: liveImageBase,
+              version: liveImageDigest,
+              createTime: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+            },
+          ],
+        })
+      );
+      const res38ImgAmbiguous = runNodeScript(liveAvEnablePreflightJs);
 
       // Negative Cloud Run schema & security fixture runner across ALL 3 consumers
       const assertRejectsAcrossConsumers = (
@@ -5481,7 +5606,7 @@ globalThis.fetch = async (url, opts) => {
             projectWideStorageViewer: opts.projectWideStorageViewer,
             defaultBucketError: opts.defaultBucketError,
             customRoles: opts.customRoles,
-            imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+            imageCreateTime: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
           })
         );
         const avPre = runNodeScript(mockedFetchPreamble + avPreflightJs, { INPUT_WORKER_SA: wSa });
@@ -5609,7 +5734,7 @@ globalThis.fetch = async (url, opts) => {
           workerSa: LIVE_V1_WORKER_SA,
           jobPayload: buildV1Job(),
           callerRole: 'roles/run.invoker',
-          imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+          imageCreateTime: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
         })
       );
       const res38LiveInvokerOnly = runNodeScript(liveAvEnablePreflightJs);
@@ -5797,6 +5922,15 @@ globalThis.fetch = async (url, opts) => {
             r.check === 'Target Worker Service Account' && r.status === 'FAIL'
         );
 
+      const imageTimestampChecksOk =
+        res38ImgMissing.status !== 0 &&
+        res38ImgDigestMismatch.status !== 0 &&
+        res38ImgMissingCreateTime.status !== 0 &&
+        res38ImgInvalidCreateTime.status !== 0 &&
+        res38ImgFutureCreateTime.status !== 0 &&
+        res38ImgListQueryFail.status !== 0 &&
+        res38ImgAmbiguous.status !== 0;
+
       assertCheck(
         '38',
         'Mocked-gcloud workflow scripts validate strict Cloud Run v1/v2 schemas across preflight/readback/live, fail closed on invalid/mixed/public/missing-IAM/storage bypasses, and verify dotenv + 3-function readbacks',
@@ -5806,6 +5940,7 @@ globalThis.fetch = async (url, opts) => {
           storageLeastPrivilegeClosed &&
           v1AndV2SchemaSupportOk &&
           missingPrereqsOk &&
+          imageTimestampChecksOk &&
           res38a.status === 0 &&
           env38a.includes('READY_FOR_INITIAL_JOB_DEPLOY_CALLER_IAM_PENDING_POST_CREATE') &&
           res38b.status !== 0 &&
