@@ -9,6 +9,8 @@ import process from 'node:process';
 import { Readable } from 'node:stream';
 import { deflateSync } from 'node:zlib';
 
+const require = createRequire(import.meta.url);
+
 class FallbackHttpsError extends Error {
   readonly code: string;
   readonly details?: unknown;
@@ -186,109 +188,104 @@ moduleWithLoad._load = function patchedLoad(
 };
 
 import type { AdminRepository } from '../functions/src/admin/adminRepository';
-import {
+import type { AdminUser } from '../functions/src/types/admin';
+const {
   AdminPermission,
   AdminRole,
-  type AdminUser,
-} from '../functions/src/types/admin';
-import {
+} = require('../functions/src/types/admin') as typeof import('../functions/src/types/admin');
+import type { LibraryDocument } from '../functions/src/shared/libraryContract';
+import type { LibraryQuarantineInternalReceipt } from '../functions/src/library/libraryQuarantineReceiptContract';
+import type {
+  LibraryQuarantineFirestoreDocumentRef,
+  LibraryQuarantineFirestoreDocumentSnapshot,
+  LibraryQuarantinePersistedReceiptEnvelope,
+} from '../functions/src/library/firestoreLibraryQuarantineReceiptStore';
+import type {
+  LibraryQuarantinePersistedReviewDraft,
+  LibraryQuarantineReviewDraftFirestoreDatabase,
+  LibraryQuarantineReviewDraftFirestoreTransaction,
+} from '../functions/src/library/firestoreLibraryQuarantineReviewDraftStore';
+import type {
+  LibraryQuarantineHumanReviewCaseStatus,
+  LibraryQuarantinePersistedHumanReviewCase,
+} from '../functions/src/library/libraryQuarantineHumanReviewCaseContract';
+import type { LibraryQuarantinePersistedCatalogHandoff } from '../functions/src/library/libraryQuarantineCatalogHandoffService';
+import type { LibraryQuarantinePersistedCatalogCaseAlignment } from '../functions/src/library/libraryQuarantineCatalogCaseAlignmentService';
+import type {
+  LibraryQuarantineBinarySafetyDisposition,
+  LibraryQuarantinePersistedBinarySafetyCase,
+} from '../functions/src/library/libraryQuarantineBinarySafetyCaseContract';
+import type { LibraryQuarantinePersistedIsolatedInspectionRequest } from '../functions/src/library/libraryQuarantineIsolatedInspectionRequestContract';
+import type { GenerationPinnedQuarantineBucket } from '../functions/src/library/libraryQuarantineAvWorker';
+import type { GcsLibraryQuarantineObjectMetadata } from '../functions/src/library/gcsLibraryQuarantineStorageAdapter';
+import type { LibraryQuarantinePersistedPdfInspection } from '../functions/src/library/libraryIsolatedPdfInspection';
+const {
   LibraryDocumentType,
   LibraryRightsStatus,
-  type LibraryDocument,
-} from '../functions/src/shared/libraryContract';
-import { WorkflowState } from '../functions/src/shared/workflowContract';
-import {
+} = require('../functions/src/shared/libraryContract') as typeof import('../functions/src/shared/libraryContract');
+const {
+  WorkflowState,
+} = require('../functions/src/shared/workflowContract') as typeof import('../functions/src/shared/workflowContract');
+const {
   LibraryQuarantineReceiptState,
-  type LibraryQuarantineInternalReceipt,
-} from '../functions/src/library/libraryQuarantineReceiptContract';
-import {
+} = require('../functions/src/library/libraryQuarantineReceiptContract') as typeof import('../functions/src/library/libraryQuarantineReceiptContract');
+const {
   LIBRARY_QUARANTINE_RECEIPT_COLLECTION,
   LIBRARY_QUARANTINE_RECEIPT_SCHEMA_VERSION,
-  type LibraryQuarantineFirestoreDocumentRef,
-  type LibraryQuarantineFirestoreDocumentSnapshot,
-  type LibraryQuarantinePersistedReceiptEnvelope,
-} from '../functions/src/library/firestoreLibraryQuarantineReceiptStore';
-import {
+} = require('../functions/src/library/firestoreLibraryQuarantineReceiptStore') as typeof import('../functions/src/library/firestoreLibraryQuarantineReceiptStore');
+const {
   LIBRARY_QUARANTINE_REVIEW_DRAFT_COLLECTION,
   LIBRARY_QUARANTINE_REVIEW_DRAFT_SCHEMA_VERSION,
   LIBRARY_QUARANTINE_REVIEW_DRAFT_STATE,
-  type LibraryQuarantinePersistedReviewDraft,
-  type LibraryQuarantineReviewDraftFirestoreDatabase,
-  type LibraryQuarantineReviewDraftFirestoreTransaction,
-} from '../functions/src/library/firestoreLibraryQuarantineReviewDraftStore';
-import {
+} = require('../functions/src/library/firestoreLibraryQuarantineReviewDraftStore') as typeof import('../functions/src/library/firestoreLibraryQuarantineReviewDraftStore');
+const {
   LIBRARY_QUARANTINE_HUMAN_REVIEW_CASE_SCHEMA_VERSION,
-  type LibraryQuarantineHumanReviewCaseStatus,
-  type LibraryQuarantinePersistedHumanReviewCase,
-} from '../functions/src/library/libraryQuarantineHumanReviewCaseContract';
-import { LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION } from '../functions/src/library/firestoreLibraryQuarantineHumanReviewCaseStore';
-import {
+} = require('../functions/src/library/libraryQuarantineHumanReviewCaseContract') as typeof import('../functions/src/library/libraryQuarantineHumanReviewCaseContract');
+const {
+  LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+} = require('../functions/src/library/firestoreLibraryQuarantineHumanReviewCaseStore') as typeof import('../functions/src/library/firestoreLibraryQuarantineHumanReviewCaseStore');
+const {
   LIBRARY_DOCUMENTS_COLLECTION,
   LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION,
   LIBRARY_QUARANTINE_CATALOG_HANDOFF_SCHEMA_VERSION,
   deriveQuarantineCatalogDocumentId,
-  type LibraryQuarantinePersistedCatalogHandoff,
-} from '../functions/src/library/libraryQuarantineCatalogHandoffService';
-import {
+} = require('../functions/src/library/libraryQuarantineCatalogHandoffService') as typeof import('../functions/src/library/libraryQuarantineCatalogHandoffService');
+const {
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
   LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENT_SCHEMA_VERSION,
   LibraryQuarantineCatalogCaseAlignmentService,
-  type LibraryQuarantinePersistedCatalogCaseAlignment,
-} from '../functions/src/library/libraryQuarantineCatalogCaseAlignmentService';
-import {
+} = require('../functions/src/library/libraryQuarantineCatalogCaseAlignmentService') as typeof import('../functions/src/library/libraryQuarantineCatalogCaseAlignmentService');
+const {
   LIBRARY_QUARANTINE_BINARY_SAFETY_CASE_SCHEMA_VERSION,
-  type LibraryQuarantineBinarySafetyDisposition,
-  type LibraryQuarantinePersistedBinarySafetyCase,
-} from '../functions/src/library/libraryQuarantineBinarySafetyCaseContract';
-import {
-  BINARY_SAFETY_STORE_SAFE_MESSAGES,
+} = require('../functions/src/library/libraryQuarantineBinarySafetyCaseContract') as typeof import('../functions/src/library/libraryQuarantineBinarySafetyCaseContract');
+const {
   LIBRARY_QUARANTINE_BINARY_SAFETY_CASES_COLLECTION,
-} from '../functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore';
-import { LibraryQuarantineBinarySafetyCaseService } from '../functions/src/library/libraryQuarantineBinarySafetyCaseService';
-import {
+} = require('../functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore') as typeof import('../functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore');
+const {
+  LibraryQuarantineBinarySafetyCaseService,
+} = require('../functions/src/library/libraryQuarantineBinarySafetyCaseService') as typeof import('../functions/src/library/libraryQuarantineBinarySafetyCaseService');
+const {
   LIBRARY_QUARANTINE_ISOLATED_INSPECTION_CONFIRMATION_LITERAL,
   LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_SCHEMA_VERSION,
   LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_STATE,
   deriveLibraryQuarantineIsolatedInspectionRequestId,
   validatePersistedLibraryQuarantineIsolatedInspectionRequest,
-  type LibraryQuarantinePersistedIsolatedInspectionRequest,
-} from '../functions/src/library/libraryQuarantineIsolatedInspectionRequestContract';
-import {
-  ISOLATED_INSPECTION_STORE_SAFE_MESSAGES,
+} = require('../functions/src/library/libraryQuarantineIsolatedInspectionRequestContract') as typeof import('../functions/src/library/libraryQuarantineIsolatedInspectionRequestContract');
+const {
   LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUESTS_COLLECTION,
-} from '../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore';
-import { LibraryQuarantineIsolatedInspectionRequestService } from '../functions/src/library/libraryQuarantineIsolatedInspectionRequestService';
-import { MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES } from '../functions/src/library/libraryUploadBinaryAdmission';
-import {
-  LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
-  LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
-  LIBRARY_QUARANTINE_AV_EXECUTION_SCHEMA_VERSION,
-  QUARANTINE_AV_EXECUTION_READINESS_INDICATORS,
-  toSanitizedLibraryQuarantineAvExecutionDto,
-  validatePersistedLibraryQuarantineAvExecution,
-} from '../functions/src/library/libraryQuarantineAvExecutionContract';
-import {
-  GoogleCloudRunQuarantineAvJobInvoker,
-  LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR,
-  buildCloudRunJobRunRequestBody,
-  type InvokeQuarantineAvJobResult,
-  type LibraryQuarantineAvJobInvoker,
-} from '../functions/src/library/libraryQuarantineAvJobInvoker';
-import {
-  AV_EXECUTION_SAFE_MESSAGES,
-  FirestoreLibraryQuarantineAvExecutionStore,
-  LibraryQuarantineAvExecutionService,
-} from '../functions/src/library/libraryQuarantineAvExecutionService';
-import type {
-  GenerationPinnedQuarantineBucket,
-} from '../functions/src/library/libraryQuarantineAvWorker';
-import {
+} = require('../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore') as typeof import('../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore');
+const {
+  LibraryQuarantineIsolatedInspectionRequestService,
+} = require('../functions/src/library/libraryQuarantineIsolatedInspectionRequestService') as typeof import('../functions/src/library/libraryQuarantineIsolatedInspectionRequestService');
+const {
+  MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES,
+} = require('../functions/src/library/libraryUploadBinaryAdmission') as typeof import('../functions/src/library/libraryUploadBinaryAdmission');
+const {
   LIBRARY_QUARANTINE_CACHE_CONTROL,
   LIBRARY_QUARANTINE_CONTENT_DISPOSITION,
   LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
-  type GcsLibraryQuarantineObjectMetadata,
-} from '../functions/src/library/gcsLibraryQuarantineStorageAdapter';
-import {
+} = require('../functions/src/library/gcsLibraryQuarantineStorageAdapter') as typeof import('../functions/src/library/gcsLibraryQuarantineStorageAdapter');
+const {
   LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
   LIBRARY_QUARANTINE_PDF_INSPECTION_OUTCOME_VERIFIED,
   LIBRARY_QUARANTINE_PDF_INSPECTION_POLICY_VERSION,
@@ -296,10 +293,54 @@ import {
   defaultRunIsolatedPdfInspection,
   inspectPdfBytesStructurally,
   validatePersistedLibraryQuarantinePdfInspection,
-  type LibraryQuarantinePersistedPdfInspection,
-} from '../functions/src/library/libraryIsolatedPdfInspection';
+} = require('../functions/src/library/libraryIsolatedPdfInspection') as typeof import('../functions/src/library/libraryIsolatedPdfInspection');
 
-const require = createRequire(import.meta.url);
+const {
+  AV_EXECUTION_SAFE_MESSAGES,
+  FirestoreLibraryQuarantineAvExecutionStore,
+  LibraryQuarantineAvExecutionService,
+} = require(
+  '../functions/src/library/libraryQuarantineAvExecutionService'
+) as typeof import(
+  '../functions/src/library/libraryQuarantineAvExecutionService'
+);
+const {
+  BINARY_SAFETY_STORE_SAFE_MESSAGES,
+} = require(
+  '../functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore'
+) as typeof import(
+  '../functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore'
+);
+const {
+  ISOLATED_INSPECTION_STORE_SAFE_MESSAGES,
+} = require(
+  '../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore'
+) as typeof import(
+  '../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore'
+);
+const {
+  LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+  LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
+  LIBRARY_QUARANTINE_AV_EXECUTION_SCHEMA_VERSION,
+  QUARANTINE_AV_EXECUTION_READINESS_INDICATORS,
+  toSanitizedLibraryQuarantineAvExecutionDto,
+  validatePersistedLibraryQuarantineAvExecution,
+} = require(
+  '../functions/src/library/libraryQuarantineAvExecutionContract'
+) as typeof import(
+  '../functions/src/library/libraryQuarantineAvExecutionContract'
+);
+const {
+  GoogleCloudRunQuarantineAvJobInvoker,
+  LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR,
+  buildCloudRunJobRunRequestBody,
+} = require(
+  '../functions/src/library/libraryQuarantineAvJobInvoker'
+) as typeof import(
+  '../functions/src/library/libraryQuarantineAvJobInvoker'
+);
+type InvokeQuarantineAvJobResult = import('../functions/src/library/libraryQuarantineAvJobInvoker').InvokeQuarantineAvJobResult;
+type LibraryQuarantineAvJobInvoker = import('../functions/src/library/libraryQuarantineAvJobInvoker').LibraryQuarantineAvJobInvoker;
 const {
   FORBIDDEN_DEFAULT_FIREBASE_STORAGE_BUCKET_NAME,
   LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME,
