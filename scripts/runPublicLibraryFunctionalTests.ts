@@ -4818,6 +4818,7 @@ async function runPublicLibraryTests() {
     };
 
     const avPreflightJs = extractHeredoc(avWorkflowRaw, 'PREFLIGHT_EOF');
+    const avReadbackJs = extractHeredoc(avWorkflowRaw, 'READBACK_EOF');
     const liveAvEnablePreflightJs = extractHeredoc(liveWorkflowRaw, 'PREFLIGHT_AV_ENABLE_EOF');
     const liveWriteDotenvJs = extractHeredoc(liveWorkflowRaw, 'WRITE_DOTENV_EOF');
     const liveReadbackManageJs = extractHeredoc(liveWorkflowRaw, 'READBACK_MANAGE_EOF');
@@ -4838,6 +4839,8 @@ const args = process.argv.slice(2);
 const scenario = JSON.parse(fs.readFileSync(${JSON.stringify(scenarioPath)}, "utf8"));
 fs.appendFileSync(${JSON.stringify(logPath)}, args.join(" ") + "\\n");
 
+const DEFAULT_SA = scenario.workerSa || "pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com";
+const DEFAULT_IMAGE = "us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker@sha256:abc123";
 const joined = args.join(" ");
 if (
   (args[0] === "run" && args[1] === "jobs" && args[2] === "deploy") ||
@@ -4881,7 +4884,7 @@ if (joined.startsWith("artifacts repositories describe")) {
 if (joined.startsWith("artifacts docker images describe")) {
   process.stdout.write(JSON.stringify({
     image_summary: {
-      digest: "sha256:abc123",
+      digest: scenario.imageDigest || "sha256:abc123",
       uploadTime: scenario.imageUploadIso || new Date().toISOString()
     }
   }));
@@ -4892,10 +4895,21 @@ if (joined.startsWith("iam service-accounts describe")) {
     console.error("ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account");
     process.exit(1);
   }
+  const saEmail = args[3] || DEFAULT_SA;
   process.stdout.write(JSON.stringify({
-    email: "pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com",
+    email: saEmail,
     disabled: false
   }));
+  process.exit(0);
+}
+if (joined.startsWith("iam roles describe")) {
+  const roleId = args[3];
+  const roleDef = scenario.customRoles && scenario.customRoles[roleId];
+  if (!roleDef) {
+    console.error("ERROR: (gcloud.iam.roles.describe) NOT_FOUND: Role not found");
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify(roleDef));
   process.exit(0);
 }
 if (joined.startsWith("storage buckets describe")) {
@@ -4914,7 +4928,7 @@ if (joined.startsWith("storage buckets get-iam-policy gs://promiseofplanet-bb325
     : [
         {
           role: scenario.workerStorageRole || "roles/storage.objectViewer",
-          members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
+          members: ["serviceAccount:" + DEFAULT_SA]
         }
       ];
   process.stdout.write(JSON.stringify({ bindings }));
@@ -4936,13 +4950,13 @@ if (joined.startsWith("projects get-iam-policy")) {
   const bindings = [
     {
       role: "roles/datastore.user",
-      members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
+      members: ["serviceAccount:" + DEFAULT_SA]
     }
   ];
   if (scenario.projectWideStorageViewer) {
     bindings.push({
       role: "roles/storage.objectViewer",
-      members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
+      members: ["serviceAccount:" + DEFAULT_SA]
     });
   }
   process.stdout.write(JSON.stringify({ bindings }));
@@ -4970,17 +4984,21 @@ if (joined.startsWith("run jobs describe")) {
     console.error("ERROR: (gcloud.run.jobs.describe) NOT_FOUND: 404 Resource not found");
     process.exit(1);
   }
+  if (scenario.jobPayload !== undefined) {
+    process.stdout.write(JSON.stringify(scenario.jobPayload));
+    process.exit(0);
+  }
   process.stdout.write(JSON.stringify({
     name: "projects/promiseofplanet-bb325/locations/us-central1/jobs/pop-library-quarantine-av-worker",
     conditions: [{ type: "Ready", state: "CONDITION_SUCCEEDED" }],
     template: {
       taskCount: 1,
       template: {
-        serviceAccount: "pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com",
+        serviceAccount: DEFAULT_SA,
         maxRetries: 0,
         timeout: "600s",
         containers: [{
-          image: "us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker@sha256:abc123",
+          image: scenario.jobImage || DEFAULT_IMAGE,
           env: [
             { name: "NODE_ENV", value: "production" },
             { name: "POP_CLAMAV_DB_DIR", value: "/var/lib/clamav" },
@@ -4994,14 +5012,15 @@ if (joined.startsWith("run jobs describe")) {
   process.exit(0);
 }
 if (joined.startsWith("run jobs get-iam-policy")) {
-  process.stdout.write(JSON.stringify({
-    bindings: [
-      {
-        role: scenario.callerRole || "roles/run.jobsExecutorWithOverrides",
-        members: ["serviceAccount:pop-fn-runtime@promiseofplanet-bb325.iam.gserviceaccount.com"]
-      }
-    ]
-  }));
+  const bindings = Array.isArray(scenario.jobIamBindings)
+    ? scenario.jobIamBindings
+    : [
+        {
+          role: scenario.callerRole || "roles/run.jobsExecutorWithOverrides",
+          members: ["serviceAccount:pop-fn-runtime@promiseofplanet-bb325.iam.gserviceaccount.com"]
+        }
+      ];
+  process.stdout.write(JSON.stringify({ bindings }));
   process.exit(0);
 }
 console.error("Unexpected mocked gcloud args: " + joined);
@@ -5053,6 +5072,143 @@ globalThis.fetch = async (url, opts) => {
 };
 `;
 
+      const LIVE_V1_WORKER_SA = 'pop-library-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com';
+      const LIVE_V1_IMAGE =
+        'us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker@sha256:320da466f629670e39fcb16d51af8968f3f48b9b4c0da778379d3e0fcd7fbcdc';
+      const STANDARD_ENV = [
+        { name: 'NODE_ENV', value: 'production' },
+        { name: 'POP_CLAMAV_DB_DIR', value: '/var/lib/clamav' },
+        { name: 'POP_CLAMSCAN_PATH', value: '/usr/bin/clamscan' },
+        { name: 'POP_QPDF_PATH', value: '/usr/bin/qpdf' },
+      ];
+
+      const buildV1Job = (overrides: {
+        apiVersion?: unknown;
+        kind?: unknown;
+        name?: unknown;
+        locationLabel?: string;
+        taskCount?: unknown;
+        serviceAccountName?: unknown;
+        maxRetries?: unknown;
+        timeoutSeconds?: unknown;
+        image?: unknown;
+        env?: Array<{ name: string; value: string }>;
+        readyStatus?: string;
+        extraRoot?: Record<string, unknown>;
+        extraPodSpec?: Record<string, unknown>;
+      } = {}) => ({
+        apiVersion: overrides.apiVersion !== undefined ? overrides.apiVersion : 'run.googleapis.com/v1',
+        kind: overrides.kind !== undefined ? overrides.kind : 'Job',
+        metadata: {
+          name: overrides.name !== undefined ? overrides.name : 'pop-library-quarantine-av-worker',
+          namespace: '328395806816',
+          labels: {
+            'cloud.googleapis.com/location': overrides.locationLabel ?? 'us-central1',
+          },
+        },
+        spec: {
+          template: {
+            spec: {
+              taskCount: overrides.taskCount !== undefined ? overrides.taskCount : 1,
+              template: {
+                spec: {
+                  serviceAccountName:
+                    overrides.serviceAccountName !== undefined
+                      ? overrides.serviceAccountName
+                      : LIVE_V1_WORKER_SA,
+                  maxRetries: overrides.maxRetries !== undefined ? overrides.maxRetries : 0,
+                  timeoutSeconds: overrides.timeoutSeconds !== undefined ? overrides.timeoutSeconds : 600,
+                  containers: [
+                    {
+                      image: overrides.image !== undefined ? overrides.image : LIVE_V1_IMAGE,
+                      env: overrides.env !== undefined ? overrides.env : STANDARD_ENV,
+                    },
+                  ],
+                  ...(overrides.extraPodSpec || {}),
+                },
+              },
+            },
+          },
+        },
+        status: {
+          conditions: [{ type: 'Ready', status: overrides.readyStatus ?? 'True' }],
+        },
+        ...(overrides.extraRoot || {}),
+      });
+
+      const buildV2Job = (overrides: {
+        name?: unknown;
+        taskCount?: unknown;
+        serviceAccount?: unknown;
+        maxRetries?: unknown;
+        timeout?: unknown;
+        image?: unknown;
+        env?: Array<{ name: string; value: string }>;
+        readyState?: string;
+        extraRoot?: Record<string, unknown>;
+      } = {}) => ({
+        name:
+          overrides.name !== undefined
+            ? overrides.name
+            : 'projects/promiseofplanet-bb325/locations/us-central1/jobs/pop-library-quarantine-av-worker',
+        conditions: [{ type: 'Ready', state: overrides.readyState ?? 'CONDITION_SUCCEEDED' }],
+        template: {
+          taskCount: overrides.taskCount !== undefined ? overrides.taskCount : 1,
+          template: {
+            serviceAccount:
+              overrides.serviceAccount !== undefined
+                ? overrides.serviceAccount
+                : 'pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com',
+            maxRetries: overrides.maxRetries !== undefined ? overrides.maxRetries : 0,
+            timeout: overrides.timeout !== undefined ? overrides.timeout : '600s',
+            containers: [
+              {
+                image:
+                  overrides.image !== undefined
+                    ? overrides.image
+                    : 'us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker@sha256:abc123',
+                env: overrides.env !== undefined ? overrides.env : STANDARD_ENV,
+              },
+            ],
+          },
+        },
+        ...(overrides.extraRoot || {}),
+      });
+
+      const runReadbackWithFixtures = (opts: {
+        jobPayload: unknown;
+        workerSa?: string;
+        expectedImage?: string;
+        jobIamBindings?: unknown[];
+        callerRole?: string;
+      }) => {
+        fs.writeFileSync('/tmp/av_job_post.json', JSON.stringify(opts.jobPayload));
+        fs.writeFileSync(
+          '/tmp/av_job_post_iam.json',
+          JSON.stringify({
+            bindings: opts.jobIamBindings ?? [
+              {
+                role: opts.callerRole ?? 'roles/run.jobsExecutorWithOverrides',
+                members: ['serviceAccount:pop-fn-runtime@promiseofplanet-bb325.iam.gserviceaccount.com'],
+              },
+            ],
+          })
+        );
+        fs.writeFileSync(
+          '/tmp/manage_library_post_av_deploy.json',
+          JSON.stringify({
+            serviceConfig: {
+              serviceAccountEmail: 'pop-fn-runtime@promiseofplanet-bb325.iam.gserviceaccount.com',
+            },
+          })
+        );
+        fs.writeFileSync('/tmp/project_iam_post_av_deploy.json', JSON.stringify({ bindings: [] }));
+        return runNodeScript(avReadbackJs, {
+          INPUT_WORKER_SA: opts.workerSa ?? LIVE_V1_WORKER_SA,
+          EXPECTED_DEPLOYED_IMAGE: opts.expectedImage ?? LIVE_V1_IMAGE,
+        });
+      };
+
       fs.writeFileSync(logPath, '');
 
       // Scenario 38a: Real GitHub Actions Cloud Run NOT_FOUND message verbatim -> PENDING_RESOURCE_CREATION
@@ -5093,10 +5249,67 @@ globalThis.fetch = async (url, opts) => {
       const res38GenericErr = runNodeScript(mockedFetchPreamble + avPreflightJs);
       const result38GenericErr = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
 
-      // Scenario 38-existingPass: Existing job with valid caller permissions -> PASS (ALL_CLOUD_PREREQUISITES_VERIFIED)
-      fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: false }));
+      // Scenario 38-v1PreflightPass: Observed real Cloud Run v1 structure -> PASS (ALL_CLOUD_PREREQUISITES_VERIFIED)
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+        })
+      );
+      const res38V1PreflightPass = runNodeScript(mockedFetchPreamble + avPreflightJs, {
+        INPUT_WORKER_SA: LIVE_V1_WORKER_SA,
+      });
+      const env38V1PreflightPass = fs.readFileSync(ghEnv, 'utf8');
+
+      // Scenario 38-existingPass (v2): Existing Cloud Run v2 job with valid caller permissions -> PASS
+      fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: false, jobPayload: buildV2Job() }));
       const res38ExistingPass = runNodeScript(mockedFetchPreamble + avPreflightJs);
       const env38ExistingPass = fs.readFileSync(ghEnv, 'utf8');
+
+      // Scenario 38-v1ReadbackPass & v2ReadbackPass & Readback negative checks
+      const res38V1ReadbackPass = runReadbackWithFixtures({
+        jobPayload: buildV1Job(),
+        workerSa: LIVE_V1_WORKER_SA,
+        expectedImage: LIVE_V1_IMAGE,
+      });
+      const res38V1ReadbackInvokerOnly = runReadbackWithFixtures({
+        jobPayload: buildV1Job(),
+        workerSa: LIVE_V1_WORKER_SA,
+        expectedImage: LIVE_V1_IMAGE,
+        callerRole: 'roles/run.invoker',
+      });
+      const env38V1ReadbackInvokerOnly = fs.readFileSync(ghEnv, 'utf8');
+
+      const v2DefaultImg =
+        'us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker@sha256:abc123';
+      const res38V2ReadbackPass = runReadbackWithFixtures({
+        jobPayload: buildV2Job(),
+        workerSa: 'pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com',
+        expectedImage: v2DefaultImg,
+      });
+      const res38ReadbackDigestMismatch = runReadbackWithFixtures({
+        jobPayload: buildV1Job({
+          image:
+            'us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker@sha256:deadbeef',
+        }),
+        workerSa: LIVE_V1_WORKER_SA,
+        expectedImage: LIVE_V1_IMAGE,
+      });
+
+      // Scenario 38-v1PreflightMissingCaller: Existing v1 job with ONLY roles/run.invoker -> MUST FAIL CLOSED and mark Caller IAM FAIL (never PASS)
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          callerRole: 'roles/run.invoker',
+        })
+      );
+      const res38V1InvokerOnly = runNodeScript(mockedFetchPreamble + avPreflightJs, {
+        INPUT_WORKER_SA: LIVE_V1_WORKER_SA,
+      });
+      const result38V1InvokerOnly = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
 
       // Scenario 38-missingAr: Missing Artifact Registry repository -> FAIL before push
       fs.writeFileSync(scenarioPath, JSON.stringify({ missingArRepo: true }));
@@ -5108,7 +5321,7 @@ globalThis.fetch = async (url, opts) => {
       const res38MissingSa = runNodeScript(mockedFetchPreamble + avPreflightJs);
       const result38MissingSa = JSON.parse(fs.readFileSync('/tmp/av_preflight_result.json', 'utf8'));
 
-      // Scenario 38b: Existing job with ONLY roles/run.invoker -> MUST FAIL CLOSED before deploy
+      // Scenario 38b: Existing v2 job with ONLY roles/run.invoker -> MUST FAIL CLOSED before deploy
       fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: false, callerRole: 'roles/run.invoker' }));
       const res38b = runNodeScript(mockedFetchPreamble + avPreflightJs);
 
@@ -5173,13 +5386,15 @@ globalThis.fetch = async (url, opts) => {
       );
       const res38ProjViewerBoth = runNodeScript(mockedFetchPreamble + avPreflightJs);
 
-      // Scenario 38d: Firebase av_execution_mode=enabled with STALE (>7d) worker image -> MUST FAIL CLOSED
+      // Prepare Firebase enabled preflight test prerequisite file
       fs.writeFileSync(
         '/tmp/manage_library_fn_pre.json',
         JSON.stringify({
           serviceConfig: { serviceAccountEmail: 'pop-fn-runtime@promiseofplanet-bb325.iam.gserviceaccount.com' },
         })
       );
+
+      // Scenario 38d: Firebase av_execution_mode=enabled with STALE (>7d) worker image -> MUST FAIL CLOSED
       fs.writeFileSync(
         scenarioPath,
         JSON.stringify({
@@ -5189,15 +5404,196 @@ globalThis.fetch = async (url, opts) => {
       );
       const res38d = runNodeScript(liveAvEnablePreflightJs);
 
-      // Scenario 38e: Firebase av_execution_mode=enabled with fresh worker image + valid IAM -> PASS
+      // Scenario 38e: Firebase av_execution_mode=enabled with fresh v2 worker image + valid IAM -> PASS
       fs.writeFileSync(
         scenarioPath,
         JSON.stringify({
           jobMissing: false,
+          jobPayload: buildV2Job(),
           imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
         })
       );
       const res38e = runNodeScript(liveAvEnablePreflightJs);
+
+      // Scenario 38e-v1: Firebase av_execution_mode=enabled with fresh v1 observed job + valid IAM -> PASS
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+        })
+      );
+      const res38eV1 = runNodeScript(liveAvEnablePreflightJs);
+
+      // Negative Cloud Run schema & security fixture runner across ALL 3 consumers
+      const assertRejectsAcrossConsumers = (
+        label: string,
+        opts: {
+          jobPayload?: unknown;
+          workerSa?: string;
+          jobIamBindings?: unknown[];
+          callerRole?: string;
+          workerStorageRole?: string;
+          omitBucketWorkerRole?: boolean;
+          projectWideStorageViewer?: boolean;
+          defaultBucketError?: string;
+          customRoles?: Record<string, { includedPermissions?: string[] }>;
+          checkReadback?: boolean;
+        }
+      ) => {
+        const wSa = opts.workerSa ?? LIVE_V1_WORKER_SA;
+        fs.writeFileSync(
+          scenarioPath,
+          JSON.stringify({
+            workerSa: wSa,
+            jobPayload: opts.jobPayload ?? buildV1Job(),
+            jobIamBindings: opts.jobIamBindings,
+            callerRole: opts.callerRole,
+            workerStorageRole: opts.workerStorageRole,
+            omitBucketWorkerRole: opts.omitBucketWorkerRole,
+            projectWideStorageViewer: opts.projectWideStorageViewer,
+            defaultBucketError: opts.defaultBucketError,
+            customRoles: opts.customRoles,
+            imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+          })
+        );
+        const avPre = runNodeScript(mockedFetchPreamble + avPreflightJs, { INPUT_WORKER_SA: wSa });
+        assert.notEqual(avPre.status, 0, `${label}: PREFLIGHT_EOF must fail closed`);
+        const livePre = runNodeScript(liveAvEnablePreflightJs);
+        assert.notEqual(livePre.status, 0, `${label}: PREFLIGHT_AV_ENABLE_EOF must fail closed`);
+        if (opts.checkReadback !== false) {
+          const avRb = runReadbackWithFixtures({
+            jobPayload: opts.jobPayload ?? buildV1Job(),
+            workerSa: wSa,
+            expectedImage: LIVE_V1_IMAGE,
+            jobIamBindings: opts.jobIamBindings,
+            callerRole: opts.callerRole,
+          });
+          assert.notEqual(avRb.status, 0, `${label}: READBACK_EOF must fail closed`);
+        }
+      };
+
+      // Negative 1: Malformed/unknown schema
+      assertRejectsAcrossConsumers('unknown-schema', { jobPayload: { foo: 'bar' } });
+      // Negative 2: Mixed top-level v1+v2 schema
+      assertRejectsAcrossConsumers('mixed-top-schema', {
+        jobPayload: buildV1Job({
+          extraRoot: {
+            name: 'projects/promiseofplanet-bb325/locations/us-central1/jobs/pop-library-quarantine-av-worker',
+          },
+        }),
+      });
+      // Negative 3: Mixed nested v2 fields inside v1 podSpec
+      assertRejectsAcrossConsumers('mixed-nested-schema', {
+        jobPayload: buildV1Job({ extraPodSpec: { timeout: '600s' } }),
+      });
+      // Negative 4: Wrong v1 metadata.name
+      assertRejectsAcrossConsumers('v1-wrong-name', {
+        jobPayload: buildV1Job({ name: 'wrong-av-worker-job' }),
+      });
+      // Negative 5: Wrong v1 location label / v2 wrong project-or-region
+      assertRejectsAcrossConsumers('v1-wrong-region', {
+        jobPayload: buildV1Job({ locationLabel: 'europe-west1' }),
+      });
+      assertRejectsAcrossConsumers('v2-wrong-project-region', {
+        jobPayload: buildV2Job({
+          name: 'projects/other-project/locations/europe-west1/jobs/pop-library-quarantine-av-worker',
+        }),
+        workerSa: 'pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com',
+      });
+      // Negative 6: Wrong worker service account
+      assertRejectsAcrossConsumers('wrong-worker-sa', {
+        jobPayload: buildV1Job({
+          serviceAccountName: '123456-compute@developer.gserviceaccount.com',
+        }),
+      });
+      // Negative 7: taskCount, maxRetries, timeout mismatch
+      assertRejectsAcrossConsumers('v1-bad-taskCount', {
+        jobPayload: buildV1Job({ taskCount: 2 }),
+      });
+      assertRejectsAcrossConsumers('v1-bad-maxRetries', {
+        jobPayload: buildV1Job({ maxRetries: 1 }),
+      });
+      assertRejectsAcrossConsumers('v1-bad-timeoutSeconds', {
+        jobPayload: buildV1Job({ timeoutSeconds: 300 }),
+      });
+      assertRejectsAcrossConsumers('v2-bad-timeout', {
+        jobPayload: buildV2Job({ timeout: '300s' }),
+        workerSa: 'pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com',
+      });
+      // Negative 8: Wrong image repository & unpinned tag
+      assertRejectsAcrossConsumers('wrong-image-repo', {
+        jobPayload: buildV1Job({
+          image: 'us-central1-docker.pkg.dev/promiseofplanet-bb325/other-repo/pop-library-quarantine-av-worker@sha256:320da466f629670e39fcb16d51af8968f3f48b9b4c0da778379d3e0fcd7fbcdc',
+        }),
+      });
+      assertRejectsAcrossConsumers('mutable-image-tag', {
+        jobPayload: buildV1Job({
+          image: 'us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker:latest',
+        }),
+      });
+      // Negative 9: Missing required env var
+      assertRejectsAcrossConsumers('missing-required-env', {
+        jobPayload: buildV1Job({
+          env: STANDARD_ENV.filter((e) => e.name !== 'POP_QPDF_PATH'),
+        }),
+      });
+      // Negative 10: Persistent POP_QUARANTINE_AV_REQUEST_ID
+      assertRejectsAcrossConsumers('persisted-request-id-env', {
+        jobPayload: buildV1Job({
+          env: [...STANDARD_ENV, { name: 'POP_QUARANTINE_AV_REQUEST_ID', value: 'req-persisted' }],
+        }),
+      });
+      // Negative 11: Public job IAM binding
+      assertRejectsAcrossConsumers('public-job-iam', {
+        jobPayload: buildV1Job(),
+        jobIamBindings: [
+          { role: 'roles/run.invoker', members: ['allUsers'] },
+          {
+            role: 'roles/run.jobsExecutorWithOverrides',
+            members: ['serviceAccount:pop-fn-runtime@promiseofplanet-bb325.iam.gserviceaccount.com'],
+          },
+        ],
+      });
+      // Negative 12: Caller holding only roles/run.invoker on live Firebase enabled preflight
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job(),
+          callerRole: 'roles/run.invoker',
+          imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+        })
+      );
+      const res38LiveInvokerOnly = runNodeScript(liveAvEnablePreflightJs);
+      assert.notEqual(res38LiveInvokerOnly.status, 0, 'live preflight must reject roles/run.invoker caller');
+
+      // Negative 13: Unreadable default Firebase bucket IAM (403) across BOTH preflights
+      assertRejectsAcrossConsumers('live-unreadable-default-bucket-403', {
+        defaultBucketError: 'ERROR: (gcloud.storage.buckets.get-iam-policy) HTTPError 403: Forbidden',
+        checkReadback: false,
+      });
+      // Negative 14: Project-wide storage.objectViewer bypass across BOTH preflights
+      assertRejectsAcrossConsumers('live-project-wide-storage-viewer', {
+        omitBucketWorkerRole: true,
+        projectWideStorageViewer: true,
+        checkReadback: false,
+      });
+      // Negative 15: Storage write/admin & unknown custom-storage role on worker across BOTH preflights
+      assertRejectsAcrossConsumers('worker-storage-write-role', {
+        workerStorageRole: 'roles/storage.objectAdmin',
+        checkReadback: false,
+      });
+      assertRejectsAcrossConsumers('worker-unknown-custom-storage-role', {
+        workerStorageRole: 'projects/promiseofplanet-bb325/roles/customStorageUnknown',
+        customRoles: {
+          customStorageUnknown: {
+            includedPermissions: ['storage.objects.get', 'storage.managedFolders.create'],
+          },
+        },
+        checkReadback: false,
+      });
 
       // Scenario 38f: Dotenv + Post-deploy readbacks across disabled & enabled modes
       fs.mkdirSync(path.join(tmpRoot, 'functions'), { recursive: true });
@@ -5318,9 +5714,27 @@ globalThis.fetch = async (url, opts) => {
         ) &&
         res38ProjViewerBoth.status !== 0;
 
-      const missingPrereqsAndExistingOk =
+      const v1AndV2SchemaSupportOk =
+        res38V1PreflightPass.status === 0 &&
+        env38V1PreflightPass.includes('ALL_CLOUD_PREREQUISITES_VERIFIED') &&
         res38ExistingPass.status === 0 &&
         env38ExistingPass.includes('ALL_CLOUD_PREREQUISITES_VERIFIED') &&
+        res38V1ReadbackPass.status === 0 &&
+        res38V1ReadbackPass.stdout.includes('schema=v1') &&
+        res38V1ReadbackInvokerOnly.status === 0 &&
+        env38V1ReadbackInvokerOnly.includes('AV_POST_DEPLOY_CALLER_IAM_STATUS=PENDING_CALLER_IAM_GRANT') &&
+        res38V2ReadbackPass.status === 0 &&
+        res38V2ReadbackPass.stdout.includes('schema=v2') &&
+        res38ReadbackDigestMismatch.status !== 0 &&
+        res38V1InvokerOnly.status !== 0 &&
+        result38V1InvokerOnly.matrix.some(
+          (r: { check: string; status: string }) =>
+            r.check === 'Caller run.jobs.runWithOverrides (manageLibraryDocuments)' && r.status === 'FAIL'
+        ) &&
+        res38eV1.status === 0 &&
+        res38e.status === 0;
+
+      const missingPrereqsOk =
         res38MissingAr.status !== 0 &&
         result38MissingAr.matrix.some(
           (r: { check: string; status: string }) =>
@@ -5334,19 +5748,19 @@ globalThis.fetch = async (url, opts) => {
 
       assertCheck(
         '38',
-        'Mocked-gcloud workflow scripts handle real Cloud Run NOT_FOUND verbatim, 403 precedence, missing AR/SA, fail-closed default bucket, reject project-wide Storage Object Viewer, and verify dotenv + 3-function readbacks',
+        'Mocked-gcloud workflow scripts validate strict Cloud Run v1/v2 schemas across preflight/readback/live, fail closed on invalid/mixed/public/missing-IAM/storage bypasses, and verify dotenv + 3-function readbacks',
         noMutationsInvoked &&
           realNotFoundHandled &&
           permPrecedenceAndGenericOk &&
           storageLeastPrivilegeClosed &&
-          missingPrereqsAndExistingOk &&
+          v1AndV2SchemaSupportOk &&
+          missingPrereqsOk &&
           res38a.status === 0 &&
           env38a.includes('READY_FOR_INITIAL_JOB_DEPLOY_CALLER_IAM_PENDING_POST_CREATE') &&
           res38b.status !== 0 &&
           res38c.status !== 0 &&
           env38c.includes('UNVERIFIED_INSUFFICIENT_PERMISSIONS') &&
           res38d.status !== 0 &&
-          res38e.status === 0 &&
           resDotDisabled.status === 0 &&
           disabledDotenvText.includes('POP_LIBRARY_AV_EXECUTION_ENABLED=false') &&
           !disabledDotenvText.includes('POP_QUARANTINE_AV_JOB_') &&
@@ -5369,6 +5783,10 @@ globalThis.fetch = async (url, opts) => {
         '/tmp/binary_download_fn_post.json',
         '/tmp/av_preflight_summary.md',
         '/tmp/av_preflight_result.json',
+        '/tmp/av_job_post.json',
+        '/tmp/av_job_post_iam.json',
+        '/tmp/manage_library_post_av_deploy.json',
+        '/tmp/project_iam_post_av_deploy.json',
       ]) {
         if (fs.existsSync(p)) fs.unlinkSync(p);
       }

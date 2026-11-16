@@ -282,6 +282,154 @@ jobs:
               return "ERROR";
             }
 
+            function normalizeCloudRunJob(jobJson, expected) {
+              if (!jobJson || typeof jobJson !== "object" || Array.isArray(jobJson)) {
+                return { ok: false, error: "Cloud Run Job JSON is not an object" };
+              }
+              const hasV1Top =
+                jobJson.apiVersion !== undefined ||
+                jobJson.kind !== undefined ||
+                jobJson.metadata !== undefined ||
+                jobJson.spec !== undefined;
+              const hasV2Top =
+                jobJson.name !== undefined ||
+                jobJson.template !== undefined ||
+                jobJson.conditions !== undefined;
+              if (hasV1Top && hasV2Top) {
+                return { ok: false, error: "Mixed Cloud Run v1 and v2 schema fields detected" };
+              }
+              if (!hasV1Top && !hasV2Top) {
+                return { ok: false, error: "Unknown or empty Cloud Run Job schema" };
+              }
+
+              if (hasV1Top) {
+                if (jobJson.apiVersion !== "run.googleapis.com/v1") {
+                  return { ok: false, error: `Unsupported Cloud Run v1 apiVersion=${String(jobJson.apiVersion)}` };
+                }
+                if (jobJson.kind !== "Job") {
+                  return { ok: false, error: `Unsupported Cloud Run v1 kind=${String(jobJson.kind)}` };
+                }
+                const md = jobJson.metadata;
+                if (!md || typeof md !== "object" || Array.isArray(md)) {
+                  return { ok: false, error: "Cloud Run v1 job.metadata missing" };
+                }
+                if (typeof md.name !== "string" || md.name !== expected.jobName) {
+                  return { ok: false, error: `Cloud Run v1 metadata.name mismatch: expected ${expected.jobName}, found ${String(md.name)}` };
+                }
+                const labels = md.labels && typeof md.labels === "object" && !Array.isArray(md.labels) ? md.labels : null;
+                if (labels && typeof labels["cloud.googleapis.com/location"] === "string" && labels["cloud.googleapis.com/location"] !== expected.region) {
+                  return { ok: false, error: `Cloud Run v1 metadata location mismatch: ${labels["cloud.googleapis.com/location"]}` };
+                }
+                if (typeof md.selfLink === "string" && md.selfLink.length > 0) {
+                  const locMatch = /\/locations\/([^/?]+)/.exec(md.selfLink);
+                  if (locMatch && locMatch[1] !== expected.region) {
+                    return { ok: false, error: `Cloud Run v1 metadata.selfLink region mismatch: ${locMatch[1]}` };
+                  }
+                  const jobMatch = /\/jobs\/([^/?]+)/.exec(md.selfLink);
+                  if (jobMatch && jobMatch[1] !== expected.jobName) {
+                    return { ok: false, error: `Cloud Run v1 metadata.selfLink job mismatch: ${jobMatch[1]}` };
+                  }
+                }
+                const spec = jobJson.spec;
+                const execTpl = spec && typeof spec === "object" && !Array.isArray(spec) ? spec.template : null;
+                const execSpec = execTpl && typeof execTpl === "object" && !Array.isArray(execTpl) ? execTpl.spec : null;
+                if (!execSpec || typeof execSpec !== "object" || Array.isArray(execSpec)) {
+                  return { ok: false, error: "Cloud Run v1 job.spec.template.spec missing" };
+                }
+                if (typeof execSpec.taskCount !== "number" || !Number.isInteger(execSpec.taskCount)) {
+                  return { ok: false, error: `Cloud Run v1 invalid spec.template.spec.taskCount=${String(execSpec.taskCount)}` };
+                }
+                const podTpl = execSpec.template;
+                const podSpec = podTpl && typeof podTpl === "object" && !Array.isArray(podTpl) ? podTpl.spec : null;
+                if (!podSpec || typeof podSpec !== "object" || Array.isArray(podSpec)) {
+                  return { ok: false, error: "Cloud Run v1 job.spec.template.spec.template.spec missing" };
+                }
+                if (podSpec.serviceAccount !== undefined || podSpec.timeout !== undefined) {
+                  return { ok: false, error: "Mixed v2 fields inside Cloud Run v1 pod spec" };
+                }
+                if (typeof podSpec.serviceAccountName !== "string") {
+                  return { ok: false, error: "Cloud Run v1 serviceAccountName missing" };
+                }
+                if (typeof podSpec.maxRetries !== "number" || !Number.isInteger(podSpec.maxRetries)) {
+                  return { ok: false, error: `Cloud Run v1 invalid maxRetries=${String(podSpec.maxRetries)}` };
+                }
+                if (typeof podSpec.timeoutSeconds !== "number" || !Number.isInteger(podSpec.timeoutSeconds)) {
+                  return { ok: false, error: `Cloud Run v1 invalid timeoutSeconds=${String(podSpec.timeoutSeconds)}` };
+                }
+                if (!Array.isArray(podSpec.containers) || podSpec.containers.length !== 1 || !podSpec.containers[0] || typeof podSpec.containers[0] !== "object" || Array.isArray(podSpec.containers[0])) {
+                  return { ok: false, error: "Cloud Run v1 containers missing, empty, or invalid" };
+                }
+                let readyIssue = null;
+                const conditions = jobJson.status && Array.isArray(jobJson.status.conditions) ? jobJson.status.conditions : [];
+                const readyCond = conditions.find((c) => c && c.type === "Ready");
+                if (readyCond && readyCond.status && readyCond.status !== "True") {
+                  readyIssue = `Cloud Run v1 Ready condition is not True (found: ${String(readyCond.status)})`;
+                }
+                return {
+                  ok: true,
+                  schemaVersion: "v1",
+                  jobIdentifier: md.name,
+                  taskCount: execSpec.taskCount,
+                  serviceAccount: podSpec.serviceAccountName.trim(),
+                  maxRetries: podSpec.maxRetries,
+                  timeoutSeconds: podSpec.timeoutSeconds,
+                  containers: podSpec.containers,
+                  readyIssue,
+                };
+              }
+
+              const expectedV2Name = `projects/${expected.projectId}/locations/${expected.region}/jobs/${expected.jobName}`;
+              if (typeof jobJson.name !== "string" || jobJson.name !== expectedV2Name) {
+                return { ok: false, error: `Cloud Run v2 name/project/region mismatch: expected ${expectedV2Name}, found ${String(jobJson.name)}` };
+              }
+              const tpl = jobJson.template;
+              if (!tpl || typeof tpl !== "object" || Array.isArray(tpl)) {
+                return { ok: false, error: "Cloud Run v2 job.template missing" };
+              }
+              if (tpl.spec !== undefined) {
+                return { ok: false, error: "Mixed v1 spec inside Cloud Run v2 job.template" };
+              }
+              if (typeof tpl.taskCount !== "number" || !Number.isInteger(tpl.taskCount)) {
+                return { ok: false, error: `Cloud Run v2 invalid template.taskCount=${String(tpl.taskCount)}` };
+              }
+              const podTpl = tpl.template;
+              if (!podTpl || typeof podTpl !== "object" || Array.isArray(podTpl)) {
+                return { ok: false, error: "Cloud Run v2 job.template.template missing" };
+              }
+              if (podTpl.spec !== undefined || podTpl.serviceAccountName !== undefined || podTpl.timeoutSeconds !== undefined) {
+                return { ok: false, error: "Mixed v1 fields inside Cloud Run v2 pod template" };
+              }
+              if (typeof podTpl.serviceAccount !== "string") {
+                return { ok: false, error: "Cloud Run v2 template.template.serviceAccount missing" };
+              }
+              if (typeof podTpl.maxRetries !== "number" || !Number.isInteger(podTpl.maxRetries)) {
+                return { ok: false, error: `Cloud Run v2 invalid maxRetries=${String(podTpl.maxRetries)}` };
+              }
+              if (typeof podTpl.timeout !== "string" || !/^\d+s$/.test(podTpl.timeout)) {
+                return { ok: false, error: `Cloud Run v2 invalid timeout=${String(podTpl.timeout)}` };
+              }
+              if (!Array.isArray(podTpl.containers) || podTpl.containers.length !== 1 || !podTpl.containers[0] || typeof podTpl.containers[0] !== "object" || Array.isArray(podTpl.containers[0])) {
+                return { ok: false, error: "Cloud Run v2 containers missing, empty, or invalid" };
+              }
+              let readyIssue = null;
+              const conditions = Array.isArray(jobJson.conditions) ? jobJson.conditions : [];
+              const readyCond = conditions.find((c) => c && c.type === "Ready");
+              if (readyCond && readyCond.state && readyCond.state !== "CONDITION_SUCCEEDED") {
+                readyIssue = `Cloud Run v2 Ready condition is not CONDITION_SUCCEEDED (found: ${String(readyCond.state)})`;
+              }
+              return {
+                ok: true,
+                schemaVersion: "v2",
+                jobIdentifier: jobJson.name,
+                taskCount: tpl.taskCount,
+                serviceAccount: podTpl.serviceAccount.trim(),
+                maxRetries: podTpl.maxRetries,
+                timeoutSeconds: Number(podTpl.timeout.slice(0, -1)),
+                containers: podTpl.containers,
+                readyIssue,
+              };
+            }
+
             let accessToken = "";
             const tokenRes = runGcloud(["auth", "print-access-token"]);
             if (!tokenRes.ok || !tokenRes.stdout.trim()) {
@@ -464,20 +612,40 @@ jobs:
                 return "NOT_GRANTED";
               }
 
+              const SAFE_CUSTOM_STORAGE_READ_PERMS = new Set([
+                "storage.objects.get",
+                "storage.objects.list",
+                "storage.buckets.get",
+              ]);
               function roleGrantsBucketObjectReadOnly(roleName) {
                 if (["roles/storage.objectViewer", "roles/storage.legacyObjectReader"].includes(roleName)) {
                   return "READ_ONLY";
                 }
-                if (["roles/storage.objectAdmin", "roles/storage.admin", "roles/storage.objectUser", "roles/storage.objectCreator"].includes(roleName)) {
+                if (
+                  [
+                    "roles/storage.objectAdmin",
+                    "roles/storage.admin",
+                    "roles/storage.objectUser",
+                    "roles/storage.objectCreator",
+                    "roles/storage.legacyBucketWriter",
+                    "roles/storage.legacyBucketOwner",
+                    "roles/storage.legacyObjectOwner",
+                    "roles/storage.hmacKeyAdmin",
+                    "roles/editor",
+                    "roles/owner",
+                  ].includes(roleName) ||
+                  roleName.startsWith("roles/storage.")
+                ) {
                   return "OVERPRIVILEGED";
                 }
                 if (roleName.startsWith(`projects/${PROJECT_ID}/roles/`)) {
                   const perms = getCustomRolePermissions(roleName);
                   if (!perms) return "UNKNOWN";
-                  const hasRead = perms.includes("storage.objects.get");
-                  const hasWrite = perms.some((p) => p === "storage.objects.create" || p === "storage.objects.delete" || p === "storage.objects.update");
-                  if (hasWrite) return "OVERPRIVILEGED";
-                  return hasRead ? "READ_ONLY" : "NONE";
+                  const storagePerms = perms.map((p) => String(p)).filter((p) => p === "*" || p.startsWith("storage."));
+                  if (storagePerms.some((p) => !SAFE_CUSTOM_STORAGE_READ_PERMS.has(p))) {
+                    return "OVERPRIVILEGED";
+                  }
+                  return storagePerms.includes("storage.objects.get") ? "READ_ONLY" : "NONE";
                 }
                 return "NONE";
               }
@@ -670,30 +838,75 @@ jobs:
                 addRow("Caller run.jobs.runWithOverrides (manageLibraryDocuments)", "UNKNOWN", "Cannot inspect job IAM because job describe failed.");
               } else {
                 const jobJson = parseJsonSafe(jobDescRes.stdout);
-                const tpl = (jobJson && jobJson.template) || {};
-                const podTpl = tpl.template || {};
-                const containers = Array.isArray(podTpl.containers) ? podTpl.containers : [];
-                const c0 = containers[0] || {};
-                const cEnv = Array.isArray(c0.env) ? c0.env : [];
-                const existingSa = typeof podTpl.serviceAccount === "string" ? podTpl.serviceAccount.trim() : "";
-                const existingImage = typeof c0.image === "string" ? c0.image.trim() : "";
-                const expectedImagePrefix = `${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${JOB_NAME}`;
-                const hasHardcodedRequestId = cEnv.some((e) => e && e.name === "POP_QUARANTINE_AV_REQUEST_ID");
-
+                const normJob = normalizeCloudRunJob(jobJson, {
+                  projectId: PROJECT_ID,
+                  region: REGION,
+                  jobName: JOB_NAME,
+                });
                 const jobIssues = [];
-                if (WORKER_SA && existingSa !== WORKER_SA) {
-                  jobIssues.push(`existing serviceAccount=${existingSa || "(none)"} !== ${WORKER_SA}`);
+                let existingSa = "";
+                if (!normJob.ok) {
+                  jobIssues.push(`invalid Cloud Run Job schema (${normJob.error})`);
+                } else {
+                  if (normJob.readyIssue) {
+                    jobIssues.push(normJob.readyIssue);
+                  }
+                  existingSa = normJob.serviceAccount;
+                  const existingSaValidSyntax =
+                    /^[a-z0-9][a-z0-9-]{4,28}[a-z0-9]@promiseofplanet-bb325\.iam\.gserviceaccount\.com$/.test(existingSa) &&
+                    !existingSa.endsWith("@appspot.gserviceaccount.com") &&
+                    !existingSa.includes("-compute@developer.gserviceaccount.com") &&
+                    !existingSa.startsWith("firebase-adminsdk-");
+                  if (!existingSa || !existingSaValidSyntax) {
+                    jobIssues.push(`existing serviceAccount=${existingSa || "(none)"} is not a dedicated worker SA`);
+                  }
+                  if (WORKER_SA && existingSa !== WORKER_SA) {
+                    jobIssues.push(`existing serviceAccount=${existingSa || "(none)"} !== ${WORKER_SA}`);
+                  }
+                  if (normJob.taskCount !== 1) jobIssues.push(`taskCount=${String(normJob.taskCount)} !== 1`);
+                  if (normJob.maxRetries !== 0) jobIssues.push(`maxRetries=${String(normJob.maxRetries)} !== 0`);
+                  if (normJob.timeoutSeconds !== 600) jobIssues.push(`timeoutSeconds=${String(normJob.timeoutSeconds)} !== 600`);
+
+                  const c0 = normJob.containers[0];
+                  const existingImage = typeof c0.image === "string" ? c0.image.trim() : "";
+                  const expectedImagePrefix = `${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${JOB_NAME}`;
+                  const hasValidDigest =
+                    existingImage.startsWith(`${expectedImagePrefix}@sha256:`) &&
+                    /^@sha256:[a-f0-9]+$/i.test(existingImage.slice(expectedImagePrefix.length));
+                  if (!hasValidDigest) {
+                    jobIssues.push(`unowned/mutable/mismatched image=${existingImage || "(none)"}`);
+                  }
+
+                  const envMap = {};
+                  for (const item of Array.isArray(c0.env) ? c0.env : []) {
+                    if (item && typeof item.name === "string") {
+                      envMap[item.name] = item.value;
+                    }
+                  }
+                  for (const [k, v] of Object.entries({
+                    NODE_ENV: "production",
+                    POP_CLAMAV_DB_DIR: "/var/lib/clamav",
+                    POP_CLAMSCAN_PATH: "/usr/bin/clamscan",
+                    POP_QPDF_PATH: "/usr/bin/qpdf",
+                  })) {
+                    if (envMap[k] !== v) {
+                      jobIssues.push(`env ${k}=${String(envMap[k])} !== ${v}`);
+                    }
+                  }
+                  if (Object.prototype.hasOwnProperty.call(envMap, "POP_QUARANTINE_AV_REQUEST_ID")) {
+                    jobIssues.push("POP_QUARANTINE_AV_REQUEST_ID must not be persisted on job spec");
+                  }
                 }
-                if (Number(tpl.taskCount) !== 1) jobIssues.push(`taskCount=${String(tpl.taskCount)} !== 1`);
-                if (Number(podTpl.maxRetries) !== 0) jobIssues.push(`maxRetries=${String(podTpl.maxRetries)} !== 0`);
-                if (podTpl.timeout !== "600s") jobIssues.push(`timeout=${String(podTpl.timeout)} !== 600s`);
-                if (!existingImage.startsWith(expectedImagePrefix)) jobIssues.push(`unowned/mismatched image=${existingImage}`);
-                if (hasHardcodedRequestId) jobIssues.push("POP_QUARANTINE_AV_REQUEST_ID must not be persisted on job spec");
 
                 const jobIamRes = runGcloud(["run", "jobs", "get-iam-policy", JOB_NAME, `--region=${REGION}`, `--project=${PROJECT_ID}`, "--format=json"]);
                 const jobIam = jobIamRes.ok ? parseJsonSafe(jobIamRes.stdout) : null;
                 if (!jobIamRes.ok || !jobIam) {
-                  addRow("Existing Cloud Run Job Configuration", "UNKNOWN", `Failed to inspect job IAM policy: ${jobIamRes.ok ? "malformed JSON" : jobIamRes.stderr.slice(0, 160)}`);
+                  const iamErrMsg = `Failed to inspect job IAM policy: ${jobIamRes.ok ? "malformed JSON" : jobIamRes.stderr.slice(0, 160)}`;
+                  addRow(
+                    "Existing Cloud Run Job Configuration",
+                    jobIssues.length > 0 ? "FAIL" : "UNKNOWN",
+                    jobIssues.length > 0 ? `${jobIssues.join("; ")}; ${iamErrMsg}` : iamErrMsg
+                  );
                   addRow("Caller run.jobs.runWithOverrides (manageLibraryDocuments)", "UNKNOWN", "Job IAM policy inspection failed.");
                 } else {
                   const jobBindings = Array.isArray(jobIam.bindings) ? jobIam.bindings : [];
@@ -709,7 +922,7 @@ jobs:
                   if (jobIssues.length > 0) {
                     addRow("Existing Cloud Run Job Configuration", "FAIL", jobIssues.join("; "));
                   } else {
-                    addRow("Existing Cloud Run Job Configuration", "PASS", `Verified existing job SA=${existingSa}, taskCount=1, maxRetries=0, timeout=600s, non-public IAM.`);
+                    addRow("Existing Cloud Run Job Configuration", "PASS", `Verified existing job (${normJob.schemaVersion}, ${normJob.jobIdentifier}) SA=${existingSa}, taskCount=1, maxRetries=0, timeout=600s, non-public IAM.`);
                   }
 
                   if (!manageFnSa) {
@@ -889,42 +1102,212 @@ jobs:
 
             const PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
             const REGION = process.env.EXPECTED_GCP_REGION;
+            const AR_REPO = process.env.EXPECTED_ARTIFACT_REGISTRY_REPO;
             const JOB_NAME = process.env.EXPECTED_CLOUD_RUN_JOB_NAME;
             const WORKER_SA = (process.env.INPUT_WORKER_SA || "").trim();
-            const EXPECTED_IMAGE = process.env.EXPECTED_DEPLOYED_IMAGE || "";
+            const EXPECTED_IMAGE = (process.env.EXPECTED_DEPLOYED_IMAGE || "").trim();
+
+            function normalizeCloudRunJob(jobJson, expected) {
+              if (!jobJson || typeof jobJson !== "object" || Array.isArray(jobJson)) {
+                return { ok: false, error: "Cloud Run Job JSON is not an object" };
+              }
+              const hasV1Top =
+                jobJson.apiVersion !== undefined ||
+                jobJson.kind !== undefined ||
+                jobJson.metadata !== undefined ||
+                jobJson.spec !== undefined;
+              const hasV2Top =
+                jobJson.name !== undefined ||
+                jobJson.template !== undefined ||
+                jobJson.conditions !== undefined;
+              if (hasV1Top && hasV2Top) {
+                return { ok: false, error: "Mixed Cloud Run v1 and v2 schema fields detected" };
+              }
+              if (!hasV1Top && !hasV2Top) {
+                return { ok: false, error: "Unknown or empty Cloud Run Job schema" };
+              }
+
+              if (hasV1Top) {
+                if (jobJson.apiVersion !== "run.googleapis.com/v1") {
+                  return { ok: false, error: `Unsupported Cloud Run v1 apiVersion=${String(jobJson.apiVersion)}` };
+                }
+                if (jobJson.kind !== "Job") {
+                  return { ok: false, error: `Unsupported Cloud Run v1 kind=${String(jobJson.kind)}` };
+                }
+                const md = jobJson.metadata;
+                if (!md || typeof md !== "object" || Array.isArray(md)) {
+                  return { ok: false, error: "Cloud Run v1 job.metadata missing" };
+                }
+                if (typeof md.name !== "string" || md.name !== expected.jobName) {
+                  return { ok: false, error: `Cloud Run v1 metadata.name mismatch: expected ${expected.jobName}, found ${String(md.name)}` };
+                }
+                const labels = md.labels && typeof md.labels === "object" && !Array.isArray(md.labels) ? md.labels : null;
+                if (labels && typeof labels["cloud.googleapis.com/location"] === "string" && labels["cloud.googleapis.com/location"] !== expected.region) {
+                  return { ok: false, error: `Cloud Run v1 metadata location mismatch: ${labels["cloud.googleapis.com/location"]}` };
+                }
+                if (typeof md.selfLink === "string" && md.selfLink.length > 0) {
+                  const locMatch = /\/locations\/([^/?]+)/.exec(md.selfLink);
+                  if (locMatch && locMatch[1] !== expected.region) {
+                    return { ok: false, error: `Cloud Run v1 metadata.selfLink region mismatch: ${locMatch[1]}` };
+                  }
+                  const jobMatch = /\/jobs\/([^/?]+)/.exec(md.selfLink);
+                  if (jobMatch && jobMatch[1] !== expected.jobName) {
+                    return { ok: false, error: `Cloud Run v1 metadata.selfLink job mismatch: ${jobMatch[1]}` };
+                  }
+                }
+                const spec = jobJson.spec;
+                const execTpl = spec && typeof spec === "object" && !Array.isArray(spec) ? spec.template : null;
+                const execSpec = execTpl && typeof execTpl === "object" && !Array.isArray(execTpl) ? execTpl.spec : null;
+                if (!execSpec || typeof execSpec !== "object" || Array.isArray(execSpec)) {
+                  return { ok: false, error: "Cloud Run v1 job.spec.template.spec missing" };
+                }
+                if (typeof execSpec.taskCount !== "number" || !Number.isInteger(execSpec.taskCount)) {
+                  return { ok: false, error: `Cloud Run v1 invalid spec.template.spec.taskCount=${String(execSpec.taskCount)}` };
+                }
+                const podTpl = execSpec.template;
+                const podSpec = podTpl && typeof podTpl === "object" && !Array.isArray(podTpl) ? podTpl.spec : null;
+                if (!podSpec || typeof podSpec !== "object" || Array.isArray(podSpec)) {
+                  return { ok: false, error: "Cloud Run v1 job.spec.template.spec.template.spec missing" };
+                }
+                if (podSpec.serviceAccount !== undefined || podSpec.timeout !== undefined) {
+                  return { ok: false, error: "Mixed v2 fields inside Cloud Run v1 pod spec" };
+                }
+                if (typeof podSpec.serviceAccountName !== "string") {
+                  return { ok: false, error: "Cloud Run v1 serviceAccountName missing" };
+                }
+                if (typeof podSpec.maxRetries !== "number" || !Number.isInteger(podSpec.maxRetries)) {
+                  return { ok: false, error: `Cloud Run v1 invalid maxRetries=${String(podSpec.maxRetries)}` };
+                }
+                if (typeof podSpec.timeoutSeconds !== "number" || !Number.isInteger(podSpec.timeoutSeconds)) {
+                  return { ok: false, error: `Cloud Run v1 invalid timeoutSeconds=${String(podSpec.timeoutSeconds)}` };
+                }
+                if (!Array.isArray(podSpec.containers) || podSpec.containers.length !== 1 || !podSpec.containers[0] || typeof podSpec.containers[0] !== "object" || Array.isArray(podSpec.containers[0])) {
+                  return { ok: false, error: "Cloud Run v1 containers missing, empty, or invalid" };
+                }
+                let readyIssue = null;
+                const conditions = jobJson.status && Array.isArray(jobJson.status.conditions) ? jobJson.status.conditions : [];
+                const readyCond = conditions.find((c) => c && c.type === "Ready");
+                if (readyCond && readyCond.status && readyCond.status !== "True") {
+                  readyIssue = `Cloud Run v1 Ready condition is not True (found: ${String(readyCond.status)})`;
+                }
+                return {
+                  ok: true,
+                  schemaVersion: "v1",
+                  jobIdentifier: md.name,
+                  taskCount: execSpec.taskCount,
+                  serviceAccount: podSpec.serviceAccountName.trim(),
+                  maxRetries: podSpec.maxRetries,
+                  timeoutSeconds: podSpec.timeoutSeconds,
+                  containers: podSpec.containers,
+                  readyIssue,
+                };
+              }
+
+              const expectedV2Name = `projects/${expected.projectId}/locations/${expected.region}/jobs/${expected.jobName}`;
+              if (typeof jobJson.name !== "string" || jobJson.name !== expectedV2Name) {
+                return { ok: false, error: `Cloud Run v2 name/project/region mismatch: expected ${expectedV2Name}, found ${String(jobJson.name)}` };
+              }
+              const tpl = jobJson.template;
+              if (!tpl || typeof tpl !== "object" || Array.isArray(tpl)) {
+                return { ok: false, error: "Cloud Run v2 job.template missing" };
+              }
+              if (tpl.spec !== undefined) {
+                return { ok: false, error: "Mixed v1 spec inside Cloud Run v2 job.template" };
+              }
+              if (typeof tpl.taskCount !== "number" || !Number.isInteger(tpl.taskCount)) {
+                return { ok: false, error: `Cloud Run v2 invalid template.taskCount=${String(tpl.taskCount)}` };
+              }
+              const podTpl = tpl.template;
+              if (!podTpl || typeof podTpl !== "object" || Array.isArray(podTpl)) {
+                return { ok: false, error: "Cloud Run v2 job.template.template missing" };
+              }
+              if (podTpl.spec !== undefined || podTpl.serviceAccountName !== undefined || podTpl.timeoutSeconds !== undefined) {
+                return { ok: false, error: "Mixed v1 fields inside Cloud Run v2 pod template" };
+              }
+              if (typeof podTpl.serviceAccount !== "string") {
+                return { ok: false, error: "Cloud Run v2 template.template.serviceAccount missing" };
+              }
+              if (typeof podTpl.maxRetries !== "number" || !Number.isInteger(podTpl.maxRetries)) {
+                return { ok: false, error: `Cloud Run v2 invalid maxRetries=${String(podTpl.maxRetries)}` };
+              }
+              if (typeof podTpl.timeout !== "string" || !/^\d+s$/.test(podTpl.timeout)) {
+                return { ok: false, error: `Cloud Run v2 invalid timeout=${String(podTpl.timeout)}` };
+              }
+              if (!Array.isArray(podTpl.containers) || podTpl.containers.length !== 1 || !podTpl.containers[0] || typeof podTpl.containers[0] !== "object" || Array.isArray(podTpl.containers[0])) {
+                return { ok: false, error: "Cloud Run v2 containers missing, empty, or invalid" };
+              }
+              let readyIssue = null;
+              const conditions = Array.isArray(jobJson.conditions) ? jobJson.conditions : [];
+              const readyCond = conditions.find((c) => c && c.type === "Ready");
+              if (readyCond && readyCond.state && readyCond.state !== "CONDITION_SUCCEEDED") {
+                readyIssue = `Cloud Run v2 Ready condition is not CONDITION_SUCCEEDED (found: ${String(readyCond.state)})`;
+              }
+              return {
+                ok: true,
+                schemaVersion: "v2",
+                jobIdentifier: jobJson.name,
+                taskCount: tpl.taskCount,
+                serviceAccount: podTpl.serviceAccount.trim(),
+                maxRetries: podTpl.maxRetries,
+                timeoutSeconds: Number(podTpl.timeout.slice(0, -1)),
+                containers: podTpl.containers,
+                readyIssue,
+              };
+            }
 
             const job = JSON.parse(fs.readFileSync("/tmp/av_job_post.json", "utf8"));
             const jobIam = JSON.parse(fs.readFileSync("/tmp/av_job_post_iam.json", "utf8"));
             const manageFn = JSON.parse(fs.readFileSync("/tmp/manage_library_post_av_deploy.json", "utf8"));
             const projIam = JSON.parse(fs.readFileSync("/tmp/project_iam_post_av_deploy.json", "utf8"));
 
-            if (typeof job.name !== "string" || !job.name.endsWith(`projects/${PROJECT_ID}/locations/${REGION}/jobs/${JOB_NAME}`)) {
-              console.error(`::error::Post-deploy job name/region mismatch: ${String(job.name)}`);
+            const normJob = normalizeCloudRunJob(job, {
+              projectId: PROJECT_ID,
+              region: REGION,
+              jobName: JOB_NAME,
+            });
+            if (!normJob.ok) {
+              console.error(`::error::Post-deploy Cloud Run Job schema/identity check failed: ${normJob.error}`);
+              process.exit(1);
+            }
+            if (normJob.readyIssue) {
+              console.error(`::error::Post-deploy Cloud Run Job readiness check failed: ${normJob.readyIssue}`);
               process.exit(1);
             }
 
-            const tpl = job.template || {};
-            const podTpl = tpl.template || {};
-            const c0 = (Array.isArray(podTpl.containers) && podTpl.containers[0]) || {};
+            const saValidSyntax =
+              /^[a-z0-9][a-z0-9-]{4,28}[a-z0-9]@promiseofplanet-bb325\.iam\.gserviceaccount\.com$/.test(normJob.serviceAccount) &&
+              !normJob.serviceAccount.endsWith("@appspot.gserviceaccount.com") &&
+              !normJob.serviceAccount.includes("-compute@developer.gserviceaccount.com") &&
+              !normJob.serviceAccount.startsWith("firebase-adminsdk-");
+            if (!saValidSyntax || normJob.serviceAccount !== WORKER_SA) {
+              console.error(`::error::Post-deploy serviceAccount mismatch: expected ${WORKER_SA}, found ${String(normJob.serviceAccount)}`);
+              process.exit(1);
+            }
+            if (normJob.taskCount !== 1) {
+              console.error(`::error::Post-deploy taskCount mismatch: expected 1, found ${String(normJob.taskCount)}`);
+              process.exit(1);
+            }
+            if (normJob.maxRetries !== 0) {
+              console.error(`::error::Post-deploy maxRetries mismatch: expected 0, found ${String(normJob.maxRetries)}`);
+              process.exit(1);
+            }
+            if (normJob.timeoutSeconds !== 600) {
+              console.error(`::error::Post-deploy timeoutSeconds mismatch: expected 600, found ${String(normJob.timeoutSeconds)}`);
+              process.exit(1);
+            }
 
-            if (podTpl.serviceAccount !== WORKER_SA) {
-              console.error(`::error::Post-deploy serviceAccount mismatch: expected ${WORKER_SA}, found ${String(podTpl.serviceAccount)}`);
+            const c0 = normJob.containers[0];
+            const deployedImage = typeof c0.image === "string" ? c0.image.trim() : "";
+            const expectedImagePrefix = `${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${JOB_NAME}`;
+            if (
+              !deployedImage.startsWith(`${expectedImagePrefix}@sha256:`) ||
+              !/^@sha256:[a-f0-9]+$/i.test(deployedImage.slice(expectedImagePrefix.length))
+            ) {
+              console.error(`::error::Post-deploy image repository/digest invalid: expected ${expectedImagePrefix}@sha256:..., found ${String(deployedImage)}`);
               process.exit(1);
             }
-            if (Number(tpl.taskCount) !== 1) {
-              console.error(`::error::Post-deploy taskCount mismatch: expected 1, found ${String(tpl.taskCount)}`);
-              process.exit(1);
-            }
-            if (Number(podTpl.maxRetries) !== 0) {
-              console.error(`::error::Post-deploy maxRetries mismatch: expected 0, found ${String(podTpl.maxRetries)}`);
-              process.exit(1);
-            }
-            if (podTpl.timeout !== "600s") {
-              console.error(`::error::Post-deploy timeout mismatch: expected 600s, found ${String(podTpl.timeout)}`);
-              process.exit(1);
-            }
-            if (c0.image !== EXPECTED_IMAGE) {
-              console.error(`::error::Post-deploy image digest mismatch: expected ${EXPECTED_IMAGE}, found ${String(c0.image)}`);
+            if (!EXPECTED_IMAGE || deployedImage !== EXPECTED_IMAGE) {
+              console.error(`::error::Post-deploy image digest mismatch: expected ${EXPECTED_IMAGE}, found ${String(deployedImage)}`);
               process.exit(1);
             }
 
@@ -997,7 +1380,7 @@ jobs:
 
             fs.appendFileSync(process.env.GITHUB_ENV, `AV_POST_DEPLOY_CALLER_IAM_STATUS=${callerOverridesStatus}\n`);
             fs.appendFileSync(process.env.GITHUB_ENV, `AV_POST_DEPLOY_MANAGE_FN_SA=${manageFnSa || ""}\n`);
-            console.log(`Post-deploy readback verified job=${job.name}, image=${c0.image}, serviceAccount=${podTpl.serviceAccount}, taskCount=1, maxRetries=0, timeout=600s, caller_runWithOverrides=${callerOverridesStatus} (${manageFnSa || "unknown"}).`);
+            console.log(`Post-deploy readback verified schema=${normJob.schemaVersion}, job=${normJob.jobIdentifier}, image=${deployedImage}, serviceAccount=${normJob.serviceAccount}, taskCount=1, maxRetries=0, timeout=600s, caller_runWithOverrides=${callerOverridesStatus} (${manageFnSa || "unknown"}).`);
           READBACK_EOF
 
       - name: Write Truthful Worker Workflow Summary
