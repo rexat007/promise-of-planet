@@ -2121,6 +2121,542 @@ async function runPublicLibraryTests() {
     );
   }
 
+  // TEST 24: Absent / Malformed Release Flags Default-OFF on Server & Client (Zero Accidental Activation)
+  {
+    const prevGate = process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR];
+    const prevUiGate = process.env.VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED;
+    let absentReadRejected = false;
+    let absentPublishRejected = false;
+    let malformedValuesRejected = true;
+
+    try {
+      delete process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR];
+      delete process.env.VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED;
+
+      try {
+        await executeManageLibraryDocumentsRequest(
+          {
+            auth: { uid: ownerFnUser.id },
+            data: {
+              action: 'getReviewedLibrarySourceReleaseStatus',
+              receiptId: validReceiptId,
+            },
+          },
+          adminRepo,
+          service,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+        );
+      } catch (err: any) {
+        if (
+          err?.code === 'failed-precondition' &&
+          String(err?.message).includes('REVIEWED_SOURCE_RELEASE_NOT_RELEASED')
+        ) {
+          absentReadRejected = true;
+        }
+      }
+
+      try {
+        await executeManageLibraryDocumentsRequest(
+          {
+            auth: { uid: ownerFnUser.id },
+            data: {
+              action: 'publishReviewedLibrarySourceReference',
+              receiptId: validReceiptId,
+              expectedHumanCaseRevision: 6,
+              expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+              expectedAlignmentRevision: 1,
+              expectedRightsDecisionRevision: 1,
+              confirmation: LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL,
+              input: validEditorialInput,
+            },
+          },
+          adminRepo,
+          service,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+        );
+      } catch (err: any) {
+        if (
+          err?.code === 'failed-precondition' &&
+          String(err?.message).includes('REVIEWED_SOURCE_RELEASE_NOT_RELEASED')
+        ) {
+          absentPublishRejected = true;
+        }
+      }
+
+      for (const badEnvVal of ['', 'false', 'TRUE', ' true ', '1', 'yes', 'on']) {
+        process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR] = badEnvVal;
+        let badServerRejected = false;
+        try {
+          await executeManageLibraryDocumentsRequest(
+            {
+              auth: { uid: ownerFnUser.id },
+              data: {
+                action: 'getReviewedLibrarySourceReleaseStatus',
+                receiptId: validReceiptId,
+              },
+            },
+            adminRepo,
+            service,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+          );
+        } catch (err: any) {
+          if (
+            err?.code === 'failed-precondition' &&
+            String(err?.message).includes('REVIEWED_SOURCE_RELEASE_NOT_RELEASED')
+          ) {
+            badServerRejected = true;
+          }
+        }
+        if (!badServerRejected) {
+          malformedValuesRejected = false;
+        }
+      }
+
+      // Injected non-boolean option must also fail closed
+      let nonBooleanOptionRejected = false;
+      try {
+        await executeManageLibraryDocumentsRequest(
+          {
+            auth: { uid: ownerFnUser.id },
+            data: {
+              action: 'getReviewedLibrarySourceReleaseStatus',
+              receiptId: validReceiptId,
+            },
+          },
+          adminRepo,
+          service,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildHandlerOptions({ reviewedSourceReleaseEnabled: 'true' as unknown as boolean })
+        );
+      } catch (err: any) {
+        if (
+          err?.code === 'failed-precondition' &&
+          String(err?.message).includes('REVIEWED_SOURCE_RELEASE_NOT_RELEASED')
+        ) {
+          nonBooleanOptionRejected = true;
+        }
+      }
+      if (!nonBooleanOptionRejected) {
+        malformedValuesRejected = false;
+      }
+
+      // Upstream server gate false must block even when reviewedSourceReleaseEnabled === true
+      let upstreamBlocked = false;
+      try {
+        await executeManageLibraryDocumentsRequest(
+          {
+            auth: { uid: ownerFnUser.id },
+            data: {
+              action: 'getReviewedLibrarySourceReleaseStatus',
+              receiptId: validReceiptId,
+            },
+          },
+          adminRepo,
+          service,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildHandlerOptions({
+            rightsDecisionEnabled: false,
+            reviewedSourceReleaseEnabled: true,
+          })
+        );
+      } catch (err: any) {
+        if (err?.code === 'failed-precondition') {
+          upstreamBlocked = true;
+        }
+      }
+      if (!upstreamBlocked) {
+        malformedValuesRejected = false;
+      }
+    } finally {
+      if (prevGate === undefined) {
+        delete process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR];
+      } else {
+        process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR] = prevGate;
+      }
+      if (prevUiGate === undefined) {
+        delete process.env.VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED;
+      } else {
+        process.env.VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED = prevUiGate;
+      }
+    }
+
+    const upstreamOnlyEnv = {
+      VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+      VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+      VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+      VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+    };
+    const absentClientFlagDisabled =
+      isLibraryQuarantineReviewedSourceReleaseEnabled() === false &&
+      isLibraryQuarantineReviewedSourceReleaseEnabled(upstreamOnlyEnv) === false;
+
+    const badClientValuesDisabled = [
+      '',
+      'false',
+      'TRUE',
+      ' true ',
+      '1',
+      'yes',
+      true,
+      null,
+      undefined,
+    ].every(
+      (badVal) =>
+        isLibraryQuarantineReviewedSourceReleaseEnabled({
+          ...upstreamOnlyEnv,
+          VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: badVal,
+        }) === false
+    );
+
+    const nonPlainEnvDisabled =
+      isLibraryQuarantineReviewedSourceReleaseEnabled([] as unknown as Record<string, unknown>) === false &&
+      isLibraryQuarantineReviewedSourceReleaseEnabled(
+        Object.create({
+          VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+          VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+          VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+          VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+          VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: 'true',
+        })
+      ) === false &&
+      isLibraryQuarantineReviewedSourceReleaseEnabled({
+        ...upstreamOnlyEnv,
+        VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'false',
+        VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: 'true',
+      }) === false;
+
+    assertCheck(
+      '24',
+      'Absent, malformed, or upstream-disabled flags fail closed (default-OFF) on both server and client',
+      absentReadRejected &&
+        absentPublishRejected &&
+        malformedValuesRejected &&
+        absentClientFlagDisabled &&
+        badClientValuesDisabled &&
+        nonPlainEnvDisabled
+    );
+  }
+
+  // TEST 25: Default Modal Panel (Without Explicit Release Flag) Renders Disabled / Hidden
+  {
+    const upstreamOnlyEnv = {
+      VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+      VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+      VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+      VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+    };
+    const dummySavedCase: SanitizedLibraryQuarantineHumanReviewCaseDto = {
+      schemaVersion: 1,
+      receiptId: validReceiptId,
+      sourceRevision: 2,
+      sourceUpdatedAt: '2026-11-13T13:26:28.891Z',
+      draftSourceRevision: 2,
+      revision: 6,
+      status: 'METADATA_RECORDED',
+      titleAr: 'عنوان',
+      titleEn: 'Title',
+      issuingOrganization: 'HCENR',
+      summaryAr: 'ملخص',
+      summaryEn: 'Summary',
+      sourceEvidenceNotes: 'Gazette',
+      rightsEvidenceNotes: 'Rights',
+      editorialNotes: 'Notes',
+      createdAt: '2026-11-13T13:26:28.891Z',
+      updatedAt: '2026-11-14T14:44:40.569Z',
+    };
+
+    const releaseService = new LibraryReviewedSourceReleaseService({
+      trustedPrincipalProvider: {
+        resolveAuthenticatedPrincipal: () => ({ uid: ownerFnUser.id }),
+      },
+      adminRepository: adminRepo,
+      db,
+      clock: () => testClock,
+    });
+
+    let getStatusCalled = false;
+    const defaultController =
+      new LibraryQuarantineReviewedSourceReleasePanelController(ownerUiUser, {
+        getStatusFn: async (rId) => {
+          getStatusCalled = true;
+          return releaseService.getReviewedLibrarySourceReleaseStatus({ receiptId: rId });
+        },
+      });
+    await defaultController.openForSavedCase(dummySavedCase);
+
+    const missingFlagHtml = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineReviewedSourceReleaseSection, {
+        controller: defaultController,
+        currentUser: ownerUiUser,
+        savedReviewCase: dummySavedCase,
+        hasUnsavedCaseEdits: false,
+        isAr: false,
+        envOverride: upstreamOnlyEnv,
+      })
+    );
+
+    const explicitFalseHtml = renderToStaticMarkup(
+      React.createElement(LibraryQuarantineReviewedSourceReleaseSection, {
+        controller: defaultController,
+        currentUser: ownerUiUser,
+        savedReviewCase: dummySavedCase,
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+        envOverride: {
+          ...upstreamOnlyEnv,
+          VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: 'false',
+        },
+      })
+    );
+
+    assertCheck(
+      '25',
+      'Default controller & modal section stay hidden and make zero backend calls when release flag is absent or false',
+      getStatusCalled === false &&
+        defaultController.getSnapshot().enabled === false &&
+        missingFlagHtml === '' &&
+        explicitFalseHtml === ''
+    );
+  }
+
+  // TEST 26: Explicit 'true' Activation Enables Gate While Preserving RBAC, Confirmation, Incident Hold & Binary Exclusion
+  {
+    const prevGate = process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR];
+    let explicitEnvActivatedStatus = false;
+    let fourPermRbacStillEnforced = false;
+    let aiStillDenied = false;
+    let confirmationStillRequired = false;
+    let incidentStillRestricted = false;
+    let binaryUrlStillRejected = false;
+
+    try {
+      process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR] = 'true';
+
+      const statusRes = (await executeManageLibraryDocumentsRequest(
+        {
+          auth: { uid: ownerFnUser.id },
+          data: {
+            action: 'getReviewedLibrarySourceReleaseStatus',
+            receiptId: validReceiptId,
+          },
+        },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+      )) as GetReviewedLibrarySourceReleaseStatusResponseDto;
+      explicitEnvActivatedStatus = statusRes.ok === true && statusRes.isPublished === true;
+
+      // Without AdminPermission.Publish (RightsReviewer lacks Approve & Publish; Curator lacks Publish)
+      try {
+        await executeManageLibraryDocumentsRequest(
+          {
+            auth: { uid: rightsFnUser.id },
+            data: {
+              action: 'publishReviewedLibrarySourceReference',
+              receiptId: validReceiptId,
+              expectedHumanCaseRevision: 6,
+              expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+              expectedAlignmentRevision: 1,
+              expectedRightsDecisionRevision: 1,
+              confirmation: LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL,
+              input: validEditorialInput,
+            },
+          },
+          adminRepo,
+          service,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+        );
+      } catch (err: any) {
+        if (err?.code === 'permission-denied') {
+          fourPermRbacStillEnforced = true;
+        }
+      }
+
+      try {
+        await executeManageLibraryDocumentsRequest(
+          {
+            auth: { uid: aiFnUser.id },
+            data: {
+              action: 'getReviewedLibrarySourceReleaseStatus',
+              receiptId: validReceiptId,
+            },
+          },
+          adminRepo,
+          service,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+        );
+      } catch (err: any) {
+        if (err?.code === 'permission-denied') {
+          aiStillDenied = true;
+        }
+      }
+
+      try {
+        await executeManageLibraryDocumentsRequest(
+          {
+            auth: { uid: ownerFnUser.id },
+            data: {
+              action: 'publishReviewedLibrarySourceReference',
+              receiptId: validReceiptId,
+              expectedHumanCaseRevision: 6,
+              expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+              expectedAlignmentRevision: 1,
+              expectedRightsDecisionRevision: 1,
+              confirmation: 'WRONG_CONFIRMATION',
+              input: validEditorialInput,
+            },
+          },
+          adminRepo,
+          service,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+        );
+      } catch (err: any) {
+        if (
+          err?.code === 'invalid-argument' &&
+          String(err?.message).includes('CONFIRMATION_REQUIRED')
+        ) {
+          confirmationStillRequired = true;
+        }
+      }
+
+      const incidentStatusRes = (await executeManageLibraryDocumentsRequest(
+        {
+          auth: { uid: ownerFnUser.id },
+          data: {
+            action: 'getReviewedLibrarySourceReleaseStatus',
+            receiptId: '1183ac250d0404e921d2aeadbec1b76c',
+          },
+        },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+      )) as GetReviewedLibrarySourceReleaseStatusResponseDto;
+
+      const incidentPublishRes = (await executeManageLibraryDocumentsRequest(
+        {
+          auth: { uid: ownerFnUser.id },
+          data: {
+            action: 'publishReviewedLibrarySourceReference',
+            receiptId: '1183ac250d0404e921d2aeadbec1b76c',
+            expectedHumanCaseRevision: 6,
+            expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+            expectedAlignmentRevision: 1,
+            expectedRightsDecisionRevision: 1,
+            confirmation: LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL,
+            input: validEditorialInput,
+          },
+        },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+      )) as PublishReviewedLibrarySourceReferenceResponseDto;
+
+      incidentStillRestricted =
+        incidentStatusRes.ok === true &&
+        incidentStatusRes.eligibleForPublish === false &&
+        incidentStatusRes.currentRightsDecision === 'RESTRICTED' &&
+        incidentStatusRes.blockCode === 'RIGHTS_NOT_AUTHORIZED_FOR_PUBLIC_LINK' &&
+        incidentPublishRes.ok === false &&
+        incidentPublishRes.errorCode === 'RIGHTS_NOT_AUTHORIZED_FOR_PUBLIC_LINK';
+
+      const binaryUrlRes = (await executeManageLibraryDocumentsRequest(
+        {
+          auth: { uid: ownerFnUser.id },
+          data: {
+            action: 'publishReviewedLibrarySourceReference',
+            receiptId: validReceiptId,
+            expectedHumanCaseRevision: 6,
+            expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+            expectedAlignmentRevision: 1,
+            expectedRightsDecisionRevision: 1,
+            confirmation: LIBRARY_REVIEWED_SOURCE_RELEASE_CONFIRMATION_LITERAL,
+            input: {
+              ...validEditorialInput,
+              verifiedSourceUrl:
+                'https://firebasestorage.googleapis.com/v0/b/promiseofplanet-bb325/o/library%2Fquarantine%2Fraw.pdf',
+            },
+          },
+        },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        buildHandlerOptions({ reviewedSourceReleaseEnabled: undefined })
+      )) as PublishReviewedLibrarySourceReferenceResponseDto;
+      binaryUrlStillRejected = binaryUrlRes.ok === false;
+    } finally {
+      if (prevGate === undefined) {
+        delete process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR];
+      } else {
+        process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR] = prevGate;
+      }
+    }
+
+    const clientAllTrue = isLibraryQuarantineReviewedSourceReleaseEnabled({
+      VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+      VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+      VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+      VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+      VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: 'true',
+    });
+
+    assertCheck(
+      '26',
+      'Explicit true activates gate while preserving 4-perm RBAC, confirmation, RESTRICTED incident hold, and quarantine binary exclusion',
+      explicitEnvActivatedStatus &&
+        fourPermRbacStillEnforced &&
+        aiStillDenied &&
+        confirmationStillRequired &&
+        incidentStillRestricted &&
+        binaryUrlStillRejected &&
+        clientAllTrue === true
+    );
+  }
+
   console.log('========================================================');
   console.log(`TEST SUMMARY: PASSED=${passed}, FAILED=${failed}`);
   console.log('========================================================');

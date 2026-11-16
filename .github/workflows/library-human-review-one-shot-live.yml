@@ -3,7 +3,7 @@ name: Library Human Review One-Shot Live Release (Functions + Hosting)
 # GOVERNANCE & ARCHITECTURAL BOUNDARY NOTICE:
 # 1. Trigger: Manual 'workflow_dispatch' ONLY on 'refs/heads/main' with explicit confirmation
 #    input 'RELEASE_LIBRARY_HUMAN_REVIEW_LIVE'. Never triggers on push, pull_request, or schedule.
-# 2. Scope: Intends to release the 7 human quarantine-library workflow stages together in a single run:
+# 2. Scope: Intends to release the 8 human quarantine-library workflow stages together in a single run:
 #    - Review Workbench
 #    - Human Review Case
 #    - Catalog Handoff
@@ -11,8 +11,9 @@ name: Library Human Review One-Shot Live Release (Functions + Hosting)
 #    - Catalog Case Alignment
 #    - Binary Safety Case
 #    - RECORD-ONLY Isolated Inspection Request
+#    - Reviewed Source Release (External Publisher Link Only)
 #    while keeping Isolated ClamAV Execution strictly disabled (VITE_LIBRARY_AV_EXECUTION_ENABLED=false,
-#    POP_LIBRARY_AV_EXECUTION_ENABLED=false) and preserving existing quarantine upload and public 'qcat-' exclusion.
+#    POP_LIBRARY_AV_EXECUTION_ENABLED=false) and preserving existing quarantine upload, public 'qcat-' exclusion, and zero binary publication.
 # 3. Single Deployment Invocation: Executes one 'firebase deploy --project promiseofplanet-bb325
 #    --only "functions:manageLibraryDocuments,functions:getPublicLibrary,hosting" --non-interactive'
 #    command ONLY after all offline, test, build, and GCP read-only preflight checks pass.
@@ -290,6 +291,7 @@ jobs:
               ["LIBRARY_BINARY_SAFETY_CASE_RELEASE_ENV_VAR", "POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED"],
               ["LIBRARY_ISOLATED_INSPECTION_REQUEST_RELEASE_ENV_VAR", "POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED"],
               ["LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR", "POP_LIBRARY_AV_EXECUTION_ENABLED"],
+              ["LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR", "POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED"],
             ];
 
             for (const [exportName, expectedEnvName] of expectedGates) {
@@ -308,7 +310,7 @@ jobs:
               process.exit(1);
             }
 
-            console.log("Verified compiled manageLibraryDocuments and getPublicLibrary exports, all 8 server release gate constants, and public qcat- exclusion guard.");
+            console.log("Verified compiled manageLibraryDocuments and getPublicLibrary exports, all 9 server release gate constants, and public qcat- exclusion guard.");
           '
 
       - name: Run Public Library & All 15 Quarantine / Human Review Backend & Client Test Suites (Pinned Local tsx)
@@ -352,6 +354,7 @@ jobs:
           VITE_LIBRARY_CASE_ALIGNMENT_ENABLED: "true"
           VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED: "true"
           VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: "true"
+          VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: "true"
           VITE_LIBRARY_AV_EXECUTION_ENABLED: "false"
         run: |
           node -e '
@@ -364,6 +367,7 @@ jobs:
               "VITE_LIBRARY_CASE_ALIGNMENT_ENABLED",
               "VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED",
               "VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED",
+              "VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED",
             ];
             for (const key of mustBeTrue) {
               if (process.env[key] !== "true") {
@@ -379,7 +383,7 @@ jobs:
               console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL mismatch.");
               process.exit(1);
             }
-            console.log("Verified explicit Vite release flags (7 human review stages=true, AV execution=false, quarantine upload preserved).");
+            console.log("Verified explicit Vite release flags (8 human review/release stages=true, AV execution=false, quarantine upload preserved).");
           '
           npm run build
           if [ ! -f "dist/index.html" ]; then
@@ -476,6 +480,7 @@ jobs:
               "POP_LIBRARY_CASE_ALIGNMENT_ENABLED",
               "POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED",
               "POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED",
+              "POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED",
               "POP_LIBRARY_AV_EXECUTION_ENABLED",
             ]);
 
@@ -650,6 +655,7 @@ jobs:
           POP_LIBRARY_CASE_ALIGNMENT_ENABLED=true
           POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true
           POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true
+          POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED=true
           POP_LIBRARY_AV_EXECUTION_ENABLED=false
           EOF
 
@@ -664,6 +670,7 @@ jobs:
               "POP_LIBRARY_CASE_ALIGNMENT_ENABLED=true",
               "POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true",
               "POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true",
+              "POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED=true",
               "POP_LIBRARY_AV_EXECUTION_ENABLED=false",
             ];
             if (raw.length !== expected.length || !expected.every((line, idx) => raw[idx] === line)) {
@@ -674,7 +681,7 @@ jobs:
               console.error("::error::Dotenv file must never exist inside dist/.");
               process.exit(1);
             }
-            console.log("Created and verified transient functions/.env.promiseofplanet-bb325 (7 human gates=true, AV execution=false).");
+            console.log("Created and verified transient functions/.env.promiseofplanet-bb325 (8 human/release gates=true, AV execution=false).");
           '
 
       - name: Install Firebase CLI
@@ -733,6 +740,7 @@ jobs:
               POP_LIBRARY_CASE_ALIGNMENT_ENABLED: "true",
               POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED: "true",
               POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: "true",
+              POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: "true",
               POP_LIBRARY_AV_EXECUTION_ENABLED: "false",
             };
 
@@ -751,7 +759,7 @@ jobs:
               process.exit(1);
             }
 
-            console.log("Post-deploy readback verified manageLibraryDocuments (GEN_2, ACTIVE, us-central1, all 8 POP_LIBRARY_* flags, and GEMINI_API_KEY secret binding).");
+            console.log("Post-deploy readback verified manageLibraryDocuments (GEN_2, ACTIVE, us-central1, all 9 POP_LIBRARY_* flags, and GEMINI_API_KEY secret binding).");
           '
 
       - name: Post-Deploy Readback of getPublicLibrary (Strict GEN_2, Region, State & AV Disabled Check)
@@ -844,6 +852,7 @@ jobs:
             echo "  - \`VITE_LIBRARY_CASE_ALIGNMENT_ENABLED=true\` / \`POP_LIBRARY_CASE_ALIGNMENT_ENABLED=true\`"
             echo "  - \`VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true\` / \`POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true\`"
             echo "  - \`VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true\` / \`POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true\`"
+            echo "  - \`VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED=true\` / \`POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED=true\`"
             echo "- **Enforced Safety Locks:**"
             echo "  - \`VITE_LIBRARY_AV_EXECUTION_ENABLED=false\` / \`POP_LIBRARY_AV_EXECUTION_ENABLED=false\`"
             echo "  - \`VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED=true\` (preserved existing endpoint)"

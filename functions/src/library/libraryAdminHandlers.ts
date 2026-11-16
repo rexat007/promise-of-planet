@@ -1426,12 +1426,12 @@ function assertReviewedSourceReleaseGatesEnabled(
 ): void {
   assertRightsDecisionReleaseGatesEnabled(options);
 
-  const explicitlyDisabled =
-    options?.reviewedSourceReleaseEnabled === false ||
-    (options?.reviewedSourceReleaseEnabled === undefined &&
-      process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR] === 'false');
+  const isReviewedSourceReleaseEnabled =
+    options?.reviewedSourceReleaseEnabled !== undefined
+      ? options.reviewedSourceReleaseEnabled === true
+      : process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR] === 'true';
 
-  if (explicitlyDisabled) {
+  if (!isReviewedSourceReleaseEnabled) {
     throw new HttpsError(
       'failed-precondition',
       'REVIEWED_SOURCE_RELEASE_NOT_RELEASED: Library reviewed source release feature is disabled on the server.'

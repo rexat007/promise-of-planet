@@ -524,24 +524,36 @@ export function isLibraryQuarantineReviewedSourceReleaseEnabled(
   ) {
     return false;
   }
-  if (envOverride) {
-    return envOverride[LIBRARY_REVIEWED_SOURCE_RELEASE_UI_ENV_VAR] !== 'false';
+  if (envOverride !== undefined) {
+    if (!isPlainRecord(envOverride)) {
+      return false;
+    }
+    return envOverride[LIBRARY_REVIEWED_SOURCE_RELEASE_UI_ENV_VAR] === 'true';
   }
-  const viteEnv = (import.meta as { env?: Record<string, unknown> }).env;
-  if (
-    viteEnv &&
-    viteEnv[LIBRARY_REVIEWED_SOURCE_RELEASE_UI_ENV_VAR] === 'false'
-  ) {
-    return false;
+  const viteEnv = (
+    import.meta as unknown as { readonly env?: Record<string, unknown> }
+  )?.env;
+  if (viteEnv && typeof viteEnv === 'object') {
+    if (viteEnv[LIBRARY_REVIEWED_SOURCE_RELEASE_UI_ENV_VAR] === 'true') {
+      return true;
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(
+        viteEnv,
+        LIBRARY_REVIEWED_SOURCE_RELEASE_UI_ENV_VAR
+      )
+    ) {
+      return false;
+    }
   }
   if (
     typeof process !== 'undefined' &&
     process.env &&
-    process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_UI_ENV_VAR] === 'false'
+    process.env[LIBRARY_REVIEWED_SOURCE_RELEASE_UI_ENV_VAR] === 'true'
   ) {
-    return false;
+    return true;
   }
-  return true;
+  return false;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
