@@ -1031,13 +1031,57 @@ jobs:
               }
 
               // 6d. Verify image digest & 7-day fresh signature build provenance in Artifact Registry
-              const imgDesc = JSON.parse(runGcloudOrFail(["artifacts", "docker", "images", "describe", jobImage, "--format=json"], "artifacts docker image describe"));
-              const imgSummary = imgDesc.image_summary || imgDesc;
-              const uploadIso = imgSummary.uploadTime || imgSummary.createTime || imgSummary.buildTime || (imgDesc.docker_image && (imgDesc.docker_image.uploadTime || imgDesc.docker_image.buildTime));
-              const uploadMs = typeof uploadIso === "string" ? Date.parse(uploadIso) : NaN;
+              const repoUri = `${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}`;
+              const rawListJson = runGcloudOrFail(["artifacts", "docker", "images", "list", repoUri, "--include-tags", "--format=json"], "artifacts docker images list");
+              let imgList;
+              try {
+                imgList = JSON.parse(rawListJson);
+              } catch {
+                console.error(`::error::STOP BEFORE DEPLOY: Invalid JSON returned by gcloud artifacts docker images list for ${repoUri}.`);
+                process.exit(1);
+              }
+              if (!Array.isArray(imgList)) {
+                console.error(`::error::STOP BEFORE DEPLOY: Unexpected non-array JSON returned by gcloud artifacts docker images list for ${repoUri}.`);
+                process.exit(1);
+              }
+
+              const expectedDigest = jobImage.slice(expectedImagePrefix.length + 1).toLowerCase();
+              const matchedImages = imgList.filter((item) => {
+                if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+                const pkg = typeof item.package === "string" ? item.package.trim() : "";
+                const ver = typeof item.version === "string" ? item.version.trim().toLowerCase() : "";
+                return pkg === expectedImagePrefix && ver === expectedDigest && `${pkg}@${ver}` === jobImage.toLowerCase();
+              });
+              if (matchedImages.length === 0) {
+                console.error(`::error::STOP BEFORE DEPLOY: Worker container image ${jobImage} was not found in Artifact Registry repository ${repoUri}.`);
+                process.exit(1);
+              }
+              if (matchedImages.length > 1) {
+                const uniqueTimes = new Set(
+                  matchedImages.map((m) => (typeof m.createTime === "string" ? m.createTime.trim() : String(m.createTime)))
+                );
+                console.error(
+                  `::error::STOP BEFORE DEPLOY: Ambiguous Artifact Registry matches (${matchedImages.length}, distinct createTime=${uniqueTimes.size}) for exact image digest ${jobImage}.`
+                );
+                process.exit(1);
+              }
+
+              const matchedImage = matchedImages[0];
+              const createTimeIso = typeof matchedImage.createTime === "string" ? matchedImage.createTime.trim() : "";
+              const ISO_8601_WITH_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+              const createdMs = ISO_8601_WITH_TZ_RE.test(createTimeIso) ? Date.parse(createTimeIso) : NaN;
+              const nowMs = Date.now();
               const MAX_SIG_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-              if (!Number.isFinite(uploadMs) || Date.now() - uploadMs > MAX_SIG_AGE_MS) {
-                console.error(`::error::STOP BEFORE DEPLOY: Worker container image ${jobImage} timestamp (${String(uploadIso)}) is missing or older than the 7-day ClamAV signature TTL.`);
+              if (!Number.isFinite(createdMs)) {
+                console.error(`::error::STOP BEFORE DEPLOY: Worker container image ${jobImage} createTime (${String(matchedImage.createTime)}) is missing or invalid.`);
+                process.exit(1);
+              }
+              if (createdMs > nowMs) {
+                console.error(`::error::STOP BEFORE DEPLOY: Worker container image ${jobImage} createTime (${createTimeIso}) is in the future (now=${new Date(nowMs).toISOString()}).`);
+                process.exit(1);
+              }
+              if (nowMs - createdMs > MAX_SIG_AGE_MS) {
+                console.error(`::error::STOP BEFORE DEPLOY: Worker container image ${jobImage} createTime (${createTimeIso}) is older than the 7-day ClamAV signature TTL.`);
                 process.exit(1);
               }
 
@@ -1219,7 +1263,7 @@ jobs:
               fs.appendFileSync(process.env.GITHUB_ENV, `VERIFIED_AV_WORKER_IMAGE=${jobImage}\n`);
               fs.appendFileSync(process.env.GITHUB_ENV, `VERIFIED_AV_WORKER_SA=${workerSa}\n`);
               fs.appendFileSync(process.env.GITHUB_ENV, `VERIFIED_MANAGE_FN_SA=${manageFnSa}\n`);
-              console.log(`Verified live Cloud Run AV Worker prerequisites: schema=${normJob.schemaVersion}, job=${normJob.jobIdentifier}, image=${jobImage} (uploaded=${uploadIso}), workerSA=${workerSa}, manageFnSA=${manageFnSa} (run.jobs.runWithOverrides verified).`);
+              console.log(`Verified live Cloud Run AV Worker prerequisites: schema=${normJob.schemaVersion}, job=${normJob.jobIdentifier}, image=${jobImage} (createTime=${createTimeIso}), workerSA=${workerSa}, manageFnSA=${manageFnSa} (run.jobs.runWithOverrides verified).`);
           PREFLIGHT_AV_ENABLE_EOF
           fi
 
