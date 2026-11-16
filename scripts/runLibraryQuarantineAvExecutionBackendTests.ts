@@ -1401,7 +1401,7 @@ const READ_ONLY_MANIFEST_EXPECTED_BLOBS: ReadonlyArray<
   ],
   [
     '.github/workflows/library-quarantine-av-job.yml',
-    '5758aea297376159ec71930916024cf338a9ae6f',
+    'd49ae7d47ff0596f5fdfbd7296b70e2086decb8d',
   ],
   [
     'functions/package.json',

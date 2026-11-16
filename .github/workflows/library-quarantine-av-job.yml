@@ -1,28 +1,29 @@
-name: Library Quarantine Isolated ClamAV Job (Manual Verify / Controlled Deploy)
+name: Library Quarantine Isolated ClamAV Job (Manual Verify / Preflight / Controlled Deploy)
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Execution mode: verify_only (default) or deploy"
+        description: "Execution mode: verify_only (default), preflight_only (read-only GCP check), or deploy"
         required: true
         default: "verify_only"
         type: choice
         options:
           - verify_only
+          - preflight_only
           - deploy
       gcp_region:
-        description: "Cloud Run Job region (e.g. us-central1)"
+        description: "Cloud Run Job region (must be us-central1)"
         required: true
         default: "us-central1"
         type: string
       artifact_registry_repo:
-        description: "Artifact Registry Docker repository name"
+        description: "Artifact Registry Docker repository name (must be pop-quarantine-workers)"
         required: true
         default: "pop-quarantine-workers"
         type: string
       cloud_run_job_name:
-        description: "Isolated ClamAV Cloud Run Job name"
+        description: "Isolated ClamAV Cloud Run Job name (must be pop-library-quarantine-av-worker)"
         required: true
         default: "pop-library-quarantine-av-worker"
         type: string
@@ -47,15 +48,120 @@ concurrency:
 
 jobs:
   verify_and_optionally_deploy_av_worker:
-    name: Verify or Deploy Isolated Quarantine ClamAV Cloud Run Job
+    name: Verify, Preflight, or Deploy Isolated Quarantine ClamAV Cloud Run Job
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
       FIREBASE_PROJECT_ID: promiseofplanet-bb325
+      EXPECTED_GCP_REGION: us-central1
+      EXPECTED_ARTIFACT_REGISTRY_REPO: pop-quarantine-workers
+      EXPECTED_CLOUD_RUN_JOB_NAME: pop-library-quarantine-av-worker
       QUARANTINE_BUCKET_NAME: promiseofplanet-bb325-library-quarantine
       FORBIDDEN_DEFAULT_BUCKET: promiseofplanet-bb325.firebasestorage.app
       POP_LIBRARY_AV_EXECUTION_ENABLED: "false"
     steps:
+      - name: Validate Inputs, Execution Mode, and Non-Empty Credential Presence
+        id: validate_inputs_and_mode
+        env:
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_REGION: ${{ inputs.gcp_region }}
+          INPUT_AR_REPO: ${{ inputs.artifact_registry_repo }}
+          INPUT_JOB_NAME: ${{ inputs.cloud_run_job_name }}
+          INPUT_WORKER_SA: ${{ inputs.worker_service_account }}
+          INPUT_CONFIRM_DEPLOY: ${{ inputs.confirm_deploy }}
+          CREDENTIAL_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+        run: |
+          set -euo pipefail
+          node << 'EOF'
+            const fs = require("node:fs");
+            const mode = process.env.INPUT_MODE || "";
+            if (!["verify_only", "preflight_only", "deploy"].includes(mode)) {
+              console.error(`::error::Invalid mode: ${mode}`);
+              process.exit(1);
+            }
+
+            if (mode === "verify_only") {
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, "has_gcp_credentials=false\n");
+              fs.appendFileSync(process.env.GITHUB_ENV, "AV_WORKFLOW_MODE=verify_only\n");
+              console.log("Mode verify_only validated (zero GCP auth, zero GCP mutations).");
+              process.exit(0);
+            }
+
+            const expectedRegion = process.env.EXPECTED_GCP_REGION;
+            const expectedRepo = process.env.EXPECTED_ARTIFACT_REGISTRY_REPO;
+            const expectedJob = process.env.EXPECTED_CLOUD_RUN_JOB_NAME;
+
+            if ((process.env.INPUT_REGION || "").trim() !== expectedRegion) {
+              console.error(`::error::gcp_region must strictly equal "${expectedRegion}".`);
+              process.exit(1);
+            }
+            if ((process.env.INPUT_AR_REPO || "").trim() !== expectedRepo) {
+              console.error(`::error::artifact_registry_repo must strictly equal "${expectedRepo}".`);
+              process.exit(1);
+            }
+            if ((process.env.INPUT_JOB_NAME || "").trim() !== expectedJob) {
+              console.error(`::error::cloud_run_job_name must strictly equal "${expectedJob}".`);
+              process.exit(1);
+            }
+
+            const workerSa = (process.env.INPUT_WORKER_SA || "").trim();
+            const isValidDedicatedWorkerSa = (sa) => {
+              if (!/^[a-z0-9][a-z0-9-]{4,28}[a-z0-9]@promiseofplanet-bb325\.iam\.gserviceaccount\.com$/.test(sa)) {
+                return false;
+              }
+              if (sa.endsWith("@appspot.gserviceaccount.com")) return false;
+              if (sa.includes("-compute@developer.gserviceaccount.com")) return false;
+              if (sa.startsWith("firebase-adminsdk-")) return false;
+              return true;
+            };
+
+            if (mode === "deploy") {
+              if ((process.env.INPUT_CONFIRM_DEPLOY || "") !== "DEPLOY_ISOLATED_QUARANTINE_AV_JOB") {
+                console.error("::error::confirm_deploy must equal DEPLOY_ISOLATED_QUARANTINE_AV_JOB when mode=deploy.");
+                process.exit(1);
+              }
+              if (!isValidDedicatedWorkerSa(workerSa)) {
+                console.error("::error::worker_service_account must be a dedicated non-default service account in promiseofplanet-bb325.iam.gserviceaccount.com when mode=deploy.");
+                process.exit(1);
+              }
+            }
+
+            let hasCreds = false;
+            let credReason = "missing";
+            const rawCred = process.env.CREDENTIAL_JSON || "";
+            if (rawCred.trim().length > 0) {
+              try {
+                const parsed = JSON.parse(rawCred);
+                if (
+                  parsed &&
+                  parsed.type === "service_account" &&
+                  parsed.project_id === "promiseofplanet-bb325" &&
+                  typeof parsed.client_email === "string" &&
+                  parsed.client_email.endsWith(".iam.gserviceaccount.com") &&
+                  typeof parsed.private_key === "string" &&
+                  parsed.private_key.includes("BEGIN PRIVATE KEY")
+                ) {
+                  hasCreds = true;
+                  credReason = "valid_service_account_json";
+                } else {
+                  credReason = "invalid_service_account_json_fields";
+                }
+              } catch {
+                credReason = "unparseable_json";
+              }
+            }
+
+            if (mode === "deploy" && !hasCreds) {
+              console.error(`::error::FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 secret is required and valid for mode=deploy (${credReason}).`);
+              process.exit(1);
+            }
+
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_gcp_credentials=${hasCreds ? "true" : "false"}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `cred_status=${credReason}\n`);
+            fs.appendFileSync(process.env.GITHUB_ENV, `AV_WORKFLOW_MODE=${mode}\n`);
+            console.log(`Validated inputs for mode=${mode} (has_gcp_credentials=${hasCreds}, cred_status=${credReason}).`);
+          EOF
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -65,12 +171,558 @@ jobs:
           node-version: "22"
           cache: "npm"
 
+      - name: Authenticate to Google Cloud
+        if: ${{ (inputs.mode == 'preflight_only' || inputs.mode == 'deploy') && steps.validate_inputs_and_mode.outputs.has_gcp_credentials == 'true' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+
+      - name: Setup gcloud SDK
+        if: ${{ (inputs.mode == 'preflight_only' || inputs.mode == 'deploy') && steps.validate_inputs_and_mode.outputs.has_gcp_credentials == 'true' }}
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Read-Only GCP Readiness Preflight (Fail-Closed Matrix, Zero Mutations)
+        id: cloud_read_only_preflight
+        if: ${{ inputs.mode == 'preflight_only' || inputs.mode == 'deploy' }}
+        env:
+          HAS_GCP_CREDS: ${{ steps.validate_inputs_and_mode.outputs.has_gcp_credentials }}
+          CRED_STATUS: ${{ steps.validate_inputs_and_mode.outputs.cred_status }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_WORKER_SA: ${{ inputs.worker_service_account }}
+        run: |
+          set -euo pipefail
+          node << 'PREFLIGHT_EOF'
+            const fs = require("node:fs");
+            const { execFileSync } = require("node:child_process");
+
+            const PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
+            const REGION = process.env.EXPECTED_GCP_REGION;
+            const AR_REPO = process.env.EXPECTED_ARTIFACT_REGISTRY_REPO;
+            const JOB_NAME = process.env.EXPECTED_CLOUD_RUN_JOB_NAME;
+            const BUCKET_NAME = process.env.QUARANTINE_BUCKET_NAME;
+            const FORBIDDEN_BUCKET = process.env.FORBIDDEN_DEFAULT_BUCKET;
+            const WORKER_SA = (process.env.INPUT_WORKER_SA || "").trim();
+            const HAS_CREDS = process.env.HAS_GCP_CREDS === "true";
+
+            const matrix = [];
+            function addRow(check, status, evidence) {
+              matrix.push({ check, status, evidence: String(evidence).replace(/\r?\n/g, " ").trim() });
+            }
+
+            function writeOutputsAndMaybeFail(allowDeploy, overallState) {
+              const md = [
+                "#### Read-Only GCP Readiness Matrix",
+                `| Check | Status | Grounded Evidence |`,
+                `| --- | --- | --- |`,
+                ...matrix.map((r) => `| ${r.check} | \`${r.status}\` | ${r.evidence.replace(/\|/g, "\\|")} |`),
+              ].join("\n");
+              fs.writeFileSync("/tmp/av_preflight_summary.md", md, "utf8");
+              fs.writeFileSync("/tmp/av_preflight_result.json", JSON.stringify({ allowDeploy, overallState, matrix }, null, 2), "utf8");
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `allow_deploy=${allowDeploy ? "true" : "false"}\n`);
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `overall_state=${overallState}\n`);
+              fs.appendFileSync(process.env.GITHUB_ENV, `AV_PREFLIGHT_ALLOW_DEPLOY=${allowDeploy ? "true" : "false"}\n`);
+              fs.appendFileSync(process.env.GITHUB_ENV, `AV_PREFLIGHT_OVERALL_STATE=${overallState}\n`);
+              console.log(md);
+              if (!allowDeploy) {
+                console.error(`::error::Read-only GCP preflight halted (${overallState}). Zero GCP mutations performed.`);
+                process.exit(1);
+              }
+            }
+
+            if (!HAS_CREDS) {
+              addRow("GCP Service Account Credential", "UNKNOWN", `FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 status=${process.env.CRED_STATUS}`);
+              writeOutputsAndMaybeFail(false, "UNVERIFIED_MISSING_GCP_CREDENTIALS");
+            }
+
+            function runGcloud(args) {
+              try {
+                const stdout = execFileSync("gcloud", args, {
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "pipe"],
+                });
+                return { ok: true, stdout };
+              } catch (err) {
+                const stderr = err && err.stderr ? String(err.stderr) : String(err && err.message ? err.message : err);
+                return { ok: false, stderr };
+              }
+            }
+
+            function parseJsonSafe(raw) {
+              try {
+                return JSON.parse(raw);
+              } catch {
+                return null;
+              }
+            }
+
+            function classifyGcloudError(stderr) {
+              const lower = stderr.toLowerCase();
+              if (lower.includes("not found") || lower.includes("404") || lower.includes("does not exist")) {
+                return "NOT_FOUND";
+              }
+              if (lower.includes("permission") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) {
+                return "PERMISSION_DENIED";
+              }
+              return "ERROR";
+            }
+
+            let accessToken = "";
+            const tokenRes = runGcloud(["auth", "print-access-token"]);
+            if (!tokenRes.ok || !tokenRes.stdout.trim()) {
+              addRow("GCP Access Token Acquisition", "UNKNOWN", "Failed to obtain active OAuth access token via gcloud.");
+              writeOutputsAndMaybeFail(false, "UNVERIFIED_AUTH_ERROR");
+            }
+            accessToken = tokenRes.stdout.trim();
+
+            async function testIamPermissions(url, permissions) {
+              try {
+                const res = await fetch(url, {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({ permissions }),
+                });
+                if (!res.ok) {
+                  return { ok: false, httpStatus: res.status, granted: [] };
+                }
+                const data = await res.json();
+                const granted = Array.isArray(data.permissions) ? data.permissions : [];
+                return { ok: true, httpStatus: res.status, granted };
+              } catch (err) {
+                return { ok: false, httpStatus: 0, granted: [] };
+              }
+            }
+
+            async function main() {
+              // 1. Active deployer identity & target project
+              const activeAcctRes = runGcloud(["auth", "list", "--filter=status:ACTIVE", "--format=value(account)"]);
+              const deployerEmail = activeAcctRes.ok ? activeAcctRes.stdout.trim().split(/\r?\n/)[0] || "" : "";
+              const projRes = runGcloud(["projects", "describe", PROJECT_ID, "--format=json"]);
+              const projJson = projRes.ok ? parseJsonSafe(projRes.stdout) : null;
+              if (!deployerEmail || !projRes.ok || !projJson || projJson.projectId !== PROJECT_ID) {
+                const errKind = projRes.ok ? "INVALID" : classifyGcloudError(projRes.stderr);
+                addRow("Active Deployer & Project", errKind === "PERMISSION_DENIED" ? "UNKNOWN" : "FAIL", `deployer=${deployerEmail || "(unknown)"}, project=${PROJECT_ID}, detail=${projRes.ok ? "mismatch" : projRes.stderr.slice(0, 160)}`);
+              } else {
+                addRow("Active Deployer & Project", "PASS", `deployer=${deployerEmail}, projectId=${projJson.projectId}, lifecycleState=${projJson.lifecycleState || "ACTIVE"}`);
+              }
+
+              // 2. Required APIs enabled
+              const requiredApis = [
+                "run.googleapis.com",
+                "artifactregistry.googleapis.com",
+                "firestore.googleapis.com",
+                "storage.googleapis.com",
+              ];
+              const svcRes = runGcloud(["services", "list", "--enabled", `--project=${PROJECT_ID}`, "--format=json"]);
+              if (!svcRes.ok) {
+                const kind = classifyGcloudError(svcRes.stderr);
+                addRow("Required GCP APIs", kind === "PERMISSION_DENIED" ? "UNKNOWN" : "FAIL", svcRes.stderr.slice(0, 180));
+              } else {
+                const enabledList = parseJsonSafe(svcRes.stdout);
+                if (!Array.isArray(enabledList)) {
+                  addRow("Required GCP APIs", "UNKNOWN", "Unparseable gcloud services list JSON.");
+                } else {
+                  const enabledSet = new Set(
+                    enabledList.map((s) => (s && s.config && s.config.name ? s.config.name : s && s.name ? String(s.name).split("/").pop() : ""))
+                  );
+                  const missingApis = requiredApis.filter((api) => !enabledSet.has(api));
+                  if (missingApis.length > 0) {
+                    addRow("Required GCP APIs", "FAIL", `Missing enabled APIs: ${missingApis.join(", ")}`);
+                  } else {
+                    addRow("Required GCP APIs", "PASS", `Enabled: ${requiredApis.join(", ")}`);
+                  }
+                }
+              }
+
+              // 3. Artifact Registry repository & deployer write/push access
+              const arRes = runGcloud(["artifacts", "repositories", "describe", AR_REPO, `--location=${REGION}`, `--project=${PROJECT_ID}`, "--format=json"]);
+              if (!arRes.ok) {
+                const kind = classifyGcloudError(arRes.stderr);
+                addRow("Artifact Registry Repository", kind === "PERMISSION_DENIED" ? "UNKNOWN" : "FAIL", `${REGION}/${AR_REPO}: ${arRes.stderr.slice(0, 180)}`);
+                addRow("Deployer Artifact Registry Write IAM", "UNKNOWN", "Skipped because repository describe failed.");
+              } else {
+                const arJson = parseJsonSafe(arRes.stdout);
+                const arFormat = arJson && arJson.format;
+                const arName = arJson && arJson.name;
+                if (arFormat === "DOCKER" && typeof arName === "string" && arName.endsWith(`/locations/${REGION}/repositories/${AR_REPO}`)) {
+                  addRow("Artifact Registry Repository", "PASS", `name=${arName}, format=${arFormat}`);
+                } else {
+                  addRow("Artifact Registry Repository", "FAIL", `Expected DOCKER repository at ${REGION}/${AR_REPO}, found format=${String(arFormat)}, name=${String(arName)}`);
+                }
+
+                const arIamTest = await testIamPermissions(
+                  `https://artifactregistry.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/repositories/${AR_REPO}:testIamPermissions`,
+                  ["artifactregistry.repositories.uploadArtifacts", "artifactregistry.repositories.downloadArtifacts", "artifactregistry.repositories.get"]
+                );
+                if (!arIamTest.ok) {
+                  addRow("Deployer Artifact Registry Write IAM", "UNKNOWN", `testIamPermissions HTTP ${arIamTest.httpStatus}`);
+                } else {
+                  const missing = ["artifactregistry.repositories.uploadArtifacts", "artifactregistry.repositories.downloadArtifacts", "artifactregistry.repositories.get"].filter((p) => !arIamTest.granted.includes(p));
+                  if (missing.length > 0) {
+                    addRow("Deployer Artifact Registry Write IAM", "FAIL", `Deployer lacks: ${missing.join(", ")}`);
+                  } else {
+                    addRow("Deployer Artifact Registry Write IAM", "PASS", `Verified via testIamPermissions: ${arIamTest.granted.join(", ")}`);
+                  }
+                }
+              }
+
+              // 4. Target Worker Service Account & Deployer actAs
+              const isValidWorkerSaSyntax =
+                /^[a-z0-9][a-z0-9-]{4,28}[a-z0-9]@promiseofplanet-bb325\.iam\.gserviceaccount\.com$/.test(WORKER_SA) &&
+                !WORKER_SA.endsWith("@appspot.gserviceaccount.com") &&
+                !WORKER_SA.includes("-compute@developer.gserviceaccount.com") &&
+                !WORKER_SA.startsWith("firebase-adminsdk-");
+
+              if (!WORKER_SA || !isValidWorkerSaSyntax) {
+                addRow("Target Worker Service Account", "FAIL", WORKER_SA ? `Rejected non-dedicated or invalid worker SA: ${WORKER_SA}` : "worker_service_account input was empty.");
+                addRow("Deployer iam.serviceAccounts.actAs", "FAIL", "Cannot verify actAs without valid worker_service_account.");
+              } else {
+                const saRes = runGcloud(["iam", "service-accounts", "describe", WORKER_SA, `--project=${PROJECT_ID}`, "--format=json"]);
+                if (!saRes.ok) {
+                  const kind = classifyGcloudError(saRes.stderr);
+                  addRow("Target Worker Service Account", kind === "PERMISSION_DENIED" ? "UNKNOWN" : "FAIL", saRes.stderr.slice(0, 180));
+                } else {
+                  const saJson = parseJsonSafe(saRes.stdout);
+                  if (saJson && saJson.email === WORKER_SA && saJson.disabled !== true) {
+                    addRow("Target Worker Service Account", "PASS", `email=${saJson.email}, disabled=false`);
+                  } else {
+                    addRow("Target Worker Service Account", "FAIL", `Service account disabled or mismatched: ${String(saJson && saJson.email)}`);
+                  }
+                }
+
+                const actAsTest = await testIamPermissions(
+                  `https://iam.googleapis.com/v1/projects/${PROJECT_ID}/serviceAccounts/${encodeURIComponent(WORKER_SA)}:testIamPermissions`,
+                  ["iam.serviceAccounts.actAs", "iam.serviceAccounts.get"]
+                );
+                if (!actAsTest.ok) {
+                  addRow("Deployer iam.serviceAccounts.actAs", "UNKNOWN", `testIamPermissions HTTP ${actAsTest.httpStatus}`);
+                } else if (!actAsTest.granted.includes("iam.serviceAccounts.actAs")) {
+                  addRow("Deployer iam.serviceAccounts.actAs", "FAIL", `Deployer lacks iam.serviceAccounts.actAs on ${WORKER_SA}`);
+                } else {
+                  addRow("Deployer iam.serviceAccounts.actAs", "PASS", `Verified iam.serviceAccounts.actAs on ${WORKER_SA}`);
+                }
+              }
+
+              // 5. Project IAM policy (used for Worker Firestore & custom role inspection)
+              const projPolicyRes = runGcloud(["projects", "get-iam-policy", PROJECT_ID, "--format=json"]);
+              const projPolicy = projPolicyRes.ok ? parseJsonSafe(projPolicyRes.stdout) : null;
+              const customRoleCache = new Map();
+              function getCustomRolePermissions(roleName) {
+                if (customRoleCache.has(roleName)) return customRoleCache.get(roleName);
+                const roleId = roleName.split("/").pop();
+                const r = runGcloud(["iam", "roles", "describe", roleId, `--project=${PROJECT_ID}`, "--format=json"]);
+                if (!r.ok) {
+                  customRoleCache.set(roleName, null);
+                  return null;
+                }
+                const parsed = parseJsonSafe(r.stdout);
+                const perms = parsed && Array.isArray(parsed.includedPermissions) ? parsed.includedPermissions : null;
+                customRoleCache.set(roleName, perms);
+                return perms;
+              }
+
+              function roleGrantsOverridesPermission(roleName) {
+                if (["roles/run.jobsExecutorWithOverrides", "roles/run.developer", "roles/run.admin", "roles/editor", "roles/owner"].includes(roleName)) {
+                  return "GRANTED";
+                }
+                if (roleName.startsWith(`projects/${PROJECT_ID}/roles/`)) {
+                  const perms = getCustomRolePermissions(roleName);
+                  if (!perms) return "UNKNOWN";
+                  return perms.includes("run.jobs.runWithOverrides") ? "GRANTED" : "NOT_GRANTED";
+                }
+                return "NOT_GRANTED";
+              }
+
+              function roleGrantsFirestoreRw(roleName) {
+                if (["roles/datastore.user", "roles/datastore.owner", "roles/owner", "roles/editor"].includes(roleName)) {
+                  return "GRANTED";
+                }
+                if (roleName.startsWith(`projects/${PROJECT_ID}/roles/`)) {
+                  const perms = getCustomRolePermissions(roleName);
+                  if (!perms) return "UNKNOWN";
+                  const needed = ["datastore.entities.get", "datastore.entities.create", "datastore.entities.update"];
+                  return needed.every((p) => perms.includes(p)) ? "GRANTED" : "NOT_GRANTED";
+                }
+                return "NOT_GRANTED";
+              }
+
+              function roleGrantsBucketObjectReadOnly(roleName) {
+                if (["roles/storage.objectViewer", "roles/storage.legacyObjectReader"].includes(roleName)) {
+                  return "READ_ONLY";
+                }
+                if (["roles/storage.objectAdmin", "roles/storage.admin", "roles/storage.objectUser", "roles/storage.objectCreator"].includes(roleName)) {
+                  return "OVERPRIVILEGED";
+                }
+                if (roleName.startsWith(`projects/${PROJECT_ID}/roles/`)) {
+                  const perms = getCustomRolePermissions(roleName);
+                  if (!perms) return "UNKNOWN";
+                  const hasRead = perms.includes("storage.objects.get");
+                  const hasWrite = perms.some((p) => p === "storage.objects.create" || p === "storage.objects.delete" || p === "storage.objects.update");
+                  if (hasWrite) return "OVERPRIVILEGED";
+                  return hasRead ? "READ_ONLY" : "NONE";
+                }
+                return "NONE";
+              }
+
+              // 6. Dedicated Quarantine GCS Bucket + Worker Read-Only Posture
+              const bucketMetaRes = runGcloud(["storage", "buckets", "describe", `gs://${BUCKET_NAME}`, "--format=json"]);
+              const bucketIamRes = runGcloud(["storage", "buckets", "get-iam-policy", `gs://${BUCKET_NAME}`, "--format=json"]);
+              if (!bucketMetaRes.ok || !bucketIamRes.ok) {
+                const combinedErr = `${bucketMetaRes.ok ? "" : bucketMetaRes.stderr} ${bucketIamRes.ok ? "" : bucketIamRes.stderr}`;
+                const kind = classifyGcloudError(combinedErr);
+                addRow("Quarantine Bucket & Worker GCS Read IAM", kind === "PERMISSION_DENIED" ? "UNKNOWN" : "FAIL", combinedErr.slice(0, 180));
+              } else {
+                const bMeta = parseJsonSafe(bucketMetaRes.stdout);
+                const bIam = parseJsonSafe(bucketIamRes.stdout);
+                const iamCfg = (bMeta && (bMeta.iamConfiguration || bMeta.iam_configuration)) || {};
+                const ubla = Boolean(
+                  (iamCfg.uniformBucketLevelAccess && iamCfg.uniformBucketLevelAccess.enabled === true) ||
+                  bMeta.uniform_bucket_level_access === true
+                );
+                const pap = iamCfg.publicAccessPrevention || bMeta.public_access_prevention || "";
+                const bindings = bIam && Array.isArray(bIam.bindings) ? bIam.bindings : null;
+                let publicMember = null;
+                const workerBucketRoles = [];
+                if (bindings) {
+                  for (const b of bindings) {
+                    const members = Array.isArray(b.members) ? b.members : [];
+                    for (const m of members) {
+                      const norm = String(m).trim().toLowerCase();
+                      if (norm === "allusers" || norm === "allauthenticatedusers" || norm.startsWith("allusers:") || norm.startsWith("allauthenticatedusers:") || norm.startsWith("domain:")) {
+                        publicMember = m;
+                      }
+                      if (WORKER_SA && m === `serviceAccount:${WORKER_SA}`) {
+                        workerBucketRoles.push(b.role);
+                      }
+                    }
+                  }
+                }
+                if (!bMeta || !ubla || pap !== "enforced" || !bindings || publicMember) {
+                  addRow("Quarantine Bucket Privacy Posture", "FAIL", `ubla=${ubla}, pap=${pap}, publicMember=${String(publicMember)}, bindingsValid=${Boolean(bindings)}`);
+                } else {
+                  addRow("Quarantine Bucket Privacy Posture", "PASS", `bucket=${BUCKET_NAME}, UBLA=true, PAP=enforced, publicPrincipals=0`);
+                }
+
+                // Check worker read-only access on quarantine bucket (bucket bindings or project bindings) & ensure NOT bound on forbidden default bucket
+                if (!WORKER_SA || !isValidWorkerSaSyntax) {
+                  addRow("Worker GCS Read-Only IAM", "FAIL", "Invalid or missing worker_service_account.");
+                } else {
+                  const candidateRoles = [...workerBucketRoles];
+                  if (projPolicy && Array.isArray(projPolicy.bindings)) {
+                    for (const b of projPolicy.bindings) {
+                      if (Array.isArray(b.members) && b.members.includes(`serviceAccount:${WORKER_SA}`)) {
+                        candidateRoles.push(b.role);
+                      }
+                    }
+                  }
+                  const classifications = candidateRoles.map((r) => ({ role: r, cls: roleGrantsBucketObjectReadOnly(r) }));
+                  const hasOverprivileged = classifications.some((c) => c.cls === "OVERPRIVILEGED");
+                  const hasReadOnly = classifications.some((c) => c.cls === "READ_ONLY");
+                  const hasUnknown = classifications.some((c) => c.cls === "UNKNOWN");
+
+                  // Check forbidden default bucket IAM if readable
+                  let defaultBucketLeak = false;
+                  const defIamRes = runGcloud(["storage", "buckets", "get-iam-policy", `gs://${FORBIDDEN_BUCKET}`, "--format=json"]);
+                  if (defIamRes.ok) {
+                    const defIam = parseJsonSafe(defIamRes.stdout);
+                    if (defIam && Array.isArray(defIam.bindings)) {
+                      for (const b of defIam.bindings) {
+                        if (Array.isArray(b.members) && b.members.includes(`serviceAccount:${WORKER_SA}`)) {
+                          defaultBucketLeak = true;
+                        }
+                      }
+                    }
+                  }
+
+                  if (defaultBucketLeak) {
+                    addRow("Worker GCS Read-Only IAM", "FAIL", `${WORKER_SA} must NOT have IAM bindings on forbidden default bucket ${FORBIDDEN_BUCKET}`);
+                  } else if (hasOverprivileged) {
+                    addRow("Worker GCS Read-Only IAM", "FAIL", `Worker SA holds over-privileged write/admin storage role(s): ${classifications.filter((c) => c.cls === "OVERPRIVILEGED").map((c) => c.role).join(", ")}`);
+                  } else if (hasReadOnly) {
+                    addRow("Worker GCS Read-Only IAM", "PASS", `Verified read-only storage role(s) on ${BUCKET_NAME}: ${classifications.filter((c) => c.cls === "READ_ONLY").map((c) => c.role).join(", ")}`);
+                  } else if (hasUnknown || !projPolicy) {
+                    addRow("Worker GCS Read-Only IAM", "UNKNOWN", `No bucket-level read-only role found on ${BUCKET_NAME} and project IAM or custom role could not be fully inspected.`);
+                  } else {
+                    addRow("Worker GCS Read-Only IAM", "FAIL", `${WORKER_SA} lacks read-only object role (e.g. roles/storage.objectViewer) on ${BUCKET_NAME}`);
+                  }
+                }
+              }
+
+              // 7. Worker Firestore transaction R/W IAM
+              if (!WORKER_SA || !isValidWorkerSaSyntax) {
+                addRow("Worker Firestore Transaction R/W IAM", "FAIL", "Invalid or missing worker_service_account.");
+              } else if (!projPolicy || !Array.isArray(projPolicy.bindings)) {
+                addRow("Worker Firestore Transaction R/W IAM", "UNKNOWN", `Cannot inspect project IAM policy for ${PROJECT_ID}: ${projPolicyRes.ok ? "malformed JSON" : projPolicyRes.stderr.slice(0, 160)}`);
+              } else {
+                const member = `serviceAccount:${WORKER_SA}`;
+                const matchedRoles = projPolicy.bindings
+                  .filter((b) => Array.isArray(b.members) && b.members.includes(member))
+                  .map((b) => b.role);
+                const statuses = matchedRoles.map((r) => ({ role: r, st: roleGrantsFirestoreRw(r) }));
+                if (statuses.some((s) => s.st === "GRANTED")) {
+                  addRow("Worker Firestore Transaction R/W IAM", "PASS", `Granted via: ${statuses.filter((s) => s.st === "GRANTED").map((s) => s.role).join(", ")}`);
+                } else if (statuses.some((s) => s.st === "UNKNOWN")) {
+                  addRow("Worker Firestore Transaction R/W IAM", "UNKNOWN", "Custom role permissions could not be described.");
+                } else {
+                  addRow("Worker Firestore Transaction R/W IAM", "FAIL", `${WORKER_SA} lacks roles/datastore.user (or equivalent transactional read/write role) in ${PROJECT_ID}. Found: ${matchedRoles.join(", ") || "(none)"}`);
+                }
+              }
+
+              // 8. manageLibraryDocuments Gen2 runtime SA inspection
+              let manageFnSa = "";
+              const fnRes = runGcloud(["functions", "describe", "manageLibraryDocuments", "--gen2", `--region=${REGION}`, `--project=${PROJECT_ID}`, "--format=json"]);
+              if (!fnRes.ok) {
+                const kind = classifyGcloudError(fnRes.stderr);
+                addRow("manageLibraryDocuments Gen2 Runtime Identity", kind === "PERMISSION_DENIED" ? "UNKNOWN" : "FAIL", fnRes.stderr.slice(0, 180));
+              } else {
+                const fnJson = parseJsonSafe(fnRes.stdout);
+                manageFnSa = fnJson && fnJson.serviceConfig && typeof fnJson.serviceConfig.serviceAccountEmail === "string"
+                  ? fnJson.serviceConfig.serviceAccountEmail.trim()
+                  : "";
+                if (!manageFnSa || fnJson.environment !== "GEN_2" || fnJson.state !== "ACTIVE") {
+                  addRow("manageLibraryDocuments Gen2 Runtime Identity", "FAIL", `env=${String(fnJson && fnJson.environment)}, state=${String(fnJson && fnJson.state)}, sa=${manageFnSa || "(missing)"}`);
+                } else if (WORKER_SA && manageFnSa === WORKER_SA) {
+                  addRow("manageLibraryDocuments Gen2 Runtime Identity", "FAIL", `Worker SA (${WORKER_SA}) must be distinct from manageLibraryDocuments runtime SA (${manageFnSa}).`);
+                } else {
+                  addRow("manageLibraryDocuments Gen2 Runtime Identity", "PASS", `runtimeSA=${manageFnSa}, GEN_2, ACTIVE`);
+                }
+              }
+
+              // 9. Existing Cloud Run Job & Deployer Job IAM + Caller run.jobs.runWithOverrides
+              const jobDescRes = runGcloud(["run", "jobs", "describe", JOB_NAME, `--region=${REGION}`, `--project=${PROJECT_ID}`, "--format=json"]);
+              const jobExists = jobDescRes.ok;
+              const jobNotFound = !jobDescRes.ok && classifyGcloudError(jobDescRes.stderr) === "NOT_FOUND";
+
+              const requiredJobPerms = jobExists
+                ? ["run.jobs.get", "run.jobs.update", "run.jobs.getIamPolicy"]
+                : ["run.jobs.create", "run.jobs.get", "run.jobs.update", "run.jobs.getIamPolicy"];
+
+              const runProjTest = await testIamPermissions(
+                `https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT_ID}:testIamPermissions`,
+                requiredJobPerms
+              );
+              if (!runProjTest.ok) {
+                addRow("Deployer Cloud Run Job IAM", "UNKNOWN", `testIamPermissions HTTP ${runProjTest.httpStatus}`);
+              } else {
+                const missingRunPerms = requiredJobPerms.filter((p) => !runProjTest.granted.includes(p));
+                if (missingRunPerms.length > 0) {
+                  addRow("Deployer Cloud Run Job IAM", "FAIL", `Deployer lacks: ${missingRunPerms.join(", ")}`);
+                } else {
+                  addRow("Deployer Cloud Run Job IAM", "PASS", `Verified: ${runProjTest.granted.join(", ")}`);
+                }
+              }
+
+              if (jobNotFound) {
+                addRow("Existing Cloud Run Job Configuration", "PENDING_RESOURCE_CREATION", `${JOB_NAME} does not exist yet in ${REGION}; initial create permitted in mode=deploy.`);
+                addRow("Caller run.jobs.runWithOverrides (manageLibraryDocuments)", "PENDING_RESOURCE_CREATION", "Job does not exist yet; Firebase AV activation remains BLOCKED until job is created, permission is granted on the created job, and read back.");
+              } else if (!jobDescRes.ok) {
+                const kind = classifyGcloudError(jobDescRes.stderr);
+                addRow("Existing Cloud Run Job Configuration", kind === "PERMISSION_DENIED" ? "UNKNOWN" : "FAIL", jobDescRes.stderr.slice(0, 180));
+                addRow("Caller run.jobs.runWithOverrides (manageLibraryDocuments)", "UNKNOWN", "Cannot inspect job IAM because job describe failed.");
+              } else {
+                const jobJson = parseJsonSafe(jobDescRes.stdout);
+                const tpl = (jobJson && jobJson.template) || {};
+                const podTpl = tpl.template || {};
+                const containers = Array.isArray(podTpl.containers) ? podTpl.containers : [];
+                const c0 = containers[0] || {};
+                const cEnv = Array.isArray(c0.env) ? c0.env : [];
+                const existingSa = typeof podTpl.serviceAccount === "string" ? podTpl.serviceAccount.trim() : "";
+                const existingImage = typeof c0.image === "string" ? c0.image.trim() : "";
+                const expectedImagePrefix = `${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${JOB_NAME}`;
+                const hasHardcodedRequestId = cEnv.some((e) => e && e.name === "POP_QUARANTINE_AV_REQUEST_ID");
+
+                const jobIssues = [];
+                if (WORKER_SA && existingSa !== WORKER_SA) {
+                  jobIssues.push(`existing serviceAccount=${existingSa || "(none)"} !== ${WORKER_SA}`);
+                }
+                if (Number(tpl.taskCount) !== 1) jobIssues.push(`taskCount=${String(tpl.taskCount)} !== 1`);
+                if (Number(podTpl.maxRetries) !== 0) jobIssues.push(`maxRetries=${String(podTpl.maxRetries)} !== 0`);
+                if (podTpl.timeout !== "600s") jobIssues.push(`timeout=${String(podTpl.timeout)} !== 600s`);
+                if (!existingImage.startsWith(expectedImagePrefix)) jobIssues.push(`unowned/mismatched image=${existingImage}`);
+                if (hasHardcodedRequestId) jobIssues.push("POP_QUARANTINE_AV_REQUEST_ID must not be persisted on job spec");
+
+                const jobIamRes = runGcloud(["run", "jobs", "get-iam-policy", JOB_NAME, `--region=${REGION}`, `--project=${PROJECT_ID}`, "--format=json"]);
+                const jobIam = jobIamRes.ok ? parseJsonSafe(jobIamRes.stdout) : null;
+                if (!jobIamRes.ok || !jobIam) {
+                  addRow("Existing Cloud Run Job Configuration", "UNKNOWN", `Failed to inspect job IAM policy: ${jobIamRes.ok ? "malformed JSON" : jobIamRes.stderr.slice(0, 160)}`);
+                  addRow("Caller run.jobs.runWithOverrides (manageLibraryDocuments)", "UNKNOWN", "Job IAM policy inspection failed.");
+                } else {
+                  const jobBindings = Array.isArray(jobIam.bindings) ? jobIam.bindings : [];
+                  for (const b of jobBindings) {
+                    const members = Array.isArray(b.members) ? b.members : [];
+                    for (const m of members) {
+                      const norm = String(m).trim().toLowerCase();
+                      if (norm === "allusers" || norm === "allauthenticatedusers" || norm.startsWith("allusers:") || norm.startsWith("allauthenticatedusers:") || norm.startsWith("domain:")) {
+                        jobIssues.push(`forbidden public IAM principal=${m}`);
+                      }
+                    }
+                  }
+                  if (jobIssues.length > 0) {
+                    addRow("Existing Cloud Run Job Configuration", "FAIL", jobIssues.join("; "));
+                  } else {
+                    addRow("Existing Cloud Run Job Configuration", "PASS", `Verified existing job SA=${existingSa}, taskCount=1, maxRetries=0, timeout=600s, non-public IAM.`);
+                  }
+
+                  if (!manageFnSa) {
+                    addRow("Caller run.jobs.runWithOverrides (manageLibraryDocuments)", "UNKNOWN", "manageLibraryDocuments runtime SA unavailable.");
+                  } else {
+                    const member = `serviceAccount:${manageFnSa}`;
+                    const boundRoles = [];
+                    for (const b of jobBindings) {
+                      if (Array.isArray(b.members) && b.members.includes(member)) boundRoles.push(b.role);
+                    }
+                    if (projPolicy && Array.isArray(projPolicy.bindings)) {
+                      for (const b of projPolicy.bindings) {
+                        if (Array.isArray(b.members) && b.members.includes(member)) boundRoles.push(b.role);
+                      }
+                    }
+                    const evals = boundRoles.map((r) => ({ role: r, res: roleGrantsOverridesPermission(r) }));
+                    if (evals.some((e) => e.res === "GRANTED")) {
+                      addRow("Caller run.jobs.runWithOverrides (manageLibraryDocuments)", "PASS", `Verified on ${manageFnSa} via ${evals.filter((e) => e.res === "GRANTED").map((e) => e.role).join(", ")}`);
+                    } else if (evals.some((e) => e.res === "UNKNOWN") || !projPolicy) {
+                      addRow("Caller run.jobs.runWithOverrides (manageLibraryDocuments)", "UNKNOWN", "Could not complete full IAM/custom-role evaluation.");
+                    } else {
+                      addRow("Caller run.jobs.runWithOverrides (manageLibraryDocuments)", "FAIL", `${manageFnSa} lacks run.jobs.runWithOverrides (roles/run.invoker alone is insufficient). Found roles: ${boundRoles.join(", ") || "(none)"}`);
+                    }
+                  }
+                }
+              }
+
+              const hasFail = matrix.some((r) => r.status === "FAIL");
+              const hasUnknown = matrix.some((r) => r.status === "UNKNOWN");
+              const hasPendingCreation = matrix.some((r) => r.status === "PENDING_RESOURCE_CREATION");
+
+              if (hasFail || hasUnknown) {
+                const state = hasFail ? "CLOUD_PREREQUISITES_MISSING" : "UNVERIFIED_INSUFFICIENT_PERMISSIONS";
+                writeOutputsAndMaybeFail(false, state);
+              } else if (hasPendingCreation) {
+                writeOutputsAndMaybeFail(true, "READY_FOR_INITIAL_JOB_DEPLOY_CALLER_IAM_PENDING_POST_CREATE");
+              } else {
+                writeOutputsAndMaybeFail(true, "ALL_CLOUD_PREREQUISITES_VERIFIED");
+              }
+            }
+
+            main().catch((err) => {
+              addRow("Preflight Execution", "UNKNOWN", err && err.message ? err.message : String(err));
+              writeOutputsAndMaybeFail(false, "UNVERIFIED_PREFLIGHT_EXCEPTION");
+            });
+          PREFLIGHT_EOF
+
+      - name: Stop cleanly when mode is preflight_only
+        if: ${{ inputs.mode == 'preflight_only' && steps.cloud_read_only_preflight.outcome == 'success' }}
+        run: |
+          echo "preflight_only completed with zero Docker builds, zero pushes, and zero Cloud Run Job mutations (state=${AV_PREFLIGHT_OVERALL_STATE})."
+
       - name: Install root and functions dependencies
+        if: ${{ inputs.mode == 'verify_only' || inputs.mode == 'deploy' }}
         run: |
           npm ci
           npm --prefix functions ci
 
       - name: Run TypeScript typecheck and AV Execution test suites
+        if: ${{ inputs.mode == 'verify_only' || inputs.mode == 'deploy' }}
         run: |
           set -euo pipefail
           npx tsc --noEmit
@@ -80,63 +732,250 @@ jobs:
           ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineIsolatedInspectionRequestBackendTests.ts")'
           ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineIsolatedInspectionRequestClientTests.ts")'
 
-      - name: Build isolated ClamAV worker container image locally and verify signatures
+      - name: Build isolated ClamAV worker container image locally and verify signatures and 7-day DB freshness
+        if: ${{ inputs.mode == 'verify_only' || inputs.mode == 'deploy' }}
         run: |
+          set -euo pipefail
           docker build \
             -f functions/library-av-worker.Dockerfile \
-            -t pop-library-quarantine-av-worker:${{ github.sha }} \
+            -t "pop-library-quarantine-av-worker:${GITHUB_SHA}" \
             functions
           docker run --rm --entrypoint /usr/bin/clamscan \
-            pop-library-quarantine-av-worker:${{ github.sha }} \
+            "pop-library-quarantine-av-worker:${GITHUB_SHA}" \
             --version --database=/var/lib/clamav
           docker run --rm --entrypoint /usr/bin/qpdf \
-            pop-library-quarantine-av-worker:${{ github.sha }} \
+            "pop-library-quarantine-av-worker:${GITHUB_SHA}" \
             --version
+          docker run --rm --entrypoint node \
+            "pop-library-quarantine-av-worker:${GITHUB_SHA}" \
+            -e '
+              const { defaultVerifyClamAvEngineAndSignatures, DEFAULT_CLAMAV_SIGNATURE_MAX_AGE_MS } = require("/app/functions/lib/library/libraryQuarantineAvWorker.js");
+              (async () => {
+                const res = await defaultVerifyClamAvEngineAndSignatures({
+                  nowIso: new Date().toISOString(),
+                  maxSignatureAgeMs: DEFAULT_CLAMAV_SIGNATURE_MAX_AGE_MS,
+                });
+                if (!res.ok) {
+                  console.error("::error::Built image failed ClamAV DB freshness/engine check:", res);
+                  process.exit(1);
+                }
+                console.log("Verified ClamAV DB freshness (<=7d):", JSON.stringify(res));
+              })().catch((err) => {
+                console.error(err);
+                process.exit(1);
+              });
+            '
 
       - name: Stop cleanly when mode is verify_only
         if: ${{ inputs.mode == 'verify_only' }}
         run: |
-          echo "verify_only completed: TypeScript build, backend/client tests, and ClamAV Docker image signature verification succeeded with zero live GCP mutations."
+          echo "verify_only completed: TypeScript build, backend/client tests, and ClamAV Docker image signature/freshness verification succeeded with zero live GCP mutations."
 
-      - name: Validate deploy confirmation phrase and dedicated worker service account
-        if: ${{ inputs.mode == 'deploy' }}
-        run: |
-          if [ "${{ inputs.confirm_deploy }}" != "DEPLOY_ISOLATED_QUARANTINE_AV_JOB" ]; then
-            echo "::error::confirm_deploy must equal DEPLOY_ISOLATED_QUARANTINE_AV_JOB when mode=deploy."
-            exit 1
-          fi
-          if [ -z "${{ inputs.worker_service_account }}" ]; then
-            echo "::error::worker_service_account is required when mode=deploy."
-            exit 1
-          fi
-
-      - name: Authenticate to Google Cloud
-        if: ${{ inputs.mode == 'deploy' }}
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
-
-      - name: Setup gcloud SDK and verify quarantine bucket & Artifact Registry preconditions
-        if: ${{ inputs.mode == 'deploy' }}
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Push image and update Cloud Run Job (taskCount=1, maxRetries=0, POP_LIBRARY_AV_EXECUTION_ENABLED remains OFF)
-        if: ${{ inputs.mode == 'deploy' }}
+      - name: Push image and deploy Cloud Run Job (taskCount=1, maxRetries=0, timeout=600s, POP_LIBRARY_AV_EXECUTION_ENABLED remains OFF)
+        id: deploy_av_worker_job
+        if: ${{ inputs.mode == 'deploy' && steps.cloud_read_only_preflight.outcome == 'success' && env.AV_PREFLIGHT_ALLOW_DEPLOY == 'true' }}
+        env:
+          INPUT_CONFIRM_DEPLOY: ${{ inputs.confirm_deploy }}
+          INPUT_WORKER_SA: ${{ inputs.worker_service_account }}
         run: |
           set -euo pipefail
-          IMAGE_URI="${{ inputs.gcp_region }}-docker.pkg.dev/${FIREBASE_PROJECT_ID}/${{ inputs.artifact_registry_repo }}/${{ inputs.cloud_run_job_name }}:${{ github.sha }}"
-          gcloud auth configure-docker "${{ inputs.gcp_region }}-docker.pkg.dev" --quiet
-          docker tag "pop-library-quarantine-av-worker:${{ github.sha }}" "${IMAGE_URI}"
+          if [ "${INPUT_CONFIRM_DEPLOY}" != "DEPLOY_ISOLATED_QUARANTINE_AV_JOB" ]; then
+            echo "::error::confirm_deploy mismatch right before deploy."
+            exit 1
+          fi
+          IMAGE_REPO_PATH="${EXPECTED_GCP_REGION}-docker.pkg.dev/${FIREBASE_PROJECT_ID}/${EXPECTED_ARTIFACT_REGISTRY_REPO}/${EXPECTED_CLOUD_RUN_JOB_NAME}"
+          IMAGE_URI="${IMAGE_REPO_PATH}:${GITHUB_SHA}"
+          gcloud auth configure-docker "${EXPECTED_GCP_REGION}-docker.pkg.dev" --quiet
+          docker tag "pop-library-quarantine-av-worker:${GITHUB_SHA}" "${IMAGE_URI}"
           docker push "${IMAGE_URI}"
 
-          gcloud run jobs deploy "${{ inputs.cloud_run_job_name }}" \
+          IMAGE_DIGEST="$(gcloud artifacts docker images describe "${IMAGE_URI}" --format='value(image_summary.digest)')"
+          if [ -z "${IMAGE_DIGEST}" ]; then
+            echo "::error::Failed to resolve immutable Artifact Registry digest for pushed image ${IMAGE_URI}."
+            exit 1
+          fi
+          IMAGE_WITH_DIGEST="${IMAGE_REPO_PATH}@${IMAGE_DIGEST}"
+          echo "EXPECTED_DEPLOYED_IMAGE=${IMAGE_WITH_DIGEST}" >> "$GITHUB_ENV"
+          echo "EXPECTED_DEPLOYED_DIGEST=${IMAGE_DIGEST}" >> "$GITHUB_ENV"
+
+          gcloud run jobs deploy "${EXPECTED_CLOUD_RUN_JOB_NAME}" \
             --project="${FIREBASE_PROJECT_ID}" \
-            --region="${{ inputs.gcp_region }}" \
-            --image="${IMAGE_URI}" \
-            --service-account="${{ inputs.worker_service_account }}" \
+            --region="${EXPECTED_GCP_REGION}" \
+            --image="${IMAGE_WITH_DIGEST}" \
+            --service-account="${INPUT_WORKER_SA}" \
             --tasks=1 \
             --max-retries=0 \
             --task-timeout=600s \
             --memory=2Gi \
             --cpu=1 \
             --set-env-vars="NODE_ENV=production,POP_CLAMAV_DB_DIR=/var/lib/clamav,POP_CLAMSCAN_PATH=/usr/bin/clamscan,POP_QPDF_PATH=/usr/bin/qpdf"
+
+      - name: Post-Deploy Cloud Run Job Readback and Caller IAM Verification
+        id: post_deploy_readback
+        if: ${{ inputs.mode == 'deploy' && steps.deploy_av_worker_job.outcome == 'success' }}
+        env:
+          INPUT_WORKER_SA: ${{ inputs.worker_service_account }}
+        run: |
+          set -euo pipefail
+          gcloud run jobs describe "${EXPECTED_CLOUD_RUN_JOB_NAME}" \
+            --project="${FIREBASE_PROJECT_ID}" \
+            --region="${EXPECTED_GCP_REGION}" \
+            --format=json > /tmp/av_job_post.json
+
+          gcloud run jobs get-iam-policy "${EXPECTED_CLOUD_RUN_JOB_NAME}" \
+            --project="${FIREBASE_PROJECT_ID}" \
+            --region="${EXPECTED_GCP_REGION}" \
+            --format=json > /tmp/av_job_post_iam.json
+
+          gcloud functions describe manageLibraryDocuments \
+            --gen2 \
+            --region="${EXPECTED_GCP_REGION}" \
+            --project="${FIREBASE_PROJECT_ID}" \
+            --format=json > /tmp/manage_library_post_av_deploy.json
+
+          gcloud projects get-iam-policy "${FIREBASE_PROJECT_ID}" \
+            --format=json > /tmp/project_iam_post_av_deploy.json || echo "{}" > /tmp/project_iam_post_av_deploy.json
+
+          node << 'READBACK_EOF'
+            const fs = require("node:fs");
+            const { execFileSync } = require("node:child_process");
+
+            const PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
+            const REGION = process.env.EXPECTED_GCP_REGION;
+            const JOB_NAME = process.env.EXPECTED_CLOUD_RUN_JOB_NAME;
+            const WORKER_SA = (process.env.INPUT_WORKER_SA || "").trim();
+            const EXPECTED_IMAGE = process.env.EXPECTED_DEPLOYED_IMAGE || "";
+
+            const job = JSON.parse(fs.readFileSync("/tmp/av_job_post.json", "utf8"));
+            const jobIam = JSON.parse(fs.readFileSync("/tmp/av_job_post_iam.json", "utf8"));
+            const manageFn = JSON.parse(fs.readFileSync("/tmp/manage_library_post_av_deploy.json", "utf8"));
+            const projIam = JSON.parse(fs.readFileSync("/tmp/project_iam_post_av_deploy.json", "utf8"));
+
+            if (typeof job.name !== "string" || !job.name.endsWith(`projects/${PROJECT_ID}/locations/${REGION}/jobs/${JOB_NAME}`)) {
+              console.error(`::error::Post-deploy job name/region mismatch: ${String(job.name)}`);
+              process.exit(1);
+            }
+
+            const tpl = job.template || {};
+            const podTpl = tpl.template || {};
+            const c0 = (Array.isArray(podTpl.containers) && podTpl.containers[0]) || {};
+
+            if (podTpl.serviceAccount !== WORKER_SA) {
+              console.error(`::error::Post-deploy serviceAccount mismatch: expected ${WORKER_SA}, found ${String(podTpl.serviceAccount)}`);
+              process.exit(1);
+            }
+            if (Number(tpl.taskCount) !== 1) {
+              console.error(`::error::Post-deploy taskCount mismatch: expected 1, found ${String(tpl.taskCount)}`);
+              process.exit(1);
+            }
+            if (Number(podTpl.maxRetries) !== 0) {
+              console.error(`::error::Post-deploy maxRetries mismatch: expected 0, found ${String(podTpl.maxRetries)}`);
+              process.exit(1);
+            }
+            if (podTpl.timeout !== "600s") {
+              console.error(`::error::Post-deploy timeout mismatch: expected 600s, found ${String(podTpl.timeout)}`);
+              process.exit(1);
+            }
+            if (c0.image !== EXPECTED_IMAGE) {
+              console.error(`::error::Post-deploy image digest mismatch: expected ${EXPECTED_IMAGE}, found ${String(c0.image)}`);
+              process.exit(1);
+            }
+
+            const envMap = {};
+            for (const item of Array.isArray(c0.env) ? c0.env : []) {
+              if (item && typeof item.name === "string") {
+                envMap[item.name] = item.value;
+              }
+            }
+            const requiredEnv = {
+              NODE_ENV: "production",
+              POP_CLAMAV_DB_DIR: "/var/lib/clamav",
+              POP_CLAMSCAN_PATH: "/usr/bin/clamscan",
+              POP_QPDF_PATH: "/usr/bin/qpdf",
+            };
+            for (const [k, v] of Object.entries(requiredEnv)) {
+              if (envMap[k] !== v) {
+                console.error(`::error::Post-deploy worker env mismatch for ${k}: expected "${v}", found "${String(envMap[k])}"`);
+                process.exit(1);
+              }
+            }
+            if (Object.prototype.hasOwnProperty.call(envMap, "POP_QUARANTINE_AV_REQUEST_ID")) {
+              console.error("::error::POP_QUARANTINE_AV_REQUEST_ID must remain a per-run override ONLY and never be persisted on the Cloud Run Job.");
+              process.exit(1);
+            }
+
+            const jobBindings = Array.isArray(jobIam.bindings) ? jobIam.bindings : [];
+            for (const b of jobBindings) {
+              for (const m of Array.isArray(b.members) ? b.members : []) {
+                const norm = String(m).trim().toLowerCase();
+                if (norm === "allusers" || norm === "allauthenticatedusers" || norm.startsWith("allusers:") || norm.startsWith("allauthenticatedusers:") || norm.startsWith("domain:")) {
+                  console.error(`::error::Post-deploy Cloud Run Job has forbidden public IAM principal: ${m}`);
+                  process.exit(1);
+                }
+              }
+            }
+
+            const manageFnSa = manageFn && manageFn.serviceConfig && manageFn.serviceConfig.serviceAccountEmail;
+            let callerOverridesStatus = "UNKNOWN";
+            if (manageFnSa) {
+              const member = `serviceAccount:${manageFnSa}`;
+              const candidateRoles = [];
+              for (const b of jobBindings) {
+                if (Array.isArray(b.members) && b.members.includes(member)) candidateRoles.push(b.role);
+              }
+              if (Array.isArray(projIam.bindings)) {
+                for (const b of projIam.bindings) {
+                  if (Array.isArray(b.members) && b.members.includes(member)) candidateRoles.push(b.role);
+                }
+              }
+              let granted = false;
+              let unknownCustom = false;
+              for (const r of candidateRoles) {
+                if (["roles/run.jobsExecutorWithOverrides", "roles/run.developer", "roles/run.admin", "roles/editor", "roles/owner"].includes(r)) {
+                  granted = true;
+                } else if (r.startsWith(`projects/${PROJECT_ID}/roles/`)) {
+                  try {
+                    const out = execFileSync("gcloud", ["iam", "roles", "describe", r.split("/").pop(), `--project=${PROJECT_ID}`, "--format=json"], { encoding: "utf8" });
+                    const parsed = JSON.parse(out);
+                    if (Array.isArray(parsed.includedPermissions) && parsed.includedPermissions.includes("run.jobs.runWithOverrides")) {
+                      granted = true;
+                    }
+                  } catch {
+                    unknownCustom = true;
+                  }
+                }
+              }
+              callerOverridesStatus = granted ? "VERIFIED" : unknownCustom ? "UNKNOWN" : "PENDING_CALLER_IAM_GRANT";
+            }
+
+            fs.appendFileSync(process.env.GITHUB_ENV, `AV_POST_DEPLOY_CALLER_IAM_STATUS=${callerOverridesStatus}\n`);
+            fs.appendFileSync(process.env.GITHUB_ENV, `AV_POST_DEPLOY_MANAGE_FN_SA=${manageFnSa || ""}\n`);
+            console.log(`Post-deploy readback verified job=${job.name}, image=${c0.image}, serviceAccount=${podTpl.serviceAccount}, taskCount=1, maxRetries=0, timeout=600s, caller_runWithOverrides=${callerOverridesStatus} (${manageFnSa || "unknown"}).`);
+          READBACK_EOF
+
+      - name: Write Truthful Worker Workflow Summary
+        if: always()
+        env:
+          INPUT_MODE: ${{ inputs.mode }}
+          PREFLIGHT_OUTCOME: ${{ steps.cloud_read_only_preflight.outcome }}
+          DEPLOY_OUTCOME: ${{ steps.deploy_av_worker_job.outcome }}
+          READBACK_OUTCOME: ${{ steps.post_deploy_readback.outcome }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Isolated Quarantine ClamAV Worker Workflow Summary"
+            echo ""
+            echo "- **Mode:** \`${INPUT_MODE}\`"
+            echo "- **Pinned Commit SHA:** \`${GITHUB_SHA}\`"
+            echo "- **Target Project / Region / Job:** \`${FIREBASE_PROJECT_ID}\` / \`${EXPECTED_GCP_REGION}\` / \`${EXPECTED_CLOUD_RUN_JOB_NAME}\`"
+            echo "- **Cloud Read-Only Preflight Outcome:** \`${PREFLIGHT_OUTCOME}\` (\`${AV_PREFLIGHT_OVERALL_STATE:-N/A}\`)"
+            echo "- **Deploy Outcome:** \`${DEPLOY_OUTCOME}\`"
+            echo "- **Post-Deploy Readback Outcome:** \`${READBACK_OUTCOME}\`"
+            echo "- **Deployed Digest Image:** \`${EXPECTED_DEPLOYED_IMAGE:-N/A}\`"
+            echo "- **manageLibraryDocuments Caller \`run.jobs.runWithOverrides\`:** \`${AV_POST_DEPLOY_CALLER_IAM_STATUS:-N/A}\` (caller SA: \`${AV_POST_DEPLOY_MANAGE_FN_SA:-N/A}\`)"
+            echo "- **Firebase Runtime AV Gate In This Workflow:** Strictly unchanged (\`POP_LIBRARY_AV_EXECUTION_ENABLED=false\` — Cloud Run deploy never activates Firebase AV execution)."
+            if [ -f /tmp/av_preflight_summary.md ]; then
+              echo ""
+              cat /tmp/av_preflight_summary.md
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

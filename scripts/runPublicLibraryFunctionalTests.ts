@@ -175,8 +175,12 @@ import {
 } from '../src/components/library/LibraryQuarantineHumanReviewModal';
 import { PublicLibraryHub } from '../src/components/library/PublicLibraryHub';
 import type { SanitizedLibraryQuarantineHumanReviewCaseDto } from '../src/services/libraryQuarantineHumanReviewClient';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Readable } from 'node:stream';
 import type {
   LibraryPublishedBinaryReleaseService as LibraryPublishedBinaryReleaseServiceClass,
@@ -237,14 +241,27 @@ import {
   type PublishQuarantinedBinaryToPublicLibraryResponseDto as ClientPublishBinaryResponseDto,
 } from '../src/services/libraryPublishedBinaryClient';
 
+import {
+  isLibraryQuarantineAvExecutionEnabled,
+} from '../src/services/libraryQuarantineIsolatedInspectionRequestClient';
+
 const require = createRequire(import.meta.url);
 const {
+  LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR,
   LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR,
   LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR,
   executeManageLibraryDocumentsRequest,
 } = require(
   '../functions/src/library/libraryAdminHandlers'
 ) as typeof import('../functions/src/library/libraryAdminHandlers');
+const {
+  GoogleCloudRunQuarantineAvJobInvoker,
+  LIBRARY_QUARANTINE_AV_JOB_NAME_ENV_VAR,
+  LIBRARY_QUARANTINE_AV_JOB_PROJECT_ENV_VAR,
+  LIBRARY_QUARANTINE_AV_JOB_REGION_ENV_VAR,
+} = require(
+  '../functions/src/library/libraryQuarantineAvJobInvoker'
+) as typeof import('../functions/src/library/libraryQuarantineAvJobInvoker');
 const {
   LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
   LIBRARY_PUBLISHED_BINARY_RELEASE_EVENTS_COLLECTION,
@@ -4722,6 +4739,565 @@ async function runPublicLibraryTests() {
       'Default Firebase storage bucket (non-dedicated quarantine bucket) is rejected fail-closed with STORAGE_BUCKET_MISCONFIGURED',
       wrongBucketRes.ok === false &&
         wrongBucketRes.errorCode === 'STORAGE_BUCKET_MISCONFIGURED'
+    );
+  }
+
+  // =========================================================================
+  // OPS-CLOSURE-01 TESTS 37–39 (Workflow Mode Gates, Mocked GCP Preflight,
+  // Env Parity & Fail-Closed No-Auto-Publish Hold)
+  // =========================================================================
+
+  // TEST 37: Operational Workflow Structural & Mode-Gate Assertions
+  {
+    const avWorkflowRaw = fs.readFileSync(
+      path.resolve(process.cwd(), '.github/workflows/library-quarantine-av-job.yml'),
+      'utf8'
+    );
+    const liveWorkflowRaw = fs.readFileSync(
+      path.resolve(process.cwd(), '.github/workflows/library-human-review-one-shot-live.yml'),
+      'utf8'
+    );
+
+    const avWorkflowOk =
+      avWorkflowRaw.includes('default: "verify_only"') &&
+      avWorkflowRaw.includes('- verify_only') &&
+      avWorkflowRaw.includes('- preflight_only') &&
+      avWorkflowRaw.includes('- deploy') &&
+      avWorkflowRaw.includes('DEPLOY_ISOLATED_QUARANTINE_AV_JOB') &&
+      avWorkflowRaw.includes('POP_LIBRARY_AV_EXECUTION_ENABLED: "false"') &&
+      avWorkflowRaw.includes('DEFAULT_CLAMAV_SIGNATURE_MAX_AGE_MS') &&
+      avWorkflowRaw.includes('run.jobs.runWithOverrides') &&
+      avWorkflowRaw.includes('roles/run.jobsExecutorWithOverrides') &&
+      avWorkflowRaw.includes('PENDING_RESOURCE_CREATION') &&
+      avWorkflowRaw.includes('CLOUD_PREREQUISITES_MISSING') &&
+      avWorkflowRaw.includes('--tasks=1') &&
+      avWorkflowRaw.includes('--max-retries=0') &&
+      avWorkflowRaw.includes('--task-timeout=600s') &&
+      avWorkflowRaw.includes('--memory=2Gi') &&
+      avWorkflowRaw.includes('--cpu=1');
+
+    const liveWorkflowOk =
+      liveWorkflowRaw.includes('RELEASE_LIBRARY_HUMAN_REVIEW_LIVE') &&
+      liveWorkflowRaw.includes("github.ref == 'refs/heads/main'") &&
+      liveWorkflowRaw.includes('av_execution_mode:') &&
+      liveWorkflowRaw.includes('default: "disabled"') &&
+      liveWorkflowRaw.includes('- disabled') &&
+      liveWorkflowRaw.includes('- enabled') &&
+      liveWorkflowRaw.includes('confirm_av_enable:') &&
+      liveWorkflowRaw.includes('ENABLE_REAL_LIBRARY_AV_FOR_DIRECT_BINARY_RELEASE') &&
+      liveWorkflowRaw.includes('POP_QUARANTINE_AV_JOB_PROJECT_ID') &&
+      liveWorkflowRaw.includes('POP_QUARANTINE_AV_JOB_REGION') &&
+      liveWorkflowRaw.includes('POP_QUARANTINE_AV_JOB_NAME') &&
+      liveWorkflowRaw.includes('!isQuarantineCatalogDocumentId(doc.id)') &&
+      liveWorkflowRaw.includes('firebase deploy --project promiseofplanet-bb325 --only "functions:manageLibraryDocuments,functions:getPublicLibrary,functions:libraryPublishedBinaryDownload,hosting" --non-interactive') &&
+      liveWorkflowRaw.includes('run.jobs.runWithOverrides');
+
+    assertCheck(
+      '37',
+      'Both deployment workflows preserve verify_only/disabled defaults while enforcing gated preflight, caller runWithOverrides IAM, and 3 invoker env vars',
+      avWorkflowOk && liveWorkflowOk
+    );
+  }
+
+  // TEST 38: Deterministic Mocked-gcloud Preflight, Dotenv & Readback Simulation
+  {
+    const avWorkflowRaw = fs.readFileSync(
+      path.resolve(process.cwd(), '.github/workflows/library-quarantine-av-job.yml'),
+      'utf8'
+    );
+    const liveWorkflowRaw = fs.readFileSync(
+      path.resolve(process.cwd(), '.github/workflows/library-human-review-one-shot-live.yml'),
+      'utf8'
+    );
+
+    const extractHeredoc = (src: string, marker: string): string => {
+      const rx = new RegExp(`node << '${marker}'\\r?\\n([\\s\\S]*?)\\r?\\n\\s*${marker}`);
+      const m = rx.exec(src);
+      assert.ok(m && m[1], `Missing embedded script ${marker}`);
+      return m[1];
+    };
+
+    const avPreflightJs = extractHeredoc(avWorkflowRaw, 'PREFLIGHT_EOF');
+    const liveAvEnablePreflightJs = extractHeredoc(liveWorkflowRaw, 'PREFLIGHT_AV_ENABLE_EOF');
+    const liveWriteDotenvJs = extractHeredoc(liveWorkflowRaw, 'WRITE_DOTENV_EOF');
+    const liveReadbackManageJs = extractHeredoc(liveWorkflowRaw, 'READBACK_MANAGE_EOF');
+    const liveReadbackPublicJs = extractHeredoc(liveWorkflowRaw, 'READBACK_PUBLIC_EOF');
+    const liveReadbackBinaryJs = extractHeredoc(liveWorkflowRaw, 'READBACK_BINARY_EOF');
+
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pop-ops-closure-test-'));
+    try {
+      const binDir = path.join(tmpRoot, 'bin');
+      fs.mkdirSync(binDir, { recursive: true });
+      const logPath = path.join(tmpRoot, 'gcloud-calls.log');
+      const scenarioPath = path.join(tmpRoot, 'scenario.json');
+      const mockGcloudPath = path.join(binDir, 'gcloud');
+
+      const mockGcloudScript = `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const scenario = JSON.parse(fs.readFileSync(${JSON.stringify(scenarioPath)}, "utf8"));
+fs.appendFileSync(${JSON.stringify(logPath)}, args.join(" ") + "\\n");
+
+const joined = args.join(" ");
+if (args[0] === "run" && args[1] === "jobs" && args[2] === "deploy") {
+  console.error("FORBIDDEN_MUTATION: deploy called in preflight test");
+  process.exit(99);
+}
+if (joined.startsWith("auth print-access-token")) {
+  process.stdout.write("mock-token\\n");
+  process.exit(0);
+}
+if (joined.startsWith("auth list")) {
+  process.stdout.write("gh-deployer@promiseofplanet-bb325.iam.gserviceaccount.com\\n");
+  process.exit(0);
+}
+if (joined.startsWith("projects describe")) {
+  process.stdout.write(JSON.stringify({ projectId: "promiseofplanet-bb325", lifecycleState: "ACTIVE" }));
+  process.exit(0);
+}
+if (joined.startsWith("services list")) {
+  process.stdout.write(JSON.stringify([
+    { config: { name: "run.googleapis.com" } },
+    { config: { name: "artifactregistry.googleapis.com" } },
+    { config: { name: "firestore.googleapis.com" } },
+    { config: { name: "storage.googleapis.com" } },
+  ]));
+  process.exit(0);
+}
+if (joined.startsWith("artifacts repositories describe")) {
+  process.stdout.write(JSON.stringify({
+    name: "projects/promiseofplanet-bb325/locations/us-central1/repositories/pop-quarantine-workers",
+    format: "DOCKER"
+  }));
+  process.exit(0);
+}
+if (joined.startsWith("artifacts docker images describe")) {
+  process.stdout.write(JSON.stringify({
+    image_summary: {
+      digest: "sha256:abc123",
+      uploadTime: scenario.imageUploadIso || new Date().toISOString()
+    }
+  }));
+  process.exit(0);
+}
+if (joined.startsWith("iam service-accounts describe")) {
+  process.stdout.write(JSON.stringify({
+    email: "pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com",
+    disabled: false
+  }));
+  process.exit(0);
+}
+if (joined.startsWith("storage buckets describe")) {
+  process.stdout.write(JSON.stringify({
+    name: "promiseofplanet-bb325-library-quarantine",
+    iamConfiguration: {
+      uniformBucketLevelAccess: { enabled: true },
+      publicAccessPrevention: "enforced"
+    }
+  }));
+  process.exit(0);
+}
+if (joined.startsWith("storage buckets get-iam-policy gs://promiseofplanet-bb325-library-quarantine")) {
+  process.stdout.write(JSON.stringify({
+    bindings: [
+      {
+        role: scenario.workerStorageRole || "roles/storage.objectViewer",
+        members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
+      }
+    ]
+  }));
+  process.exit(0);
+}
+if (joined.startsWith("storage buckets get-iam-policy gs://promiseofplanet-bb325.firebasestorage.app")) {
+  process.stdout.write(JSON.stringify({ bindings: [] }));
+  process.exit(0);
+}
+if (joined.startsWith("projects get-iam-policy")) {
+  if (scenario.forbidProjectIam) {
+    console.error("ERROR: (gcloud.projects.get-iam-policy) PERMISSION_DENIED: 403 Forbidden");
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify({
+    bindings: [
+      {
+        role: "roles/datastore.user",
+        members: ["serviceAccount:pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com"]
+      }
+    ]
+  }));
+  process.exit(0);
+}
+if (joined.startsWith("functions describe manageLibraryDocuments")) {
+  process.stdout.write(JSON.stringify({
+    name: "projects/promiseofplanet-bb325/locations/us-central1/functions/manageLibraryDocuments",
+    environment: "GEN_2",
+    state: "ACTIVE",
+    serviceConfig: {
+      serviceAccountEmail: "pop-fn-runtime@promiseofplanet-bb325.iam.gserviceaccount.com",
+      secretEnvironmentVariables: [{ key: "GEMINI_API_KEY" }],
+      environmentVariables: {}
+    }
+  }));
+  process.exit(0);
+}
+if (joined.startsWith("run jobs describe")) {
+  if (scenario.jobMissing) {
+    console.error("ERROR: (gcloud.run.jobs.describe) NOT_FOUND: 404 Resource not found");
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify({
+    name: "projects/promiseofplanet-bb325/locations/us-central1/jobs/pop-library-quarantine-av-worker",
+    conditions: [{ type: "Ready", state: "CONDITION_SUCCEEDED" }],
+    template: {
+      taskCount: 1,
+      template: {
+        serviceAccount: "pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com",
+        maxRetries: 0,
+        timeout: "600s",
+        containers: [{
+          image: "us-central1-docker.pkg.dev/promiseofplanet-bb325/pop-quarantine-workers/pop-library-quarantine-av-worker@sha256:abc123",
+          env: [
+            { name: "NODE_ENV", value: "production" },
+            { name: "POP_CLAMAV_DB_DIR", value: "/var/lib/clamav" },
+            { name: "POP_CLAMSCAN_PATH", value: "/usr/bin/clamscan" },
+            { name: "POP_QPDF_PATH", value: "/usr/bin/qpdf" }
+          ]
+        }]
+      }
+    }
+  }));
+  process.exit(0);
+}
+if (joined.startsWith("run jobs get-iam-policy")) {
+  process.stdout.write(JSON.stringify({
+    bindings: [
+      {
+        role: scenario.callerRole || "roles/run.jobsExecutorWithOverrides",
+        members: ["serviceAccount:pop-fn-runtime@promiseofplanet-bb325.iam.gserviceaccount.com"]
+      }
+    ]
+  }));
+  process.exit(0);
+}
+console.error("Unexpected mocked gcloud args: " + joined);
+process.exit(1);
+`;
+      fs.writeFileSync(mockGcloudPath, mockGcloudScript, { mode: 0o755 });
+
+      const ghOut = path.join(tmpRoot, 'gh.out');
+      const ghEnv = path.join(tmpRoot, 'gh.env');
+      const baseEnv = {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH || ''}`,
+        FIREBASE_PROJECT_ID: 'promiseofplanet-bb325',
+        EXPECTED_GCP_REGION: 'us-central1',
+        EXPECTED_FUNCTION_REGION: 'us-central1',
+        EXPECTED_ARTIFACT_REGISTRY_REPO: 'pop-quarantine-workers',
+        EXPECTED_CLOUD_RUN_JOB_NAME: 'pop-library-quarantine-av-worker',
+        EXPECTED_AV_JOB_NAME: 'pop-library-quarantine-av-worker',
+        QUARANTINE_BUCKET_NAME: 'promiseofplanet-bb325-library-quarantine',
+        EXPECTED_QUARANTINE_BUCKET: 'promiseofplanet-bb325-library-quarantine',
+        FORBIDDEN_DEFAULT_BUCKET: 'promiseofplanet-bb325.firebasestorage.app',
+        HAS_GCP_CREDS: 'true',
+        CRED_STATUS: 'valid_service_account_json',
+        INPUT_WORKER_SA: 'pop-av-worker@promiseofplanet-bb325.iam.gserviceaccount.com',
+        GITHUB_OUTPUT: ghOut,
+        GITHUB_ENV: ghEnv,
+      };
+
+      const runNodeScript = (code: string, extraEnv: Record<string, string> = {}) => {
+        fs.writeFileSync(ghOut, '');
+        fs.writeFileSync(ghEnv, '');
+        return spawnSync(process.execPath, ['-e', code], {
+          cwd: tmpRoot,
+          env: { ...baseEnv, ...extraEnv },
+          encoding: 'utf8',
+        });
+      };
+
+      // Note: testIamPermissions fetch calls in avPreflightJs require HTTP; we patch fetch in a small preamble for unit testing
+      const mockedFetchPreamble = `
+const origFetch = globalThis.fetch;
+globalThis.fetch = async (url, opts) => {
+  const body = opts && opts.body ? JSON.parse(opts.body) : {};
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ permissions: body.permissions || [] })
+  };
+};
+`;
+
+      // Scenario 38a: Job missing yet (PENDING_RESOURCE_CREATION) -> preflight passes for initial deploy, marks PENDING_RESOURCE_CREATION
+      fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: true }));
+      fs.writeFileSync(logPath, '');
+      const res38a = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const env38a = fs.readFileSync(ghEnv, 'utf8');
+      const calls38a = fs.readFileSync(logPath, 'utf8');
+
+      // Scenario 38b: Existing job with ONLY roles/run.invoker -> MUST FAIL CLOSED before deploy
+      fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: false, callerRole: 'roles/run.invoker' }));
+      const res38b = runNodeScript(mockedFetchPreamble + avPreflightJs);
+
+      // Scenario 38c: Project IAM 403 -> MUST report UNKNOWN and FAIL CLOSED
+      fs.writeFileSync(scenarioPath, JSON.stringify({ jobMissing: false, forbidProjectIam: true }));
+      const res38c = runNodeScript(mockedFetchPreamble + avPreflightJs);
+      const env38c = fs.readFileSync(ghEnv, 'utf8');
+
+      // Scenario 38d: Firebase av_execution_mode=enabled with STALE (>7d) worker image -> MUST FAIL CLOSED
+      fs.writeFileSync(
+        '/tmp/manage_library_fn_pre.json',
+        JSON.stringify({
+          serviceConfig: { serviceAccountEmail: 'pop-fn-runtime@promiseofplanet-bb325.iam.gserviceaccount.com' },
+        })
+      );
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobMissing: false,
+          imageUploadIso: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+        })
+      );
+      const res38d = runNodeScript(liveAvEnablePreflightJs);
+
+      // Scenario 38e: Firebase av_execution_mode=enabled with fresh worker image + valid IAM -> PASS
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          jobMissing: false,
+          imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+        })
+      );
+      const res38e = runNodeScript(liveAvEnablePreflightJs);
+
+      // Scenario 38f: Dotenv + Post-deploy readbacks across disabled & enabled modes
+      fs.mkdirSync(path.join(tmpRoot, 'functions'), { recursive: true });
+      const resDotDisabled = runNodeScript(liveWriteDotenvJs, { AV_EXECUTION_MODE: 'disabled' });
+      const disabledDotenvText = fs.readFileSync(path.join(tmpRoot, 'functions/.env.promiseofplanet-bb325'), 'utf8');
+      fs.unlinkSync(path.join(tmpRoot, 'functions/.env.promiseofplanet-bb325'));
+
+      const resDotEnabled = runNodeScript(liveWriteDotenvJs, { AV_EXECUTION_MODE: 'enabled' });
+      const enabledDotenvText = fs.readFileSync(path.join(tmpRoot, 'functions/.env.promiseofplanet-bb325'), 'utf8');
+
+      const sharedFlagsDisabled = {
+        POP_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+        POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+        POP_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+        POP_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+        POP_LIBRARY_CASE_ALIGNMENT_ENABLED: 'true',
+        POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED: 'true',
+        POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: 'true',
+        POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: 'true',
+        POP_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED: 'true',
+        POP_LIBRARY_PUBLISHED_BINARY_DOWNLOAD_URL:
+          'https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryPublishedBinaryDownload',
+        POP_LIBRARY_AV_EXECUTION_ENABLED: 'false',
+      };
+      const sharedFlagsEnabled = {
+        ...sharedFlagsDisabled,
+        POP_LIBRARY_AV_EXECUTION_ENABLED: 'true',
+        POP_QUARANTINE_AV_JOB_PROJECT_ID: 'promiseofplanet-bb325',
+        POP_QUARANTINE_AV_JOB_REGION: 'us-central1',
+        POP_QUARANTINE_AV_JOB_NAME: 'pop-library-quarantine-av-worker',
+      };
+
+      fs.writeFileSync(
+        '/tmp/manage_library_fn_post.json',
+        JSON.stringify({
+          name: 'projects/promiseofplanet-bb325/locations/us-central1/functions/manageLibraryDocuments',
+          environment: 'GEN_2',
+          state: 'ACTIVE',
+          serviceConfig: {
+            secretEnvironmentVariables: [{ key: 'GEMINI_API_KEY' }],
+            environmentVariables: sharedFlagsEnabled,
+          },
+        })
+      );
+      fs.writeFileSync(
+        '/tmp/get_public_library_fn_post.json',
+        JSON.stringify({
+          name: 'projects/promiseofplanet-bb325/locations/us-central1/functions/getPublicLibrary',
+          environment: 'GEN_2',
+          state: 'ACTIVE',
+          serviceConfig: { environmentVariables: sharedFlagsEnabled },
+        })
+      );
+      fs.writeFileSync(
+        '/tmp/binary_download_fn_post.json',
+        JSON.stringify({
+          name: 'projects/promiseofplanet-bb325/locations/us-central1/functions/libraryPublishedBinaryDownload',
+          environment: 'GEN_2',
+          state: 'ACTIVE',
+          serviceConfig: { environmentVariables: sharedFlagsEnabled },
+        })
+      );
+
+      const rbManageEnabled = runNodeScript(liveReadbackManageJs, { AV_EXECUTION_MODE: 'enabled' });
+      const rbPublicEnabled = runNodeScript(liveReadbackPublicJs, { AV_EXECUTION_MODE: 'enabled' });
+      const rbBinaryEnabled = runNodeScript(liveReadbackBinaryJs, { AV_EXECUTION_MODE: 'enabled' });
+      // Must fail if expected mode=disabled receives enabled env vars!
+      const rbMismatchFail = runNodeScript(liveReadbackManageJs, { AV_EXECUTION_MODE: 'disabled' });
+
+      assertCheck(
+        '38',
+        'Mocked-gcloud workflow scripts handle PENDING_RESOURCE_CREATION, reject roles/run.invoker and stale >7d images, fail closed on 403 UNKNOWN, and verify dotenv + 3-function readbacks',
+        res38a.status === 0 &&
+          env38a.includes('READY_FOR_INITIAL_JOB_DEPLOY_CALLER_IAM_PENDING_POST_CREATE') &&
+          !calls38a.includes('run jobs deploy') &&
+          res38b.status !== 0 &&
+          res38c.status !== 0 &&
+          env38c.includes('UNVERIFIED_INSUFFICIENT_PERMISSIONS') &&
+          res38d.status !== 0 &&
+          res38e.status === 0 &&
+          resDotDisabled.status === 0 &&
+          disabledDotenvText.includes('POP_LIBRARY_AV_EXECUTION_ENABLED=false') &&
+          !disabledDotenvText.includes('POP_QUARANTINE_AV_JOB_') &&
+          resDotEnabled.status === 0 &&
+          enabledDotenvText.includes('POP_LIBRARY_AV_EXECUTION_ENABLED=true') &&
+          enabledDotenvText.includes('POP_QUARANTINE_AV_JOB_PROJECT_ID=promiseofplanet-bb325') &&
+          enabledDotenvText.includes('POP_QUARANTINE_AV_JOB_REGION=us-central1') &&
+          enabledDotenvText.includes('POP_QUARANTINE_AV_JOB_NAME=pop-library-quarantine-av-worker') &&
+          rbManageEnabled.status === 0 &&
+          rbPublicEnabled.status === 0 &&
+          rbBinaryEnabled.status === 0 &&
+          rbMismatchFail.status !== 0
+      );
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+      for (const p of [
+        '/tmp/manage_library_fn_pre.json',
+        '/tmp/manage_library_fn_post.json',
+        '/tmp/get_public_library_fn_post.json',
+        '/tmp/binary_download_fn_post.json',
+        '/tmp/av_preflight_summary.md',
+        '/tmp/av_preflight_result.json',
+      ]) {
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      }
+    }
+  }
+
+  // TEST 39: Client/Invoker Env Alignment & Receipt 1183ac250d0404e921d2aeadbec1b76c Hold Preservation
+  {
+    const prevProj = process.env[LIBRARY_QUARANTINE_AV_JOB_PROJECT_ENV_VAR];
+    const prevReg = process.env[LIBRARY_QUARANTINE_AV_JOB_REGION_ENV_VAR];
+    const prevJob = process.env[LIBRARY_QUARANTINE_AV_JOB_NAME_ENV_VAR];
+    const prevAv = process.env[LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR];
+
+    let disabledInvokerRejected = false;
+    let enabledInvokerValid = false;
+    let clientDisabledByDefault = false;
+    let clientEnabledOnlyWithAllFlags = false;
+    let incident1183StillHeld = false;
+
+    try {
+      delete process.env[LIBRARY_QUARANTINE_AV_JOB_PROJECT_ENV_VAR];
+      delete process.env[LIBRARY_QUARANTINE_AV_JOB_REGION_ENV_VAR];
+      delete process.env[LIBRARY_QUARANTINE_AV_JOB_NAME_ENV_VAR];
+
+      const invokerDisabled = new GoogleCloudRunQuarantineAvJobInvoker();
+      const vDisabled = invokerDisabled.validateConfig();
+      disabledInvokerRejected =
+        vDisabled.ok === false &&
+        vDisabled.failureReasonCode === 'JOB_CONFIG_MISSING_OR_INVALID';
+
+      process.env[LIBRARY_QUARANTINE_AV_JOB_PROJECT_ENV_VAR] = 'promiseofplanet-bb325';
+      process.env[LIBRARY_QUARANTINE_AV_JOB_REGION_ENV_VAR] = 'us-central1';
+      process.env[LIBRARY_QUARANTINE_AV_JOB_NAME_ENV_VAR] =
+        'pop-library-quarantine-av-worker';
+      process.env[LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR] = 'true';
+
+      const invokerEnabled = new GoogleCloudRunQuarantineAvJobInvoker();
+      const vEnabled = invokerEnabled.validateConfig();
+      enabledInvokerValid =
+        vEnabled.ok === true &&
+        vEnabled.config.projectId === 'promiseofplanet-bb325' &&
+        vEnabled.config.region === 'us-central1' &&
+        vEnabled.config.jobName === 'pop-library-quarantine-av-worker';
+
+      clientDisabledByDefault =
+        isLibraryQuarantineAvExecutionEnabled({
+          VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+          VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+          VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+          VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+          VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED: 'true',
+          VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: 'true',
+          VITE_LIBRARY_AV_EXECUTION_ENABLED: 'false',
+        }) === false;
+
+      clientEnabledOnlyWithAllFlags =
+        isLibraryQuarantineAvExecutionEnabled({
+          VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+          VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+          VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+          VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+          VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED: 'true',
+          VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: 'true',
+          VITE_LIBRARY_AV_EXECUTION_ENABLED: 'true',
+        }) === true;
+
+      const incidentRid = '1183ac250d0404e921d2aeadbec1b76c';
+      const binDb = new InMemoryReleaseFirestoreDatabase();
+      const binBucket = new InMemoryPublishedBinaryBucket();
+      seedCleanBinaryChain(binDb, binBucket, {
+        receiptId: incidentRid,
+        format: 'PDF',
+        bytes: buildDeterministicValidPdfBytes('Incident Hold Check'),
+        avState: 'MISSING',
+        priorRightsDecision: 'RESTRICTED',
+      });
+
+      const statusRes = (await executeManageLibraryDocumentsRequest(
+        {
+          auth: { uid: ownerFnUser.id },
+          data: {
+            action: 'getPublishedLibraryBinaryReleaseStatus',
+            receiptId: incidentRid,
+          },
+        },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          ...buildHandlerOptions({
+            binarySafetyCaseEnabled: true,
+            isolatedInspectionRequestEnabled: true,
+            publishedBinaryReleaseEnabled: true,
+          }),
+          draftDatabase: binDb,
+          publishedBinaryStorageBucket: binBucket,
+          publishedBinaryReleaseClock: () => '2026-11-16T10:00:00.000Z',
+        }
+      )) as ClientGetPublishedBinaryStatusDto;
+
+      incident1183StillHeld =
+        statusRes.ok === true &&
+        statusRes.isPublished === false &&
+        statusRes.eligibleForPublish === false &&
+        statusRes.blockCode === 'WAITING_FOR_ACTUAL_SCAN';
+    } finally {
+      if (prevProj === undefined) delete process.env[LIBRARY_QUARANTINE_AV_JOB_PROJECT_ENV_VAR];
+      else process.env[LIBRARY_QUARANTINE_AV_JOB_PROJECT_ENV_VAR] = prevProj;
+      if (prevReg === undefined) delete process.env[LIBRARY_QUARANTINE_AV_JOB_REGION_ENV_VAR];
+      else process.env[LIBRARY_QUARANTINE_AV_JOB_REGION_ENV_VAR] = prevReg;
+      if (prevJob === undefined) delete process.env[LIBRARY_QUARANTINE_AV_JOB_NAME_ENV_VAR];
+      else process.env[LIBRARY_QUARANTINE_AV_JOB_NAME_ENV_VAR] = prevJob;
+      if (prevAv === undefined) delete process.env[LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR];
+      else process.env[LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR] = prevAv;
+    }
+
+    assertCheck(
+      '39',
+      'Invoker rejects missing job vars when disabled, validates exact 3 vars when enabled, and receipt 1183ac250d0404e921d2aeadbec1b76c stays blocked without auto-publication',
+      disabledInvokerRejected &&
+        enabledInvokerValid &&
+        clientDisabledByDefault &&
+        clientEnabledOnlyWithAllFlags &&
+        incident1183StillHeld
     );
   }
 
