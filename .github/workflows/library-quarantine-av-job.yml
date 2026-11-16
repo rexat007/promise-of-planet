@@ -72,12 +72,13 @@ jobs:
 
       - name: Run TypeScript typecheck and AV Execution test suites
         run: |
+          set -euo pipefail
           npx tsc --noEmit
           npm --prefix functions run build
           npx tsx scripts/runLibraryQuarantineAvExecutionBackendTests.ts
-          npx tsx scripts/runLibraryQuarantineAvExecutionClientTests.ts
-          npx tsx scripts/runLibraryQuarantineIsolatedInspectionRequestBackendTests.ts
-          npx tsx scripts/runLibraryQuarantineIsolatedInspectionRequestClientTests.ts
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineAvExecutionClientTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineIsolatedInspectionRequestBackendTests.ts")'
+          ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineIsolatedInspectionRequestClientTests.ts")'
 
       - name: Build isolated ClamAV worker container image locally and verify signatures
         run: |
