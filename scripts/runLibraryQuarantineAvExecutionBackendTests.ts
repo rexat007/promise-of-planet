@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { Readable } from 'node:stream';
+import { deflateSync } from 'node:zlib';
 
 class FallbackHttpsError extends Error {
   readonly code: string;
@@ -287,6 +288,16 @@ import {
   LIBRARY_QUARANTINE_METADATA_STATE_VALUE,
   type GcsLibraryQuarantineObjectMetadata,
 } from '../functions/src/library/gcsLibraryQuarantineStorageAdapter';
+import {
+  LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+  LIBRARY_QUARANTINE_PDF_INSPECTION_OUTCOME_VERIFIED,
+  LIBRARY_QUARANTINE_PDF_INSPECTION_POLICY_VERSION,
+  LIBRARY_QUARANTINE_PDF_INSPECTION_SCHEMA_VERSION,
+  defaultRunIsolatedPdfInspection,
+  inspectPdfBytesStructurally,
+  validatePersistedLibraryQuarantinePdfInspection,
+  type LibraryQuarantinePersistedPdfInspection,
+} from '../functions/src/library/libraryIsolatedPdfInspection';
 
 const require = createRequire(import.meta.url);
 const {
@@ -316,6 +327,124 @@ const {
 
 function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function buildValidClassicPdfBytes(label: string): Buffer {
+  const header = `%PDF-1.7\n% ${label}\n`;
+  const obj1 = '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n';
+  const obj2 = '2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n';
+  const off1 = Buffer.byteLength(header, 'latin1');
+  const off2 = off1 + Buffer.byteLength(obj1, 'latin1');
+  const xrefOffset = off2 + Buffer.byteLength(obj2, 'latin1');
+  const pad = (n: number): string => String(n).padStart(10, '0');
+  const xref =
+    'xref\n' +
+    '0 3\n' +
+    '0000000000 65535 f \n' +
+    `${pad(off1)} 00000 n \n` +
+    `${pad(off2)} 00000 n \n` +
+    'trailer\n<< /Size 3 /Root 1 0 R >>\n' +
+    `startxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(header + obj1 + obj2 + xref, 'latin1');
+}
+
+function buildCompressedStreamPdfBytes(embeddedObjBody: string): Buffer {
+  // Objects: 1 = Catalog (/Pages 2 0 R), 2 = Pages, 3 = custom object inside ObjStm, 4 = ObjStm, 5 = XRef stream
+  const innerEntries: ReadonlyArray<readonly [number, string]> = [
+    [1, '<< /Type /Catalog /Pages 2 0 R >>'],
+    [2, '<< /Type /Pages /Kids [] /Count 0 >>'],
+    [3, embeddedObjBody],
+  ];
+  let relHeader = '';
+  let relBodies = '';
+  let cursor = 0;
+  for (const [objNum, body] of innerEntries) {
+    relHeader += `${objNum} ${cursor} `;
+    const segment = `${body}\n`;
+    relBodies += segment;
+    cursor += Buffer.byteLength(segment, 'latin1');
+  }
+  const objStmRaw = Buffer.from(relHeader + relBodies, 'latin1');
+  const objStmCompressed = deflateSync(objStmRaw);
+  const firstOffset = Buffer.byteLength(relHeader, 'latin1');
+
+  const header = '%PDF-1.7\n';
+  const objStmPrefix =
+    `4 0 obj\n<< /Type /ObjStm /N ${innerEntries.length} /First ${firstOffset} ` +
+    `/Filter /FlateDecode /Length ${objStmCompressed.byteLength} >>\nstream\n`;
+  const objStmSuffix = '\nendstream\nendobj\n';
+
+  const obj4Offset = Buffer.byteLength(header, 'latin1');
+  const xrefOffset =
+    obj4Offset +
+    Buffer.byteLength(objStmPrefix, 'latin1') +
+    objStmCompressed.byteLength +
+    Buffer.byteLength(objStmSuffix, 'latin1');
+
+  // XRef table entries (6 entries: 0 free, 1/2/3 compressed in obj 4 idx 0/1/2, 4 normal, 5 normal)
+  // Using W = [1, 4, 1]
+  const entry = (type: number, f2: number, f3: number): Buffer => {
+    const b = Buffer.alloc(6);
+    b.writeUInt8(type, 0);
+    b.writeUInt32BE(f2, 1);
+    b.writeUInt8(f3, 5);
+    return b;
+  };
+  const rawXrefTable = Buffer.concat([
+    entry(0, 0, 255),
+    entry(2, 4, 0),
+    entry(2, 4, 1),
+    entry(2, 4, 2),
+    entry(1, obj4Offset, 0),
+    entry(1, xrefOffset, 0),
+  ]);
+  const compressedXref = deflateSync(rawXrefTable);
+  const xrefPrefix =
+    `5 0 obj\n<< /Type /XRef /Size 6 /W [1 4 1] /Root 1 0 R ` +
+    `/Filter /FlateDecode /Length ${compressedXref.byteLength} >>\nstream\n`;
+  const xrefSuffix = `\nendstream\nendobj\nstartxref\n${xrefOffset}\n%%EOF\n`;
+
+  return Buffer.concat([
+    Buffer.from(header + objStmPrefix, 'latin1'),
+    objStmCompressed,
+    Buffer.from(objStmSuffix + xrefPrefix, 'latin1'),
+    compressedXref,
+    Buffer.from(xrefSuffix, 'latin1'),
+  ]);
+}
+
+function buildFakeQpdfCleanJson(objectCount = 2): string {
+  const objects: Record<string, unknown> = { trailer: {} };
+  for (let i = 1; i <= objectCount; i += 1) {
+    objects[`obj:${i} 0 R`] = {};
+  }
+  return JSON.stringify({
+    warnings: [],
+    encrypt: { encrypted: false },
+    objects,
+  });
+}
+
+async function runInProcessIsolatedPdfInspector(params: {
+  readonly tempFilePath: string;
+  readonly expectedSha256: string;
+  readonly expectedByteSize: number;
+  readonly timeoutMs: number;
+}) {
+  return defaultRunIsolatedPdfInspection(params, {
+    binaryVerifier: async () => ({
+      ok: true,
+      parserName: 'qpdf',
+      parserVersion: '11.9.1',
+    }),
+    qpdfRunner: async () => ({
+      exitCode: 0,
+      timedOut: false,
+      spawnFailed: false,
+      stdout: buildFakeQpdfCleanJson(2),
+      stderr: '',
+    }),
+  });
 }
 
 function buildHexReceiptId(index: number): string {
@@ -489,7 +618,10 @@ class InMemoryAvExecutionFirestoreDatabase
             this.onBeforeTransactionWritesHook?.(attempt);
           }
           const colName = resolveColName(ref);
-          if (colName !== LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION) {
+          if (
+            colName !== LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION &&
+            colName !== LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION
+          ) {
             throw new Error(
               `UNAUTHORIZED_WRITE_COLLECTION: ${colName}/${ref.id}`
             );
@@ -521,7 +653,10 @@ class InMemoryAvExecutionFirestoreDatabase
             this.onBeforeTransactionWritesHook?.(attempt);
           }
           const colName = resolveColName(ref);
-          if (colName !== LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION) {
+          if (
+            colName !== LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION &&
+            colName !== LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION
+          ) {
             throw new Error(
               `UNAUTHORIZED_WRITE_COLLECTION: ${colName}/${ref.id}`
             );
@@ -649,12 +784,9 @@ function seedFullEightDocChain(
   const format = overrides.format ?? 'PDF';
   const payloadBytes =
     overrides.payloadBytes ??
-    Buffer.from(
-      format === 'PDF'
-        ? `%PDF-1.7\n% Quarantined Binary Payload #${index}\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n`
-        : `PK\x03\x04 Quarantined DOCX Payload #${index}`,
-      'utf8'
-    );
+    (format === 'PDF'
+      ? buildValidClassicPdfBytes(`Quarantined Binary Payload #${index}`)
+      : Buffer.from(`PK\x03\x04 Quarantined DOCX Payload #${index}`, 'utf8'));
   const sha256 = createHash('sha256').update(payloadBytes).digest('hex');
 
   const canonicalExtension =
@@ -1174,7 +1306,7 @@ const READ_ONLY_MANIFEST_EXPECTED_BLOBS: ReadonlyArray<
   ],
   [
     'functions/src/library/libraryQuarantineAvExecutionContract.ts',
-    'e909ad973da54d6c327892a259e0f0957dbc9582',
+    'a40b6249ee80b99a18085bcc8a2d9c5a45488e3f',
   ],
   [
     'functions/src/library/libraryQuarantineReceiptContract.ts',
@@ -1221,14 +1353,14 @@ const READ_ONLY_MANIFEST_EXPECTED_BLOBS: ReadonlyArray<
     '8064d1393b6e519f9df4be13ad35ece6d07907c0',
   ],
   ['src/types/admin.ts', '226e5fa017f1123181deb8bee259cb294adb8683'],
-  ['functions/src/index.ts', '5a14cada5dad8e764f8cc3092f40c386f6b09616'],
+  ['functions/src/index.ts', '77d8fb72920e93eb363981cbbaaecb34767ba14c'],
   [
     'functions/library-av-worker.Dockerfile',
-    '7d15c7f825169a7d78d71345e1e1046509b0cd00',
+    '0fa20360c30be4f455e22ad4e21b829a18dc7dbc',
   ],
   [
     '.github/workflows/library-quarantine-av-job.yml',
-    '4ae529cd83e3fa22d9e5616e4b05178626bf7270',
+    'ef137a06fc1f6cd136251686a7845db77da492e0',
   ],
   [
     'functions/package.json',
@@ -1786,6 +1918,12 @@ async function runTests(): Promise<void> {
           spawnFailed: false,
         };
       },
+      pdfParserVerifier: async () => ({
+        ok: true,
+        parserName: 'qpdf',
+        parserVersion: '11.9.1',
+      }),
+      pdfInspector: runInProcessIsolatedPdfInspector,
     });
 
     assert.equal(pdfWorkerResult.ok, true, JSON.stringify(pdfWorkerResult));
@@ -1833,6 +1971,52 @@ async function runTests(): Promise<void> {
         pdfSeeded.sha256,
         pdfSeeded.generation
       );
+    }
+
+    // Verify closed 32-field isolated PDF inspection attestation persisted cleanly alongside clean AV completion
+    const persistedPdfInspection = db.getRawDoc(
+      LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+      pdfSeeded.requestId
+    );
+    const validatedPdfInspection = validatePersistedLibraryQuarantinePdfInspection(
+      persistedPdfInspection,
+      pdfSeeded.requestId
+    );
+    assert.equal(validatedPdfInspection.ok, true);
+    if (validatedPdfInspection.ok) {
+      assert.equal(
+        validatedPdfInspection.value.schemaVersion,
+        LIBRARY_QUARANTINE_PDF_INSPECTION_SCHEMA_VERSION
+      );
+      assert.equal(
+        validatedPdfInspection.value.outcome,
+        LIBRARY_QUARANTINE_PDF_INSPECTION_OUTCOME_VERIFIED
+      );
+      assert.equal(validatedPdfInspection.value.parserName, 'qpdf');
+      assert.equal(validatedPdfInspection.value.warningCount, 0);
+      assert.equal(validatedPdfInspection.value.encrypted, false);
+      assert.equal(
+        validatedPdfInspection.value.activeOrExternalConstructsDetected,
+        false
+      );
+      assert.equal(
+        validatedPdfInspection.value.sourceSha256,
+        pdfSeeded.sha256
+      );
+      assert.equal(
+        validatedPdfInspection.value.sourceGeneration,
+        pdfSeeded.generation
+      );
+      assert.equal(
+        validatedPdfInspection.value.workerRunId,
+        'worker_run_pdf_clean_01'
+      );
+      assert.equal(
+        validatedPdfInspection.value.avCompletedAt,
+        pdfWorkerResult.execution?.completedAt
+      );
+      assert.equal(validatedPdfInspection.value.isSanitized, false);
+      assert.equal(validatedPdfInspection.value.isVerifiedSafe, false);
     }
 
     // 5B: Worker executes infected DOCX scan (exit 1 -> AV_THREAT_DETECTED)
@@ -1986,6 +2170,11 @@ async function runTests(): Promise<void> {
         signatureVersion: 'daily.cvd:27455',
         signatureUpdatedAt: '2026-11-11T06:00:00.000Z',
       }),
+      pdfParserVerifier: async () => ({
+        ok: true,
+        parserName: 'qpdf',
+        parserVersion: '11.9.1',
+      }),
       clamAvRunner: async () => {
         clamScanCalledOnBadSha = true;
         return { exitCode: 0, timedOut: false, spawnFailed: false };
@@ -2031,6 +2220,12 @@ async function runTests(): Promise<void> {
         timedOut: false,
         spawnFailed: false,
       }),
+      pdfParserVerifier: async () => ({
+        ok: true,
+        parserName: 'qpdf',
+        parserVersion: '11.9.1',
+      }),
+      pdfInspector: runInProcessIsolatedPdfInspector,
     });
     assert.equal(exit2Res.ok, false);
     assert.equal(exit2Res.execution?.state, 'AV_SCAN_FAILED');
@@ -2040,7 +2235,7 @@ async function runTests(): Promise<void> {
       'SCAN_EXECUTION_ERROR'
     );
 
-    // 6D: Post-scan GCS generation or source chain drift -> STALE_HOLD
+    // 6D: Post-scan GCS generation or source chain drift -> STALE_HOLD (and ZERO PDF attestation written)
     const driftSeeded = seedFullEightDocChain(db, 11, { format: 'PDF' });
     await service.dispatchQuarantineAvInspection({
       receiptId: driftSeeded.receiptId,
@@ -2078,12 +2273,25 @@ async function runTests(): Promise<void> {
         timedOut: false,
         spawnFailed: false,
       }),
+      pdfParserVerifier: async () => ({
+        ok: true,
+        parserName: 'qpdf',
+        parserVersion: '11.9.1',
+      }),
+      pdfInspector: runInProcessIsolatedPdfInspector,
     });
     assert.equal(driftRes.ok, false);
     assert.equal(driftRes.execution?.state, 'STALE_HOLD');
     assert.equal(
       driftRes.execution?.failureReasonCode,
       'RECEIPT_GENERATION_DRIFT_DURING_SCAN'
+    );
+    assert.equal(
+      db.getRawDoc(
+        LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+        driftSeeded.requestId
+      ),
+      undefined
     );
 
     // 6E: Forbidden default bucket name is rejected before any file read
@@ -2113,6 +2321,11 @@ async function runTests(): Promise<void> {
         signatureVersion: 'daily.cvd:27455',
         signatureUpdatedAt: '2026-11-11T06:00:00.000Z',
       }),
+      pdfParserVerifier: async () => ({
+        ok: true,
+        parserName: 'qpdf',
+        parserVersion: '11.9.1',
+      }),
     });
     assert.equal(wrongBucketRes.ok, false);
     assert.equal(wrongBucketRes.execution?.state, 'AV_SCAN_FAILED');
@@ -2140,6 +2353,7 @@ async function runTests(): Promise<void> {
     const prevRequestIdEnv = process.env[LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR];
     const prevClamDbDirEnv = process.env.POP_CLAMAV_DB_DIR;
     const prevClamScanPathEnv = process.env.POP_CLAMSCAN_PATH;
+    const prevQpdfPathEnv = process.env.POP_QPDF_PATH;
     const workerModulePath = require.resolve(
       '../functions/src/library/libraryQuarantineAvWorker'
     );
@@ -2177,8 +2391,37 @@ async function runTests(): Promise<void> {
       );
       fs.chmodSync(fakeClamScanBin, 0o755);
 
+      const qpdfCountFile = path.join(cliFixtureDir, 'qpdf-count.txt');
+      fs.writeFileSync(qpdfCountFile, '0', 'utf8');
+
+      const fakeQpdfBin = path.join(cliFixtureDir, 'fake-qpdf.js');
+      fs.writeFileSync(
+        fakeQpdfBin,
+        [
+          '#!/usr/bin/env node',
+          'const fs = require("fs");',
+          'const args = process.argv.slice(2);',
+          'if (args.includes("--version")) {',
+          '  process.stdout.write("qpdf version 11.9.1\\n");',
+          '  process.exit(0);',
+          '}',
+          `const qpdfCountPath = ${JSON.stringify(qpdfCountFile)};`,
+          'const qpdfCur = Number(fs.readFileSync(qpdfCountPath, "utf8") || "0");',
+          'fs.writeFileSync(qpdfCountPath, String(qpdfCur + 1), "utf8");',
+          'const targetFile = args[args.length - 1];',
+          'if (!args.includes("--json") || !targetFile || !fs.existsSync(targetFile)) {',
+          '  process.exit(2);',
+          '}',
+          'process.stdout.write(JSON.stringify({ warnings: [], encrypt: { encrypted: false }, objects: { "obj:1 0 R": {}, "obj:2 0 R": {}, trailer: {} } }));',
+          'process.exit(0);',
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      fs.chmodSync(fakeQpdfBin, 0o755);
+
       process.env.POP_CLAMAV_DB_DIR = clamDbDir;
       process.env.POP_CLAMSCAN_PATH = fakeClamScanBin;
+      process.env.POP_QPDF_PATH = fakeQpdfBin;
 
       const createCliDispatchService = (
         targetDb: InMemoryAvExecutionFirestoreDatabase,
@@ -2326,6 +2569,17 @@ async function runTests(): Promise<void> {
       assert.equal(coldSavedExec?.isRightsApproved, false);
       assert.equal(coldSavedExec?.isPublished, false);
       assert.equal(coldSavedExec?.isReadyForPeia, false);
+      const coldPdfAttest = coldDb.getRawDoc(
+        LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+        coldSeeded.requestId
+      );
+      assert.equal(
+        validatePersistedLibraryQuarantinePdfInspection(
+          coldPdfAttest,
+          coldSeeded.requestId
+        ).ok,
+        true
+      );
 
       // 7B: Pre-existing default Firebase app -> zero duplicate initializeApp() calls
       const warmDb = new InMemoryAvExecutionFirestoreDatabase();
@@ -2380,6 +2634,17 @@ async function runTests(): Promise<void> {
         warmSeeded.requestId
       );
       assert.equal(warmSavedExec?.state, 'AV_NO_THREAT_DETECTED');
+      const warmPdfAttest = warmDb.getRawDoc(
+        LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+        warmSeeded.requestId
+      );
+      assert.equal(
+        validatePersistedLibraryQuarantinePdfInspection(
+          warmPdfAttest,
+          warmSeeded.requestId
+        ).ok,
+        true
+      );
 
       // 7C: Initialization failure -> fail-closed exit (1), zero scan execution,
       //     zero Firestore/Storage calls or writes, and zero secret/metadata leakage
@@ -2494,6 +2759,11 @@ async function runTests(): Promise<void> {
         delete process.env.POP_CLAMSCAN_PATH;
       } else {
         process.env.POP_CLAMSCAN_PATH = prevClamScanPathEnv;
+      }
+      if (prevQpdfPathEnv === undefined) {
+        delete process.env.POP_QPDF_PATH;
+      } else {
+        process.env.POP_QPDF_PATH = prevQpdfPathEnv;
       }
       fs.rmSync(cliFixtureDir, { recursive: true, force: true });
     }
@@ -2866,8 +3136,534 @@ async function runTests(): Promise<void> {
     }
   }
 
+  // =========================================================================
+  // TEST 10 (LIB-DIRECT-FILE-01 / PDF-SAFETY-RB1): Real Isolated PDF Parser,
+  //          Compressed /ObjStm + /XRef Support, Encrypted/Active/Malformed
+  //          Fail-Closed Rejection, qpdf Warnings/Timeout, Store Provenance Guard,
+  //          and Clean DOCX Parity Without PDF Attestation
+  // =========================================================================
+  {
+    const db = new InMemoryAvExecutionFirestoreDatabase();
+    const adminRepo = new InMemoryAdminRepo([ownerAdmin]);
+    const dispatchService = new LibraryQuarantineAvExecutionService({
+      trustedPrincipalProvider: {
+        resolveAuthenticatedPrincipal: () => ({
+          uid: ownerAdmin.id,
+          token: {},
+        }),
+      },
+      adminRepository: adminRepo,
+      db,
+      avJobInvoker: {
+        validateConfig: () => ({
+          ok: true,
+          config: {
+            projectId: 'promiseofplanet-bb325',
+            region: 'europe-west1',
+            jobName: 'pop-quarantine-av-worker',
+          },
+        }),
+        invokeAvJobForRequest: async () => ({
+          status: 'LAUNCHED',
+          executionName: 'exec-pdf-rb1',
+        }),
+      },
+      clock: () => '2026-11-11T11:00:00.000Z',
+    });
+
+    const okSigVerifier = async () => ({
+      ok: true as const,
+      engineVersion: 'ClamAV 1.3.1/27455',
+      signatureVersion: 'daily.cvd:27455',
+      signatureUpdatedAt: '2026-11-11T06:00:00.000Z',
+    });
+
+    // 10A: Missing qpdf parser binary -> PDF_PARSER_BINARY_MISSING BEFORE streaming GCS bytes
+    const missingParserSeeded = seedFullEightDocChain(db, 1001, {
+      format: 'PDF',
+    });
+    await dispatchService.dispatchQuarantineAvInspection({
+      receiptId: missingParserSeeded.receiptId,
+      expectedRequestId: missingParserSeeded.requestId,
+      expectedSafetyCaseRevision: 1,
+      acknowledgedHumanCaseRevision: 2,
+      confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+    });
+    const missingParserBucket = createFakeGenerationPinnedBucket({
+      expectedStoragePath: missingParserSeeded.receipt.storagePath,
+      expectedGeneration: missingParserSeeded.generation!,
+      payloadBytes: missingParserSeeded.payloadBytes,
+    });
+    const missingParserRes = await executeLibraryQuarantineAvWorkerTask({
+      requestId: missingParserSeeded.requestId,
+      workerRunId: 'worker_pdf_missing_qpdf_01',
+      db,
+      bucket: missingParserBucket,
+      clock: () => '2026-11-11T11:01:00.000Z',
+      signatureVerifier: okSigVerifier,
+      pdfParserVerifier: async () => ({
+        ok: false,
+        failureReasonCode: 'PDF_PARSER_BINARY_MISSING',
+        errorMessage: 'qpdf binary missing',
+      }),
+    });
+    assert.equal(missingParserRes.ok, false);
+    assert.equal(missingParserRes.execution?.state, 'AV_SCAN_FAILED');
+    assert.equal(
+      missingParserRes.execution?.failureReasonCode,
+      'PDF_PARSER_BINARY_MISSING'
+    );
+    assert.equal(missingParserBucket.streamCalls, 0);
+    assert.equal(
+      db.getRawDoc(
+        LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+        missingParserSeeded.requestId
+      ),
+      undefined
+    );
+
+    // 10B: qpdf exit 3 warning / recovery & qpdf timeout fail closed (NEVER pass with warnings)
+    const warnSeeded = seedFullEightDocChain(db, 1002, { format: 'PDF' });
+    await dispatchService.dispatchQuarantineAvInspection({
+      receiptId: warnSeeded.receiptId,
+      expectedRequestId: warnSeeded.requestId,
+      expectedSafetyCaseRevision: 1,
+      acknowledgedHumanCaseRevision: 2,
+      confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+    });
+    const warnBucket = createFakeGenerationPinnedBucket({
+      expectedStoragePath: warnSeeded.receipt.storagePath,
+      expectedGeneration: warnSeeded.generation!,
+      payloadBytes: warnSeeded.payloadBytes,
+    });
+    const warnRes = await executeLibraryQuarantineAvWorkerTask({
+      requestId: warnSeeded.requestId,
+      workerRunId: 'worker_pdf_warn_01',
+      db,
+      bucket: warnBucket,
+      clock: () => '2026-11-11T11:02:00.000Z',
+      signatureVerifier: okSigVerifier,
+      clamAvRunner: async () => ({
+        exitCode: 0,
+        timedOut: false,
+        spawnFailed: false,
+      }),
+      pdfParserVerifier: async () => ({
+        ok: true,
+        parserName: 'qpdf',
+        parserVersion: '11.9.1',
+      }),
+      pdfInspector: async (params) =>
+        defaultRunIsolatedPdfInspection(params, {
+          binaryVerifier: async () => ({
+            ok: true,
+            parserName: 'qpdf',
+            parserVersion: '11.9.1',
+          }),
+          qpdfRunner: async () => ({
+            exitCode: 3,
+            timedOut: false,
+            spawnFailed: false,
+            stdout: '',
+            stderr: 'WARNING: xref stream repaired',
+          }),
+        }),
+    });
+    assert.equal(warnRes.ok, false);
+    assert.equal(warnRes.execution?.state, 'AV_SCAN_FAILED');
+    assert.equal(
+      warnRes.execution?.failureReasonCode,
+      'PDF_ENCRYPTED_OR_MALFORMED'
+    );
+    assert.equal(
+      db.getRawDoc(
+        LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+        warnSeeded.requestId
+      ),
+      undefined
+    );
+
+    const timeoutSeeded = seedFullEightDocChain(db, 1003, { format: 'PDF' });
+    await dispatchService.dispatchQuarantineAvInspection({
+      receiptId: timeoutSeeded.receiptId,
+      expectedRequestId: timeoutSeeded.requestId,
+      expectedSafetyCaseRevision: 1,
+      acknowledgedHumanCaseRevision: 2,
+      confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+    });
+    const timeoutBucket = createFakeGenerationPinnedBucket({
+      expectedStoragePath: timeoutSeeded.receipt.storagePath,
+      expectedGeneration: timeoutSeeded.generation!,
+      payloadBytes: timeoutSeeded.payloadBytes,
+    });
+    const timeoutRes = await executeLibraryQuarantineAvWorkerTask({
+      requestId: timeoutSeeded.requestId,
+      workerRunId: 'worker_pdf_timeout_01',
+      db,
+      bucket: timeoutBucket,
+      clock: () => '2026-11-11T11:03:00.000Z',
+      signatureVerifier: okSigVerifier,
+      clamAvRunner: async () => ({
+        exitCode: 0,
+        timedOut: false,
+        spawnFailed: false,
+      }),
+      pdfParserVerifier: async () => ({
+        ok: true,
+        parserName: 'qpdf',
+        parserVersion: '11.9.1',
+      }),
+      pdfInspector: async (params) =>
+        defaultRunIsolatedPdfInspection(params, {
+          binaryVerifier: async () => ({
+            ok: true,
+            parserName: 'qpdf',
+            parserVersion: '11.9.1',
+          }),
+          qpdfRunner: async () => ({
+            exitCode: null,
+            timedOut: true,
+            spawnFailed: false,
+            stdout: '',
+            stderr: '',
+          }),
+        }),
+    });
+    assert.equal(timeoutRes.ok, false);
+    assert.equal(timeoutRes.execution?.state, 'AV_SCAN_FAILED');
+    assert.equal(
+      timeoutRes.execution?.failureReasonCode,
+      'PDF_INSPECTION_TIMEOUT'
+    );
+
+    // 10C: Real structural parser & worker reject active/encrypted/malformed PDFs
+    const buildSingleObjPdfWithExtra = (
+      extraObj3: string,
+      trailerExtra = ''
+    ): Buffer => {
+      const header = '%PDF-1.7\n';
+      const o1 = '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n';
+      const o2 = '2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n';
+      const o3 = `3 0 obj\n${extraObj3}\nendobj\n`;
+      const off1 = Buffer.byteLength(header, 'latin1');
+      const off2 = off1 + Buffer.byteLength(o1, 'latin1');
+      const off3 = off2 + Buffer.byteLength(o2, 'latin1');
+      const xrefOffset = off3 + Buffer.byteLength(o3, 'latin1');
+      const pad = (n: number) => String(n).padStart(10, '0');
+      const xref =
+        'xref\n0 4\n' +
+        '0000000000 65535 f \n' +
+        `${pad(off1)} 00000 n \n` +
+        `${pad(off2)} 00000 n \n` +
+        `${pad(off3)} 00000 n \n` +
+        `trailer\n<< /Size 4 /Root 1 0 R ${trailerExtra}>>\n` +
+        `startxref\n${xrefOffset}\n%%EOF\n`;
+      return Buffer.from(header + o1 + o2 + o3 + xref, 'latin1');
+    };
+
+    const unsafeCorpus: ReadonlyArray<{
+      readonly label: string;
+      readonly bytes: Buffer;
+      readonly expectedCode:
+        | 'PDF_ENCRYPTED_OR_MALFORMED'
+        | 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE';
+    }> = [
+      {
+        label: 'encrypted-trailer',
+        bytes: buildSingleObjPdfWithExtra('<< /Type /Info >>', '/Encrypt 3 0 R '),
+        expectedCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      },
+      {
+        label: 'javascript-plain',
+        bytes: buildSingleObjPdfWithExtra('<< /S /JavaScript /JS (app.alert(1)) >>'),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'javascript-hex-escape-obfuscated',
+        bytes: buildSingleObjPdfWithExtra('<< /S /Java#53cript /#4aS (app.alert(1)) >>'),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'launch-action',
+        bytes: buildSingleObjPdfWithExtra('<< /S /Launch /F (cmd.exe) >>'),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'openaction-key',
+        bytes: buildSingleObjPdfWithExtra('<< /OpenAction << /S /Named /N /FirstPage >> >>'),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'embedded-files',
+        bytes: buildSingleObjPdfWithExtra('<< /Type /Filespec /EF << /F 4 0 R >> >>'),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'xfa-form',
+        bytes: buildSingleObjPdfWithExtra('<< /XFA (xml) >>'),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'richmedia',
+        bytes: buildSingleObjPdfWithExtra('<< /Subtype /RichMedia >>'),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'external-uri',
+        bytes: buildSingleObjPdfWithExtra('<< /S /URI /URI (https://evil.example) >>'),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'jbig2decode-filter',
+        bytes: Buffer.from(
+          '%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n' +
+            '2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n' +
+            '3 0 obj\n<< /Filter /JBIG2Decode /Length 2 >>\nstream\nAA\nendstream\nendobj\n' +
+            'xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000107 00000 n \n' +
+            'trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n177\n%%EOF\n',
+          'latin1'
+        ),
+        expectedCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      },
+      {
+        label: 'hidden-js-inside-compressed-objstm',
+        bytes: buildCompressedStreamPdfBytes('<< /S /JavaScript /JS (app.alert(1)) >>'),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'trailing-polyglot-after-eof',
+        bytes: Buffer.concat([
+          buildValidClassicPdfBytes('Polyglot'),
+          Buffer.from('<script>alert(1)</script>', 'latin1'),
+        ]),
+        expectedCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      },
+      {
+        label: 'malformed-missing-xref',
+        bytes: Buffer.from(
+          '%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n%%EOF\n',
+          'latin1'
+        ),
+        expectedCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      },
+    ];
+
+    for (let idx = 0; idx < unsafeCorpus.length; idx += 1) {
+      const item = unsafeCorpus[idx];
+      const directParse = inspectPdfBytesStructurally(item.bytes);
+      assert.equal(
+        directParse.ok,
+        false,
+        `Expected direct structural rejection for ${item.label}`
+      );
+      if (!directParse.ok) {
+        assert.equal(
+          directParse.failureReasonCode,
+          item.expectedCode,
+          `Mismatch for ${item.label}: got ${directParse.failureReasonCode}`
+        );
+      }
+
+      const unsafeSeeded = seedFullEightDocChain(db, 1010 + idx, {
+        format: 'PDF',
+        payloadBytes: item.bytes,
+      });
+      await dispatchService.dispatchQuarantineAvInspection({
+        receiptId: unsafeSeeded.receiptId,
+        expectedRequestId: unsafeSeeded.requestId,
+        expectedSafetyCaseRevision: 1,
+        acknowledgedHumanCaseRevision: 2,
+        confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+      });
+      const unsafeBucket = createFakeGenerationPinnedBucket({
+        expectedStoragePath: unsafeSeeded.receipt.storagePath,
+        expectedGeneration: unsafeSeeded.generation!,
+        payloadBytes: item.bytes,
+      });
+      const unsafeWorkerRes = await executeLibraryQuarantineAvWorkerTask({
+        requestId: unsafeSeeded.requestId,
+        workerRunId: `worker_unsafe_${idx}_01`,
+        db,
+        bucket: unsafeBucket,
+        clock: () => '2026-11-11T11:04:00.000Z',
+        signatureVerifier: okSigVerifier,
+        clamAvRunner: async () => ({
+          exitCode: 0,
+          timedOut: false,
+          spawnFailed: false,
+        }),
+        pdfParserVerifier: async () => ({
+          ok: true,
+          parserName: 'qpdf',
+          parserVersion: '11.9.1',
+        }),
+        pdfInspector: runInProcessIsolatedPdfInspector,
+      });
+      assert.equal(unsafeWorkerRes.ok, false, item.label);
+      assert.equal(unsafeWorkerRes.execution?.state, 'AV_SCAN_FAILED', item.label);
+      assert.equal(
+        unsafeWorkerRes.execution?.failureReasonCode,
+        item.expectedCode,
+        item.label
+      );
+      assert.equal(
+        db.getRawDoc(
+          LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+          unsafeSeeded.requestId
+        ),
+        undefined,
+        item.label
+      );
+    }
+
+    // 10D: Clean PDF with real /Type /XRef stream + zlib-compressed /Type /ObjStm passes
+    const cleanCompressedPdf = buildCompressedStreamPdfBytes('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+    const compressedSeeded = seedFullEightDocChain(db, 1030, {
+      format: 'PDF',
+      payloadBytes: cleanCompressedPdf,
+    });
+    await dispatchService.dispatchQuarantineAvInspection({
+      receiptId: compressedSeeded.receiptId,
+      expectedRequestId: compressedSeeded.requestId,
+      expectedSafetyCaseRevision: 1,
+      acknowledgedHumanCaseRevision: 2,
+      confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+    });
+    const compressedBucket = createFakeGenerationPinnedBucket({
+      expectedStoragePath: compressedSeeded.receipt.storagePath,
+      expectedGeneration: compressedSeeded.generation!,
+      payloadBytes: cleanCompressedPdf,
+    });
+    const compressedWorkerRes = await executeLibraryQuarantineAvWorkerTask({
+      requestId: compressedSeeded.requestId,
+      workerRunId: 'worker_clean_objstm_01',
+      db,
+      bucket: compressedBucket,
+      clock: () => '2026-11-11T11:05:00.000Z',
+      signatureVerifier: okSigVerifier,
+      clamAvRunner: async () => ({
+        exitCode: 0,
+        timedOut: false,
+        spawnFailed: false,
+      }),
+      pdfParserVerifier: async () => ({
+        ok: true,
+        parserName: 'qpdf',
+        parserVersion: '11.9.1',
+      }),
+      pdfInspector: runInProcessIsolatedPdfInspector,
+    });
+    assert.equal(compressedWorkerRes.ok, true);
+    assert.equal(
+      compressedWorkerRes.execution?.state,
+      'AV_NO_THREAT_DETECTED'
+    );
+    const compressedAttest = db.getRawDoc(
+      LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+      compressedSeeded.requestId
+    ) as unknown as LibraryQuarantinePersistedPdfInspection | undefined;
+    assert.equal(compressedAttest?.xrefFormat, 'STREAM');
+    assert.equal(
+      (compressedAttest?.compressedObjectStreamsParsed ?? 0) >= 1,
+      true
+    );
+    assert.equal(compressedAttest?.isSanitized, false);
+    assert.equal(compressedAttest?.isVerifiedSafe, false);
+
+    // 10E: Store transaction guard refuses AV_NO_THREAT_DETECTED on PDF without valid provenance-matched pdfInspection
+    const storeGuardSeeded = seedFullEightDocChain(db, 1031, { format: 'PDF' });
+    await dispatchService.dispatchQuarantineAvInspection({
+      receiptId: storeGuardSeeded.receiptId,
+      expectedRequestId: storeGuardSeeded.requestId,
+      expectedSafetyCaseRevision: 1,
+      acknowledgedHumanCaseRevision: 2,
+      confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+    });
+    const avStoreDirect = new FirestoreLibraryQuarantineAvExecutionStore(db);
+    const claimDirect = await avStoreDirect.claimAvExecutionForWorkerTransactional({
+      requestId: storeGuardSeeded.requestId,
+      workerRunId: 'worker_store_guard_01',
+      nowIso: '2026-11-11T11:06:00.000Z',
+    });
+    assert.equal(claimDirect.status, 'CLAIMED');
+    if (claimDirect.status === 'CLAIMED') {
+      const bypassAttemptRes =
+        await avStoreDirect.recordWorkerAvScanOutcomeTransactional({
+          requestId: storeGuardSeeded.requestId,
+          expectedRevision: claimDirect.execution.revision,
+          workerRunId: 'worker_store_guard_01',
+          nowIso: '2026-11-11T11:06:05.000Z',
+          targetState: 'AV_NO_THREAT_DETECTED',
+          engineName: 'ClamAV',
+          engineVersion: 'ClamAV 1.3.1/27455',
+          signatureVersion: 'daily.cvd:27455',
+          signatureUpdatedAt: '2026-11-11T06:00:00.000Z',
+          scannedBytes: storeGuardSeeded.payloadBytes.byteLength,
+          exitCode: 0,
+          failureReasonCode: null,
+          observedGcsGeneration: storeGuardSeeded.generation!,
+          observedSha256: storeGuardSeeded.sha256,
+          observedByteSize: storeGuardSeeded.payloadBytes.byteLength,
+          pdfInspection: null,
+        });
+      assert.equal(bypassAttemptRes.status, 'RECORDED');
+      if (bypassAttemptRes.status === 'RECORDED') {
+        assert.equal(bypassAttemptRes.execution.state, 'AV_SCAN_FAILED');
+        assert.equal(
+          bypassAttemptRes.execution.failureReasonCode,
+          'PDF_INSPECTION_FAILED'
+        );
+      }
+      assert.equal(
+        db.getRawDoc(
+          LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+          storeGuardSeeded.requestId
+        ),
+        undefined
+      );
+    }
+
+    // 10F: Clean DOCX completes AV_NO_THREAT_DETECTED without needing or writing a PDF attestation
+    const cleanDocxSeeded = seedFullEightDocChain(db, 1032, { format: 'DOCX' });
+    await dispatchService.dispatchQuarantineAvInspection({
+      receiptId: cleanDocxSeeded.receiptId,
+      expectedRequestId: cleanDocxSeeded.requestId,
+      expectedSafetyCaseRevision: 1,
+      acknowledgedHumanCaseRevision: 2,
+      confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+    });
+    const cleanDocxBucket = createFakeGenerationPinnedBucket({
+      expectedStoragePath: cleanDocxSeeded.receipt.storagePath,
+      expectedGeneration: cleanDocxSeeded.generation!,
+      payloadBytes: cleanDocxSeeded.payloadBytes,
+    });
+    const cleanDocxRes = await executeLibraryQuarantineAvWorkerTask({
+      requestId: cleanDocxSeeded.requestId,
+      workerRunId: 'worker_clean_docx_01',
+      db,
+      bucket: cleanDocxBucket,
+      clock: () => '2026-11-11T11:07:00.000Z',
+      signatureVerifier: okSigVerifier,
+      clamAvRunner: async () => ({
+        exitCode: 0,
+        timedOut: false,
+        spawnFailed: false,
+      }),
+    });
+    assert.equal(cleanDocxRes.ok, true);
+    assert.equal(cleanDocxRes.status, 'COMPLETED_CLEAN');
+    assert.equal(cleanDocxRes.execution?.state, 'AV_NO_THREAT_DETECTED');
+    assert.equal(
+      db.getRawDoc(
+        LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+        cleanDocxSeeded.requestId
+      ),
+      undefined
+    );
+  }
+
   console.log(
-    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 BACKEND TESTS PASSED (9/9).'
+    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 + PDF-SAFETY-RB1 BACKEND TESTS PASSED (10/10).'
   );
 }
 

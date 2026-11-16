@@ -75,8 +75,16 @@ import type {
   TrustedQuarantineReviewerPrincipalProvider,
 } from './libraryQuarantineReviewDraftPersistenceService';
 
+import {
+  LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+  arePersistedPdfInspectionProvenanceIncompatible,
+  validatePersistedLibraryQuarantinePdfInspection,
+  type LibraryQuarantinePersistedPdfInspection,
+} from './libraryIsolatedPdfInspection';
+
 const ALLOWED_AV_EXECUTION_WRITE_COLLECTIONS: ReadonlySet<string> = new Set([
   LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
+  LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
 ]);
 
 const ALLOWED_GET_STATUS_INPUT_KEYS: ReadonlySet<string> = new Set([
@@ -205,6 +213,16 @@ export const AV_EXECUTION_SAFE_MESSAGES: Readonly<
     'Quarantine receipt storage generation or SHA-256 changed during the AV scan.',
   TEMP_WORKSPACE_INIT_FAILED:
     'Isolated worker failed to initialize restricted temporary workspace.',
+  PDF_PARSER_BINARY_MISSING:
+    'Isolated worker could not locate or verify the required qpdf PDF parser executable.',
+  PDF_ENCRYPTED_OR_MALFORMED:
+    'Isolated PDF inspection rejected an encrypted, malformed, or warning-producing PDF file.',
+  PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE:
+    'Isolated PDF inspection rejected prohibited active, embedded, external, or unsafe PDF structures.',
+  PDF_INSPECTION_TIMEOUT:
+    'Isolated PDF structural inspection timed out and failed closed.',
+  PDF_INSPECTION_FAILED:
+    'Isolated PDF structural inspection failed closed without creating a clearance attestation.',
   INVALID_SERVICE_INPUT_HOLD:
     'AV inspection execution request payload must be a plain object with required fields.',
   UNTRUSTED_CALLER_FIELD_HOLD:
@@ -406,6 +424,7 @@ export interface WorkerRecordAvScanOutcomeInput {
   readonly observedGcsGeneration?: string;
   readonly observedSha256?: string;
   readonly observedByteSize?: number;
+  readonly pdfInspection?: LibraryQuarantinePersistedPdfInspection | null;
 }
 
 export interface WorkerRecordAvScanOutcomeRecordedResult {
@@ -566,6 +585,39 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
       execRef,
       toFirestoreDocumentData(record) as Record<string, unknown>
     );
+  }
+
+  private setPdfInspectionRecordInTransaction(
+    tx: LibraryQuarantineReviewDraftFirestoreTransaction,
+    pdfRef: LibraryQuarantineFirestoreDocumentRef,
+    record: LibraryQuarantinePersistedPdfInspection
+  ): void {
+    this.assertAllowedWriteCollection(
+      LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION
+    );
+    if (pdfRef.id !== undefined && pdfRef.id !== record.requestId) {
+      throw new Error(
+        'DOCUMENT_ID_MISMATCH: PDF inspection attestation document ID does not match record.requestId.'
+      );
+    }
+    const setFn = (
+      tx as Partial<{
+        set(
+          documentRef: LibraryQuarantineFirestoreDocumentRef,
+          data: Record<string, unknown>
+        ): unknown;
+      }>
+    )?.set;
+    if (typeof setFn !== 'function') {
+      throw new Error(
+        'INVALID_AV_EXECUTION_TRANSACTION: Firestore transaction does not expose set() for PDF inspection attestation.'
+      );
+    }
+    const clone: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(record)) {
+      clone[key] = value;
+    }
+    setFn.call(tx, pdfRef, clone);
   }
 
   private getPointDocRef(
@@ -1669,6 +1721,10 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
             LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
             requestId
           );
+          const pdfRef = this.getPointDocRef(
+            LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+            requestId
+          );
 
           const receiptSnap = await tx.get(receiptRef);
           const draftSnap = await tx.get(draftRef);
@@ -1679,6 +1735,8 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
           const safetySnap = await tx.get(safetyRef);
           const requestSnap = await tx.get(requestRef);
           const execSnap = await tx.get(execRef);
+          const existingPdfSnap = await tx.get(pdfRef);
+          void existingPdfSnap;
 
           if (!execSnap.exists) {
             return Object.freeze({
@@ -1736,6 +1794,8 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
 
           let effectiveTargetState = params.targetState;
           let effectiveFailureReason = params.failureReasonCode;
+          let verifiedPdfAttestation: LibraryQuarantinePersistedPdfInspection | null =
+            null;
 
           if (!chainResult.ok) {
             effectiveTargetState = 'STALE_HOLD';
@@ -1805,6 +1865,32 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
               ) {
                 effectiveTargetState = 'STALE_HOLD';
                 effectiveFailureReason = 'RECEIPT_GENERATION_DRIFT_DURING_SCAN';
+              } else if (
+                effectiveTargetState === 'AV_NO_THREAT_DETECTED' &&
+                receipt.format === 'PDF'
+              ) {
+                const rawAttestation = params.pdfInspection;
+                const attCheck =
+                  validatePersistedLibraryQuarantinePdfInspection(
+                    rawAttestation,
+                    requestId
+                  );
+                if (
+                  !attCheck.ok ||
+                  arePersistedPdfInspectionProvenanceIncompatible(
+                    attCheck.value,
+                    {
+                      ...expectedProvenance,
+                      workerRunId: params.workerRunId,
+                      avCompletedAt: completedAt,
+                    }
+                  )
+                ) {
+                  effectiveTargetState = 'AV_SCAN_FAILED';
+                  effectiveFailureReason = 'PDF_INSPECTION_FAILED';
+                } else {
+                  verifiedPdfAttestation = attCheck.value;
+                }
               }
             }
           }
@@ -1858,6 +1944,17 @@ export class FirestoreLibraryQuarantineAvExecutionStore {
           }
 
           this.setAvExecutionRecordInTransaction(tx, execRef, finalExec);
+          if (
+            verifiedPdfAttestation !== null &&
+            finalExec.state === 'AV_NO_THREAT_DETECTED' &&
+            finalExec.sourceFormat === 'PDF'
+          ) {
+            this.setPdfInspectionRecordInTransaction(
+              tx,
+              pdfRef,
+              verifiedPdfAttestation
+            );
+          }
 
           return Object.freeze({
             status: 'RECORDED' as const,

@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  Download,
   ExternalLink,
   FileText,
   Globe,
@@ -55,6 +56,17 @@ import {
   type ReviewedPublicLibraryRightsStatus,
   type ReviewedPublicLinkBasis,
 } from '../../services/libraryReviewedSourceReleaseClient';
+import {
+  LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+  LibraryQuarantinePublishedBinaryReleasePanelController,
+  PUBLISHED_BINARY_PUBLIC_RIGHTS_STATUSES,
+  PUBLISHED_BINARY_RIGHTS_BASES,
+  canUserPublishQuarantinedBinaryToPublicLibrary,
+  isLibraryQuarantinePublishedBinaryReleaseEnabled,
+  type LibraryQuarantinePublishedBinaryReleasePanelSnapshot,
+  type PublishedBinaryPublicLibraryRightsStatus,
+  type PublishedBinaryRightsBasis,
+} from '../../services/libraryPublishedBinaryClient';
 
 /**
  * LIB-FILE-HUMAN-CASEWORK-01 — Human Review Case Modal & State Controller
@@ -994,6 +1006,7 @@ export interface LibraryQuarantineHumanReviewModalProps {
   readonly catalogHandoffController?: LibraryQuarantineCatalogHandoffPanelController;
   readonly rightsDecisionController?: LibraryQuarantineRightsDecisionPanelController;
   readonly reviewedSourceReleaseController?: LibraryQuarantineReviewedSourceReleasePanelController;
+  readonly publishedBinaryReleaseController?: LibraryQuarantinePublishedBinaryReleasePanelController;
   readonly envOverride?: Record<string, unknown>;
 }
 
@@ -1030,6 +1043,7 @@ export function LibraryQuarantineHumanReviewModal({
   catalogHandoffController,
   rightsDecisionController,
   reviewedSourceReleaseController,
+  publishedBinaryReleaseController,
   envOverride,
 }: LibraryQuarantineHumanReviewModalProps) {
   const [snapshot, setSnapshot] =
@@ -1042,6 +1056,8 @@ export function LibraryQuarantineHumanReviewModal({
     useRef<LibraryQuarantineRightsDecisionPanelController | null>(null);
   const fallbackReleaseControllerRef =
     useRef<LibraryQuarantineReviewedSourceReleasePanelController | null>(null);
+  const fallbackBinaryReleaseControllerRef =
+    useRef<LibraryQuarantinePublishedBinaryReleasePanelController | null>(null);
 
   if (!rightsDecisionController && !fallbackRightsControllerRef.current) {
     fallbackRightsControllerRef.current =
@@ -1058,11 +1074,25 @@ export function LibraryQuarantineHumanReviewModal({
       });
   }
 
+  if (
+    !publishedBinaryReleaseController &&
+    !fallbackBinaryReleaseControllerRef.current
+  ) {
+    fallbackBinaryReleaseControllerRef.current =
+      new LibraryQuarantinePublishedBinaryReleasePanelController(currentUser, {
+        enabled: isLibraryQuarantinePublishedBinaryReleaseEnabled(envOverride),
+      });
+  }
+
   const effectiveRightsDecisionController =
     rightsDecisionController ?? fallbackRightsControllerRef.current!;
 
   const effectiveReleaseController =
     reviewedSourceReleaseController ?? fallbackReleaseControllerRef.current!;
+
+  const effectiveBinaryReleaseController =
+    publishedBinaryReleaseController ??
+    fallbackBinaryReleaseControllerRef.current!;
 
   useEffect(() => {
     setSnapshot(controller.getSnapshot());
@@ -1073,12 +1103,18 @@ export function LibraryQuarantineHumanReviewModal({
 
   useEffect(() => {
     effectiveReleaseController.setCurrentUser(currentUser);
-  }, [effectiveReleaseController, currentUser]);
+    effectiveBinaryReleaseController.setCurrentUser(currentUser);
+  }, [
+    effectiveReleaseController,
+    effectiveBinaryReleaseController,
+    currentUser,
+  ]);
 
   useEffect(() => {
     if (!snapshot.isOpen) {
       effectiveRightsDecisionController.resetPanel();
       effectiveReleaseController.resetPanel();
+      effectiveBinaryReleaseController.resetPanel();
       return;
     }
     closeButtonRef.current?.focus();
@@ -1100,6 +1136,7 @@ export function LibraryQuarantineHumanReviewModal({
     controller,
     effectiveRightsDecisionController,
     effectiveReleaseController,
+    effectiveBinaryReleaseController,
   ]);
 
   if (!snapshot.isOpen || !snapshot.activeReceipt) {
@@ -1934,6 +1971,29 @@ export function LibraryQuarantineHumanReviewModal({
             envOverride={envOverride}
           />
         )}
+
+        {/* Inline Direct Uploaded Binary Release Panel (LIB-DIRECT-FILE-01) */}
+        {!loading && !loadError && (
+          <LibraryQuarantinePublishedBinaryReleaseSection
+            controller={effectiveBinaryReleaseController}
+            currentUser={currentUser}
+            savedReviewCase={reviewCase}
+            hasUnsavedCaseEdits={Boolean(
+              reviewCase &&
+                (form.status !== reviewCase.status ||
+                  form.titleAr !== reviewCase.titleAr ||
+                  form.titleEn !== reviewCase.titleEn ||
+                  form.issuingOrganization !== reviewCase.issuingOrganization ||
+                  form.summaryAr !== reviewCase.summaryAr ||
+                  form.summaryEn !== reviewCase.summaryEn ||
+                  form.sourceEvidenceNotes !== reviewCase.sourceEvidenceNotes ||
+                  form.rightsEvidenceNotes !== reviewCase.rightsEvidenceNotes ||
+                  form.editorialNotes !== reviewCase.editorialNotes)
+            )}
+            isAr={isAr}
+            envOverride={envOverride}
+          />
+        )}
       </div>
     </div>
   );
@@ -2578,8 +2638,752 @@ export function LibraryQuarantineReviewedSourceReleaseSection({
                 </button>
               </div>
             )}
+      </div>
+        )}
+    </section>
+  );
+}
+
+interface LibraryQuarantinePublishedBinaryReleaseSectionProps {
+  readonly controller: LibraryQuarantinePublishedBinaryReleasePanelController;
+  readonly currentUser: AdminUser | null;
+  readonly savedReviewCase: SanitizedLibraryQuarantineHumanReviewCaseDto | null;
+  readonly hasUnsavedCaseEdits: boolean;
+  readonly isAr: boolean;
+  readonly envOverride?: Record<string, unknown>;
+}
+
+function getBinaryRightsBasisLabel(
+  basis: PublishedBinaryRightsBasis,
+  isAr: boolean
+): string {
+  switch (basis) {
+    case 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION':
+      return isAr
+        ? 'أنا المالك وأملك حقوق النشر والتوزيع للملف المرفوع'
+        : 'Owner / Author Holding Binary Distribution Rights';
+    case 'EXPLICIT_BINARY_REDISTRIBUTION_PERMISSION':
+      return isAr
+        ? 'لدي إذن صريح وموثّق لإعادة نشر الملف المرفوع'
+        : 'Explicit Written Binary Redistribution Permission';
+    case 'OPEN_LICENSE_BINARY_REDISTRIBUTION':
+      return isAr
+        ? 'ترخيص مفتوح يسمح بإعادة نشر وتنزيل الملف'
+        : 'Open License Allowing Binary Redistribution';
+    case 'PUBLIC_DOMAIN_BINARY_DISTRIBUTION':
+      return isAr
+        ? 'ملكية عامة تسمح بنشر وتنزيل الملف'
+        : 'Public Domain Binary Distribution';
+  }
+}
+
+export function LibraryQuarantinePublishedBinaryReleaseSection({
+  controller,
+  currentUser,
+  savedReviewCase,
+  hasUnsavedCaseEdits,
+  isAr,
+  envOverride,
+}: LibraryQuarantinePublishedBinaryReleaseSectionProps) {
+  const [state, setState] =
+    useState<LibraryQuarantinePublishedBinaryReleasePanelSnapshot>(() =>
+      controller.getSnapshot()
+    );
+
+  const lastLoadedKeyRef = useRef<string>('');
+
+  useEffect(() => {
+    setState(controller.getSnapshot());
+    return controller.subscribe((next) => {
+      setState(next);
+    });
+  }, [controller]);
+
+  const isEnabled =
+    state.enabled || isLibraryQuarantinePublishedBinaryReleaseEnabled(envOverride);
+  const canPublish =
+    canUserPublishQuarantinedBinaryToPublicLibrary(currentUser);
+  const isSavedCaseMetadataRecorded =
+    savedReviewCase !== null && savedReviewCase.status === 'METADATA_RECORDED';
+
+  useEffect(() => {
+    if (!isEnabled || !canPublish || !isSavedCaseMetadataRecorded) {
+      lastLoadedKeyRef.current = '';
+      return;
+    }
+    const loadKey = `${savedReviewCase.receiptId}:${savedReviewCase.revision}`;
+    if (lastLoadedKeyRef.current !== loadKey) {
+      lastLoadedKeyRef.current = loadKey;
+      void controller.openForSavedCase(savedReviewCase);
+    }
+  }, [
+    controller,
+    isEnabled,
+    canPublish,
+    isSavedCaseMetadataRecorded,
+    savedReviewCase,
+  ]);
+
+  if (!isEnabled || !canPublish || !isSavedCaseMetadataRecorded) {
+    return null;
+  }
+
+  const {
+    loading,
+    publishing,
+    readinessStatus,
+    holdCode,
+    holdMessage,
+    form,
+    confirmed,
+    loadError,
+    publishError,
+    lastOutcome,
+    conflictState,
+    uncertainState,
+  } = state;
+
+  const isPublished = readinessStatus?.isPublished === true;
+  const isEligible = readinessStatus?.eligibleForPublish === true;
+  const waitingForScan =
+    holdCode === 'WAITING_FOR_ACTUAL_SCAN' ||
+    (readinessStatus !== null &&
+      !readinessStatus.isScanCleanForCurrentRevision);
+
+  return (
+    <section
+      data-testid="quarantine-published-binary-release-panel"
+      aria-labelledby="quarantine-published-binary-release-heading"
+      className="p-4 sm:p-5 rounded-2xl border-2 border-indigo-200 dark:border-indigo-900/70 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-4 text-xs"
+      dir={isAr ? 'rtl' : 'ltr'}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2 border-b border-indigo-200/80 dark:border-indigo-900/60 pb-3">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="p-1.5 rounded-lg bg-indigo-100 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-300">
+              <Download className="h-4 w-4" />
+            </span>
+            <h4
+              id="quarantine-published-binary-release-heading"
+              data-testid="quarantine-published-binary-release-title"
+              className="text-sm font-extrabold text-gray-900 dark:text-gray-100"
+            >
+              {isAr
+                ? 'نشر الملف المرفوع للتحميل'
+                : 'Publish Uploaded File for Download'}
+            </h4>
+            <span
+              data-testid="quarantine-published-binary-release-badge"
+              className={`px-2 py-0.5 rounded-md font-bold text-[11px] border ${
+                isPublished
+                  ? 'bg-emerald-100 text-emerald-900 border-emerald-300 dark:bg-emerald-900/60 dark:text-emerald-200 dark:border-emerald-700'
+                  : waitingForScan
+                    ? 'bg-amber-100 text-amber-900 border-amber-300 dark:bg-amber-950/60 dark:text-amber-200 dark:border-amber-800'
+                    : isEligible
+                      ? 'bg-indigo-100 text-indigo-900 border-indigo-300 dark:bg-indigo-950/60 dark:text-indigo-200 dark:border-indigo-800'
+                      : 'bg-rose-100 text-rose-900 border-rose-300 dark:bg-rose-950/60 dark:text-rose-200 dark:border-rose-800'
+              }`}
+            >
+              {isPublished
+                ? isAr
+                  ? 'منشور للتحميل المباشر'
+                  : 'PUBLISHED FOR DIRECT DOWNLOAD'
+                : waitingForScan
+                  ? isAr
+                    ? 'بانتظار نتيجة فحص ClamAV الفعلي'
+                    : 'WAITING_FOR_ACTUAL_SCAN'
+                  : isEligible
+                    ? isAr
+                      ? 'جاهز لنشر الملف المرفوع'
+                      : 'ELIGIBLE FOR BINARY RELEASE'
+                    : isAr
+                      ? 'موقوف لحين استيفاء المتطلبات'
+                      : 'HOLD'}
+            </span>
+          </div>
+          <p className="text-[11px] text-gray-600 dark:text-gray-400 leading-relaxed">
+            {isAr
+              ? 'يتيح هذا المسار نشر ملف PDF أو Word المرفوع نفسه في المكتبة العامة ليقوم الزائر بتنزيله مباشرةً كمرفق آمن دون الحاجة لأي رابط خارجي أو إعادة رفع، بعد تحقق الفحص النظيف وموافقة المالك.'
+              : 'Publishes the already-uploaded PDF or Word binary itself for safe attachment download from Public Library without external publisher links or re-upload, strictly after clean ClamAV verification and explicit binary rights approval.'}
+          </p>
+        </div>
+
+        <button
+          type="button"
+          data-testid="refresh-published-binary-release-btn"
+          disabled={loading || publishing}
+          onClick={() => {
+            void controller.reloadStatus();
+          }}
+          className="px-2.5 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-bold text-[11px] cursor-pointer disabled:opacity-50 inline-flex items-center gap-1"
+        >
+          <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+          <span>{isAr ? 'تحديث حالة النشر' : 'Check Binary Readiness'}</span>
+        </button>
+      </div>
+
+      {hasUnsavedCaseEdits && (
+        <div
+          data-testid="published-binary-release-unsaved-hold"
+          className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 font-bold"
+        >
+          {isAr
+            ? 'يوجد تعديل غير محفوظ في سجل المراجعة البشرية — احفظ السجل وأجرِ المواءمة قبل نشر الملف المرفوع.'
+            : 'Unsaved edits exist in the human review case. Save and align before publishing the uploaded file.'}
+        </div>
+      )}
+
+      {loading && (
+        <div
+          data-testid="published-binary-release-loading"
+          className="p-4 text-center text-gray-600 dark:text-gray-400 flex items-center justify-center gap-2 font-bold"
+        >
+          <Loader2 className="h-4 w-4 animate-spin text-indigo-700" />
+          <span>
+            {isAr
+              ? 'جاري التحقق من الفحص الأمني ومواءمة الفهرس وأهلية النشر الثنائي...'
+              : 'Verifying ClamAV execution, alignment, and binary release readiness...'}
+          </span>
+        </div>
+      )}
+
+      {!loading && loadError && (
+        <div
+          data-testid="published-binary-release-load-error"
+          role="alert"
+          className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200"
+        >
+          <div className="font-extrabold">
+            {isAr
+              ? 'تعذر فحص حالة نشر الملف المرفوع'
+              : 'Failed to Load Binary Release Status'}
+          </div>
+          <p className="font-mono text-[11px] mt-1">{loadError}</p>
+        </div>
+      )}
+
+      {!loading && !loadError && holdCode && (
+        <div
+          data-testid="published-binary-release-hold-banner"
+          role="alert"
+          className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 text-rose-950 dark:text-rose-100 space-y-1.5"
+        >
+          <div className="font-extrabold flex items-center gap-1.5">
+            <AlertTriangle className="h-4 w-4 text-rose-600 dark:text-rose-400 shrink-0" />
+            <span>
+              {waitingForScan
+                ? isAr
+                  ? 'نشر الملف المرفوع موقوف — بانتظار نتيجة فحص ClamAV النظيفة الفعلية'
+                  : 'Binary Release Held — WAITING FOR ACTUAL CLEAN CLAMAV SCAN'
+                : isAr
+                  ? 'نشر الملف المرفوع موقوف لحين استيفاء المتطلبات'
+                  : 'Binary Release Held'}
+            </span>
+          </div>
+          <div
+            data-testid="published-binary-release-hold-code"
+            className="font-mono text-[11px] font-bold"
+            dir="ltr"
+          >
+            {holdCode}
+          </div>
+          {holdMessage && (
+            <p className="text-[11px] leading-relaxed">{holdMessage}</p>
+          )}
+        </div>
+      )}
+
+      {uncertainState && (
+        <div
+          data-testid="published-binary-release-uncertain-banner"
+          role="alert"
+          className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border-2 border-amber-400 text-amber-950 dark:text-amber-100 space-y-2"
+        >
+          <div className="font-extrabold flex items-center gap-1.5">
+            <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+            <span>
+              {isAr
+                ? 'نتيجة نشر الملف غير مؤكدة — تم إيقاف إعادة الإرسال التلقائي'
+                : 'Binary Publish Commit Uncertain — Automatic Retry Stopped'}
+            </span>
+          </div>
+          <p className="text-[11px]">{uncertainState.errorMessage}</p>
+          <button
+            type="button"
+            data-testid="verify-published-binary-release-btn"
+            disabled={loading || publishing}
+            onClick={() => {
+              void controller.verifyUncertainPublish();
+            }}
+            className="px-3.5 py-2 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-extrabold text-xs cursor-pointer inline-flex items-center gap-1.5"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            <span>
+              {isAr ? 'تحقق من حالة النشر' : 'Verify binary release status'}
+            </span>
+          </button>
+        </div>
+      )}
+
+      {conflictState && (
+        <div
+          data-testid="published-binary-release-conflict-banner"
+          role="alert"
+          className="p-3.5 rounded-xl bg-orange-50 dark:bg-orange-950/40 border border-orange-300 dark:border-orange-800 text-orange-950 dark:text-orange-100 space-y-2"
+        >
+          <div className="font-extrabold">
+            {isAr
+              ? `تعارض في البيانات (${conflictState.errorCode})`
+              : `Release Precondition Conflict (${conflictState.errorCode})`}
+          </div>
+          <p className="text-[11px]">{conflictState.errorMessage}</p>
+          <button
+            type="button"
+            data-testid="reload-published-binary-release-conflict-btn"
+            onClick={() => {
+              void controller.reloadStatus();
+            }}
+            className="px-3 py-1.5 rounded-lg bg-orange-700 text-white font-bold text-xs cursor-pointer"
+          >
+            {isAr ? 'تحديث الحالة الحالية' : 'Refresh Current State'}
+          </button>
+        </div>
+      )}
+
+      {!loading &&
+        !loadError &&
+        readinessStatus &&
+        isPublished &&
+        readinessStatus.publicDocument &&
+        readinessStatus.releaseRecord && (
+          <div
+            data-testid="published-binary-release-published-summary"
+            className="p-3.5 rounded-xl bg-emerald-100/70 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800 space-y-2 text-emerald-950 dark:text-emerald-100"
+          >
+            <div className="font-extrabold flex items-center gap-1.5">
+              <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-400 shrink-0" />
+              <span>
+                {lastOutcome === 'ALREADY_PUBLISHED'
+                  ? isAr
+                    ? 'الملف المرفوع منشور مسبقاً في المكتبة العامة'
+                    : 'Uploaded File Already Published in Public Library'
+                  : isAr
+                    ? 'تم نشر الملف المرفوع للتحميل المباشر في المكتبة العامة'
+                    : 'Uploaded File Published for Direct Public Download'}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'معرّف السجل العام: ' : 'Public Document ID: '}
+                </span>
+                <span
+                  data-testid="published-binary-release-public-doc-id"
+                  className="font-mono font-bold"
+                  dir="ltr"
+                >
+                  {readinessStatus.publicDocument.id}
+                </span>
+              </div>
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'صيغة وحجم الملف: ' : 'Format & Size: '}
+                </span>
+                <span className="font-mono font-bold" dir="ltr">
+                  {readinessStatus.releaseRecord.format} ·{' '}
+                  {readinessStatus.releaseRecord.byteSize} bytes
+                </span>
+              </div>
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'مسودة الحجر الداخلية: ' : 'Quarantine Draft: '}
+                </span>
+                <span className="font-mono" dir="ltr">
+                  {readinessStatus.quarantineCatalogDocumentId} (
+                  {readinessStatus.quarantineDraftWorkflowState})
+                </span>
+              </div>
+              <div>
+                <span className="font-bold">
+                  {isAr ? 'إخلاء السلامة الثنائية: ' : 'Assurance Flags: '}
+                </span>
+                <span className="font-mono" dir="ltr">
+                  isSanitized=false, isVerifiedSafe=false
+                </span>
+              </div>
+            </div>
+            <div className="pt-1">
+              <a
+                href={readinessStatus.publicDocument.downloadGatewayUrl}
+                download
+                data-testid="published-binary-release-gateway-link"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white dark:bg-gray-900 border border-indigo-400 text-indigo-900 dark:text-indigo-200 font-bold hover:underline break-all"
+                dir="ltr"
+              >
+                <Download className="h-3.5 w-3.5 shrink-0" />
+                <span>{readinessStatus.releaseRecord.downloadFilename}</span>
+              </a>
+            </div>
           </div>
         )}
+
+      {!loading && !loadError && readinessStatus && !isPublished && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-3 rounded-xl bg-white dark:bg-gray-900/70 border border-gray-200 dark:border-gray-800 text-[11px]">
+            <div>
+              <span className="font-bold">
+                {isAr ? 'نوع الملف والحجم: ' : 'Uploaded Format & Size: '}
+              </span>
+              <span className="font-mono" dir="ltr">
+                {readinessStatus.format} ({readinessStatus.byteSize} B)
+              </span>
+            </div>
+            <div>
+              <span className="font-bold">
+                {isAr ? 'حالة الفحص الفعلي (ClamAV): ' : 'ClamAV Execution: '}
+              </span>
+              <span className="font-mono" dir="ltr">
+                {readinessStatus.avExecutionState}
+              </span>
+            </div>
+            <div>
+              <span className="font-bold">
+                {isAr ? 'مواءمة الفهرس والحالة: ' : 'Catalog Alignment: '}
+              </span>
+              <span className="font-mono" dir="ltr">
+                {readinessStatus.catalogAligned ? 'ALIGNED' : 'NOT_ALIGNED'} (v
+                {readinessStatus.effectiveAlignedCaseRevision})
+              </span>
+            </div>
+            <div>
+              <span className="font-bold">
+                {isAr ? 'معرّف النشر المتوقع: ' : 'Target Public ID: '}
+              </span>
+              <span className="font-mono" dir="ltr">
+                {readinessStatus.publicDocumentId}
+              </span>
+            </div>
+          </div>
+
+          {isEligible && !hasUnsavedCaseEdits ? (
+            <div
+              data-testid="published-binary-release-form"
+              className="space-y-3"
+            >
+              {readinessStatus.requiresContradictionResolution && (
+                <div
+                  data-testid="binary-release-contradiction-box"
+                  className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 space-y-2 text-amber-950 dark:text-amber-100"
+                >
+                  <div className="font-extrabold flex items-center gap-1.5">
+                    <ShieldCheck className="h-4 w-4 text-amber-700 shrink-0" />
+                    <span>
+                      {isAr
+                        ? `تنبيه حقوق مسبقة (${readinessStatus.currentPriorRightsDecision ?? 'RESTRICTED'})`
+                        : `Prior Rights Decision Notice (${readinessStatus.currentPriorRightsDecision ?? 'RESTRICTED'})`}
+                    </span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    {isAr
+                      ? 'يوجد قرار حقوق سابق يخص مسودة الفهرسة ولن يتم المساس بسجله التاريخي. لإتاحة تحميل الملف نفسه للزوار، يجب تأكيد حل التعارض وتوثيق التفويض الصريح لتوزيع الملف.'
+                      : 'A prior rights decision record exists and will remain preserved immutably. To authorize direct binary download, explicitly acknowledge and summarize why binary redistribution is authorized.'}
+                  </p>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      data-testid="binary-release-ack-restricted-checkbox"
+                      disabled={publishing}
+                      checked={form.acknowledgePriorRestrictedDecision}
+                      onChange={(e) =>
+                        controller.updateFormField(
+                          'acknowledgePriorRestrictedDecision',
+                          e.target.checked
+                        )
+                      }
+                      className="mt-0.5"
+                    />
+                    <span className="font-bold text-[11px]">
+                      {isAr
+                        ? 'أؤكد مراجعة قرار الحقوق السابق وأقرّ بأهلية نشر الملف المرفوع للتحميل المباشر'
+                        : 'I acknowledge the prior rights decision and confirm explicit authorization to redistribute the binary file'}
+                    </span>
+                  </label>
+                  <textarea
+                    data-testid="binary-release-contradiction-summary-input"
+                    rows={2}
+                    disabled={publishing}
+                    value={form.contradictionResolutionSummary}
+                    onChange={(e) =>
+                      controller.updateFormField(
+                        'contradictionResolutionSummary',
+                        e.target.value
+                      )
+                    }
+                    placeholder={
+                      isAr
+                        ? 'اشرح سبب جواز توزيع الملف رغم القرار المسبق (مثلاً: أنا المالك وأصرّح بتحميل الوثيقة)...'
+                        : 'Explain resolution for prior RESTRICTED record (e.g., Owner explicitly authorizes public PDF download)...'
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                  />
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label
+                    htmlFor="binary-release-public-rights-status"
+                    className="block font-bold text-gray-700 dark:text-gray-300"
+                  >
+                    {isAr
+                      ? 'تصنيف الحقوق للتحميل العام'
+                      : 'Public Binary Download Rights Status'}
+                  </label>
+                  <select
+                    id="binary-release-public-rights-status"
+                    data-testid="binary-release-public-rights-status-select"
+                    disabled={publishing}
+                    value={form.publicRightsStatus}
+                    onChange={(e) =>
+                      controller.updateFormField(
+                        'publicRightsStatus',
+                        e.target.value as PublishedBinaryPublicLibraryRightsStatus
+                      )
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-bold"
+                  >
+                    {PUBLISHED_BINARY_PUBLIC_RIGHTS_STATUSES.map((st) => (
+                      <option key={st} value={st}>
+                        {st}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label
+                    htmlFor="binary-release-rights-basis"
+                    className="block font-bold text-gray-700 dark:text-gray-300"
+                  >
+                    {isAr
+                      ? 'أساس التفويض لتوزيع الملف المرفوع'
+                      : 'Binary Redistribution Authorization Basis'}
+                  </label>
+                  <select
+                    id="binary-release-rights-basis"
+                    data-testid="binary-release-rights-basis-select"
+                    disabled={publishing}
+                    value={form.binaryRightsBasis}
+                    onChange={(e) =>
+                      controller.updateFormField(
+                        'binaryRightsBasis',
+                        e.target.value as PublishedBinaryRightsBasis
+                      )
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-bold"
+                  >
+                    {PUBLISHED_BINARY_RIGHTS_BASES.map((basis) => (
+                      <option key={basis} value={basis}>
+                        {getBinaryRightsBasisLabel(basis, isAr)} ({basis})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label
+                    htmlFor="binary-release-evidence-reference"
+                    className="block font-bold text-gray-700 dark:text-gray-300"
+                  >
+                    {isAr
+                      ? 'مرجع سند توزيع الملف'
+                      : 'Binary Rights Evidence Reference'}
+                  </label>
+                  <input
+                    id="binary-release-evidence-reference"
+                    data-testid="binary-release-evidence-reference-input"
+                    type="text"
+                    disabled={publishing}
+                    value={form.rightsEvidenceReference}
+                    onChange={(e) =>
+                      controller.updateFormField(
+                        'rightsEvidenceReference',
+                        e.target.value
+                      )
+                    }
+                    placeholder={
+                      isAr
+                        ? 'مثال: إقرار المالك / خطاب الموافقة...'
+                        : 'e.g., Owner Authorization / Written Release...'
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label
+                    htmlFor="binary-release-filename"
+                    className="block font-bold text-gray-700 dark:text-gray-300"
+                  >
+                    {isAr
+                      ? `اسم ملف التحميل للزوار (.${readinessStatus.format.toLowerCase()})`
+                      : `Visitor Download Filename (.${readinessStatus.format.toLowerCase()})`}
+                  </label>
+                  <input
+                    id="binary-release-filename"
+                    data-testid="binary-release-filename-input"
+                    type="text"
+                    dir="ltr"
+                    disabled={publishing}
+                    value={form.downloadFilename}
+                    onChange={(e) =>
+                      controller.updateFormField(
+                        'downloadFilename',
+                        e.target.value
+                      )
+                    }
+                    placeholder={`document.${readinessStatus.format.toLowerCase()}`}
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label
+                    htmlFor="binary-release-evidence-summary"
+                    className="block font-bold text-gray-700 dark:text-gray-300"
+                  >
+                    {isAr
+                      ? 'ملخص تفويض التحميل المباشر للملف'
+                      : 'Human Binary Distribution Verification Summary'}
+                  </label>
+                  <textarea
+                    id="binary-release-evidence-summary"
+                    data-testid="binary-release-evidence-summary-input"
+                    rows={2}
+                    disabled={publishing}
+                    value={form.rightsEvidenceSummary}
+                    onChange={(e) =>
+                      controller.updateFormField(
+                        'rightsEvidenceSummary',
+                        e.target.value
+                      )
+                    }
+                    placeholder={
+                      isAr
+                        ? 'توثيق بشري صريح بأهلية إتاحة الملف الثنائي للتحميل...'
+                        : 'Explicit human verification authorizing public binary download...'
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label
+                    htmlFor="binary-release-notes"
+                    className="block font-bold text-gray-700 dark:text-gray-300"
+                  >
+                    {isAr
+                      ? 'ملاحظات الاعتماد للنشر (اختياري)'
+                      : 'Release Approval Notes (Optional)'}
+                  </label>
+                  <textarea
+                    id="binary-release-notes"
+                    data-testid="binary-release-notes-input"
+                    rows={2}
+                    disabled={publishing}
+                    value={form.releaseNotes}
+                    onChange={(e) =>
+                      controller.updateFormField('releaseNotes', e.target.value)
+                    }
+                    placeholder={
+                      isAr
+                        ? 'ملاحظات تحريرية أو تدقيقية مرافقة...'
+                        : 'Optional editorial/audit approval notes...'
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+                  />
+                </div>
+              </div>
+
+              {publishError && (
+                <div
+                  data-testid="published-binary-release-publish-error"
+                  role="alert"
+                  className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200 font-mono text-[11px]"
+                >
+                  {publishError}
+                </div>
+              )}
+
+              <label className="flex items-start gap-2 p-2.5 rounded-xl bg-white dark:bg-gray-900/60 border border-indigo-200 dark:border-indigo-900 cursor-pointer">
+                <input
+                  type="checkbox"
+                  data-testid="binary-release-confirmation-checkbox"
+                  disabled={publishing}
+                  checked={confirmed}
+                  onChange={(e) => controller.setConfirmed(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span className="text-[11px] font-bold text-gray-800 dark:text-gray-200">
+                  {isAr
+                    ? `أؤكد نشر الملف المرفوع النظيف (${readinessStatus.format}) للتحميل المباشر في المكتبة العامة كمرفق آمن (${LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL}).`
+                    : `I confirm publishing this cleanly AV-scanned (${readinessStatus.format}) file to the public library for direct attachment download (${LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL}).`}
+                </span>
+              </label>
+
+              <button
+                type="button"
+                data-testid="publish-quarantined-binary-release-btn"
+                disabled={publishing || !confirmed || uncertainState !== null}
+                onClick={() => {
+                  void controller.publish();
+                }}
+                className="px-4 py-2.5 rounded-xl bg-indigo-700 hover:bg-indigo-800 text-white font-extrabold text-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2 shadow-xs"
+              >
+                {publishing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                <span>
+                  {publishing
+                    ? isAr
+                      ? 'جاري نشر الملف للتحميل المباشر...'
+                      : 'Publishing File for Direct Download...'
+                    : isAr
+                      ? 'نشر الملف المرفوع للتحميل'
+                      : 'Publish Uploaded File for Download'}
+                </span>
+              </button>
+            </div>
+          ) : (
+            <div className="pt-1">
+              <button
+                type="button"
+                data-testid="publish-quarantined-binary-release-btn"
+                disabled={true}
+                aria-disabled="true"
+                className="px-4 py-2.5 rounded-xl bg-gray-300 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-extrabold text-xs cursor-not-allowed inline-flex items-center gap-2"
+              >
+                <Lock className="h-3.5 w-3.5" />
+                <span>
+                  {waitingForScan
+                    ? isAr
+                      ? 'نشر الملف المرفوع للتحميل (بانتظار فحص ClamAV)'
+                      : 'Publish Uploaded File (WAITING FOR ACTUAL SCAN)'
+                    : isAr
+                      ? 'نشر الملف المرفوع للتحميل (موقوف)'
+                      : 'Publish Uploaded File for Download (Disabled)'}
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </section>
   );
 }

@@ -35,12 +35,24 @@ import { LIBRARY_QUARANTINE_AV_REQUEST_ID_ENV_VAR } from './libraryQuarantineAvJ
 import {
   FirestoreLibraryQuarantineAvExecutionStore,
 } from './libraryQuarantineAvExecutionService';
+import {
+  LIBRARY_QUARANTINE_PDF_INSPECTION_OUTCOME_VERIFIED,
+  LIBRARY_QUARANTINE_PDF_INSPECTION_POLICY_VERSION,
+  LIBRARY_QUARANTINE_PDF_INSPECTION_SCHEMA_VERSION,
+  defaultRunIsolatedPdfInspection,
+  defaultVerifyPdfParserBinary,
+  type IsolatedPdfInspectorFn,
+  type IsolatedPdfInspectorSuccess,
+  type LibraryQuarantinePersistedPdfInspection,
+  type VerifyPdfParserBinaryFn,
+} from './libraryIsolatedPdfInspection';
 
 export const DEFAULT_CLAMAV_DB_DIR = '/var/lib/clamav' as const;
 export const DEFAULT_CLAMAV_SIGNATURE_MAX_AGE_MS =
   7 * 24 * 60 * 60 * 1000; // 7 days
 export const DEFAULT_QUARANTINE_STREAM_TIMEOUT_MS = 60_000;
 export const DEFAULT_CLAMSCAN_TIMEOUT_MS = 120_000;
+export const DEFAULT_PDF_INSPECTION_TIMEOUT_MS = 60_000;
 
 export interface GenerationPinnedQuarantineFile {
   exists(): Promise<readonly [boolean]>;
@@ -102,9 +114,12 @@ export interface QuarantineAvWorkerOptions {
   readonly bucket?: GenerationPinnedQuarantineBucket;
   readonly signatureVerifier?: ClamAvSignatureVerifier;
   readonly clamAvRunner?: ClamAvSubprocessRunner;
+  readonly pdfParserVerifier?: VerifyPdfParserBinaryFn;
+  readonly pdfInspector?: IsolatedPdfInspectorFn;
   readonly clock?: () => string;
   readonly streamTimeoutMs?: number;
   readonly scanTimeoutMs?: number;
+  readonly pdfInspectionTimeoutMs?: number;
   readonly maxSignatureAgeMs?: number;
   readonly tempRootDir?: string;
   readonly onTempFileCreated?: (tempFilePath: string) => void;
@@ -762,6 +777,25 @@ export async function executeLibraryQuarantineAvWorkerTask(
     return recordFailClosed(sigCheck.failureReasonCode);
   }
 
+  // Step 2b: For PDFs, verify isolated PDF parser binary availability BEFORE streaming bytes
+  if (
+    receipt.format === 'PDF' &&
+    (options.pdfParserVerifier !== undefined ||
+      options.pdfInspector === undefined)
+  ) {
+    const pdfBinaryVerifier =
+      options.pdfParserVerifier ?? defaultVerifyPdfParserBinary;
+    const pdfBinCheck = await pdfBinaryVerifier();
+    if (!pdfBinCheck.ok) {
+      return recordFailClosed(pdfBinCheck.failureReasonCode, {
+        engineName: 'ClamAV',
+        engineVersion: sigCheck.engineVersion,
+        signatureVersion: sigCheck.signatureVersion,
+        signatureUpdatedAt: sigCheck.signatureUpdatedAt,
+      });
+    }
+  }
+
   // Step 3: Bind strictly to dedicated quarantine bucket (never default bucket)
   let bucket = options.bucket;
   if (!bucket) {
@@ -987,7 +1021,31 @@ export async function executeLibraryQuarantineAvWorkerTask(
       });
     }
 
-    // Step 7: Re-verify generation on GCS right after scan before committing Firestore result
+    let pdfInspectionResult: IsolatedPdfInspectorSuccess | null = null;
+    if (scanRes.exitCode === 0 && receipt.format === 'PDF') {
+      const pdfInspector =
+        options.pdfInspector ?? defaultRunIsolatedPdfInspection;
+      const pdfTimeoutMs =
+        options.pdfInspectionTimeoutMs ?? DEFAULT_PDF_INSPECTION_TIMEOUT_MS;
+      const pdfCheck = await pdfInspector({
+        tempFilePath,
+        expectedSha256: receipt.sha256,
+        expectedByteSize: receipt.byteSize,
+        timeoutMs: pdfTimeoutMs,
+      });
+      if (!pdfCheck.ok) {
+        return await recordFailClosed(pdfCheck.failureReasonCode, {
+          engineName: 'ClamAV',
+          engineVersion: sigCheck.engineVersion,
+          signatureVersion: sigCheck.signatureVersion,
+          signatureUpdatedAt: sigCheck.signatureUpdatedAt,
+          scannedBytes: streamRes.streamedBytes,
+        });
+      }
+      pdfInspectionResult = pdfCheck;
+    }
+
+    // Step 7: Re-verify generation on GCS right after scan/inspection before committing Firestore result
     let postScanMetaTuple: readonly [GcsLibraryQuarantineObjectMetadata];
     try {
       postScanMetaTuple = await pinnedFile.getMetadata();
@@ -1015,12 +1073,68 @@ export async function executeLibraryQuarantineAvWorkerTask(
         : ('AV_THREAT_DETECTED' as const);
 
     const completeAt = clock();
+    const resolvedCompleteAt = isValidIsoUtcTimestamp(completeAt)
+      ? completeAt
+      : nowIso;
+    const completedAtBound =
+      Date.parse(resolvedCompleteAt) >= Date.parse(claimedExec.dispatchedAt)
+        ? resolvedCompleteAt
+        : claimedExec.dispatchedAt;
+
+    let pdfInspectionAttestation: LibraryQuarantinePersistedPdfInspection | null =
+      null;
+    if (
+      targetState === 'AV_NO_THREAT_DETECTED' &&
+      receipt.format === 'PDF' &&
+      pdfInspectionResult !== null
+    ) {
+      pdfInspectionAttestation = Object.freeze({
+        schemaVersion: LIBRARY_QUARANTINE_PDF_INSPECTION_SCHEMA_VERSION,
+        requestId: parsedId.requestId,
+        receiptId: claimResult.eligibleChain.chainSnapshot.receiptEnvelope.receipt.receiptId,
+        documentId: claimResult.eligibleChain.chainSnapshot.documentId,
+        sourceRevision:
+          claimResult.eligibleChain.chainSnapshot.receiptEnvelope.revision,
+        sourceUpdatedAt: receipt.updatedAt,
+        sourceSha256: receipt.sha256,
+        sourceGeneration,
+        sourceByteSize: receipt.byteSize,
+        sourceFormat: 'PDF',
+        deepInspectionStatus: 'PDF_REQUIRES_ISOLATED_PARSER',
+        safetyCaseRevision: claimResult.eligibleChain.safetyCaseRevision,
+        effectiveHumanCaseRevision:
+          claimResult.eligibleChain.chainSnapshot.effectiveHumanCaseRevision,
+        catalogUpdatedAt:
+          claimResult.eligibleChain.chainSnapshot.catalogUpdatedAt,
+        workerRunId,
+        inspectedAt: completedAtBound,
+        avCompletedAt: completedAtBound,
+        outcome: LIBRARY_QUARANTINE_PDF_INSPECTION_OUTCOME_VERIFIED,
+        parserName: pdfInspectionResult.parserName,
+        parserVersion: pdfInspectionResult.parserVersion,
+        structuralPolicyVersion:
+          LIBRARY_QUARANTINE_PDF_INSPECTION_POLICY_VERSION,
+        xrefFormat: pdfInspectionResult.xrefFormat,
+        parsedObjectCount: pdfInspectionResult.parsedObjectCount,
+        compressedObjectStreamsParsed:
+          pdfInspectionResult.compressedObjectStreamsParsed,
+        warningCount: 0,
+        encrypted: false,
+        activeOrExternalConstructsDetected: false,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      });
+    }
+
     const recordOutcomeRes =
       await avStore.recordWorkerAvScanOutcomeTransactional({
         requestId: parsedId.requestId,
         expectedRevision: claimedRevision,
         workerRunId,
-        nowIso: isValidIsoUtcTimestamp(completeAt) ? completeAt : nowIso,
+        nowIso: resolvedCompleteAt,
         targetState,
         engineName: 'ClamAV',
         engineVersion: sigCheck.engineVersion,
@@ -1032,6 +1146,7 @@ export async function executeLibraryQuarantineAvWorkerTask(
         observedGcsGeneration,
         observedSha256: streamRes.computedSha256,
         observedByteSize: streamRes.streamedBytes,
+        pdfInspection: pdfInspectionAttestation,
       });
 
     if (recordOutcomeRes.status !== 'RECORDED') {

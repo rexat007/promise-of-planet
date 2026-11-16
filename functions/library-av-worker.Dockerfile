@@ -14,13 +14,15 @@ FROM node:22.11.0-bookworm-slim AS runtime
 
 ENV NODE_ENV=production \
     POP_CLAMAV_DB_DIR=/var/lib/clamav \
-    POP_CLAMSCAN_PATH=/usr/bin/clamscan
+    POP_CLAMSCAN_PATH=/usr/bin/clamscan \
+    POP_QPDF_PATH=/usr/bin/qpdf
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates \
       clamav \
-      clamav-freshclam && \
+      clamav-freshclam \
+      qpdf && \
     rm -rf /var/lib/apt/lists/* && \
     mkdir -p /var/lib/clamav && \
     chown -R clamav:clamav /var/lib/clamav && \
@@ -28,6 +30,7 @@ RUN apt-get update && \
     test -s /var/lib/clamav/main.cvd -o -s /var/lib/clamav/main.cld && \
     test -s /var/lib/clamav/daily.cvd -o -s /var/lib/clamav/daily.cld && \
     /usr/bin/clamscan --version --database=/var/lib/clamav && \
+    /usr/bin/qpdf --version && \
     chmod -R a+rX /var/lib/clamav
 
 WORKDIR /app/functions

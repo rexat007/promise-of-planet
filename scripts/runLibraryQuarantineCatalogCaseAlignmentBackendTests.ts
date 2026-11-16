@@ -1020,7 +1020,7 @@ async function runTests(): Promise<void> {
       ],
       [
         'functions/src/index.ts',
-        '5a14cada5dad8e764f8cc3092f40c386f6b09616',
+        '77d8fb72920e93eb363981cbbaaecb34767ba14c',
       ],
       ['package.json', '923f67eebb513a6fab3e1e4d30de2ca9e48eb50b'],
     ];

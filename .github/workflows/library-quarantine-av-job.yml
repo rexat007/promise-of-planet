@@ -88,6 +88,9 @@ jobs:
           docker run --rm --entrypoint /usr/bin/clamscan \
             pop-library-quarantine-av-worker:${{ github.sha }} \
             --version --database=/var/lib/clamav
+          docker run --rm --entrypoint /usr/bin/qpdf \
+            pop-library-quarantine-av-worker:${{ github.sha }} \
+            --version
 
       - name: Stop cleanly when mode is verify_only
         if: ${{ inputs.mode == 'verify_only' }}
@@ -135,4 +138,4 @@ jobs:
             --task-timeout=600s \
             --memory=2Gi \
             --cpu=1 \
-            --set-env-vars="NODE_ENV=production,POP_CLAMAV_DB_DIR=/var/lib/clamav"
+            --set-env-vars="NODE_ENV=production,POP_CLAMAV_DB_DIR=/var/lib/clamav,POP_CLAMSCAN_PATH=/usr/bin/clamscan,POP_QPDF_PATH=/usr/bin/qpdf"

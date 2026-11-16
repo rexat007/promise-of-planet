@@ -17,14 +17,28 @@ import {
 import { LibraryDocumentType, LibraryRightsStatus } from '../../types/library';
 import type { PublicLibraryDocument } from '../../types/library';
 import { PublicLibraryClient } from '../../services/publicLibraryClient';
+import {
+  detectPublishedBinaryFormat,
+  getOwnedPublishedBinaryDownloadUrl,
+} from '../../services/libraryPublishedBinaryClient';
 import { Container } from '../layout/Container';
 
-export function PublicLibraryHub() {
-  const { i18n } = useTranslation();
-  const isAr = i18n.language === 'ar';
+export interface PublicLibraryHubProps {
+  readonly initialDocuments?: readonly PublicLibraryDocument[];
+  readonly initialSelectedDoc?: PublicLibraryDocument | null;
+  readonly initialLanguage?: 'ar' | 'en';
+}
 
-  const [documents, setDocuments] = useState<PublicLibraryDocument[]>([]);
-  const [loading, setLoading] = useState(true);
+export function PublicLibraryHub(props?: PublicLibraryHubProps) {
+  const { i18n } = useTranslation();
+  const isAr = (props?.initialLanguage ?? i18n?.language) === 'ar';
+
+  const [documents, setDocuments] = useState<PublicLibraryDocument[]>(() =>
+    props?.initialDocuments ? [...props.initialDocuments] : []
+  );
+  const [loading, setLoading] = useState(() =>
+    props?.initialDocuments === undefined
+  );
   const [apiError, setApiError] = useState<string | null>(null);
 
   // Search & Filter States
@@ -34,13 +48,18 @@ export function PublicLibraryHub() {
   const [selectedRights] = useState<string>('ALL');
 
   // Selected Document Inspector State
-  const [selectedDoc, setSelectedDoc] = useState<PublicLibraryDocument | null>(null);
+  const [selectedDoc, setSelectedDoc] = useState<PublicLibraryDocument | null>(
+    () => props?.initialSelectedDoc ?? null
+  );
   const [aiSummary, setAiSummary] = useState<string>('');
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
 
   useEffect(() => {
+    if (props?.initialDocuments !== undefined) {
+      return;
+    }
     async function loadPublishedLibrary() {
       setLoading(true);
       setApiError(null);
@@ -60,7 +79,7 @@ export function PublicLibraryHub() {
       }
     }
     loadPublishedLibrary();
-  }, [isAr]);
+  }, [isAr, props?.initialDocuments]);
 
   // Filtered documents
   const filteredDocuments = useMemo(() => {
@@ -177,7 +196,16 @@ export function PublicLibraryHub() {
     }
   };
 
-  const verifiedReferenceUrl = selectedDoc ? getVerifiedReferenceUrl(selectedDoc) : undefined;
+  const ownedBinaryDownloadUrl = selectedDoc
+    ? getOwnedPublishedBinaryDownloadUrl(selectedDoc)
+    : null;
+  const ownedBinaryFormat = selectedDoc
+    ? detectPublishedBinaryFormat(selectedDoc)
+    : null;
+  const verifiedReferenceUrl =
+    selectedDoc && !ownedBinaryDownloadUrl
+      ? getVerifiedReferenceUrl(selectedDoc)
+      : undefined;
   const selectedLegalStatus = selectedDoc ? getLegalStatusDescription(selectedDoc) : undefined;
 
   return (
@@ -500,6 +528,24 @@ export function PublicLibraryHub() {
                       <div className="col-span-2 py-2.5 px-4 rounded-xl bg-gray-100 dark:bg-gray-800 text-gray-500 text-xs font-bold text-center">
                         {isAr ? 'الوثيقة مقيدة أو تتطلب إذناً خاصاً لإعادة التوزيع' : 'Restricted document — Permission required for redistribution'}
                       </div>
+                    ) : ownedBinaryDownloadUrl ? (
+                      <a
+                        href={ownedBinaryDownloadUrl}
+                        download
+                        data-testid="public-library-direct-binary-download-btn"
+                        className="col-span-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs inline-flex items-center justify-center gap-2 transition-colors shadow-sm"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span>
+                          {ownedBinaryFormat === 'DOCX'
+                            ? isAr
+                              ? 'تحميل Word'
+                              : 'Download Word'
+                            : isAr
+                              ? 'تحميل PDF'
+                              : 'Download PDF'}
+                        </span>
+                      </a>
                     ) : verifiedReferenceUrl ? (
                       <a
                         href={verifiedReferenceUrl}

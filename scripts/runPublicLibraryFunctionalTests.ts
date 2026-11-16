@@ -171,16 +171,101 @@ import {
 } from '../src/services/libraryReviewedSourceReleaseClient';
 import {
   LibraryQuarantineReviewedSourceReleaseSection,
+  LibraryQuarantinePublishedBinaryReleaseSection,
 } from '../src/components/library/LibraryQuarantineHumanReviewModal';
+import { PublicLibraryHub } from '../src/components/library/PublicLibraryHub';
 import type { SanitizedLibraryQuarantineHumanReviewCaseDto } from '../src/services/libraryQuarantineHumanReviewClient';
+import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
+import type {
+  LibraryPublishedBinaryReleaseService as LibraryPublishedBinaryReleaseServiceClass,
+  PublishedBinaryStorageBucket,
+  PublishedBinaryStorageFile,
+} from '../functions/src/library/libraryPublishedBinaryReleaseService';
+import type {
+  PublishedBinaryDownloadHttpResponseWriter,
+} from '../functions/src/library/libraryPublishedBinaryDownloadEndpoint';
+import {
+  LIBRARY_QUARANTINE_BINARY_SAFETY_CASES_COLLECTION,
+} from '../functions/src/library/firestoreLibraryQuarantineBinarySafetyCaseStore';
+import {
+  LIBRARY_QUARANTINE_BINARY_SAFETY_CASE_SCHEMA_VERSION,
+  type LibraryQuarantinePersistedBinarySafetyCase,
+} from '../functions/src/library/libraryQuarantineBinarySafetyCaseContract';
+import {
+  LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUESTS_COLLECTION,
+} from '../functions/src/library/firestoreLibraryQuarantineIsolatedInspectionRequestStore';
+import {
+  LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_SCHEMA_VERSION,
+  LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_STATE,
+  deriveLibraryQuarantineIsolatedInspectionRequestId,
+  type LibraryQuarantinePersistedIsolatedInspectionRequest,
+} from '../functions/src/library/libraryQuarantineIsolatedInspectionRequestContract';
+import {
+  LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
+  LIBRARY_QUARANTINE_AV_EXECUTION_SCHEMA_VERSION,
+  type LibraryQuarantinePersistedAvExecution,
+} from '../functions/src/library/libraryQuarantineAvExecutionContract';
+import {
+  LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+  LIBRARY_QUARANTINE_PDF_INSPECTION_SCHEMA_VERSION,
+  LIBRARY_QUARANTINE_PDF_INSPECTION_POLICY_VERSION,
+  LIBRARY_QUARANTINE_PDF_INSPECTION_OUTCOME_VERIFIED,
+  type LibraryQuarantinePersistedPdfInspection,
+} from '../functions/src/library/libraryIsolatedPdfInspection';
+import {
+  computeCrc32,
+  inspectLibraryUploadDeepStructure,
+} from '../functions/src/library/libraryUploadDeepStructure';
+import {
+  CANONICAL_DOCX_MIME_TYPE,
+  CANONICAL_PDF_MIME_TYPE,
+  MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES,
+} from '../functions/src/library/libraryUploadBinaryAdmission';
+import type { GcsLibraryQuarantineObjectMetadata } from '../functions/src/library/gcsLibraryQuarantineStorageAdapter';
+import {
+  LibraryQuarantinePublishedBinaryReleasePanelController,
+  canUserPublishQuarantinedBinaryToPublicLibrary,
+  detectPublishedBinaryFormat,
+  getOwnedPublishedBinaryDownloadUrl,
+  isLibraryQuarantinePublishedBinaryReleaseEnabled,
+  isOwnedPublishedBinaryDownloadUrl,
+  isPublishedBinaryPublicDocumentId,
+  validateClientBinaryDownloadFilename,
+  type GetPublishedLibraryBinaryReleaseStatusResponseDto as ClientGetPublishedBinaryStatusDto,
+  type PublishQuarantinedBinaryToPublicLibraryResponseDto as ClientPublishBinaryResponseDto,
+} from '../src/services/libraryPublishedBinaryClient';
 
 const require = createRequire(import.meta.url);
 const {
   LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR,
+  LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR,
   executeManageLibraryDocumentsRequest,
 } = require(
   '../functions/src/library/libraryAdminHandlers'
 ) as typeof import('../functions/src/library/libraryAdminHandlers');
+const {
+  LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+  LIBRARY_PUBLISHED_BINARY_RELEASE_EVENTS_COLLECTION,
+  LIBRARY_PUBLISHED_BINARY_RELEASES_COLLECTION,
+  LibraryPublishedBinaryReleaseService,
+  derivePublishedBinaryPublicLibraryDocumentId,
+  derivePublishedBinaryReleaseEventId,
+} = require(
+  '../functions/src/library/libraryPublishedBinaryReleaseService'
+) as typeof import('../functions/src/library/libraryPublishedBinaryReleaseService');
+const {
+  createPublishedBinaryDownloadHandler,
+} = require(
+  '../functions/src/library/libraryPublishedBinaryDownloadEndpoint'
+) as typeof import('../functions/src/library/libraryPublishedBinaryDownloadEndpoint');
+const {
+  LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME,
+  FORBIDDEN_DEFAULT_FIREBASE_STORAGE_BUCKET_NAME,
+} = require(
+  '../functions/src/library/libraryQuarantineUploadEndpoint'
+) as typeof import('../functions/src/library/libraryQuarantineUploadEndpoint');
 
 function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -2654,6 +2739,1989 @@ async function runPublicLibraryTests() {
         incidentStillRestricted &&
         binaryUrlStillRejected &&
         clientAllTrue === true
+    );
+  }
+
+  // =========================================================================
+  // LIB-DIRECT-FILE-01 TESTS 27–36 (Published Binary Release & Safe Download)
+  // =========================================================================
+
+  function buildDeterministicValidPdfBytes(label = 'Promise of Planet Test PDF'): Buffer {
+    const body =
+      '%PDF-1.7\n' +
+      '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n' +
+      `2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n% ${label}\n` +
+      'xref\n0 3\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n' +
+      'trailer\n<< /Size 3 /Root 1 0 R >>\n' +
+      'startxref\n110\n' +
+      '%%EOF\n';
+    return Buffer.from(body, 'latin1');
+  }
+
+  function buildDeterministicValidDocxBytes(label = 'Promise of Planet Test DOCX'): Buffer {
+    const entries = [
+      {
+        name: '[Content_Types].xml',
+        data: Buffer.from(
+          '<?xml version="1.0" encoding="UTF-8"?>' +
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+            '<Default Extension="xml" ContentType="application/xml"/>' +
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+            '</Types>',
+          'utf8'
+        ),
+      },
+      {
+        name: '_rels/.rels',
+        data: Buffer.from(
+          '<?xml version="1.0" encoding="UTF-8"?>' +
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+            '</Relationships>',
+          'utf8'
+        ),
+      },
+      {
+        name: 'word/document.xml',
+        data: Buffer.from(
+          '<?xml version="1.0" encoding="UTF-8"?>' +
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+            `<w:body><w:p><w:r><w:t>${label}</w:t></w:r></w:p></w:body>` +
+            '</w:document>',
+          'utf8'
+        ),
+      },
+    ];
+
+    const localChunks: Buffer[] = [];
+    const centralChunks: Buffer[] = [];
+    let offset = 0;
+
+    for (const entry of entries) {
+      const nameBuf = Buffer.from(entry.name, 'utf8');
+      const crc = computeCrc32(entry.data);
+      const localHeader = Buffer.alloc(30);
+      localHeader.writeUInt32LE(0x04034b50, 0);
+      localHeader.writeUInt16LE(20, 4);
+      localHeader.writeUInt16LE(0, 6);
+      localHeader.writeUInt16LE(0, 8);
+      localHeader.writeUInt16LE(0, 10);
+      localHeader.writeUInt16LE(0, 12);
+      localHeader.writeUInt32LE(crc >>> 0, 14);
+      localHeader.writeUInt32LE(entry.data.length, 18);
+      localHeader.writeUInt32LE(entry.data.length, 22);
+      localHeader.writeUInt16LE(nameBuf.length, 26);
+      localHeader.writeUInt16LE(0, 28);
+      localChunks.push(localHeader, nameBuf, entry.data);
+
+      const centralHeader = Buffer.alloc(46);
+      centralHeader.writeUInt32LE(0x02014b50, 0);
+      centralHeader.writeUInt16LE(20, 4);
+      centralHeader.writeUInt16LE(20, 6);
+      centralHeader.writeUInt16LE(0, 8);
+      centralHeader.writeUInt16LE(0, 10);
+      centralHeader.writeUInt16LE(0, 12);
+      centralHeader.writeUInt16LE(0, 14);
+      centralHeader.writeUInt32LE(crc >>> 0, 16);
+      centralHeader.writeUInt32LE(entry.data.length, 20);
+      centralHeader.writeUInt32LE(entry.data.length, 24);
+      centralHeader.writeUInt16LE(nameBuf.length, 28);
+      centralHeader.writeUInt16LE(0, 30);
+      centralHeader.writeUInt16LE(0, 32);
+      centralHeader.writeUInt16LE(0, 34);
+      centralHeader.writeUInt16LE(0, 36);
+      centralHeader.writeUInt32LE(0, 38);
+      centralHeader.writeUInt32LE(offset, 42);
+      centralChunks.push(centralHeader, nameBuf);
+
+      offset += localHeader.length + nameBuf.length + entry.data.length;
+    }
+
+    const centralDir = Buffer.concat(centralChunks);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(0, 4);
+    eocd.writeUInt16LE(0, 6);
+    eocd.writeUInt16LE(entries.length, 8);
+    eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(centralDir.length, 12);
+    eocd.writeUInt32LE(offset, 16);
+    eocd.writeUInt16LE(0, 20);
+
+    return Buffer.concat([...localChunks, centralDir, eocd]);
+  }
+
+  interface StoredBucketObject {
+    bytes: Buffer;
+    metadata: Record<string, unknown>;
+  }
+
+  class InMemoryPublishedBinaryBucket implements PublishedBinaryStorageBucket {
+    public readonly objects = new Map<string, StoredBucketObject>();
+    private nextGen = 1700001000;
+    public lastWriteOptions: unknown = null;
+
+    constructor(public readonly name: string = LIBRARY_QUARANTINE_DEDICATED_BUCKET_NAME) {}
+
+    public seedObject(
+      objectPath: string,
+      bytes: Buffer,
+      opts?: {
+        readonly generation?: string;
+        readonly contentType?: string;
+        readonly cacheControl?: string;
+        readonly contentDisposition?: string;
+        readonly metadata?: Record<string, unknown>;
+        readonly extraTopMeta?: Record<string, unknown>;
+      }
+    ): string {
+      const generation = opts?.generation ?? String(++this.nextGen);
+      this.objects.set(objectPath, {
+        bytes: Buffer.from(bytes),
+        metadata: {
+          bucket: this.name,
+          name: objectPath,
+          generation,
+          size: bytes.length,
+          contentType: opts?.contentType ?? CANONICAL_PDF_MIME_TYPE,
+          cacheControl: opts?.cacheControl ?? 'no-store, max-age=0',
+          contentDisposition: opts?.contentDisposition ?? 'attachment',
+          metadata: { ...(opts?.metadata ?? {}) },
+          ...(opts?.extraTopMeta ?? {}),
+        },
+      });
+      return generation;
+    }
+
+    public file(
+      objectPath: string,
+      options?: { readonly generation?: string | number }
+    ): PublishedBinaryStorageFile {
+      const bucket = this;
+      return {
+        name: objectPath,
+        async exists() {
+          const entry = bucket.objects.get(objectPath);
+          if (!entry) return [false];
+          if (
+            options?.generation !== undefined &&
+            String(entry.metadata.generation) !== String(options.generation)
+          ) {
+            return [false];
+          }
+          return [true];
+        },
+        async getMetadata() {
+          const entry = bucket.objects.get(objectPath);
+          if (!entry) {
+            throw new Error(`OBJECT_NOT_FOUND:${objectPath}`);
+          }
+          if (
+            options?.generation !== undefined &&
+            String(entry.metadata.generation) !== String(options.generation)
+          ) {
+            throw new Error(`GENERATION_MISMATCH:${objectPath}`);
+          }
+          return [deepClone(entry.metadata) as GcsLibraryQuarantineObjectMetadata];
+        },
+        async setMetadata(meta: Record<string, unknown>) {
+          const entry = bucket.objects.get(objectPath);
+          if (!entry) {
+            throw new Error(`OBJECT_NOT_FOUND:${objectPath}`);
+          }
+          entry.metadata = {
+            ...entry.metadata,
+            ...deepClone(meta),
+            metadata: {
+              ...((entry.metadata.metadata as Record<string, unknown>) ?? {}),
+              ...((meta.metadata as Record<string, unknown>) ?? {}),
+            },
+          };
+          return [deepClone(entry.metadata) as GcsLibraryQuarantineObjectMetadata];
+        },
+        createReadStream() {
+          const entry = bucket.objects.get(objectPath);
+          if (!entry) {
+            return Readable.from(
+              (async function* () {
+                throw new Error(`OBJECT_NOT_FOUND:${objectPath}`);
+              })()
+            );
+          }
+          if (
+            options?.generation !== undefined &&
+            String(entry.metadata.generation) !== String(options.generation)
+          ) {
+            return Readable.from(
+              (async function* () {
+                throw new Error(`GENERATION_MISMATCH:${objectPath}`);
+              })()
+            );
+          }
+          const bytes = Buffer.from(entry.bytes);
+          const mid = Math.max(1, Math.floor(bytes.length / 2));
+          const chunks =
+            mid < bytes.length
+              ? [bytes.subarray(0, mid), bytes.subarray(mid)]
+              : [bytes];
+          return Readable.from(chunks);
+        },
+        createWriteStream(writeOptions?: {
+          readonly preconditionOpts?: { readonly ifGenerationMatch?: number };
+          readonly resumable?: boolean;
+          readonly validation?: false | 'crc32c' | 'md5';
+          readonly metadata?: Record<string, unknown>;
+        }) {
+          bucket.lastWriteOptions = writeOptions ?? null;
+          const emitter = new EventEmitter() as EventEmitter & {
+            end: (chunk?: Buffer) => void;
+            destroy?: (err?: Error) => void;
+          };
+          const chunks: Buffer[] = [];
+          emitter.destroy = () => {};
+          emitter.end = (chunk?: Buffer) => {
+            queueMicrotask(() => {
+              const existing = bucket.objects.get(objectPath);
+              if (
+                writeOptions?.preconditionOpts?.ifGenerationMatch === 0 &&
+                existing !== undefined
+              ) {
+                const err = new Error('ALREADY_EXISTS: ifGenerationMatch=0 failed');
+                emitter.emit('error', err);
+                return;
+              }
+              if (chunk) {
+                chunks.push(Buffer.from(chunk));
+              }
+              const bytes = Buffer.concat(chunks);
+              const gen = String(++bucket.nextGen);
+              const metaInput = writeOptions?.metadata ?? {};
+              bucket.objects.set(objectPath, {
+                bytes,
+                metadata: {
+                  bucket: bucket.name,
+                  name: objectPath,
+                  generation: gen,
+                  size: bytes.length,
+                  ...deepClone(metaInput),
+                },
+              });
+              emitter.emit('finish');
+            });
+          };
+          return emitter;
+        },
+        async save(
+          data: Buffer,
+          saveOptions: {
+            readonly contentType: string;
+            readonly resumable: false;
+            readonly preconditionOpts: { readonly ifGenerationMatch: 0 };
+            readonly preconditions: { readonly ifGenerationMatch: 0 };
+            readonly metadata: {
+              readonly cacheControl: string;
+              readonly contentDisposition: string;
+              readonly metadata: Readonly<Record<string, string>>;
+            };
+          }
+        ) {
+          bucket.lastWriteOptions = saveOptions;
+          const existing = bucket.objects.get(objectPath);
+          if (
+            saveOptions?.preconditionOpts?.ifGenerationMatch === 0 &&
+            existing !== undefined
+          ) {
+            const err = new Error('ALREADY_EXISTS: ifGenerationMatch=0 failed') as Error & {
+              code: number;
+            };
+            err.code = 412;
+            throw err;
+          }
+          const bytes = Buffer.from(data);
+          const gen = String(++bucket.nextGen);
+          bucket.objects.set(objectPath, {
+            bytes,
+            metadata: {
+              bucket: bucket.name,
+              name: objectPath,
+              generation: gen,
+              size: bytes.length,
+              contentType: saveOptions.contentType,
+              cacheControl: saveOptions.metadata.cacheControl,
+              contentDisposition: saveOptions.metadata.contentDisposition,
+              metadata: { ...saveOptions.metadata.metadata },
+            },
+          });
+        },
+        acl: {
+          async get() {
+            return [[]];
+          },
+        },
+      };
+    }
+  }
+
+  class InMemoryHttpResponseRecorder
+    implements PublishedBinaryDownloadHttpResponseWriter
+  {
+    public statusCode = 200;
+    public readonly headers = new Map<string, string>();
+    public bodyBuffer: Buffer | null = null;
+    public jsonBody: unknown = null;
+    public ended = false;
+
+    status(code: number): PublishedBinaryDownloadHttpResponseWriter {
+      this.statusCode = code;
+      return this;
+    }
+    setHeader(name: string, value: string): PublishedBinaryDownloadHttpResponseWriter {
+      this.headers.set(name.toLowerCase(), value);
+      return this;
+    }
+    getHeader(name: string): string | undefined {
+      return this.headers.get(name.toLowerCase());
+    }
+    json(body: unknown): void {
+      this.jsonBody = body;
+      this.ended = true;
+    }
+    send(body: Buffer | string): void {
+      this.bodyBuffer = Buffer.isBuffer(body) ? Buffer.from(body) : Buffer.from(body, 'utf8');
+      this.ended = true;
+    }
+    end(chunk?: Buffer | string): void {
+      if (chunk !== undefined) {
+        this.bodyBuffer = Buffer.isBuffer(chunk)
+          ? Buffer.from(chunk)
+          : Buffer.from(chunk, 'utf8');
+      }
+      this.ended = true;
+    }
+  }
+
+  function seedCleanBinaryChain(
+    db: InMemoryReleaseFirestoreDatabase,
+    bucket: InMemoryPublishedBinaryBucket,
+    opts: {
+      readonly receiptId: string;
+      readonly format: 'PDF' | 'DOCX';
+      readonly bytes: Buffer;
+      readonly priorRightsDecision?: LibraryQuarantineRightsDecisionStatus | null;
+      readonly avState?:
+        | 'MISSING'
+        | 'RUNNING'
+        | 'AV_THREAT_DETECTED'
+        | 'AV_NO_THREAT_DETECTED'
+        | 'STALE_SHA'
+        | 'STALE_GENERATION'
+        | 'STALE_REVISION';
+      readonly includeSafetyCase?: boolean;
+      readonly includeInspectionRequest?: boolean;
+      readonly sourceVerificationStatus?: 'Verified' | 'PendingVerification';
+    }
+  ): {
+    readonly sha256: string;
+    readonly generation: string;
+    readonly safetyCaseRevision: number;
+    readonly avRequestId: string;
+  } {
+    const { receiptId, format, bytes } = opts;
+    const ext = format === 'PDF' ? 'pdf' : 'docx';
+    const mime =
+      format === 'PDF' ? CANONICAL_PDF_MIME_TYPE : CANONICAL_DOCX_MIME_TYPE;
+    const deepStatus =
+      format === 'PDF'
+        ? 'PDF_REQUIRES_ISOLATED_PARSER'
+        : 'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION';
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const storagePath = `library/quarantine/${receiptId}/source.${ext}`;
+    const generation = bucket.seedObject(storagePath, bytes, {
+      contentType: mime,
+      metadata: {
+        receiptId,
+        sha256,
+        format,
+        deepInspectionStatus: deepStatus,
+        isSanitized: 'false',
+        isVerifiedSafe: 'false',
+      },
+    });
+
+    seedReviewedChain(db, {
+      receiptId,
+      humanCaseRevision: 6,
+      alignedCaseRevision: 6,
+      alignmentRevision: 1,
+      rightsDecision:
+        opts.priorRightsDecision !== undefined
+          ? opts.priorRightsDecision
+          : 'RESTRICTED',
+      sourceVerificationStatus: opts.sourceVerificationStatus ?? 'Verified',
+    });
+
+    // Update receipt + draft + handoff + rights to match real binary bytes + sha256 + format + generation
+    const receiptEnv = db.getRawDoc(
+      LIBRARY_QUARANTINE_RECEIPT_COLLECTION,
+      receiptId
+    ) as unknown as LibraryQuarantinePersistedReceiptEnvelope;
+    const patchedReceipt: LibraryQuarantinePersistedReceiptEnvelope = {
+      ...receiptEnv,
+      receipt: {
+        ...receiptEnv.receipt,
+        originalFilename: `incident-document.${ext}`,
+        sanitizedFilename: `incident-document.${ext}`,
+        format,
+        canonicalExtension: ext,
+        canonicalMimeType: mime,
+        byteSize: bytes.length,
+        sha256,
+        deepInspectionStatus: deepStatus,
+        storagePath,
+        generation,
+      },
+    };
+    db.seedDoc(LIBRARY_QUARANTINE_RECEIPT_COLLECTION, receiptId, patchedReceipt);
+
+    const draftDoc = db.getRawDoc(
+      LIBRARY_QUARANTINE_REVIEW_DRAFT_COLLECTION,
+      receiptId
+    ) as Record<string, unknown>;
+    db.seedDoc(LIBRARY_QUARANTINE_REVIEW_DRAFT_COLLECTION, receiptId, {
+      ...draftDoc,
+      sourceSha256: sha256,
+      format,
+    });
+
+    const handoffDoc = db.getRawDoc(
+      LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION,
+      receiptId
+    ) as Record<string, unknown>;
+    db.seedDoc(LIBRARY_QUARANTINE_CATALOG_HANDOFFS_COLLECTION, receiptId, {
+      ...handoffDoc,
+      sourceSha256: sha256,
+    });
+
+    const alignDoc = db.getRawDoc(
+      LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION,
+      receiptId
+    ) as Record<string, unknown>;
+    db.seedDoc(LIBRARY_QUARANTINE_CATALOG_CASE_ALIGNMENTS_COLLECTION, receiptId, {
+      ...alignDoc,
+      sourceSha256: sha256,
+    });
+
+    const caseDoc = db.getRawDoc(
+      LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION,
+      receiptId
+    ) as Record<string, unknown>;
+    db.seedDoc(LIBRARY_QUARANTINE_HUMAN_REVIEW_CASES_COLLECTION, receiptId, {
+      ...caseDoc,
+      sourceSha256: sha256,
+    });
+
+    const rightsDoc = db.getRawDoc(
+      LIBRARY_QUARANTINE_RIGHTS_DECISIONS_COLLECTION,
+      receiptId
+    );
+    if (rightsDoc) {
+      db.seedDoc(LIBRARY_QUARANTINE_RIGHTS_DECISIONS_COLLECTION, receiptId, {
+        ...rightsDoc,
+        sourceSha256: sha256,
+      });
+    }
+
+    const safetyCaseRevision = 1;
+    const qcatId = deriveQuarantineCatalogDocumentId(receiptId);
+
+    if (opts.includeSafetyCase !== false) {
+      const safetyCase: LibraryQuarantinePersistedBinarySafetyCase = {
+        schemaVersion: LIBRARY_QUARANTINE_BINARY_SAFETY_CASE_SCHEMA_VERSION,
+        receiptId,
+        documentId: qcatId,
+        revision: safetyCaseRevision,
+        sourceRevision: 2,
+        sourceUpdatedAt: receiptEnv.receipt.updatedAt,
+        sourceSha256: sha256,
+        sourceFormat: format,
+        deepInspectionStatus: deepStatus,
+        effectiveHumanCaseRevision: 6,
+        effectiveHumanCaseUpdatedAt: '2026-11-14T14:44:40.569Z',
+        catalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+        disposition: 'ISOLATED_ASSESSMENT_REQUIRED',
+        evidenceReference: 'Owner Safety Case Review #1',
+        evidenceNotes:
+          'Requires isolated ClamAV malware scan before any binary release.',
+        reviewNotes:
+          'Maintain fail-closed quarantine until clean ClamAV terminal execution.',
+        createdBy: 'admin-owner-1',
+        createdAt: '2026-11-15T10:00:00.000Z',
+        updatedBy: 'admin-owner-1',
+        updatedAt: '2026-11-15T10:00:00.000Z',
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      };
+      db.seedDoc(
+        LIBRARY_QUARANTINE_BINARY_SAFETY_CASES_COLLECTION,
+        receiptId,
+        safetyCase
+      );
+    }
+
+    const avRequestId = deriveLibraryQuarantineIsolatedInspectionRequestId(
+      receiptId,
+      receiptEnv.revision,
+      safetyCaseRevision
+    );
+
+    if (opts.includeInspectionRequest !== false) {
+      const reqDoc: LibraryQuarantinePersistedIsolatedInspectionRequest = {
+        schemaVersion:
+          LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_SCHEMA_VERSION,
+        requestId: avRequestId,
+        receiptId,
+        documentId: qcatId,
+        sourceRevision: 2,
+        sourceUpdatedAt: receiptEnv.receipt.updatedAt,
+        sourceSha256: sha256,
+        sourceGeneration: generation,
+        sourceByteSize: bytes.length,
+        sourceFormat: format,
+        deepInspectionStatus: deepStatus,
+        safetyCaseRevision,
+        effectiveHumanCaseRevision: 6,
+        catalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+        requestedBy: 'admin-owner-1',
+        requestedAt: '2026-11-15T10:05:00.000Z',
+        state: LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_STATE,
+        dispatched: false,
+        scanPerformed: false,
+        sanitized: false,
+        isVerifiedSafe: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      };
+      db.seedDoc(
+        LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUESTS_COLLECTION,
+        avRequestId,
+        reqDoc
+      );
+    }
+
+    const avMode = opts.avState ?? 'AV_NO_THREAT_DETECTED';
+    if (avMode !== 'MISSING') {
+      const avExec: LibraryQuarantinePersistedAvExecution = {
+        schemaVersion: LIBRARY_QUARANTINE_AV_EXECUTION_SCHEMA_VERSION,
+        requestId: avRequestId,
+        receiptId,
+        documentId: qcatId,
+        revision: avMode === 'RUNNING' ? 2 : 3,
+        safetyCaseRevision,
+        sourceRevision: 2,
+        sourceUpdatedAt: receiptEnv.receipt.updatedAt,
+        sourceSha256:
+          avMode === 'STALE_SHA' ? 'f'.repeat(64) : sha256,
+        sourceGeneration:
+          avMode === 'STALE_GENERATION' ? '9999999999' : generation,
+        sourceByteSize: bytes.length,
+        sourceFormat: format,
+        deepInspectionStatus: deepStatus,
+        effectiveHumanCaseRevision:
+          avMode === 'STALE_REVISION' ? 5 : 6,
+        catalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+        state:
+          avMode === 'RUNNING'
+            ? 'RUNNING'
+            : avMode === 'AV_THREAT_DETECTED'
+              ? 'AV_THREAT_DETECTED'
+              : 'AV_NO_THREAT_DETECTED',
+        dispatchedBy: 'admin-owner-1',
+        dispatchedAt: '2026-11-15T10:10:00.000Z',
+        workerRunId: 'exec-clamav-worker-001',
+        workerClaimedAt: '2026-11-15T10:10:05.000Z',
+        completedAt:
+          avMode === 'RUNNING' ? null : '2026-11-15T10:10:12.000Z',
+        engineName: avMode === 'RUNNING' ? null : 'ClamAV',
+        engineVersion: avMode === 'RUNNING' ? null : '1.4.2',
+        signatureVersion: avMode === 'RUNNING' ? null : '27501',
+        signatureUpdatedAt:
+          avMode === 'RUNNING' ? null : '2026-11-15T08:00:00.000Z',
+        scannedBytes: avMode === 'RUNNING' ? null : bytes.length,
+        exitCode:
+          avMode === 'RUNNING' ? null : avMode === 'AV_THREAT_DETECTED' ? 1 : 0,
+        failureReasonCode: null,
+        isSanitized: false,
+        isVerifiedSafe: false,
+        isRightsApproved: false,
+        isPublished: false,
+        isReadyForPeia: false,
+      };
+      db.seedDoc(
+        LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
+        avRequestId,
+        avExec
+      );
+
+      if (format === 'PDF') {
+        const pdfInspection: LibraryQuarantinePersistedPdfInspection = {
+          schemaVersion: LIBRARY_QUARANTINE_PDF_INSPECTION_SCHEMA_VERSION,
+          requestId: avRequestId,
+          receiptId,
+          documentId: qcatId,
+          sourceRevision: 2,
+          sourceUpdatedAt: receiptEnv.receipt.updatedAt,
+          sourceSha256: sha256,
+          sourceGeneration: generation,
+          sourceByteSize: bytes.length,
+          sourceFormat: 'PDF',
+          deepInspectionStatus: 'PDF_REQUIRES_ISOLATED_PARSER',
+          safetyCaseRevision,
+          effectiveHumanCaseRevision: 6,
+          catalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          workerRunId: 'exec-clamav-worker-001',
+          inspectedAt: '2026-11-15T10:10:12.000Z',
+          avCompletedAt: '2026-11-15T10:10:12.000Z',
+          outcome: LIBRARY_QUARANTINE_PDF_INSPECTION_OUTCOME_VERIFIED,
+          parserName: 'qpdf',
+          parserVersion: '11.9.1',
+          structuralPolicyVersion: LIBRARY_QUARANTINE_PDF_INSPECTION_POLICY_VERSION,
+          xrefFormat: 'TABLE',
+          parsedObjectCount: 3,
+          compressedObjectStreamsParsed: 0,
+          warningCount: 0,
+          encrypted: false,
+          activeOrExternalConstructsDetected: false,
+          isSanitized: false,
+          isVerifiedSafe: false,
+          isRightsApproved: false,
+          isPublished: false,
+          isReadyForPeia: false,
+        };
+        db.seedDoc(
+          LIBRARY_QUARANTINE_PDF_INSPECTIONS_COLLECTION,
+          avRequestId,
+          pdfInspection
+        );
+      }
+    }
+
+    return {
+      sha256,
+      generation,
+      safetyCaseRevision,
+      avRequestId,
+    };
+  }
+
+  // TEST 27: Reuse Existing Incident 1183ac... & Case v6 (Zero Re-Upload), Publish Real PDF + Real DOCX, Verify Byte-for-Byte HTTP GET/HEAD Download & Non-Assurance Flags
+  {
+    const prevGate = process.env[LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR];
+    const prevAvGate = process.env.POP_LIBRARY_AV_EXECUTION_ENABLED;
+    try {
+      const incidentId = '1183ac250d0404e921d2aeadbec1b76c';
+      const docxId = 'deadbeefcafebabe0011223344556677';
+      const pdfBytes = buildDeterministicValidPdfBytes('Sudan Environmental Act 2026 PDF');
+      const docxBytes = buildDeterministicValidDocxBytes('Sudan Environmental Policy 2026 DOCX');
+
+      const binDb = new InMemoryReleaseFirestoreDatabase();
+      const binBucket = new InMemoryPublishedBinaryBucket();
+
+      const pdfMeta = seedCleanBinaryChain(binDb, binBucket, {
+        receiptId: incidentId,
+        format: 'PDF',
+        bytes: pdfBytes,
+        priorRightsDecision: 'RESTRICTED',
+      });
+      const docxMeta = seedCleanBinaryChain(binDb, binBucket, {
+        receiptId: docxId,
+        format: 'DOCX',
+        bytes: docxBytes,
+        priorRightsDecision: 'RESTRICTED',
+      });
+
+      const handlerOpts = {
+        ...buildHandlerOptions({
+          binarySafetyCaseEnabled: true,
+          isolatedInspectionRequestEnabled: true,
+          avExecutionEnabled: false,
+          publishedBinaryReleaseEnabled: true,
+        }),
+        draftDatabase: binDb,
+        publishedBinaryStorageBucket: binBucket,
+        publishedBinaryReleaseClock: () => '2026-11-16T10:00:00.000Z',
+      };
+
+      const pdfStatus = (await executeManageLibraryDocumentsRequest(
+        {
+          auth: { uid: ownerFnUser.id },
+          data: {
+            action: 'getPublishedLibraryBinaryReleaseStatus',
+            receiptId: incidentId,
+          },
+        },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        handlerOpts
+      )) as ClientGetPublishedBinaryStatusDto;
+
+      assert(pdfStatus.ok && pdfStatus.status === 'READY');
+      assert(pdfStatus.eligibleForPublish === true);
+      assert(pdfStatus.currentHumanCaseRevision === 6);
+      assert(pdfStatus.requiresContradictionResolution === true);
+      assert(pdfStatus.currentPriorRightsDecision === 'RESTRICTED');
+
+      const publishPdf = (await executeManageLibraryDocumentsRequest(
+        {
+          auth: { uid: ownerFnUser.id },
+          data: {
+            action: 'publishQuarantinedBinaryToPublicLibrary',
+            receiptId: incidentId,
+            expectedHumanCaseRevision: 6,
+            expectedCatalogUpdatedAt: pdfStatus.catalogUpdatedAt,
+            expectedAlignmentRevision: pdfStatus.currentAlignmentRevision,
+            expectedSafetyCaseRevision: pdfMeta.safetyCaseRevision,
+            expectedAvRequestId: pdfMeta.avRequestId,
+            expectedPriorRightsDecisionRevision:
+              pdfStatus.currentPriorRightsDecisionRevision,
+            confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+            input: {
+              publicRightsStatus: 'PermissionGranted',
+              binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+              rightsEvidenceReference: 'Owner Direct Release Memo #01',
+              rightsEvidenceSummary:
+                'Owner explicitly authorizes public PDF download of uploaded file.',
+              releaseNotes: 'First direct PDF release from existing case v6.',
+              downloadFilename: 'sudan-water-act-2026.pdf',
+              acknowledgePriorRestrictedDecision: true,
+              contradictionResolutionSummary:
+                'Prior RESTRICTED applied to catalog metadata handoff; owner authorizes public binary download.',
+            },
+          },
+        },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        handlerOpts
+      )) as ClientPublishBinaryResponseDto;
+
+      const publishDocx = (await executeManageLibraryDocumentsRequest(
+        {
+          auth: { uid: ownerFnUser.id },
+          data: {
+            action: 'publishQuarantinedBinaryToPublicLibrary',
+            receiptId: docxId,
+            expectedHumanCaseRevision: 6,
+            expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+            expectedAlignmentRevision: 1,
+            expectedSafetyCaseRevision: docxMeta.safetyCaseRevision,
+            expectedAvRequestId: docxMeta.avRequestId,
+            expectedPriorRightsDecisionRevision: 1,
+            confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+            input: {
+              publicRightsStatus: 'OpenPubliclyAvailable',
+              binaryRightsBasis: 'EXPLICIT_BINARY_REDISTRIBUTION_PERMISSION',
+              rightsEvidenceReference: 'Official Ministry License #99',
+              rightsEvidenceSummary:
+                'Written explicit permission authorizing Word DOCX redistribution.',
+              downloadFilename: 'sudan-policy-2026.docx',
+              acknowledgePriorRestrictedDecision: true,
+              contradictionResolutionSummary:
+                'Ministry written permission supersedes earlier metadata restriction.',
+            },
+          },
+        },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        handlerOpts
+      )) as ClientPublishBinaryResponseDto;
+
+      assert(
+        publishPdf.ok === true && publishPdf.status === 'PUBLISHED',
+        `publishPdf failed: ${JSON.stringify(publishPdf)}`
+      );
+      assert(
+        publishDocx.ok === true && publishDocx.status === 'PUBLISHED',
+        `publishDocx failed: ${JSON.stringify(publishDocx)}`
+      );
+
+      // Check quarantine draft stayed Draft, prior RESTRICTED decision stayed immutable, released object matches SHA & privacy
+      const rawQcat = binDb.getRawDoc(
+        LIBRARY_DOCUMENTS_COLLECTION,
+        deriveQuarantineCatalogDocumentId(incidentId)
+      );
+      const rawPriorRights = binDb.getRawDoc(
+        LIBRARY_QUARANTINE_RIGHTS_DECISIONS_COLLECTION,
+        incidentId
+      );
+      const releasedPdfObj = binBucket.objects.get(
+        `library/released/${incidentId}/v1/document.pdf`
+      );
+      const releasedDocxObj = binBucket.objects.get(
+        `library/released/${docxId}/v1/document.docx`
+      );
+
+      // Verify PublicLibraryRepository lists doc-qbin-* and NEVER qcat-*
+      const publicRepoOnBinDb = new PublicLibraryRepository(
+        new DbBackedLibraryRepository(binDb)
+      );
+      const listedPublic = await publicRepoOnBinDb.listPublicDocuments();
+      const pdfPublicDocId = derivePublishedBinaryPublicLibraryDocumentId(incidentId);
+      const docxPublicDocId = derivePublishedBinaryPublicLibraryDocumentId(docxId);
+      const listedIds = new Set(listedPublic.map((d) => d.id));
+
+      // Execute anonymous HTTP GET + HEAD download handler on both PDF and DOCX
+      const dlHandler = createPublishedBinaryDownloadHandler({
+        db: binDb,
+        storageBucket: binBucket,
+      });
+
+      const pdfGetRes = new InMemoryHttpResponseRecorder();
+      await dlHandler(
+        { method: 'GET', path: '/', query: { documentId: pdfPublicDocId } },
+        pdfGetRes
+      );
+      const pdfHeadRes = new InMemoryHttpResponseRecorder();
+      await dlHandler(
+        { method: 'HEAD', path: '/', query: { documentId: pdfPublicDocId } },
+        pdfHeadRes
+      );
+      const docxGetRes = new InMemoryHttpResponseRecorder();
+      await dlHandler(
+        { method: 'GET', path: '/', query: { documentId: docxPublicDocId } },
+        docxGetRes
+      );
+
+      assertCheck(
+        '27',
+        'Existing incident 1183ac... & case v6 + new DOCX publish cleanly (qcat Draft preserved, RESTRICTED untouched, byte-for-byte HTTP GET/HEAD download, non-assurance flags preserved)',
+        publishPdf.isSanitized === false &&
+          publishPdf.isVerifiedSafe === false &&
+          publishPdf.quarantineDraftRemainsDraft === true &&
+          rawQcat?.workflowState === FnWorkflowState.Draft &&
+          rawPriorRights?.decision === 'RESTRICTED' &&
+          rawPriorRights?.revision === 1 &&
+          releasedPdfObj !== undefined &&
+          Buffer.compare(releasedPdfObj.bytes, pdfBytes) === 0 &&
+          releasedDocxObj !== undefined &&
+          Buffer.compare(releasedDocxObj.bytes, docxBytes) === 0 &&
+          listedIds.has(pdfPublicDocId) &&
+          listedIds.has(docxPublicDocId) &&
+          !listedIds.has(deriveQuarantineCatalogDocumentId(incidentId)) &&
+          pdfGetRes.statusCode === 200 &&
+          pdfGetRes.bodyBuffer !== null &&
+          Buffer.compare(pdfGetRes.bodyBuffer, pdfBytes) === 0 &&
+          pdfGetRes.getHeader('content-type') === CANONICAL_PDF_MIME_TYPE &&
+          String(pdfGetRes.getHeader('content-disposition')).startsWith('attachment;') &&
+          pdfGetRes.getHeader('x-content-type-options') === 'nosniff' &&
+          pdfGetRes.getHeader('content-security-policy') === "default-src 'none'; sandbox" &&
+          pdfGetRes.getHeader('cache-control') === 'private, no-store, max-age=0' &&
+          pdfHeadRes.statusCode === 200 &&
+          pdfHeadRes.bodyBuffer === null &&
+          pdfHeadRes.getHeader('content-length') === String(pdfBytes.length) &&
+          docxGetRes.statusCode === 200 &&
+          docxGetRes.bodyBuffer !== null &&
+          Buffer.compare(docxGetRes.bodyBuffer, docxBytes) === 0 &&
+          docxGetRes.getHeader('content-type') === CANONICAL_DOCX_MIME_TYPE
+      );
+    } finally {
+      if (prevGate === undefined) delete process.env[LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR];
+      else process.env[LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR] = prevGate;
+      if (prevAvGate === undefined) delete process.env.POP_LIBRARY_AV_EXECUTION_ENABLED;
+      else process.env.POP_LIBRARY_AV_EXECUTION_ENABLED = prevAvGate;
+    }
+  }
+
+  // TEST 28: Missing/Pending/Threat/Stale AV Scan & Pre-Rights Holds Strictly Block Publication
+  {
+    const pdfBytes = buildDeterministicValidPdfBytes('AV Gate Test');
+    const scenarios = [
+      { avState: 'MISSING' as const, expectedCode: 'WAITING_FOR_ACTUAL_SCAN' },
+      { avState: 'RUNNING' as const, expectedCode: 'WAITING_FOR_ACTUAL_SCAN' },
+      { avState: 'AV_THREAT_DETECTED' as const, expectedCode: 'AV_THREAT_DETECTED' },
+      { avState: 'STALE_SHA' as const, expectedCode: 'AV_SCAN_STALE_HOLD' },
+      { avState: 'STALE_GENERATION' as const, expectedCode: 'AV_SCAN_STALE_HOLD' },
+      { avState: 'STALE_REVISION' as const, expectedCode: 'AV_SCAN_STALE_HOLD' },
+    ];
+
+    let allBlocked = true;
+    for (let i = 0; i < scenarios.length; i += 1) {
+      const sc = scenarios[i];
+      const rid = `a111111111111111111111111111111${i}`;
+      const binDb = new InMemoryReleaseFirestoreDatabase();
+      const binBucket = new InMemoryPublishedBinaryBucket();
+      const meta = seedCleanBinaryChain(binDb, binBucket, {
+        receiptId: rid,
+        format: 'PDF',
+        bytes: pdfBytes,
+        avState: sc.avState,
+      });
+
+      const opts = {
+        ...buildHandlerOptions({
+          binarySafetyCaseEnabled: true,
+          isolatedInspectionRequestEnabled: true,
+          avExecutionEnabled: false,
+          publishedBinaryReleaseEnabled: true,
+        }),
+        draftDatabase: binDb,
+        publishedBinaryStorageBucket: binBucket,
+        publishedBinaryReleaseClock: () => '2026-11-16T10:00:00.000Z',
+      };
+
+      const st = (await executeManageLibraryDocumentsRequest(
+        { auth: { uid: ownerFnUser.id }, data: { action: 'getPublishedLibraryBinaryReleaseStatus', receiptId: rid } },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        opts
+      )) as ClientGetPublishedBinaryStatusDto;
+
+      const pubRes = (await executeManageLibraryDocumentsRequest(
+        {
+          auth: { uid: ownerFnUser.id },
+          data: {
+            action: 'publishQuarantinedBinaryToPublicLibrary',
+            receiptId: rid,
+            expectedHumanCaseRevision: 6,
+            expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+            expectedAlignmentRevision: 1,
+            expectedSafetyCaseRevision: meta.safetyCaseRevision,
+            expectedAvRequestId: meta.avRequestId,
+            expectedPriorRightsDecisionRevision: 1,
+            confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+            input: {
+              publicRightsStatus: 'PermissionGranted',
+              binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+              rightsEvidenceReference: 'Owner Memo',
+              rightsEvidenceSummary: 'Owner explicit binary permission summary text.',
+              downloadFilename: 'blocked.pdf',
+              acknowledgePriorRestrictedDecision: true,
+              contradictionResolutionSummary: 'Resolved prior restriction cleanly.',
+            },
+          },
+        },
+        adminRepo,
+        service,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        opts
+      )) as ClientPublishBinaryResponseDto;
+
+      if (
+        !st.ok ||
+        st.eligibleForPublish !== false ||
+        st.isScanCleanForCurrentRevision !== false ||
+        st.blockCode !== sc.expectedCode ||
+        pubRes.ok !== false ||
+        pubRes.status !== 'HOLD' ||
+        pubRes.errorCode !== sc.expectedCode ||
+        binDb.listCollectionDocs(LIBRARY_PUBLISHED_BINARY_RELEASES_COLLECTION).length !== 0
+      ) {
+        allBlocked = false;
+      }
+    }
+
+    assertCheck(
+      '28',
+      'Missing, running, infected, or stale-provenance ClamAV scans strictly hold publication with zero fabricated clean verdicts or Firestore writes',
+      allBlocked
+    );
+  }
+
+  // TEST 29: Metadata-Only Rights Text & Unacknowledged Prior RESTRICTED Decision Rejected Without Mutating Prior Rights Doc
+  {
+    const rid = 'b2222222222222222222222222222222';
+    const pdfBytes = buildDeterministicValidPdfBytes('Rights Guard Test');
+    const binDb = new InMemoryReleaseFirestoreDatabase();
+    const binBucket = new InMemoryPublishedBinaryBucket();
+    const meta = seedCleanBinaryChain(binDb, binBucket, {
+      receiptId: rid,
+      format: 'PDF',
+      bytes: pdfBytes,
+      priorRightsDecision: 'RESTRICTED',
+    });
+
+    const opts = {
+      ...buildHandlerOptions({
+        binarySafetyCaseEnabled: true,
+        isolatedInspectionRequestEnabled: true,
+        publishedBinaryReleaseEnabled: true,
+      }),
+      draftDatabase: binDb,
+      publishedBinaryStorageBucket: binBucket,
+      publishedBinaryReleaseClock: () => '2026-11-16T10:00:00.000Z',
+    };
+
+    const unackRes = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 6,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: meta.safetyCaseRevision,
+          expectedAvRequestId: meta.avRequestId,
+          expectedPriorRightsDecisionRevision: 1,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'PermissionGranted',
+            binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Owner Memo',
+            rightsEvidenceSummary: 'Explicit binary authorization note.',
+            downloadFilename: 'doc.pdf',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      opts
+    )) as ClientPublishBinaryResponseDto;
+
+    const metadataOnlyRes = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 6,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: meta.safetyCaseRevision,
+          expectedAvRequestId: meta.avRequestId,
+          expectedPriorRightsDecisionRevision: 1,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'PermissionGranted',
+            binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Catalog Note',
+            rightsEvidenceSummary: 'Reusing METADATA_USE_CLEARED and CATALOG_METADATA_ONLY.',
+            downloadFilename: 'doc.pdf',
+            acknowledgePriorRestrictedDecision: true,
+            contradictionResolutionSummary: 'Explaining override cleanly.',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      opts
+    )) as ClientPublishBinaryResponseDto;
+
+    assertCheck(
+      '29',
+      'Unacknowledged prior RESTRICTED decision and CATALOG_METADATA_ONLY substitutes are both rejected while keeping prior rights record immutable',
+      unackRes.ok === false &&
+        unackRes.errorCode === 'PRIOR_RIGHTS_CONTRADICTION_UNRESOLVED' &&
+        metadataOnlyRes.ok === false &&
+        metadataOnlyRes.errorCode === 'BINARY_RIGHTS_EVIDENCE_REQUIRED' &&
+        binDb.listCollectionDocs(LIBRARY_PUBLISHED_BINARY_RELEASES_COLLECTION).length === 0
+    );
+  }
+
+  // TEST 30: Duplicate Click Idempotency, CAS Revision Drift Conflict, Already-Exists Conflict & Uncertain Transaction Commit Hold
+  {
+    const rid = 'c3333333333333333333333333333333';
+    const pdfBytes = buildDeterministicValidPdfBytes('Concurrency Test');
+    const binDb = new InMemoryReleaseFirestoreDatabase();
+    const binBucket = new InMemoryPublishedBinaryBucket();
+    const meta = seedCleanBinaryChain(binDb, binBucket, {
+      receiptId: rid,
+      format: 'PDF',
+      bytes: pdfBytes,
+      priorRightsDecision: null,
+    });
+
+    const opts = {
+      ...buildHandlerOptions({
+        binarySafetyCaseEnabled: true,
+        isolatedInspectionRequestEnabled: true,
+        publishedBinaryReleaseEnabled: true,
+      }),
+      draftDatabase: binDb,
+      publishedBinaryStorageBucket: binBucket,
+      publishedBinaryReleaseClock: () => '2026-11-16T10:00:00.000Z',
+    };
+
+    // Stale case revision -> RELEASE_PRECONDITION_CONFLICT
+    const staleCasRes = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 5,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: meta.safetyCaseRevision,
+          expectedAvRequestId: meta.avRequestId,
+          expectedPriorRightsDecisionRevision: null,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'PermissionGranted',
+            binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Owner Memo',
+            rightsEvidenceSummary: 'Explicit owner binary release statement.',
+            downloadFilename: 'cas-test.pdf',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      opts
+    )) as ClientPublishBinaryResponseDto;
+
+    // Simulate UNKNOWN lost transaction commit ACK (throws after staging writes -> rolls back working copy)
+    const binDbUncertain = new InMemoryReleaseFirestoreDatabase();
+    const binBucketUncertain = new InMemoryPublishedBinaryBucket();
+    const metaUnc = seedCleanBinaryChain(binDbUncertain, binBucketUncertain, {
+      receiptId: rid,
+      format: 'PDF',
+      bytes: pdfBytes,
+      priorRightsDecision: null,
+    });
+    binDbUncertain.onAfterTransactionWritesStagedHook = () => {
+      throw new Error('DEADLINE_EXCEEDED: Commit response lost');
+    };
+    const unknownRes = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 6,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: metaUnc.safetyCaseRevision,
+          expectedAvRequestId: metaUnc.avRequestId,
+          expectedPriorRightsDecisionRevision: null,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'PermissionGranted',
+            binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Owner Memo',
+            rightsEvidenceSummary: 'Explicit owner binary release statement.',
+            downloadFilename: 'uncertain-test.pdf',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        ...opts,
+        draftDatabase: binDbUncertain,
+        publishedBinaryStorageBucket: binBucketUncertain,
+      }
+    )) as ClientPublishBinaryResponseDto;
+
+    // First clean publish -> PUBLISHED; identical duplicate -> ALREADY_PUBLISHED; mismatched input on existing -> RELEASE_ALREADY_EXISTS_CONFLICT
+    const firstPub = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 6,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: meta.safetyCaseRevision,
+          expectedAvRequestId: meta.avRequestId,
+          expectedPriorRightsDecisionRevision: null,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'PermissionGranted',
+            binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Owner Memo',
+            rightsEvidenceSummary: 'Explicit owner binary release statement.',
+            downloadFilename: 'idem.pdf',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      opts
+    )) as ClientPublishBinaryResponseDto;
+
+    const dupPub = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 6,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: meta.safetyCaseRevision,
+          expectedAvRequestId: meta.avRequestId,
+          expectedPriorRightsDecisionRevision: null,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'PermissionGranted',
+            binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Owner Memo',
+            rightsEvidenceSummary: 'Explicit owner binary release statement.',
+            downloadFilename: 'idem.pdf',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      opts
+    )) as ClientPublishBinaryResponseDto;
+
+    const conflictingExistingRes = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 6,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: meta.safetyCaseRevision,
+          expectedAvRequestId: meta.avRequestId,
+          expectedPriorRightsDecisionRevision: null,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'OpenPubliclyAvailable',
+            binaryRightsBasis: 'PUBLIC_DOMAIN_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Different Ref',
+            rightsEvidenceSummary: 'Different payload after already published.',
+            downloadFilename: 'other.pdf',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      opts
+    )) as ClientPublishBinaryResponseDto;
+
+    assertCheck(
+      '30',
+      'CAS drift returns RELEASE_PRECONDITION_CONFLICT, commit ambiguity returns UNKNOWN, identical duplicate returns ALREADY_PUBLISHED, differing repeat returns RELEASE_ALREADY_EXISTS_CONFLICT',
+      staleCasRes.ok === false &&
+        staleCasRes.errorCode === 'RELEASE_PRECONDITION_CONFLICT' &&
+        unknownRes.ok === false &&
+        unknownRes.status === 'UNKNOWN' &&
+        unknownRes.published === null &&
+        unknownRes.errorCode === 'TRANSACTION_COMMIT_UNCERTAIN' &&
+        firstPub.ok === true &&
+        firstPub.status === 'PUBLISHED' &&
+        dupPub.ok === true &&
+        dupPub.status === 'ALREADY_PUBLISHED' &&
+        dupPub.publishedChanged === false &&
+        conflictingExistingRes.ok === false &&
+        conflictingExistingRes.errorCode === 'RELEASE_ALREADY_EXISTS_CONFLICT'
+    );
+  }
+
+  // TEST 31: Strict 4-Permission Human RBAC, AI Denial, No Secret Leaks, and Bad Filename / `.doc` Rejection
+  {
+    const rid = 'd4444444444444444444444444444444';
+    const pdfBytes = buildDeterministicValidPdfBytes('RBAC & Filename Test');
+    const binDb = new InMemoryReleaseFirestoreDatabase();
+    const binBucket = new InMemoryPublishedBinaryBucket();
+    const meta = seedCleanBinaryChain(binDb, binBucket, {
+      receiptId: rid,
+      format: 'PDF',
+      bytes: pdfBytes,
+      priorRightsDecision: null,
+    });
+
+    const opts = {
+      ...buildHandlerOptions({
+        binarySafetyCaseEnabled: true,
+        isolatedInspectionRequestEnabled: true,
+        publishedBinaryReleaseEnabled: true,
+      }),
+      draftDatabase: binDb,
+      publishedBinaryStorageBucket: binBucket,
+      publishedBinaryReleaseClock: () => '2026-11-16T10:00:00.000Z',
+    };
+
+    let deniedCount = 0;
+    for (const actorUid of [
+      rightsFnUser.id,
+      aiFnUser.id,
+      'nonexistent-user-id',
+    ]) {
+      try {
+        await executeManageLibraryDocumentsRequest(
+          {
+            auth: { uid: actorUid },
+            data: {
+              action: 'getPublishedLibraryBinaryReleaseStatus',
+              receiptId: rid,
+            },
+          },
+          adminRepo,
+          service,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          opts
+        );
+      } catch (err: any) {
+        if (err?.code === 'permission-denied') {
+          deniedCount += 1;
+        }
+      }
+    }
+
+    const clientRbacChecks =
+      canUserPublishQuarantinedBinaryToPublicLibrary(ownerUiUser) === true &&
+      canUserPublishQuarantinedBinaryToPublicLibrary(curatorUiUser) === false &&
+      canUserPublishQuarantinedBinaryToPublicLibrary(rightsUiUser) === false &&
+      canUserPublishQuarantinedBinaryToPublicLibrary({
+        ...ownerUiUser,
+        role: AdminRole.AIAssistant,
+      }) === false &&
+      canUserPublishQuarantinedBinaryToPublicLibrary({
+        ...ownerUiUser,
+        permissions: [AdminPermission.Review, AdminPermission.ManageRights],
+      }) === false;
+
+    let badFilenameRejected = 0;
+    for (const badName of [
+      '../escape.pdf',
+      'evil\u202Efdp.pdf',
+      'legacy.doc',
+      'mismatch.docx',
+      'bad|name.pdf',
+    ]) {
+      try {
+        validateClientBinaryDownloadFilename(badName, 'PDF');
+      } catch {
+        badFilenameRejected += 1;
+      }
+    }
+
+    const serverBadFilenameRes = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 6,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: meta.safetyCaseRevision,
+          expectedAvRequestId: meta.avRequestId,
+          expectedPriorRightsDecisionRevision: null,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'PermissionGranted',
+            binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Owner Memo',
+            rightsEvidenceSummary: 'Explicit owner binary release statement.',
+            downloadFilename: 'legacy-word.doc',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      opts
+    )) as ClientPublishBinaryResponseDto;
+
+    const cleanStatus = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'getPublishedLibraryBinaryReleaseStatus',
+          receiptId: rid,
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      opts
+    )) as ClientGetPublishedBinaryStatusDto;
+
+    const statusJson = JSON.stringify(cleanStatus);
+    const noSecretLeak =
+      !statusJson.includes('library/quarantine/') &&
+      !statusJson.includes('library/released/') &&
+      !statusJson.includes('sourceSha256') &&
+      !statusJson.includes('firebaseStorageDownloadTokens') &&
+      !statusJson.includes('X-Goog-Signature');
+
+    assertCheck(
+      '31',
+      '4-perm human RBAC + AI denial enforced, unsafe/.doc/BiDi filenames rejected, and sanitized DTOs leak zero quarantine/released storage paths or hashes',
+      deniedCount === 3 &&
+        clientRbacChecks &&
+        badFilenameRejected === 5 &&
+        serverBadFilenameRes.ok === false &&
+        serverBadFilenameRes.errorCode === 'INVALID_DOWNLOAD_FILENAME' &&
+        noSecretLeak
+    );
+  }
+
+  // TEST 32: HTTP Download Fail-Closed Security Guards (qcat- & doc-qsrc- 403, Verbs 405, Query/Path 400, Revoked/Restricted/Corrupt/Token/Size>15MB)
+  {
+    const rid = 'e5555555555555555555555555555555';
+    const pdfBytes = buildDeterministicValidPdfBytes('HTTP Download Abuse Test');
+    const binDb = new InMemoryReleaseFirestoreDatabase();
+    const binBucket = new InMemoryPublishedBinaryBucket();
+    const meta = seedCleanBinaryChain(binDb, binBucket, {
+      receiptId: rid,
+      format: 'PDF',
+      bytes: pdfBytes,
+      priorRightsDecision: null,
+    });
+    const opts = {
+      ...buildHandlerOptions({
+        binarySafetyCaseEnabled: true,
+        isolatedInspectionRequestEnabled: true,
+        publishedBinaryReleaseEnabled: true,
+      }),
+      draftDatabase: binDb,
+      publishedBinaryStorageBucket: binBucket,
+      publishedBinaryReleaseClock: () => '2026-11-16T10:00:00.000Z',
+    };
+
+    const pub = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 6,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: meta.safetyCaseRevision,
+          expectedAvRequestId: meta.avRequestId,
+          expectedPriorRightsDecisionRevision: null,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'PermissionGranted',
+            binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Owner Memo',
+            rightsEvidenceSummary: 'Explicit owner binary release statement.',
+            downloadFilename: 'http-sec.pdf',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      opts
+    )) as ClientPublishBinaryResponseDto;
+    assert(pub.ok === true, `Test 32 pub failed: ${JSON.stringify(pub)}`);
+
+    const publicDocId = derivePublishedBinaryPublicLibraryDocumentId(rid);
+    const dlHandler = createPublishedBinaryDownloadHandler({
+      db: binDb,
+      storageBucket: binBucket,
+    });
+
+    const postRes = new InMemoryHttpResponseRecorder();
+    await dlHandler({ method: 'POST', path: '/', query: { documentId: publicDocId } }, postRes);
+
+    const qcatRes = new InMemoryHttpResponseRecorder();
+    await dlHandler(
+      { method: 'GET', path: '/', query: { documentId: `qcat-${rid}` } },
+      qcatRes
+    );
+
+    const qsrcRes = new InMemoryHttpResponseRecorder();
+    await dlHandler(
+      { method: 'GET', path: '/', query: { documentId: `doc-qsrc-${rid}` } },
+      qsrcRes
+    );
+
+    const extraParamRes = new InMemoryHttpResponseRecorder();
+    await dlHandler(
+      { method: 'GET', path: '/', query: { documentId: publicDocId, extra: '1' } },
+      extraParamRes
+    );
+
+    const badPathRes = new InMemoryHttpResponseRecorder();
+    await dlHandler(
+      { method: 'GET', path: '/library/quarantine/x', query: { documentId: publicDocId } },
+      badPathRes
+    );
+
+    // Inject download token into released metadata -> must fail closed 503
+    const relObj = binBucket.objects.get(`library/released/${rid}/v1/document.pdf`)!;
+    const savedMeta = deepClone(relObj.metadata);
+    (relObj.metadata.metadata as Record<string, unknown>).firebaseStorageDownloadTokens =
+      'leaked-token-123';
+    const tokenRes = new InMemoryHttpResponseRecorder();
+    await dlHandler({ method: 'GET', path: '/', query: { documentId: publicDocId } }, tokenRes);
+    relObj.metadata = savedMeta;
+
+    // Downgrade public rights to Restricted -> must fail closed 403
+    const pubDocRaw = binDb.getRawDoc(LIBRARY_DOCUMENTS_COLLECTION, publicDocId)!;
+    binDb.seedDoc(LIBRARY_DOCUMENTS_COLLECTION, publicDocId, {
+      ...pubDocRaw,
+      rightsStatus: FnLibraryRightsStatus.Restricted,
+    });
+    const revokedRes = new InMemoryHttpResponseRecorder();
+    await dlHandler({ method: 'GET', path: '/', query: { documentId: publicDocId } }, revokedRes);
+    binDb.seedDoc(LIBRARY_DOCUMENTS_COLLECTION, publicDocId, pubDocRaw);
+
+    // Oversized > 15MB check in release metadata -> fails closed
+    const relDocRaw = binDb.getRawDoc(LIBRARY_PUBLISHED_BINARY_RELEASES_COLLECTION, rid)!;
+    binDb.seedDoc(LIBRARY_PUBLISHED_BINARY_RELEASES_COLLECTION, rid, {
+      ...relDocRaw,
+      sourceByteSize: MAX_LIBRARY_UPLOAD_PRELIMINARY_BYTES + 1,
+    });
+    const oversizeRes = new InMemoryHttpResponseRecorder();
+    await dlHandler({ method: 'GET', path: '/', query: { documentId: publicDocId } }, oversizeRes);
+
+    assertCheck(
+      '32',
+      'Download gateway rejects POST (405), qcat-/doc-qsrc- (403), extra params/path (400), token metadata leak (503), downgraded rights (403), and >15MB records (403/503)',
+      postRes.statusCode === 405 &&
+        qcatRes.statusCode === 403 &&
+        qsrcRes.statusCode === 403 &&
+        extraParamRes.statusCode === 400 &&
+        badPathRes.statusCode === 400 &&
+        tokenRes.statusCode === 503 &&
+        revokedRes.statusCode === 403 &&
+        (oversizeRes.statusCode === 403 || oversizeRes.statusCode === 503)
+    );
+  }
+
+  // TEST 33: Default-OFF Server & Client Feature Gates Independent of AV Execution Gate (AV Stays Disabled)
+  {
+    const prevGate = process.env[LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR];
+    let serverDefaultOffRejected = false;
+    try {
+      delete process.env[LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR];
+      try {
+        await executeManageLibraryDocumentsRequest(
+          {
+            auth: { uid: ownerFnUser.id },
+            data: {
+              action: 'getPublishedLibraryBinaryReleaseStatus',
+              receiptId: '1183ac250d0404e921d2aeadbec1b76c',
+            },
+          },
+          adminRepo,
+          service,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          buildHandlerOptions({
+            binarySafetyCaseEnabled: true,
+            isolatedInspectionRequestEnabled: true,
+            avExecutionEnabled: false,
+            publishedBinaryReleaseEnabled: undefined,
+          })
+        );
+      } catch (err: any) {
+        if (
+          err?.code === 'failed-precondition' &&
+          String(err?.message).includes('PUBLISHED_BINARY_RELEASE_NOT_RELEASED')
+        ) {
+          serverDefaultOffRejected = true;
+        }
+      }
+    } finally {
+      if (prevGate === undefined) delete process.env[LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR];
+      else process.env[LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR] = prevGate;
+    }
+
+    const baseSixFlags = {
+      VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+      VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+      VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+      VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+      VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED: 'true',
+      VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: 'true',
+    };
+
+    const clientDefaultOff =
+      isLibraryQuarantinePublishedBinaryReleaseEnabled() === false &&
+      isLibraryQuarantinePublishedBinaryReleaseEnabled(baseSixFlags) === false &&
+      isLibraryQuarantinePublishedBinaryReleaseEnabled({
+        ...baseSixFlags,
+        VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED: 'false',
+      }) === false;
+
+    const clientExplicitOnWithoutAv =
+      isLibraryQuarantinePublishedBinaryReleaseEnabled({
+        ...baseSixFlags,
+        VITE_LIBRARY_AV_EXECUTION_ENABLED: 'false',
+        VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED: 'true',
+      }) === true;
+
+    assertCheck(
+      '33',
+      'Default-OFF feature gates block binary release when absent/false on server & client while enabling cleanly without turning on ClamAV dispatch',
+      serverDefaultOffRejected && clientDefaultOff && clientExplicitOnWithoutAv
+    );
+  }
+
+  // TEST 34: PublicLibraryHub Direct Download UI Rendering for PDF vs DOCX vs External Source Record
+  {
+    const baseDoc: Omit<PublicLibraryDocument, 'id' | 'versions'> = {
+      titleAr: 'وثيقة بيئية منشورة',
+      titleEn: 'Published Environmental Document',
+      documentType: LibraryDocumentType.Law,
+      organizationId: 'org-hcenr',
+      sourceId: 'src-gazette',
+      geographyAr: 'السودان',
+      geographyEn: 'Sudan',
+      publicationDate: '2026-11-16',
+      language: 'bilingual',
+      summaryAr: 'ملخص عربي معتمد.',
+      summaryEn: 'Approved English summary.',
+      topicsAr: ['بيئة'],
+      topicsEn: ['Environment'],
+      environmentalDomains: ['LawAndPolicy'],
+      rightsStatus: LibraryRightsStatus.PermissionGranted,
+      workflowState: WorkflowState.Published,
+      createdAt: '2026-11-16T00:00:00.000Z',
+      updatedAt: '2026-11-16T00:00:00.000Z',
+    };
+
+    const pdfPublicDoc: PublicLibraryDocument = {
+      ...baseDoc,
+      id: 'doc-qbin-1183ac250d0404e921d2aeadbec1b76c',
+      versions: [
+        {
+          id: 'ver-pdf-1',
+          documentId: 'doc-qbin-1183ac250d0404e921d2aeadbec1b76c',
+          versionNumber: '1.0',
+          publishedDate: '2026-11-16',
+          changeDescriptionAr: 'إتاحة ملف PDF المرفوع الأصلي للتحميل المباشر',
+          changeDescriptionEn: 'Direct public attachment release of uploaded PDF Original',
+          referenceUrl:
+            'https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryPublishedBinaryDownload?documentId=doc-qbin-1183ac250d0404e921d2aeadbec1b76c',
+        },
+      ],
+    };
+
+    const docxPublicDoc: PublicLibraryDocument = {
+      ...baseDoc,
+      id: 'doc-qbin-deadbeefcafebabe0011223344556677',
+      versions: [
+        {
+          id: 'ver-docx-1',
+          documentId: 'doc-qbin-deadbeefcafebabe0011223344556677',
+          versionNumber: '1.0',
+          publishedDate: '2026-11-16',
+          changeDescriptionAr: 'إتاحة ملف Word (DOCX) المرفوع الأصلي للتحميل المباشر',
+          changeDescriptionEn: 'Direct public attachment release of uploaded Word DOCX Original',
+          referenceUrl:
+            'https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryPublishedBinaryDownload?documentId=doc-qbin-deadbeefcafebabe0011223344556677',
+        },
+      ],
+    };
+
+    const qsrcPublicDoc: PublicLibraryDocument = {
+      ...baseDoc,
+      id: 'doc-qsrc-1183ac250d0404e921d2aeadbec1b76c',
+      versions: [
+        {
+          id: 'ver-qsrc-1',
+          documentId: 'doc-qsrc-1183ac250d0404e921d2aeadbec1b76c',
+          versionNumber: '1.0',
+          publishedDate: '2026-11-16',
+          changeDescriptionAr: 'إتاحة في المكتبة العامة عبر رابط الناشر الرسمي',
+          changeDescriptionEn: 'Published via verified publisher link',
+          referenceUrl: 'https://official-publisher.gov.sd/law.pdf',
+        },
+      ],
+    };
+
+    const pdfHtmlAr = renderToStaticMarkup(
+      React.createElement(PublicLibraryHub, {
+        initialDocuments: [pdfPublicDoc],
+        initialSelectedDoc: pdfPublicDoc,
+        initialLanguage: 'ar',
+      })
+    );
+    const pdfHtmlEn = renderToStaticMarkup(
+      React.createElement(PublicLibraryHub, {
+        initialDocuments: [pdfPublicDoc],
+        initialSelectedDoc: pdfPublicDoc,
+        initialLanguage: 'en',
+      })
+    );
+    const docxHtmlAr = renderToStaticMarkup(
+      React.createElement(PublicLibraryHub, {
+        initialDocuments: [docxPublicDoc],
+        initialSelectedDoc: docxPublicDoc,
+        initialLanguage: 'ar',
+      })
+    );
+    const docxHtmlEn = renderToStaticMarkup(
+      React.createElement(PublicLibraryHub, {
+        initialDocuments: [docxPublicDoc],
+        initialSelectedDoc: docxPublicDoc,
+        initialLanguage: 'en',
+      })
+    );
+    const qsrcHtmlAr = renderToStaticMarkup(
+      React.createElement(PublicLibraryHub, {
+        initialDocuments: [qsrcPublicDoc],
+        initialSelectedDoc: qsrcPublicDoc,
+        initialLanguage: 'ar',
+      })
+    );
+
+    assertCheck(
+      '34',
+      'PublicLibraryHub renders direct PDF/Word attachment CTAs for doc-qbin-* without target=_blank while preserving external publisher link CTA for doc-qsrc-*',
+      isPublishedBinaryPublicDocumentId(pdfPublicDoc.id) &&
+        !isPublishedBinaryPublicDocumentId(qsrcPublicDoc.id) &&
+        detectPublishedBinaryFormat(pdfPublicDoc) === 'PDF' &&
+        detectPublishedBinaryFormat(docxPublicDoc) === 'DOCX' &&
+        isOwnedPublishedBinaryDownloadUrl(getOwnedPublishedBinaryDownloadUrl(pdfPublicDoc)) &&
+        pdfHtmlAr.includes('تحميل PDF') &&
+        pdfHtmlAr.includes('download') &&
+        !pdfHtmlAr.includes('target="_blank"') &&
+        pdfHtmlEn.includes('Download PDF') &&
+        docxHtmlAr.includes('تحميل Word') &&
+        docxHtmlEn.includes('Download Word') &&
+        !docxHtmlAr.includes('target="_blank"') &&
+        qsrcHtmlAr.includes('فتح أو تحميل الوثيقة الأصلية') &&
+        qsrcHtmlAr.includes('target="_blank"')
+    );
+  }
+
+  // TEST 35: Modal Section Hidden When Default-OFF and Renders Clean Waiting-for-Scan + Prior RESTRICTED Box in AR/EN When Enabled
+  {
+    const rid = '1183ac250d0404e921d2aeadbec1b76c';
+    const pdfBytes = buildDeterministicValidPdfBytes('Modal UI Test');
+    const binDb = new InMemoryReleaseFirestoreDatabase();
+    const binBucket = new InMemoryPublishedBinaryBucket();
+    seedCleanBinaryChain(binDb, binBucket, {
+      receiptId: rid,
+      format: 'PDF',
+      bytes: pdfBytes,
+      avState: 'MISSING',
+      priorRightsDecision: 'RESTRICTED',
+    });
+
+    const dummySavedCase: SanitizedLibraryQuarantineHumanReviewCaseDto = {
+      schemaVersion: 1,
+      receiptId: rid,
+      sourceRevision: 2,
+      sourceUpdatedAt: '2026-11-13T13:26:28.891Z',
+      draftSourceRevision: 2,
+      revision: 6,
+      status: 'METADATA_RECORDED',
+      titleAr: 'عنوان',
+      titleEn: 'Title',
+      issuingOrganization: 'HCENR',
+      summaryAr: 'ملخص',
+      summaryEn: 'Summary',
+      sourceEvidenceNotes: 'Gazette',
+      rightsEvidenceNotes: 'Rights',
+      editorialNotes: 'Notes',
+      createdAt: '2026-11-13T13:26:28.891Z',
+      updatedAt: '2026-11-14T14:44:40.569Z',
+    };
+
+    const binService = new LibraryPublishedBinaryReleaseService({
+      trustedPrincipalProvider: {
+        resolveAuthenticatedPrincipal: () => ({ uid: ownerFnUser.id }),
+      },
+      adminRepository: adminRepo,
+      db: binDb,
+      storageBucket: binBucket,
+      clock: () => '2026-11-16T10:00:00.000Z',
+    });
+
+    const defaultController =
+      new LibraryQuarantinePublishedBinaryReleasePanelController(ownerUiUser);
+    const hiddenHtml = renderToStaticMarkup(
+      React.createElement(LibraryQuarantinePublishedBinaryReleaseSection, {
+        controller: defaultController,
+        currentUser: ownerUiUser,
+        savedReviewCase: dummySavedCase,
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+      })
+    );
+
+    const enabledEnv = {
+      VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: 'true',
+      VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: 'true',
+      VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: 'true',
+      VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+      VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED: 'true',
+      VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: 'true',
+      VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED: 'true',
+    };
+
+    const activeController =
+      new LibraryQuarantinePublishedBinaryReleasePanelController(ownerUiUser, {
+        enabled: true,
+        api: {
+          getPublishedLibraryBinaryReleaseStatus: (id) =>
+            binService.getPublishedLibraryBinaryReleaseStatus({
+              receiptId: id,
+            }) as unknown as Promise<ClientGetPublishedBinaryStatusDto>,
+          publishQuarantinedBinaryToPublicLibrary: (payload) =>
+            binService.publishQuarantinedBinaryToPublicLibrary(
+              payload as unknown as Parameters<
+                LibraryPublishedBinaryReleaseServiceClass['publishQuarantinedBinaryToPublicLibrary']
+              >[0]
+            ) as unknown as Promise<ClientPublishBinaryResponseDto>,
+        },
+      });
+    await activeController.openForSavedCase(dummySavedCase);
+
+    const waitingArHtml = renderToStaticMarkup(
+      React.createElement(LibraryQuarantinePublishedBinaryReleaseSection, {
+        controller: activeController,
+        currentUser: ownerUiUser,
+        savedReviewCase: dummySavedCase,
+        hasUnsavedCaseEdits: false,
+        isAr: true,
+        envOverride: enabledEnv,
+      })
+    );
+
+    const waitingEnHtml = renderToStaticMarkup(
+      React.createElement(LibraryQuarantinePublishedBinaryReleaseSection, {
+        controller: activeController,
+        currentUser: ownerUiUser,
+        savedReviewCase: dummySavedCase,
+        hasUnsavedCaseEdits: false,
+        isAr: false,
+        envOverride: enabledEnv,
+      })
+    );
+
+    assertCheck(
+      '35',
+      'Published binary modal section stays hidden when default-OFF and renders WAITING_FOR_ACTUAL_SCAN hold cleanly in AR/EN without faking pass',
+      hiddenHtml === '' &&
+        waitingArHtml.includes('نشر الملف المرفوع للتحميل') &&
+        waitingArHtml.includes('WAITING_FOR_ACTUAL_SCAN') &&
+        waitingEnHtml.includes('Publish Uploaded File for Download') &&
+        waitingEnHtml.includes('WAITING_FOR_ACTUAL_SCAN')
+    );
+  }
+
+  // TEST 36: Released Storage Bucket Posture Rejection & Tampered Released Object Fail-Closed Verification
+  {
+    const rid = 'f6666666666666666666666666666666';
+    const pdfBytes = buildDeterministicValidPdfBytes('Bucket Posture Test');
+    const binDb = new InMemoryReleaseFirestoreDatabase();
+    const wrongBucket = new InMemoryPublishedBinaryBucket(
+      FORBIDDEN_DEFAULT_FIREBASE_STORAGE_BUCKET_NAME
+    );
+    seedCleanBinaryChain(binDb, wrongBucket, {
+      receiptId: rid,
+      format: 'PDF',
+      bytes: pdfBytes,
+    });
+
+    const wrongBucketRes = (await executeManageLibraryDocumentsRequest(
+      {
+        auth: { uid: ownerFnUser.id },
+        data: {
+          action: 'publishQuarantinedBinaryToPublicLibrary',
+          receiptId: rid,
+          expectedHumanCaseRevision: 6,
+          expectedCatalogUpdatedAt: '2026-11-14T15:00:00.000Z',
+          expectedAlignmentRevision: 1,
+          expectedSafetyCaseRevision: 1,
+          expectedAvRequestId: deriveLibraryQuarantineIsolatedInspectionRequestId(rid, 2, 1),
+          expectedPriorRightsDecisionRevision: 1,
+          confirmation: LIBRARY_PUBLISHED_BINARY_RELEASE_CONFIRMATION_LITERAL,
+          input: {
+            publicRightsStatus: 'PermissionGranted',
+            binaryRightsBasis: 'OWNER_COPYRIGHT_BINARY_DISTRIBUTION',
+            rightsEvidenceReference: 'Owner Memo',
+            rightsEvidenceSummary: 'Explicit owner binary release statement.',
+            downloadFilename: 'bucket-test.pdf',
+            acknowledgePriorRestrictedDecision: true,
+            contradictionResolutionSummary: 'Resolved prior restriction cleanly.',
+          },
+        },
+      },
+      adminRepo,
+      service,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        ...buildHandlerOptions({
+          binarySafetyCaseEnabled: true,
+          isolatedInspectionRequestEnabled: true,
+          publishedBinaryReleaseEnabled: true,
+        }),
+        draftDatabase: binDb,
+        publishedBinaryStorageBucket: wrongBucket,
+        publishedBinaryReleaseClock: () => '2026-11-16T10:00:00.000Z',
+      }
+    )) as ClientPublishBinaryResponseDto;
+
+    assertCheck(
+      '36',
+      'Default Firebase storage bucket (non-dedicated quarantine bucket) is rejected fail-closed with STORAGE_BUCKET_MISCONFIGURED',
+      wrongBucketRes.ok === false &&
+        wrongBucketRes.errorCode === 'STORAGE_BUCKET_MISCONFIGURED'
     );
   }
 

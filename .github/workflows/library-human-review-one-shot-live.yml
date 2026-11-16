@@ -3,7 +3,7 @@ name: Library Human Review One-Shot Live Release (Functions + Hosting)
 # GOVERNANCE & ARCHITECTURAL BOUNDARY NOTICE:
 # 1. Trigger: Manual 'workflow_dispatch' ONLY on 'refs/heads/main' with explicit confirmation
 #    input 'RELEASE_LIBRARY_HUMAN_REVIEW_LIVE'. Never triggers on push, pull_request, or schedule.
-# 2. Scope: Intends to release the 8 human quarantine-library workflow stages together in a single run:
+# 2. Scope: Intends to release the human quarantine-library workflow stages together in a single run:
 #    - Review Workbench
 #    - Human Review Case
 #    - Catalog Handoff
@@ -12,10 +12,11 @@ name: Library Human Review One-Shot Live Release (Functions + Hosting)
 #    - Binary Safety Case
 #    - RECORD-ONLY Isolated Inspection Request
 #    - Reviewed Source Release (External Publisher Link Only)
+#    - Published Binary Release (Safe Direct Download Gateway for Cleanly AV-Scanned PDF/DOCX Only)
 #    while keeping Isolated ClamAV Execution strictly disabled (VITE_LIBRARY_AV_EXECUTION_ENABLED=false,
-#    POP_LIBRARY_AV_EXECUTION_ENABLED=false) and preserving existing quarantine upload, public 'qcat-' exclusion, and zero binary publication.
+#    POP_LIBRARY_AV_EXECUTION_ENABLED=false) and preserving existing quarantine upload and public 'qcat-' exclusion.
 # 3. Single Deployment Invocation: Executes one 'firebase deploy --project promiseofplanet-bb325
-#    --only "functions:manageLibraryDocuments,functions:getPublicLibrary,hosting" --non-interactive'
+#    --only "functions:manageLibraryDocuments,functions:getPublicLibrary,functions:libraryPublishedBinaryDownload,hosting" --non-interactive'
 #    command ONLY after all offline, test, build, and GCP read-only preflight checks pass.
 #    Firebase CLI updates Cloud Functions Gen2 and Hosting sequentially within one invocation (not a cloud-atomic transaction);
 #    this workflow never auto-retries on partial failure.
@@ -38,7 +39,7 @@ concurrency:
 
 jobs:
   one_shot_human_review_release:
-    name: Preflight, Build, Verify & One-Shot Deploy (manageLibraryDocuments + getPublicLibrary + Hosting)
+    name: Preflight, Build, Verify & One-Shot Deploy (manageLibraryDocuments + getPublicLibrary + libraryPublishedBinaryDownload + Hosting)
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     timeout-minutes: 60
@@ -260,14 +261,18 @@ jobs:
           npx tsc --noEmit
           npm --prefix functions run build
 
-      - name: Verify Compiled Function Exports (manageLibraryDocuments & getPublicLibrary), Server Release Gates, and Public qcat- Exclusion Guard
+      - name: Verify Compiled Function Exports (manageLibraryDocuments, getPublicLibrary, libraryPublishedBinaryDownload), Server Release Gates, and Public qcat- Exclusion Guard
         id: verify_compiled_exports_and_guards
         run: |
           node -e '
             const fs = require("node:fs");
             const indexSource = fs.readFileSync("functions/src/index.ts", "utf8");
-            if (!indexSource.includes("manageLibraryDocuments") || !indexSource.includes("getPublicLibrary")) {
-              console.error("::error::functions/src/index.ts must export both manageLibraryDocuments and getPublicLibrary.");
+            if (
+              !indexSource.includes("manageLibraryDocuments") ||
+              !indexSource.includes("getPublicLibrary") ||
+              !indexSource.includes("libraryPublishedBinaryDownload")
+            ) {
+              console.error("::error::functions/src/index.ts must export manageLibraryDocuments, getPublicLibrary, and libraryPublishedBinaryDownload.");
               process.exit(1);
             }
 
@@ -278,6 +283,10 @@ jobs:
             }
             if (typeof indexExport.getPublicLibrary !== "function") {
               console.error("::error::Compiled functions/lib/index.js is missing getPublicLibrary function export.");
+              process.exit(1);
+            }
+            if (typeof indexExport.libraryPublishedBinaryDownload !== "function") {
+              console.error("::error::Compiled functions/lib/index.js is missing libraryPublishedBinaryDownload function export.");
               process.exit(1);
             }
 
@@ -292,6 +301,7 @@ jobs:
               ["LIBRARY_ISOLATED_INSPECTION_REQUEST_RELEASE_ENV_VAR", "POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED"],
               ["LIBRARY_AV_EXECUTION_RELEASE_ENV_VAR", "POP_LIBRARY_AV_EXECUTION_ENABLED"],
               ["LIBRARY_REVIEWED_SOURCE_RELEASE_ENV_VAR", "POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED"],
+              ["LIBRARY_PUBLISHED_BINARY_RELEASE_ENV_VAR", "POP_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED"],
             ];
 
             for (const [exportName, expectedEnvName] of expectedGates) {
@@ -310,7 +320,7 @@ jobs:
               process.exit(1);
             }
 
-            console.log("Verified compiled manageLibraryDocuments and getPublicLibrary exports, all 9 server release gate constants, and public qcat- exclusion guard.");
+            console.log("Verified compiled manageLibraryDocuments, getPublicLibrary, and libraryPublishedBinaryDownload exports, all 10 server release gate constants, and public qcat- exclusion guard.");
           '
 
       - name: Run Public Library & All 15 Quarantine / Human Review Backend & Client Test Suites (Pinned Local tsx)
@@ -355,6 +365,7 @@ jobs:
           VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED: "true"
           VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: "true"
           VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: "true"
+          VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED: "true"
           VITE_LIBRARY_AV_EXECUTION_ENABLED: "false"
         run: |
           node -e '
@@ -368,6 +379,7 @@ jobs:
               "VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED",
               "VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED",
               "VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED",
+              "VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED",
             ];
             for (const key of mustBeTrue) {
               if (process.env[key] !== "true") {
@@ -383,7 +395,7 @@ jobs:
               console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL mismatch.");
               process.exit(1);
             }
-            console.log("Verified explicit Vite release flags (8 human review/release stages=true, AV execution=false, quarantine upload preserved).");
+            console.log("Verified explicit Vite release flags (9 human review/release stages=true, AV execution=false, quarantine upload preserved).");
           '
           npm run build
           if [ ! -f "dist/index.html" ]; then
@@ -481,6 +493,8 @@ jobs:
               "POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED",
               "POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED",
               "POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED",
+              "POP_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED",
+              "POP_LIBRARY_PUBLISHED_BINARY_DOWNLOAD_URL",
               "POP_LIBRARY_AV_EXECUTION_ENABLED",
             ]);
 
@@ -656,6 +670,8 @@ jobs:
           POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true
           POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true
           POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED=true
+          POP_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED=true
+          POP_LIBRARY_PUBLISHED_BINARY_DOWNLOAD_URL=https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryPublishedBinaryDownload
           POP_LIBRARY_AV_EXECUTION_ENABLED=false
           EOF
 
@@ -671,6 +687,8 @@ jobs:
               "POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true",
               "POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true",
               "POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED=true",
+              "POP_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED=true",
+              "POP_LIBRARY_PUBLISHED_BINARY_DOWNLOAD_URL=https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryPublishedBinaryDownload",
               "POP_LIBRARY_AV_EXECUTION_ENABLED=false",
             ];
             if (raw.length !== expected.length || !expected.every((line, idx) => raw[idx] === line)) {
@@ -681,13 +699,13 @@ jobs:
               console.error("::error::Dotenv file must never exist inside dist/.");
               process.exit(1);
             }
-            console.log("Created and verified transient functions/.env.promiseofplanet-bb325 (8 human/release gates=true, AV execution=false).");
+            console.log("Created and verified transient functions/.env.promiseofplanet-bb325 (9 human/release gates=true, published binary gateway URL set, AV execution=false).");
           '
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
-      - name: Execute Single Live Firebase Deployment (functions:manageLibraryDocuments,functions:getPublicLibrary,hosting)
+      - name: Execute Single Live Firebase Deployment (functions:manageLibraryDocuments,functions:getPublicLibrary,functions:libraryPublishedBinaryDownload,hosting)
         id: firebase_one_shot_deploy
         run: |
           set -euo pipefail
@@ -697,7 +715,7 @@ jobs:
             exit 1
           fi
           echo "DEPLOY_ATTEMPTED=true" >> "$GITHUB_ENV"
-          firebase deploy --project promiseofplanet-bb325 --only "functions:manageLibraryDocuments,functions:getPublicLibrary,hosting" --non-interactive
+          firebase deploy --project promiseofplanet-bb325 --only "functions:manageLibraryDocuments,functions:getPublicLibrary,functions:libraryPublishedBinaryDownload,hosting" --non-interactive
 
       - name: Remove Transient Functions Dotenv File
         if: always()
@@ -741,6 +759,8 @@ jobs:
               POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED: "true",
               POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: "true",
               POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: "true",
+              POP_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED: "true",
+              POP_LIBRARY_PUBLISHED_BINARY_DOWNLOAD_URL: "https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryPublishedBinaryDownload",
               POP_LIBRARY_AV_EXECUTION_ENABLED: "false",
             };
 
@@ -759,7 +779,7 @@ jobs:
               process.exit(1);
             }
 
-            console.log("Post-deploy readback verified manageLibraryDocuments (GEN_2, ACTIVE, us-central1, all 9 POP_LIBRARY_* flags, and GEMINI_API_KEY secret binding).");
+            console.log("Post-deploy readback verified manageLibraryDocuments (GEN_2, ACTIVE, us-central1, all 11 POP_LIBRARY_* settings, and GEMINI_API_KEY secret binding).");
           '
 
       - name: Post-Deploy Readback of getPublicLibrary (Strict GEN_2, Region, State & AV Disabled Check)
@@ -798,6 +818,42 @@ jobs:
             console.log("Post-deploy readback verified getPublicLibrary (GEN_2, ACTIVE, us-central1, POP_LIBRARY_AV_EXECUTION_ENABLED=" + String(envVars.POP_LIBRARY_AV_EXECUTION_ENABLED) + ").");
           '
 
+      - name: Post-Deploy Readback of libraryPublishedBinaryDownload (Strict GEN_2, Region, State & AV Disabled Check)
+        id: post_deploy_readback_binary_download
+        run: |
+          set -euo pipefail
+          gcloud functions describe libraryPublishedBinaryDownload \
+            --gen2 \
+            --region="${EXPECTED_FUNCTION_REGION}" \
+            --project="${FIREBASE_PROJECT_ID}" \
+            --format=json > /tmp/binary_download_fn_post.json
+
+          node -e '
+            const fs = require("node:fs");
+            const fn = JSON.parse(fs.readFileSync("/tmp/binary_download_fn_post.json", "utf8"));
+            if (typeof fn.name !== "string" || !fn.name.endsWith("projects/promiseofplanet-bb325/locations/us-central1/functions/libraryPublishedBinaryDownload")) {
+              console.error("::error::Post-deploy libraryPublishedBinaryDownload name/region mismatch: " + String(fn.name));
+              process.exit(1);
+            }
+            if (fn.environment !== "GEN_2") {
+              console.error("::error::Post-deploy libraryPublishedBinaryDownload environment must strictly equal \"GEN_2\" (found: " + String(fn.environment) + ").");
+              process.exit(1);
+            }
+            if (fn.state !== "ACTIVE") {
+              console.error("::error::Post-deploy libraryPublishedBinaryDownload state must equal \"ACTIVE\" (found: " + String(fn.state) + ").");
+              process.exit(1);
+            }
+
+            const serviceConfig = fn.serviceConfig || {};
+            const envVars = serviceConfig.environmentVariables || {};
+            if (envVars.POP_LIBRARY_AV_EXECUTION_ENABLED === "true") {
+              console.error("::error::Post-deploy libraryPublishedBinaryDownload must never have POP_LIBRARY_AV_EXECUTION_ENABLED=true.");
+              process.exit(1);
+            }
+
+            console.log("Post-deploy readback verified libraryPublishedBinaryDownload (GEN_2, ACTIVE, us-central1, POP_LIBRARY_AV_EXECUTION_ENABLED=" + String(envVars.POP_LIBRARY_AV_EXECUTION_ENABLED) + ").");
+          '
+
       - name: Write Truthful One-Shot Release Summary
         if: always()
         env:
@@ -805,6 +861,7 @@ jobs:
           DEPLOY_OUTCOME: ${{ steps.firebase_one_shot_deploy.outcome }}
           READBACK_MANAGE_OUTCOME: ${{ steps.post_deploy_readback_manage_library.outcome }}
           READBACK_PUBLIC_OUTCOME: ${{ steps.post_deploy_readback_public_library.outcome }}
+          READBACK_BINARY_OUTCOME: ${{ steps.post_deploy_readback_binary_download.outcome }}
         run: |
           set -euo pipefail
           DEPLOY_ATTEMPTED_FLAG="${DEPLOY_ATTEMPTED:-false}"
@@ -814,14 +871,14 @@ jobs:
             DEPLOY_SUCCEEDED_LABEL="NO (firebase_one_shot_deploy outcome: ${DEPLOY_OUTCOME})"
           fi
 
-          if [ "${DEPLOY_OUTCOME}" = "success" ] && [ "${READBACK_MANAGE_OUTCOME}" = "success" ] && [ "${READBACK_PUBLIC_OUTCOME}" = "success" ]; then
-            BOTH_READBACKS_VERIFIED_LABEL="YES (manageLibraryDocuments=success, getPublicLibrary=success)"
+          if [ "${DEPLOY_OUTCOME}" = "success" ] && [ "${READBACK_MANAGE_OUTCOME}" = "success" ] && [ "${READBACK_PUBLIC_OUTCOME}" = "success" ] && [ "${READBACK_BINARY_OUTCOME}" = "success" ]; then
+            ALL_READBACKS_VERIFIED_LABEL="YES (manageLibraryDocuments=success, getPublicLibrary=success, libraryPublishedBinaryDownload=success)"
             OVERALL_RELEASE_STATE="LIVE_DEPLOY_AND_READBACK_SUCCEEDED_PENDING_HUMAN_ACCEPTANCE"
           elif [ "${DEPLOY_ATTEMPTED_FLAG}" != "true" ]; then
-            BOTH_READBACKS_VERIFIED_LABEL="NO (not executed; workflow halted in preflight before any Firebase deployment)"
+            ALL_READBACKS_VERIFIED_LABEL="NO (not executed; workflow halted in preflight before any Firebase deployment)"
             OVERALL_RELEASE_STATE="HALTED_BEFORE_DEPLOY_NO_CLOUD_MUTATION"
           else
-            BOTH_READBACKS_VERIFIED_LABEL="NO (manageLibraryDocuments=${READBACK_MANAGE_OUTCOME}, getPublicLibrary=${READBACK_PUBLIC_OUTCOME})"
+            ALL_READBACKS_VERIFIED_LABEL="NO (manageLibraryDocuments=${READBACK_MANAGE_OUTCOME}, getPublicLibrary=${READBACK_PUBLIC_OUTCOME}, libraryPublishedBinaryDownload=${READBACK_BINARY_OUTCOME})"
             OVERALL_RELEASE_STATE="FAILED_OR_INCOMPLETE_DEPLOYMENT_DO_NOT_AUTO_RETRY"
           fi
 
@@ -838,13 +895,13 @@ jobs:
             echo "#### Execution & Verification Truth Table"
             echo "- **Cloud Read-Only Preflight Outcome:** \`${PREFLIGHT_OUTCOME}\`"
             echo "- **Deployment Attempted:** \`${DEPLOY_ATTEMPTED_FLAG}\`"
-            echo "- **Deployment Succeeded (\`functions:manageLibraryDocuments,functions:getPublicLibrary,hosting\`):** \`${DEPLOY_SUCCEEDED_LABEL}\`"
-            echo "- **Both Function Readbacks Verified (\`manageLibraryDocuments\` & \`getPublicLibrary\`):** \`${BOTH_READBACKS_VERIFIED_LABEL}\`"
+            echo "- **Deployment Succeeded (\`functions:manageLibraryDocuments,functions:getPublicLibrary,functions:libraryPublishedBinaryDownload,hosting\`):** \`${DEPLOY_SUCCEEDED_LABEL}\`"
+            echo "- **Function Readbacks Verified (\`manageLibraryDocuments\`, \`getPublicLibrary\`, \`libraryPublishedBinaryDownload\`):** \`${ALL_READBACKS_VERIFIED_LABEL}\`"
             echo "- **Firestore Location Inventory Note:** \`me-central2\` (recorded as historical Owner-verified inventory evidence; not re-queried via \`datastore.databases.getMetadata\` in CI)"
             echo ""
             echo "#### Intended Release Configuration (Applied Only When Deployment & Readback Succeed)"
-            echo "- **Intended Target Resources:** \`functions:manageLibraryDocuments\`, \`functions:getPublicLibrary\`, \`hosting\`"
-            echo "- **Intended Human Review Flags (\`true\`):**"
+            echo "- **Intended Target Resources:** \`functions:manageLibraryDocuments\`, \`functions:getPublicLibrary\`, \`functions:libraryPublishedBinaryDownload\`, \`hosting\`"
+            echo "- **Intended Human Review & Release Flags (\`true\`):**"
             echo "  - \`VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED=true\` / \`POP_LIBRARY_REVIEW_WORKBENCH_ENABLED=true\`"
             echo "  - \`VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED=true\` / \`POP_LIBRARY_HUMAN_CASE_REVIEW_ENABLED=true\`"
             echo "  - \`VITE_LIBRARY_CATALOG_HANDOFF_ENABLED=true\` / \`POP_LIBRARY_CATALOG_HANDOFF_ENABLED=true\`"
@@ -853,12 +910,14 @@ jobs:
             echo "  - \`VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true\` / \`POP_LIBRARY_BINARY_SAFETY_CASE_ENABLED=true\`"
             echo "  - \`VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true\` / \`POP_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED=true\`"
             echo "  - \`VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED=true\` / \`POP_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED=true\`"
+            echo "  - \`VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED=true\` / \`POP_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED=true\`"
+            echo "  - \`POP_LIBRARY_PUBLISHED_BINARY_DOWNLOAD_URL=https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryPublishedBinaryDownload\`"
             echo "- **Enforced Safety Locks:**"
             echo "  - \`VITE_LIBRARY_AV_EXECUTION_ENABLED=false\` / \`POP_LIBRARY_AV_EXECUTION_ENABLED=false\`"
             echo "  - \`VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED=true\` (preserved existing endpoint)"
-            echo "  - \`qcat-\` catalog drafts remain excluded from public library queries; no binary download or publication enabled."
+            echo "  - \`qcat-\` catalog drafts remain excluded from public library queries; un-scanned binaries remain blocked (\`WAITING_FOR_ACTUAL_SCAN\`); published binaries (\`doc-qbin-*\`) serve strictly with \`Content-Disposition: attachment\` and immutable non-assurance flags (\`isSanitized: false\`, \`isVerifiedSafe: false\`)."
             echo ""
             echo "#### Post-Release Acceptance Notice"
             echo "- If \`Overall Release State\` is \`FAILED_OR_INCOMPLETE_DEPLOYMENT_DO_NOT_AUTO_RETRY\`, inspect the failed step logs and cloud state before taking manual action; never auto-retry."
-            echo "- Even when deployment and readback succeed, CI does not prove live end-to-end acceptance; the Owner must test existing \`Quarantined\` receipts directly."
+            echo "- Even when deployment and readback succeed, CI does not prove live end-to-end acceptance; clean AV execution via the isolated ClamAV worker must also be verified before Owner binary publication."
           } >> "$GITHUB_STEP_SUMMARY"
