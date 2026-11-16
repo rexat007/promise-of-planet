@@ -895,13 +895,15 @@ function inspectPdfValueTree(
       }
       if (k === '/F') {
         // Numeric annotation bitflag `/F 4` on annotations is standard; string/dict/array `/F` or Filespec `/F` is prohibited
+        const filespecType = dict.get('/Type');
         if (
           v.kind !== 'number' ||
           keys.has('/EF') ||
           keys.has('/UF') ||
           keys.has('/FS') ||
-          (dict.get('/Type')?.kind === 'name' &&
-            dict.get('/Type')?.value === '/Filespec')
+          (filespecType !== undefined &&
+            filespecType.kind === 'name' &&
+            filespecType.value === '/Filespec')
         ) {
           findings.push('PROHIBITED_EXTERNAL_FILESPEC_F');
         }
@@ -1196,7 +1198,8 @@ export function inspectPdfBytesStructurally(
           throw new Error('PDF_XREF_OBJECT_NOT_STREAM');
         }
         const dict = parsedXrefObj.value.dict;
-        if (dict.get('/Type')?.kind !== 'name' || dict.get('/Type')?.value !== '/XRef') {
+        const xrefType = dict.get('/Type');
+        if (!xrefType || xrefType.kind !== 'name' || xrefType.value !== '/XRef') {
           throw new Error('PDF_XREF_STREAM_MISSING_TYPE');
         }
         hasXrefStream = true;
@@ -1419,10 +1422,13 @@ export function inspectPdfBytesStructurally(
       if (findings.length > 0) break;
 
       // Decompress and parse every compressed object inside `/Type /ObjStm`
+      const objStmType = parsedVal.value.kind === 'stream' ? parsedVal.value.dict.get('/Type') : null;
       if (
         parsedVal.value.kind === 'stream' &&
-        parsedVal.value.dict.get('/Type')?.kind === 'name' &&
-        parsedVal.value.dict.get('/Type')?.value === '/ObjStm'
+        objStmType !== null &&
+        objStmType !== undefined &&
+        objStmType.kind === 'name' &&
+        objStmType.value === '/ObjStm'
       ) {
         compressedObjectStreamsParsed += 1;
         if (compressedObjectStreamsParsed > PDF_INSPECTION_MAX_OBJSTM_COUNT) {
@@ -1547,9 +1553,11 @@ export function inspectPdfBytesStructurally(
       errorMessage: 'PDF /Root catalog object is missing or invalid.',
     };
   }
+  const catalogType = catalogVal.entries.get('/Type');
   if (
-    catalogVal.entries.get('/Type')?.kind !== 'name' ||
-    catalogVal.entries.get('/Type')?.value !== '/Catalog'
+    !catalogType ||
+    catalogType.kind !== 'name' ||
+    catalogType.value !== '/Catalog'
   ) {
     return {
       ok: false,
@@ -1566,11 +1574,13 @@ export function inspectPdfBytesStructurally(
     };
   }
   const pagesVal = parsedObjects.get(pagesRef.objNum);
+  const pagesType = pagesVal?.kind === 'dict' ? pagesVal.entries.get('/Type') : null;
   if (
     !pagesVal ||
     pagesVal.kind !== 'dict' ||
-    pagesVal.entries.get('/Type')?.kind !== 'name' ||
-    pagesVal.entries.get('/Type')?.value !== '/Pages'
+    !pagesType ||
+    pagesType.kind !== 'name' ||
+    pagesType.value !== '/Pages'
   ) {
     return {
       ok: false,
@@ -1771,6 +1781,7 @@ export function defaultQpdfJsonRunner(params: {
         const execErr = error as NodeJS.ErrnoException & {
           readonly killed?: boolean;
           readonly code?: unknown;
+          readonly signal?: string | null;
         };
         if (execErr.killed || execErr.signal === 'SIGTERM' || execErr.signal === 'SIGKILL') {
           resolve({

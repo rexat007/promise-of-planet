@@ -72,7 +72,6 @@ import {
 import { LIBRARY_QUARANTINE_BINARY_SAFETY_CASES_COLLECTION } from './firestoreLibraryQuarantineBinarySafetyCaseStore';
 import {
   isMatchingSourceFormatAndDeepInspection,
-  isValidSha256Hex,
   validatePersistedLibraryQuarantineBinarySafetyCase,
   type LibraryQuarantineBinarySafetyDeepInspectionStatus,
   type LibraryQuarantineBinarySafetySourceFormat,
