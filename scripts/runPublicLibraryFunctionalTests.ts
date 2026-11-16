@@ -5091,6 +5091,7 @@ globalThis.fetch = async (url, opts) => {
         serviceAccountName?: unknown;
         maxRetries?: unknown;
         timeoutSeconds?: unknown;
+        omitTimeoutSeconds?: boolean;
         image?: unknown;
         env?: Array<{ name: string; value: string }>;
         readyStatus?: string;
@@ -5117,7 +5118,12 @@ globalThis.fetch = async (url, opts) => {
                       ? overrides.serviceAccountName
                       : LIVE_V1_WORKER_SA,
                   maxRetries: overrides.maxRetries !== undefined ? overrides.maxRetries : 0,
-                  timeoutSeconds: overrides.timeoutSeconds !== undefined ? overrides.timeoutSeconds : 600,
+                  ...(overrides.omitTimeoutSeconds
+                    ? {}
+                    : {
+                        timeoutSeconds:
+                          overrides.timeoutSeconds !== undefined ? overrides.timeoutSeconds : '600',
+                      }),
                   containers: [
                     {
                       image: overrides.image !== undefined ? overrides.image : LIVE_V1_IMAGE,
@@ -5426,6 +5432,26 @@ globalThis.fetch = async (url, opts) => {
       );
       const res38eV1 = runNodeScript(liveAvEnablePreflightJs);
 
+      // Scenario 38-v1NumericTimeoutCompat: Legacy numeric integer timeoutSeconds: 600 passes across ALL 3 consumers
+      fs.writeFileSync(
+        scenarioPath,
+        JSON.stringify({
+          workerSa: LIVE_V1_WORKER_SA,
+          jobPayload: buildV1Job({ timeoutSeconds: 600 }),
+          imageUploadIso: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+        })
+      );
+      const res38V1NumericTimeoutPreflight = runNodeScript(mockedFetchPreamble + avPreflightJs, {
+        INPUT_WORKER_SA: LIVE_V1_WORKER_SA,
+      });
+      const env38V1NumericTimeoutPreflight = fs.readFileSync(ghEnv, 'utf8');
+      const res38V1NumericTimeoutLive = runNodeScript(liveAvEnablePreflightJs);
+      const res38V1NumericTimeoutReadback = runReadbackWithFixtures({
+        jobPayload: buildV1Job({ timeoutSeconds: 600 }),
+        workerSa: LIVE_V1_WORKER_SA,
+        expectedImage: LIVE_V1_IMAGE,
+      });
+
       // Negative Cloud Run schema & security fixture runner across ALL 3 consumers
       const assertRejectsAcrossConsumers = (
         label: string,
@@ -5517,6 +5543,26 @@ globalThis.fetch = async (url, opts) => {
       });
       assertRejectsAcrossConsumers('v1-bad-timeoutSeconds', {
         jobPayload: buildV1Job({ timeoutSeconds: 300 }),
+      });
+      for (const [negLabel, negVal] of [
+        ['v1-timeoutSeconds-num-599', 599],
+        ['v1-timeoutSeconds-str-599', '599'],
+        ['v1-timeoutSeconds-leading-zero', '0600'],
+        ['v1-timeoutSeconds-decimal-str', '600.0'],
+        ['v1-timeoutSeconds-duration-suffix', '600s'],
+        ['v1-timeoutSeconds-whitespace', ' 600 '],
+        ['v1-timeoutSeconds-scientific', '6e2'],
+        ['v1-timeoutSeconds-float', 600.5],
+        ['v1-timeoutSeconds-bool', true],
+        ['v1-timeoutSeconds-null', null],
+        ['v1-timeoutSeconds-unsafe-int64', '9007199254740993'],
+      ] as Array<[string, unknown]>) {
+        assertRejectsAcrossConsumers(negLabel, {
+          jobPayload: buildV1Job({ timeoutSeconds: negVal }),
+        });
+      }
+      assertRejectsAcrossConsumers('v1-timeoutSeconds-missing', {
+        jobPayload: buildV1Job({ omitTimeoutSeconds: true }),
       });
       assertRejectsAcrossConsumers('v2-bad-timeout', {
         jobPayload: buildV2Job({ timeout: '300s' }),
@@ -5732,7 +5778,12 @@ globalThis.fetch = async (url, opts) => {
             r.check === 'Caller run.jobs.runWithOverrides (manageLibraryDocuments)' && r.status === 'FAIL'
         ) &&
         res38eV1.status === 0 &&
-        res38e.status === 0;
+        res38e.status === 0 &&
+        res38V1NumericTimeoutPreflight.status === 0 &&
+        env38V1NumericTimeoutPreflight.includes('ALL_CLOUD_PREREQUISITES_VERIFIED') &&
+        res38V1NumericTimeoutLive.status === 0 &&
+        res38V1NumericTimeoutReadback.status === 0 &&
+        res38V1NumericTimeoutReadback.stdout.includes('schema=v1');
 
       const missingPrereqsOk =
         res38MissingAr.status !== 0 &&

@@ -797,6 +797,18 @@ jobs:
                 return "ERROR";
               }
 
+              function parseStrictV1TimeoutSeconds(raw) {
+                if (typeof raw === "number") {
+                  return Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
+                }
+                if (typeof raw === "string") {
+                  if (!/^(0|[1-9]\d*)$/.test(raw)) return null;
+                  const n = Number(raw);
+                  return Number.isSafeInteger(n) && String(n) === raw ? n : null;
+                }
+                return null;
+              }
+
               function normalizeCloudRunJob(jobJson, expected) {
                 if (!jobJson || typeof jobJson !== "object" || Array.isArray(jobJson)) {
                   return { ok: false, error: "Cloud Run Job JSON is not an object" };
@@ -868,7 +880,8 @@ jobs:
                   if (typeof podSpec.maxRetries !== "number" || !Number.isInteger(podSpec.maxRetries)) {
                     return { ok: false, error: `Cloud Run v1 invalid maxRetries=${String(podSpec.maxRetries)}` };
                   }
-                  if (typeof podSpec.timeoutSeconds !== "number" || !Number.isInteger(podSpec.timeoutSeconds)) {
+                  const parsedTimeoutSeconds = parseStrictV1TimeoutSeconds(podSpec.timeoutSeconds);
+                  if (parsedTimeoutSeconds === null) {
                     return { ok: false, error: `Cloud Run v1 invalid timeoutSeconds=${String(podSpec.timeoutSeconds)}` };
                   }
                   if (!Array.isArray(podSpec.containers) || podSpec.containers.length !== 1 || !podSpec.containers[0] || typeof podSpec.containers[0] !== "object" || Array.isArray(podSpec.containers[0])) {
@@ -887,7 +900,7 @@ jobs:
                     taskCount: execSpec.taskCount,
                     serviceAccount: podSpec.serviceAccountName.trim(),
                     maxRetries: podSpec.maxRetries,
-                    timeoutSeconds: podSpec.timeoutSeconds,
+                    timeoutSeconds: parsedTimeoutSeconds,
                     containers: podSpec.containers,
                     readyIssue,
                   };
