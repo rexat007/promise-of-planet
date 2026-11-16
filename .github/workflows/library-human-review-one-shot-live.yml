@@ -327,6 +327,7 @@ jobs:
         id: run_preflight_test_suites
         run: |
           set -euo pipefail
+          ./node_modules/.bin/tsx scripts/runLibraryQuarantineAvExecutionBackendTests.ts
           ./node_modules/.bin/tsx -e 'require("./scripts/runPublicLibraryFunctionalTests.ts")'
           ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineAdminReadTests.ts")'
           ./node_modules/.bin/tsx -e 'require("./scripts/runLibraryQuarantineReviewWorkbenchBackendTests.ts")'
