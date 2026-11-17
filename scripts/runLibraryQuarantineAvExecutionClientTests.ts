@@ -17,6 +17,7 @@ import {
 import {
   LIBRARY_AV_EXECUTION_UI_ENV_VAR,
   LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+  LIBRARY_QUARANTINE_AV_EXECUTION_FAILURE_REASON_CODES,
   LIBRARY_QUARANTINE_AV_EXECUTION_SCHEMA_VERSION,
   LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_SCHEMA_VERSION,
   LIBRARY_QUARANTINE_ISOLATED_INSPECTION_REQUEST_STATE,
@@ -27,6 +28,7 @@ import {
   validateDispatchQuarantineAvInspectionResponseDto,
   validateGetQuarantineAvInspectionStatusResponseDto,
   validateSanitizedAvExecutionDto,
+  type LibraryQuarantineAvExecutionFailureReasonCode,
   type SanitizedLibraryQuarantineAvExecutionDto,
   type SanitizedLibraryQuarantineIsolatedInspectionRequestDto,
 } from '../src/services/libraryQuarantineIsolatedInspectionRequestClient';
@@ -751,8 +753,223 @@ async function runClientTests(): Promise<void> {
   assert.equal(unknownCtrl.getState().avStatusSnapshot, null);
   assert.equal(unknownCtrl.getState().avPhase, 'idle');
 
+  // =========================================================================
+  // PASS 5: PDF Inspection Failure Reason Codes Contract Parity & Fail-Closed
+  //         Guarantees (Accept 5 PDF Codes in Failure States; Reject Unknowns
+  //         and Non-Null Codes on AV_NO_THREAT_DETECTED / AV_THREAT_DETECTED)
+  // =========================================================================
+  const expectedPdfFailureReasonCodes: ReadonlyArray<LibraryQuarantineAvExecutionFailureReasonCode> =
+    [
+      'PDF_PARSER_BINARY_MISSING',
+      'PDF_ENCRYPTED_OR_MALFORMED',
+      'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      'PDF_INSPECTION_TIMEOUT',
+      'PDF_INSPECTION_FAILED',
+    ];
+
+  assert.equal(LIBRARY_QUARANTINE_AV_EXECUTION_FAILURE_REASON_CODES.length, 23);
+  for (const pdfCode of expectedPdfFailureReasonCodes) {
+    assert.equal(
+      LIBRARY_QUARANTINE_AV_EXECUTION_FAILURE_REASON_CODES.includes(pdfCode),
+      true,
+      `Missing PDF failure reason code in client list: ${pdfCode}`
+    );
+
+    const failedPdfDto = makeSanitizedAvExecutionDto({
+      revision: 4,
+      state: 'AV_SCAN_FAILED',
+      workerClaimedAt: ISO_2,
+      completedAt: ISO_3,
+      failureReasonCode: pdfCode,
+    });
+
+    const dtoCheck = validateSanitizedAvExecutionDto(failedPdfDto, RECEIPT_ID_A);
+    assert.equal(
+      dtoCheck.ok,
+      true,
+      `validateSanitizedAvExecutionDto must accept PDF failure code ${pdfCode}`
+    );
+    if (dtoCheck.ok) {
+      assert.equal(dtoCheck.value.state, 'AV_SCAN_FAILED');
+      assert.equal(dtoCheck.value.failureReasonCode, pdfCode);
+      assert.equal(dtoCheck.value.isSanitized, false);
+      assert.equal(dtoCheck.value.isVerifiedSafe, false);
+      assert.equal(dtoCheck.value.isRightsApproved, false);
+      assert.equal(dtoCheck.value.isPublished, false);
+      assert.equal(dtoCheck.value.isReadyForPeia, false);
+    }
+
+    const statusPayload = makeGetAvStatusResponse('AV_SCAN_FAILED', failedPdfDto);
+    const statusCheck = validateGetQuarantineAvInspectionStatusResponseDto(
+      statusPayload,
+      RECEIPT_ID_A
+    );
+    assert.equal(
+      statusCheck.ok,
+      true,
+      `GET AV status validator must accept PDF failure code ${pdfCode}`
+    );
+    if (statusCheck.ok && statusCheck.value.ok) {
+      assert.equal(statusCheck.value.status, 'AV_SCAN_FAILED');
+      assert.equal(statusCheck.value.execution?.failureReasonCode, pdfCode);
+      assert.equal(statusCheck.value.isSanitized, false);
+      assert.equal(statusCheck.value.isVerifiedSafe, false);
+      assert.equal(statusCheck.value.isRightsApproved, false);
+      assert.equal(statusCheck.value.isPublished, false);
+      assert.equal(statusCheck.value.isReadyForPeia, false);
+      assert.equal(statusCheck.value.readiness.binarySafety, 'NOT_VERIFIED');
+      assert.equal(
+        statusCheck.value.readiness.fileSanitization,
+        'NOT_PERFORMED'
+      );
+      assert.equal(statusCheck.value.readiness.publication, 'BLOCKED');
+      assert.equal(statusCheck.value.readiness.catalogWorkflow, 'Draft');
+    }
+
+    const pdfFailCtrl = new LibraryQuarantineIsolatedInspectionRequestController(
+      RECEIPT_ID_A,
+      {
+        envOverride: ALL_SIX_FLAGS_ON,
+        currentUser: ownerUser,
+        callableOverride: async (payload) => {
+          if (payload.action === 'getQuarantineIsolatedInspectionRequest') {
+            return { data: makeGetRecordedRequestResponse() };
+          }
+          return { data: statusPayload };
+        },
+      }
+    );
+    await pdfFailCtrl.loadRequest();
+    const loadRes = await pdfFailCtrl.loadAvInspectionStatus();
+    assert.equal(loadRes.ok, true);
+    assert.equal(pdfFailCtrl.getState().avPhase, 'ready');
+    assert.equal(pdfFailCtrl.getState().avHoldState, null);
+    assert.equal(
+      pdfFailCtrl.getState().avStatusSnapshot?.status,
+      'AV_SCAN_FAILED'
+    );
+    assert.equal(
+      pdfFailCtrl.getState().avStatusSnapshot?.execution?.failureReasonCode,
+      pdfCode
+    );
+
+    // Failure state with PDF code must NOT convert into clean/published flags
+    for (const escalatedFlag of [
+      { isSanitized: true },
+      { isVerifiedSafe: true },
+      { isRightsApproved: true },
+      { isPublished: true },
+      { isReadyForPeia: true },
+    ]) {
+      assert.equal(
+        validateSanitizedAvExecutionDto(
+          { ...failedPdfDto, ...escalatedFlag },
+          RECEIPT_ID_A
+        ).ok,
+        false,
+        `Failure state ${pdfCode} must reject escalated flag ${JSON.stringify(escalatedFlag)}`
+      );
+      assert.equal(
+        validateGetQuarantineAvInspectionStatusResponseDto(
+          {
+            ...makeGetAvStatusResponse('AV_SCAN_FAILED', failedPdfDto),
+            ...escalatedFlag,
+          },
+          RECEIPT_ID_A
+        ).ok,
+        false,
+        `GET AV status with ${pdfCode} must reject escalated flag ${JSON.stringify(escalatedFlag)}`
+      );
+    }
+
+    // AV_NO_THREAT_DETECTED and AV_THREAT_DETECTED must reject non-null PDF failureReasonCode
+    assert.equal(
+      validateSanitizedAvExecutionDto(
+        { ...cleanExecDto, failureReasonCode: pdfCode as unknown as null },
+        RECEIPT_ID_A
+      ).ok,
+      false,
+      `AV_NO_THREAT_DETECTED must reject non-null failureReasonCode ${pdfCode}`
+    );
+    assert.equal(
+      validateSanitizedAvExecutionDto(
+        {
+          ...cleanExecDto,
+          state: 'AV_THREAT_DETECTED',
+          exitCode: 1,
+          failureReasonCode: pdfCode as unknown as null,
+        },
+        RECEIPT_ID_A
+      ).ok,
+      false,
+      `AV_THREAT_DETECTED must reject non-null failureReasonCode ${pdfCode}`
+    );
+  }
+
+  // Reject unknown/arbitrary failureReasonCode and fail closed to MALFORMED_SERVER_RESPONSE_HOLD
+  for (const unknownCode of [
+    'UNKNOWN_PDF_FAILURE_CODE',
+    'ARBITRARY_REASON_CODE',
+    '',
+  ]) {
+    const unknownDto = {
+      ...makeSanitizedAvExecutionDto({
+        revision: 4,
+        state: 'AV_SCAN_FAILED',
+        workerClaimedAt: ISO_2,
+        completedAt: ISO_3,
+      }),
+      failureReasonCode: unknownCode,
+    };
+
+    assert.equal(
+      validateSanitizedAvExecutionDto(unknownDto, RECEIPT_ID_A).ok,
+      false,
+      `validateSanitizedAvExecutionDto must reject unknown failureReasonCode "${unknownCode}"`
+    );
+
+    const malformedPayload = {
+      ...makeGetAvStatusResponse('AV_SCAN_FAILED', null),
+      execution: unknownDto,
+    };
+    assert.equal(
+      validateGetQuarantineAvInspectionStatusResponseDto(
+        malformedPayload,
+        RECEIPT_ID_A
+      ).ok,
+      false,
+      `GET AV status validator must reject unknown failureReasonCode "${unknownCode}"`
+    );
+
+    const holdCtrl = new LibraryQuarantineIsolatedInspectionRequestController(
+      RECEIPT_ID_A,
+      {
+        envOverride: ALL_SIX_FLAGS_ON,
+        currentUser: ownerUser,
+        callableOverride: async (payload) => {
+          if (payload.action === 'getQuarantineIsolatedInspectionRequest') {
+            return { data: makeGetRecordedRequestResponse() };
+          }
+          return { data: malformedPayload };
+        },
+      }
+    );
+    await holdCtrl.loadRequest();
+    const holdRes = await holdCtrl.loadAvInspectionStatus();
+    assert.equal(holdRes.ok, false);
+    if (!holdRes.ok) {
+      assert.equal(holdRes.errorCode, 'MALFORMED_SERVER_RESPONSE_HOLD');
+    }
+    assert.equal(holdCtrl.getState().avPhase, 'hold');
+    assert.equal(
+      holdCtrl.getState().avHoldState?.errorCode,
+      'MALFORMED_SERVER_RESPONSE_HOLD'
+    );
+    assert.equal(holdCtrl.getState().avStatusSnapshot, null);
+  }
+
   console.log(
-    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 CLIENT TESTS PASSED (4/4).'
+    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 CLIENT TESTS PASSED (5/5).'
   );
 }
 
