@@ -17,8 +17,10 @@ import {
 import type { CitizenSubmission, CitizenSubmissionAttachment } from '../../types/community';
 import { SubmissionStatus } from '../../types/community';
 import type { AdminUser } from '../../types/admin';
-import { AdminPermission } from '../../types/admin';
-import { AdminAccessService } from '../../services/adminAccess';
+import {
+  canModerateCommunitySubmissions,
+  canCreateNewsDraftFromAcceptedCitizenSubmission,
+} from '../../../functions/src/shared/adminContract';
 import { CitizenSubmissionService } from '../../services/citizenSubmissionService';
 import { getCommunityCategoryLabel } from '../content/contentFormatters';
 import { dynamicTranslationService } from '../../services/dynamicTranslation';
@@ -40,9 +42,15 @@ export function CitizenSubmissionReviewModal({
   currentUser,
   isAr,
 }: CitizenSubmissionReviewModalProps) {
-  const [status, setStatus] = useState<SubmissionStatus>(SubmissionStatus.Received);
-  const [moderatorNotes, setModeratorNotes] = useState<string>('');
-  const [editorialReferenceId, setEditorialReferenceId] = useState<string>('');
+  const [status, setStatus] = useState<SubmissionStatus>(
+    submission?.status ?? SubmissionStatus.Received
+  );
+  const [moderatorNotes, setModeratorNotes] = useState<string>(
+    submission?.moderatorNotes || ''
+  );
+  const [editorialReferenceId, setEditorialReferenceId] = useState<string>(
+    submission?.editorialReferenceId || ''
+  );
   const [showOriginalSource, setShowOriginalSource] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -85,7 +93,7 @@ export function CitizenSubmissionReviewModal({
         : dynamicTranslationService.translateText(submission.locationDescription, submission.sourceLanguage, targetLang, submission.id))
     : undefined;
 
-  const canReview = AdminAccessService.hasPermission(currentUser, AdminPermission.Review);
+  const canReview = canModerateCommunitySubmissions(currentUser);
 
   const handleInspectAttachment = async (att: CitizenSubmissionAttachment) => {
     setAttachmentError(null);
@@ -140,13 +148,35 @@ export function CitizenSubmissionReviewModal({
     }
   };
 
-  const canCreateDraft = AdminAccessService.hasPermission(currentUser, AdminPermission.Create);
+  const canCreateDraft = canCreateNewsDraftFromAcceptedCitizenSubmission(currentUser);
   const effectiveRefId = (editorialReferenceId || submission.editorialReferenceId || '').trim();
-  const isAccepted = status === SubmissionStatus.AcceptedForEditorial || submission.status === SubmissionStatus.AcceptedForEditorial;
+  const isPersistedAccepted = submission.status === SubmissionStatus.AcceptedForEditorial;
+  const hasUnsavedStatusChange = status !== submission.status;
+  const isAcceptedSectionVisible = isPersistedAccepted || status === SubmissionStatus.AcceptedForEditorial;
+  const isDraftCreationReady = isPersistedAccepted && !hasUnsavedStatusChange && canCreateDraft;
 
   const handleCreateNewsDraft = async () => {
     setDraftCreationError(null);
     setDraftCreationSuccess(null);
+
+    if (!isPersistedAccepted || hasUnsavedStatusChange) {
+      setDraftCreationError(
+        isAr
+          ? 'يجب حفظ حالة "مقبول للتحرير" في الخادم أولاً قبل إنشاء مسودة الخبر.'
+          : 'Please save the "Accepted for Editorial" status to the server first before creating a news draft.'
+      );
+      return;
+    }
+
+    if (!canCreateDraft) {
+      setDraftCreationError(
+        isAr
+          ? 'ليس لديك صلاحية إنشاء مسودة خبر من بلاغ مواطن.'
+          : 'You do not have permission to create a news draft from this citizen submission.'
+      );
+      return;
+    }
+
     setIsCreatingDraft(true);
     try {
       const res = await CitizenSubmissionService.createNewsDraft(submission.id, currentUser);
@@ -453,7 +483,7 @@ export function CitizenSubmissionReviewModal({
             </div>
 
             {/* Editorial Draft Handoff Section */}
-            {isAccepted && (
+            {isAcceptedSectionVisible && (
               <div className="p-4 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 space-y-3">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div className="flex items-center gap-2">
@@ -475,9 +505,34 @@ export function CitizenSubmissionReviewModal({
                         ? 'تم ربط هذا البلاغ بمسودة خبر رسمية في غرفة الأخبار. يمكنك فتح المسودة لمراجعتها وتعديلها أو الانتقال بها عبر دورة النشر التحريرية.'
                         : 'This report is linked to an official news draft in the Newsroom. You can open the draft to review, edit, or transition it through the editorial publishing workflow.')
                     : (isAr
-                        ? 'تم قبول هذا البلاغ للتحرير. يمكنك الآن إنشاء مسودة خبر رسمية تنقل البيانات بأمان مع عزل المرفقات الخاصة.'
-                        : 'This report is accepted for editorial treatment. You can now create an official news draft with safe mapping while keeping private evidence attachments isolated.')}
+                        ? 'بعد تثبيت حالة "مقبول للتحرير" في الخادم، يمكنك إنشاء مسودة خبر رسمية تنقل البيانات بأمان مع عزل المرفقات الخاصة.'
+                        : 'Once "Accepted for Editorial" is saved to the server, you can create an official news draft with safe mapping while keeping private evidence attachments isolated.')}
                 </p>
+
+                {!effectiveRefId && (!isPersistedAccepted || hasUnsavedStatusChange) && (
+                  <div
+                    data-testid="citizen-draft-save-status-first-notice"
+                    className="p-2.5 rounded-lg bg-amber-100/90 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 text-xs font-bold text-amber-900 dark:text-amber-200 flex items-start gap-2"
+                  >
+                    <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                    <span>
+                      {isAr
+                        ? 'يرجى النقر على "حفظ التحديثات" لتثبيت حالة "مقبول للتحرير" في الخادم أولاً قبل إنشاء مسودة الخبر.'
+                        : 'Please click "Save Changes" to persist "Accepted for Editorial" on the server first before creating a news draft.'}
+                    </span>
+                  </div>
+                )}
+
+                {!effectiveRefId && isPersistedAccepted && !hasUnsavedStatusChange && !canCreateDraft && (
+                  <div className="p-2.5 rounded-lg bg-rose-100/80 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs font-semibold text-rose-800 dark:text-rose-200 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <span>
+                      {isAr
+                        ? 'إنشاء مسودة الخبر متاح فقط للمالك أو مشرف صحافة المواطن أو محرر المحتوى.'
+                        : 'Creating a news draft is restricted to Owner, CitizenModerator, or ContentEditor roles.'}
+                    </span>
+                  </div>
+                )}
 
                 {draftCreationSuccess && (
                   <div className="p-2.5 rounded-lg bg-emerald-100 dark:bg-emerald-900/40 text-xs font-bold text-emerald-800 dark:text-emerald-200 flex items-center gap-2">
@@ -506,9 +561,10 @@ export function CitizenSubmissionReviewModal({
                   ) : (
                     <button
                       type="button"
-                      disabled={isCreatingDraft || !canCreateDraft}
+                      data-testid="citizen-create-news-draft-btn"
+                      disabled={isCreatingDraft || !isDraftCreationReady}
                       onClick={handleCreateNewsDraft}
-                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <FileCheck className="w-4 h-4" />
                       <span>
@@ -528,7 +584,7 @@ export function CitizenSubmissionReviewModal({
         {/* Modal Footer */}
         <div className="px-6 py-4 border-t border-gray-100 dark:border-gray-800 bg-gray-50/80 dark:bg-gray-950/50 flex items-center justify-between gap-3 flex-wrap">
           <div>
-            {isAccepted && effectiveRefId && (
+            {isPersistedAccepted && effectiveRefId && (
               <button
                 type="button"
                 onClick={() => handleOpenNewsDraft(effectiveRefId)}

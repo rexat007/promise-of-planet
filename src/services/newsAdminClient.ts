@@ -1591,7 +1591,8 @@ export class NewsAdminClient {
   public static async saveNewsItem(
     item: Partial<NewsItem>,
     _actor?: AdminUser,
-    isNew: boolean = false
+    isNew: boolean = false,
+    createIdempotencyKey?: string
   ): Promise<NewsItem> {
     if (!item.titleAr || item.titleAr.trim() === '') {
       throw new Error('Arabic title (titleAr) is mandatory for Promise of Planet news items');
@@ -1650,6 +1651,9 @@ export class NewsAdminClient {
       payload.location = payload.location || 'Sudan / السودان';
       payload.urgencyLevel = payload.urgencyLevel || 'Standard';
       payload.relatedVideoIds = payload.relatedVideoIds || [];
+      if (typeof createIdempotencyKey === 'string' && createIdempotencyKey.trim().length >= 16) {
+        payload.createIdempotencyKey = createIdempotencyKey.trim();
+      }
     } else if (item.id && !item.id.startsWith('news-sudan-provisional-') && !item.id.startsWith('temp-')) {
       payload.id = item.id;
     }
@@ -4435,6 +4439,7 @@ export class NewsEditorImageSessionController {
   private readonly inlineAssets = new Map<string, MutableStagedInlineImageEntry>();
   private readonly ownedObjectUrls = new Set<string>();
   private isSaveInFlight = false;
+  private pendingCreateIdempotencyKey: string | null = null;
   private readonly urlAdapter: ObjectUrlLifecycleAdapter;
   private readonly idFactory: () => { readonly intakeId: string; readonly assetId: string };
 
@@ -4444,6 +4449,21 @@ export class NewsEditorImageSessionController {
   }) {
     this.urlAdapter = options?.urlAdapter ?? defaultObjectUrlAdapter;
     this.idFactory = options?.idFactory ?? (() => createCanonicalNewsImageUploadIds());
+  }
+
+  public getPendingCreateIdempotencyKey(): string | null {
+    return this.pendingCreateIdempotencyKey;
+  }
+
+  private ensureCreateIdempotencyKey(): string {
+    if (!this.pendingCreateIdempotencyKey) {
+      const randHex =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID().replace(/-/g, '')
+          : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}_${Math.random().toString(36).slice(2, 12)}`;
+      this.pendingCreateIdempotencyKey = `draft_${randHex}`.slice(0, 64);
+    }
+    return this.pendingCreateIdempotencyKey;
   }
 
   private createSessionOwnedObjectUrl(file: NewsImageBinaryFileLike): string | null {
@@ -4981,6 +5001,7 @@ export class NewsEditorImageSessionController {
       licensingInfo: '',
     };
     this.isSaveInFlight = false;
+    this.pendingCreateIdempotencyKey = null;
   }
 
   /**
@@ -5225,10 +5246,12 @@ export class NewsEditorImageSessionController {
     );
 
     const referencedStagedEntries: MutableStagedInlineImageEntry[] = [];
+    const referencedStagedIds = new Set<string>();
     for (const assetId of referencedInlineAssetIds) {
       const stagedEntry = this.inlineAssets.get(assetId);
       if (stagedEntry) {
         referencedStagedEntries.push(stagedEntry);
+        referencedStagedIds.add(assetId);
         continue;
       }
       if (persistedBaselineAssetIds.has(assetId)) {
@@ -5248,6 +5271,24 @@ export class NewsEditorImageSessionController {
         haltedAmbiguousInlineUploads: this.getHaltedAmbiguousInlineUploads(),
         haltedInlineUploads: this.getHaltedInlineUploads(),
       };
+    }
+
+    // If featuredImage points to a staged session asset (e.g., from usage='both' even if later
+    // removed from inline text before saving), ensure it is uploaded once without duplication.
+    const rawFeaturedRef =
+      typeof input.editForm.featuredImage === 'string'
+        ? input.editForm.featuredImage.trim()
+        : '';
+    if (
+      !this.selectedFile &&
+      rawFeaturedRef.length > 0 &&
+      !referencedStagedIds.has(rawFeaturedRef)
+    ) {
+      const stagedFeaturedEntry = this.inlineAssets.get(rawFeaturedRef);
+      if (stagedFeaturedEntry) {
+        referencedStagedEntries.push(stagedFeaturedEntry);
+        referencedStagedIds.add(rawFeaturedRef);
+      }
     }
 
     // If a featured image file is selected, validate selection & metadata BEFORE any remote call
@@ -5605,10 +5646,12 @@ export class NewsEditorImageSessionController {
         delete itemToSave.bodyAr;
         delete itemToSave.bodyEn;
 
+        const createIdempotencyKey = this.ensureCreateIdempotencyKey();
         savedItem = await NewsAdminClient.saveNewsItem(
           itemToSave,
           input.currentUser,
-          true
+          true,
+          createIdempotencyKey
         );
       } else if (input.activeItem) {
         const effectiveRelatedVideoIds =
@@ -5649,9 +5692,13 @@ export class NewsEditorImageSessionController {
       this.boundIds = null;
       this.retainedCompletedUpload = null;
       this.haltedAmbiguousUpload = null;
+      this.pendingCreateIdempotencyKey = null;
 
       // Clean up any unreferenced never-uploaded inline staged assets and release their previews
       const referencedSet = new Set(referencedInlineAssetIds);
+      if (resolvedFeaturedImage) {
+        referencedSet.add(resolvedFeaturedImage);
+      }
       for (const [assetId, entry] of Array.from(this.inlineAssets.entries())) {
         if (
           !referencedSet.has(assetId) &&
@@ -5677,8 +5724,7 @@ export class NewsEditorImageSessionController {
         reusedRetainedInlineAssetIds,
       };
     } catch (err: any) {
-      const baseMsg =
-        err?.message || (isAr ? 'فشل حفظ المقال' : 'Failed to save article');
+      const baseMsg = formatNewsEditorialErrorMessage(err, isAr);
       const retainedInline = this.getRetainedCompletedInlineUploads();
       const retainedAssetIds = [
         ...(this.retainedCompletedUpload
@@ -5707,6 +5753,129 @@ export class NewsEditorImageSessionController {
       this.isSaveInFlight = false;
     }
   }
+}
+
+export interface NewsEditorialStructuredErrorDetails {
+  readonly reasonCode?: string;
+  readonly subReasonCode?: string;
+  readonly assetId?: string;
+  readonly locations?: readonly ('cover' | 'inline_ar' | 'inline_en')[];
+}
+
+function formatEditorialImageRolesLabel(
+  locations: readonly string[] | undefined,
+  isAr: boolean
+): string {
+  if (!Array.isArray(locations) || locations.length === 0) {
+    return isAr ? 'صورة تحريرية مرتبطة بالمقال' : 'referenced editorial image';
+  }
+  const labels = locations.map((loc) => {
+    if (loc === 'cover') return isAr ? 'صورة الغلاف' : 'cover image';
+    if (loc === 'inline_ar') return isAr ? 'صورة ضمن النص العربي' : 'Arabic inline image';
+    if (loc === 'inline_en') return isAr ? 'صورة ضمن النص الإنجليزي' : 'English inline image';
+    return loc;
+  });
+  return labels.join(isAr ? ' و' : ' & ');
+}
+
+/**
+ * Translates structured or prefixed server news/image errors into clear, actionable
+ * Arabic/English operator messages without leaking private GCS paths or raw URLs.
+ */
+export function formatNewsEditorialErrorMessage(err: unknown, isAr: boolean): string {
+  const errObj = err && typeof err === 'object' ? (err as Record<string, any>) : null;
+  const rawMessage =
+    typeof errObj?.message === 'string' && errObj.message.trim().length > 0
+      ? errObj.message
+          .replace(/editorial_images\/[^\s"';)]*/gi, '[REDACTED]')
+          .replace(/gs:\/\/[^\s"';)]*/gi, '[REDACTED]')
+          .replace(/https?:\/\/storage\.googleapis\.com\/[^\s"';)]*/gi, '[REDACTED]')
+      : '';
+
+  const details: NewsEditorialStructuredErrorDetails | null =
+    errObj?.details && typeof errObj.details === 'object' && !Array.isArray(errObj.details)
+      ? (errObj.details as NewsEditorialStructuredErrorDetails)
+      : null;
+
+  const reasonCode =
+    details?.reasonCode ||
+    (rawMessage.includes('EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE')
+      ? 'EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE'
+      : rawMessage.startsWith('INVALID_TRANSITION')
+      ? 'INVALID_TRANSITION'
+      : rawMessage.startsWith('PERMISSION_DENIED')
+      ? 'PERMISSION_DENIED'
+      : rawMessage.startsWith('INELIGIBLE_EDITORIAL_IMAGE_ASSET_')
+      ? rawMessage.split(':')[0].trim()
+      : rawMessage.startsWith('UNVERIFIED_EDITORIAL_IMAGE_ASSET_')
+      ? rawMessage.split(':')[0].trim()
+      : undefined);
+
+  const subReasonCode =
+    details?.subReasonCode ||
+    (/\[(RIGHTS_STATUS_NOT_APPROVED|USAGE_SCOPE_NOT_AUTHORIZED|INACTIVE_ASSET_STATUS|ASSET_NOT_FOUND|INVALID_ASSET_RECORD|INVALID_CANONICAL_VARIANTS)\]/.exec(
+      rawMessage
+    )?.[1] ??
+      undefined);
+
+  const assetId =
+    details?.assetId ||
+    (/asset\s+"([A-Za-z0-9_-]{3,128})"/.exec(rawMessage)?.[1] ?? undefined);
+
+  const parsedLocationsFromMsg = /\[roles=([a-z_,]+)\]/.exec(rawMessage)?.[1]?.split(',');
+  const locations = details?.locations ?? parsedLocationsFromMsg;
+  const roleLabel = formatEditorialImageRolesLabel(locations, isAr);
+  const assetSuffix = assetId ? ` (${assetId})` : '';
+
+  if (reasonCode === 'EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE') {
+    if (subReasonCode === 'RIGHTS_STATUS_NOT_APPROVED') {
+      return isAr
+        ? `تعذر نشر الخبر لأن ${roleLabel}${assetSuffix} لم تُعتمد حقوقها بعد. افتح قسم "مراجعة حقوق الصور التحريرية" في تبويب سير العمل لإكمال الاعتماد البشري ثم أعد محاولة النشر.`
+        : `Cannot publish article because ${roleLabel}${assetSuffix} does not have human-approved rights yet. Open the "Editorial Image Rights Review" panel in the Workflow tab to approve it, then retry publication.`;
+    }
+    if (subReasonCode === 'USAGE_SCOPE_NOT_AUTHORIZED') {
+      return isAr
+        ? `تعذر نشر الخبر لأن نطاق استخدام ${roleLabel}${assetSuffix} غير مخوّل لهذا المقال. يرجى مراجعة نطاق الحقوق (ArticleRestricted / GeneralEditorial) في لوحة مراجعة حقوق الصور.`
+        : `Cannot publish article because the usage scope of ${roleLabel}${assetSuffix} does not authorize this article. Update or verify its usage scope in the Editorial Image Rights Review panel.`;
+    }
+    if (subReasonCode === 'INACTIVE_ASSET_STATUS') {
+      return isAr
+        ? `تعذر نشر الخبر لأن ${roleLabel}${assetSuffix} غير نشطة أو تم سحبها. يرجى استبدالها بصورة نشطة ومعتمدة الحقوق.`
+        : `Cannot publish article because ${roleLabel}${assetSuffix} is inactive or revoked. Replace it with an active, rights-approved image.`;
+    }
+    if (subReasonCode === 'ASSET_NOT_FOUND') {
+      return isAr
+        ? `تعذر نشر الخبر لأن ${roleLabel}${assetSuffix} غير موجودة في سجل الأصول المعتمد. يرجى إعادة رفع الصورة وحفظ المسودة.`
+        : `Cannot publish article because ${roleLabel}${assetSuffix} was not found in the canonical asset repository. Re-upload the image and save the draft.`;
+    }
+    return isAr
+      ? `تعذر نشر الخبر بسبب عدم استيفاء أهلية حقوق ${roleLabel}${assetSuffix}. يرجى مراجعة لوحة حقوق الصور التحريرية.`
+      : `Cannot publish article because ${roleLabel}${assetSuffix} is not eligible for public release. Please inspect the Editorial Image Rights Review panel.`;
+  }
+
+  if (
+    reasonCode === 'INELIGIBLE_EDITORIAL_IMAGE_ASSET_RIGHTS' ||
+    reasonCode === 'INELIGIBLE_EDITORIAL_IMAGE_ASSET_STATUS' ||
+    reasonCode === 'UNVERIFIED_EDITORIAL_IMAGE_ASSET_NOT_FOUND'
+  ) {
+    return isAr
+      ? `تعذر ربط ${roleLabel}${assetSuffix} بالمسودة لأن حالة الأصل أو حقوقه غير مؤهلة. تأكد من اكتمال الرفع وأن الصورة نشطة وغير مرفوضة أو مسحوبة.`
+      : `Cannot link ${roleLabel}${assetSuffix} to the draft because the asset record is missing, inactive, or rejected/revoked.`;
+  }
+
+  if (reasonCode === 'PERMISSION_DENIED') {
+    return isAr
+      ? 'ليس لديك الصلاحية المطلوبة لتنفيذ هذا الإجراء التحريري.'
+      : 'You do not have the required permission to perform this editorial action.';
+  }
+
+  if (reasonCode === 'INVALID_TRANSITION') {
+    return isAr
+      ? 'لا يمكن تنفيذ هذا الانتقال من حالة المقال الحالية. يرجى اتباع تسلسل سير العمل (مسودة ← قيد المراجعة ← معتمد ← منشور).'
+      : 'This workflow transition is not allowed from the article’s current state. Follow the editorial workflow sequence.';
+  }
+
+  return rawMessage || (isAr ? 'تعذر إتمام العملية المطلوبة.' : 'Operation failed.');
 }
 
 

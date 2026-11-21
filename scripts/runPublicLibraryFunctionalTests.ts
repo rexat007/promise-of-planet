@@ -6103,6 +6103,60 @@ globalThis.fetch = async (url, opts) => {
     );
   }
 
+  // TEST 40: firebase-hosting-live.yml fail-closed validation & build propagation of all 12 VITE_LIBRARY_* vars
+  {
+    const hostingWorkflowText = fs.readFileSync(
+      '.github/workflows/firebase-hosting-live.yml',
+      'utf8'
+    );
+    const requiredTwelveLibraryVars = [
+      'VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED',
+      'VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL',
+      'VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED',
+      'VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED',
+      'VITE_LIBRARY_CATALOG_HANDOFF_ENABLED',
+      'VITE_LIBRARY_RIGHTS_DECISION_ENABLED',
+      'VITE_LIBRARY_CASE_ALIGNMENT_ENABLED',
+      'VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED',
+      'VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED',
+      'VITE_LIBRARY_AV_EXECUTION_ENABLED',
+      'VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED',
+      'VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED',
+    ] as const;
+
+    const allTwelveReferencedFromVars = requiredTwelveLibraryVars.every((varName) =>
+      hostingWorkflowText.includes(`${varName}: \${{ vars.${varName} }}`)
+    );
+    const allTwelvePropagatedInBuild = requiredTwelveLibraryVars.every((varName) => {
+      const matches = hostingWorkflowText.match(
+        new RegExp(`${varName}: \\$\\{\\{ vars\\.${varName} \\}\\}`, 'g')
+      );
+      // Appears in BOTH the fail-closed validation step and the build step
+      return (matches?.length ?? 0) >= 2;
+    });
+    const noHardcodedTrueForLibraryVars = requiredTwelveLibraryVars.every(
+      (varName) =>
+        !new RegExp(`${varName}:\\s*["']?true["']?`).test(hostingWorkflowText)
+    );
+    const validatesAvBooleanAndUploadEndpoint =
+      hostingWorkflowText.includes('VITE_LIBRARY_AV_EXECUTION_ENABLED') &&
+      hostingWorkflowText.includes(
+        'https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryQuarantineUploadEndpoint'
+      ) &&
+      hostingWorkflowText.includes(
+        'Validate Library Quarantine, Review, Release & AV Flags'
+      );
+
+    assertCheck(
+      '40',
+      'firebase-hosting-live.yml validates fail-closed and propagates all 12 VITE_LIBRARY_* repository variables without hardcoding true',
+      allTwelveReferencedFromVars &&
+        allTwelvePropagatedInBuild &&
+        noHardcodedTrueForLibraryVars &&
+        validatesAvBooleanAndUploadEndpoint
+    );
+  }
+
   console.log('========================================================');
   console.log(`TEST SUMMARY: PASSED=${passed}, FAILED=${failed}`);
   console.log('========================================================');

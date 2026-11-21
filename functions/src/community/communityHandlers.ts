@@ -3,8 +3,11 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { CommunityApplicationService } from './communityApplicationService';
 import type { AdminRepository } from '../admin/adminRepository';
 import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
-import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
-import { AdminPermission } from '../types/admin';
+import {
+  canAccessCommunitySubmissions,
+  canModerateCommunitySubmissions,
+  canCreateNewsDraftFromAcceptedCitizenSubmission,
+} from '../shared/adminContract';
 import type { AdminUser } from '../types/admin';
 
 export interface CommunityRequestContext {
@@ -28,9 +31,11 @@ export class FirestoreAccountLookupVerifier implements AccountLookupVerifier {
   }
 }
 
-async function authenticateAndAuthorizeAdmin(
+type CommunityAdminPolicy = 'view' | 'moderate' | 'createNewsDraft';
+
+async function authenticateAndAuthorizeCommunityAdmin(
   requestContext: CommunityRequestContext,
-  requiredPermission: AdminPermission,
+  policy: CommunityAdminPolicy,
   adminRepo: AdminRepository
 ): Promise<AdminUser> {
   if (!requestContext.auth || !requestContext.auth.uid || requestContext.auth.uid.trim() === '') {
@@ -53,11 +58,22 @@ async function authenticateAndAuthorizeAdmin(
     throw new HttpsError('permission-denied', 'ADMIN_INACTIVE: AdminUser account is inactive');
   }
 
-  const isAuthorized = AdminAuthorizationService.hasPermission(admin, requiredPermission);
-  if (!isAuthorized) {
+  if (policy === 'view' && !canAccessCommunitySubmissions(admin)) {
     throw new HttpsError(
       'permission-denied',
-      `PERMISSION_DENIED: AdminUser lacks required ${requiredPermission} permission`
+      'PERMISSION_DENIED: Only active Owner or CitizenModerator may access confidential citizen submissions'
+    );
+  }
+  if (policy === 'moderate' && !canModerateCommunitySubmissions(admin)) {
+    throw new HttpsError(
+      'permission-denied',
+      'PERMISSION_DENIED: Only active Owner or CitizenModerator may moderate citizen submissions'
+    );
+  }
+  if (policy === 'createNewsDraft' && !canCreateNewsDraftFromAcceptedCitizenSubmission(admin)) {
+    throw new HttpsError(
+      'permission-denied',
+      'PERMISSION_DENIED: Only active Owner, CitizenModerator, or ContentEditor may create a news draft from an accepted citizen submission'
     );
   }
 
@@ -96,6 +112,9 @@ export async function executeSubmitCitizenReport(
   } catch (err: any) {
     if (err instanceof HttpsError) throw err;
     const msg = err?.message || 'Submission failed';
+    if (msg.startsWith('SUBMISSION_EXISTS')) {
+      throw new HttpsError('already-exists', msg);
+    }
     if (msg.startsWith('VALIDATION_ERROR') || msg.startsWith('ATTACHMENT_INVALID')) {
       throw new HttpsError('invalid-argument', msg);
     }
@@ -118,13 +137,13 @@ export async function executeManageCitizenSubmissions(
 
   try {
     if (action === 'listAll') {
-      await authenticateAndAuthorizeAdmin(requestContext, AdminPermission.View, adminRepo);
+      await authenticateAndAuthorizeCommunityAdmin(requestContext, 'view', adminRepo);
       const submissions = await communityService.listAllForAdmin();
       return { submissions };
     }
 
     if (action === 'getById') {
-      await authenticateAndAuthorizeAdmin(requestContext, AdminPermission.View, adminRepo);
+      await authenticateAndAuthorizeCommunityAdmin(requestContext, 'view', adminRepo);
       if (!data.id || typeof data.id !== 'string') {
         throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: Submission id is required');
       }
@@ -133,7 +152,7 @@ export async function executeManageCitizenSubmissions(
     }
 
     if (action === 'moderate') {
-      const admin = await authenticateAndAuthorizeAdmin(requestContext, AdminPermission.Review, adminRepo);
+      const admin = await authenticateAndAuthorizeCommunityAdmin(requestContext, 'moderate', adminRepo);
       if (!data.id || typeof data.id !== 'string') {
         throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: Submission id is required');
       }
@@ -154,7 +173,7 @@ export async function executeManageCitizenSubmissions(
     }
 
     if (action === 'createNewsDraft') {
-      const admin = await authenticateAndAuthorizeAdmin(requestContext, AdminPermission.Create, adminRepo);
+      const admin = await authenticateAndAuthorizeCommunityAdmin(requestContext, 'createNewsDraft', adminRepo);
       const submissionId = data.submissionId || data.id;
       if (!submissionId || typeof submissionId !== 'string') {
         throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: Submission id is required');

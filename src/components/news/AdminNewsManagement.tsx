@@ -23,6 +23,7 @@ import {
   MAX_RELATED_VIDEOS_PER_NEWS_ARTICLE,
   NewsAdminClient,
   NewsEditorImageSessionController,
+  formatNewsEditorialErrorMessage,
   isArbitraryUrlOrInvalidVideoId,
   validateRelatedVideoIdsForClient,
   type HaltedAmbiguousImageUpload,
@@ -1471,16 +1472,6 @@ export function AdminNewsManagement({
       return false;
     }
 
-    // Both usage safety (Section 5)
-    if (prepared.usage === 'both') {
-      setErrorMessage(
-        isAr
-          ? 'خيار استخدام الصورة كغلاف وضمن النص معاً غير مفعل حالياً لمنع تكرار الرفع. يرجى اختيار "ضمن النص" أو "غلاف فقط".'
-          : 'Using the image as both cover and inline is currently disabled to prevent duplicate uploads. Please select "Article Body" or "Cover Only".'
-      );
-      return false;
-    }
-
     // Cover-only integration (Section 4)
     if (prepared.usage === 'cover') {
       const selectRes = imageSessionRef.current.selectFile(prepared.file);
@@ -1504,18 +1495,18 @@ export function AdminNewsManagement({
       return true;
     }
 
-    // Inline integration (Section 3)
-    if (prepared.usage === 'inline') {
+    // Inline or Both (single canonical upload/assetId reused for both cover & inline)
+    if (prepared.usage === 'inline' || prepared.usage === 'both') {
       if (!activeInsertionRequest || activeInsertionRequest.request.isConsumed()) {
         setErrorMessage(
           isAr
-            ? 'انتهت صلاحية طلب إدراج الصورة في المحرر. يرجى إعادة النقر على زر إدراج صورة داخل المحرر.'
-            : 'Editor image insertion request is stale or expired. Please click the editor image button again.'
+            ? 'لاستخدام الصورة ضمن النص أو كغلاف ونص معاً، يرجى فتح أداة الصور من داخل محرر النص عند الموضع المطلوب.'
+            : 'A valid editor insertion location is required for inline or body+cover usage. Please click the image tool inside the rich text editor.'
         );
         return false;
       }
 
-      // 1. Call stageInlineImage(prepared.file, prepared.metadata)
+      // 1. Stage ONE canonical image entry (single intakeId + assetId -> single upload & single rights review)
       const stageResult = imageSessionRef.current.stageInlineImage(
         prepared.file,
         prepared.metadata
@@ -1555,18 +1546,33 @@ export function AdminNewsManagement({
       // 5. Refresh session-owned preview state
       setInlinePreviewUrls(imageSessionRef.current.getInlinePreviewUrlMap());
 
-      // Update the originating editor's richBody in editForm
+      // When usage === 'both', clear any separate cover-only file selection so ONLY this single canonical
+      // assetId is uploaded once and referenced in both featuredImage and the rich body.
+      if (prepared.usage === 'both') {
+        imageSessionRef.current.selectFile(null);
+        setSelectedImageFile(null);
+        setLocalPreviewUrl(null);
+        setRetainedUpload(null);
+        setHaltedUpload(null);
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
+      }
+
+      // Update the originating editor's richBody (and featuredImage when usage === 'both') in editForm
       if (activeInsertionRequest.targetEditor === 'ar') {
         setEditForm((prev) => ({
           ...prev,
           richBodyAr: insertResult.wrapper,
           bodyArHasEdited: true,
+          ...(prepared.usage === 'both' ? { featuredImage: stageResult.assetId } : {}),
         }));
       } else {
         setEditForm((prev) => ({
           ...prev,
           richBodyEn: insertResult.wrapper,
           bodyEnHasEdited: true,
+          ...(prepared.usage === 'both' ? { featuredImage: stageResult.assetId } : {}),
         }));
       }
 
@@ -1736,7 +1742,7 @@ export function AdminNewsManagement({
         );
       }
     } catch (err: any) {
-      setErrorMessage(err.message || (isAr ? 'فشل تنفيذ عملية الانتقال' : 'Transition failed'));
+      setErrorMessage(formatNewsEditorialErrorMessage(err, isAr));
     } finally {
       setIsTransitioning(false);
     }
@@ -3829,6 +3835,7 @@ export function AdminNewsManagement({
         readOnly={!canSaveContent}
         busy={isSaving}
         initialUsage={activeInsertionRequest ? 'inline' : 'cover'}
+        allowInlineUsage={Boolean(activeInsertionRequest && !activeInsertionRequest.request.isConsumed())}
       />
     </div>
   );

@@ -87,6 +87,7 @@ export interface EditorialInlineImageModalProps {
   readonly readOnly?: boolean;
   readonly busy?: boolean;
   readonly initialUsage?: EditorialUsageIntent;
+  readonly allowInlineUsage?: boolean;
   readonly initialWidth?: EditorialImageWidthV2;
   readonly initialLayout?: EditorialImageLayoutV2;
 }
@@ -404,6 +405,7 @@ export function EditorialInlineImageModal({
   readOnly = false,
   busy = false,
   initialUsage = "inline",
+  allowInlineUsage = true,
   initialWidth = "50%",
   initialLayout = "float-start",
 }: EditorialInlineImageModalProps) {
@@ -433,9 +435,16 @@ export function EditorialInlineImageModal({
   const [licensingInfo, setLicensingInfo] = useState<string>("");
 
   // Usage intent & inline formatting
-  const [usage, setUsage] = useState<EditorialUsageIntent>(initialUsage);
+  const resolvedInitialUsage: EditorialUsageIntent =
+    !allowInlineUsage && initialUsage !== "cover" ? "cover" : initialUsage;
+  const [usage, setUsage] = useState<EditorialUsageIntent>(resolvedInitialUsage);
   const [width, setWidth] = useState<EditorialImageWidthV2>(initialWidth);
   const [layout, setLayout] = useState<EditorialImageLayoutV2>(initialLayout);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setUsage(!allowInlineUsage && initialUsage !== "cover" ? "cover" : initialUsage);
+  }, [isOpen, allowInlineUsage, initialUsage]);
 
   // Validation feedback
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -1016,31 +1025,63 @@ export function EditorialInlineImageModal({
                       descEn: "Both uses",
                     },
                   ] as const
-                ).map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    data-testid={`editorial-usage-${item.id}-btn`}
-                    onClick={() => setUsage(item.id)}
-                    className={`p-2.5 rounded-lg border text-center transition-all ${
-                      usage === item.id
-                        ? "bg-emerald-600 text-white border-emerald-600 shadow-xs"
-                        : "bg-white text-gray-700 border-gray-200 hover:border-gray-300"
-                    }`}
-                  >
-                    <span className="text-xs font-bold block">
-                      {isAr ? item.labelAr : item.labelEn}
-                    </span>
-                    <span
-                      className={`text-[10px] block opacity-80 ${
-                        usage === item.id ? "text-emerald-100" : "text-gray-400"
+                ).map((item) => {
+                  const requiresEditorTarget = item.id === "inline" || item.id === "both";
+                  const isOptionDisabled = requiresEditorTarget && !allowInlineUsage;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      data-testid={`editorial-usage-${item.id}-btn`}
+                      disabled={isOptionDisabled}
+                      title={
+                        isOptionDisabled
+                          ? isAr
+                            ? "افتح أداة الصور من داخل محرر النص لتحديد موضع الإدراج."
+                            : "Open the image tool from inside the rich text editor to select an insertion point."
+                          : undefined
+                      }
+                      onClick={() => {
+                        if (!isOptionDisabled) {
+                          setUsage(item.id);
+                        }
+                      }}
+                      className={`p-2.5 rounded-lg border text-center transition-all ${
+                        isOptionDisabled
+                          ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed opacity-60"
+                          : usage === item.id
+                          ? "bg-emerald-600 text-white border-emerald-600 shadow-xs"
+                          : "bg-white text-gray-700 border-gray-200 hover:border-gray-300"
                       }`}
                     >
-                      {isAr ? item.descAr : item.descEn}
-                    </span>
-                  </button>
-                ))}
+                      <span className="text-xs font-bold block">
+                        {isAr ? item.labelAr : item.labelEn}
+                      </span>
+                      <span
+                        className={`text-[10px] block opacity-80 ${
+                          isOptionDisabled
+                            ? "text-gray-400"
+                            : usage === item.id
+                            ? "text-emerald-100"
+                            : "text-gray-400"
+                        }`}
+                      >
+                        {isAr ? item.descAr : item.descEn}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
+              {!allowInlineUsage && (
+                <p
+                  data-testid="editorial-usage-inline-disabled-note"
+                  className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2 leading-relaxed"
+                >
+                  {isAr
+                    ? "لاستخدام الصورة ضمن النص أو كغلاف ونص معاً، يرجى فتح أداة الصور من شريط محرر النص عند الموضع المطلوب (لن يتم تخمين موضع المؤشر تلقائياً)."
+                    : "To insert into the article body or use one image for both cover and body, open the image tool from inside the rich text editor at your target cursor position."}
+                </p>
+              )}
             </div>
 
             {/* Inline Formatting Controls (Width & Layout) */}

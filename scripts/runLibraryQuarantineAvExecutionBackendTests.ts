@@ -3701,10 +3701,373 @@ async function runTests(): Promise<void> {
       ),
       undefined
     );
+
+    // =========================================================================
+    // PASS 11: Real-World Safe Static PDF Links, Safe OpenAction, XRef PNG
+    //          Predictor (10..15), Adversarial Fail-Closed findingCodes &
+    //          Sanitized Worker Diagnostic Log (Zero DTO Schema Drift)
+    // =========================================================================
+    const encodePngPredictorRows = (
+      raw: Buffer,
+      columns: number,
+      predictor: 11 | 12 | 13 | 14
+    ): Buffer => {
+      assert.equal(raw.length % columns, 0);
+      const rowCount = raw.length / columns;
+      const out = Buffer.alloc(rowCount * (columns + 1));
+      const filterType = predictor - 10; // 1=Sub, 2=Up, 3=Avg, 4=Paeth
+      const paeth = (a: number, b: number, c: number): number => {
+        const p = a + b - c;
+        const pa = Math.abs(p - a);
+        const pb = Math.abs(p - b);
+        const pc = Math.abs(p - c);
+        if (pa <= pb && pa <= pc) return a;
+        if (pb <= pc) return b;
+        return c;
+      };
+      for (let r = 0; r < rowCount; r += 1) {
+        const inBase = r * columns;
+        const outBase = r * (columns + 1);
+        out[outBase] = filterType;
+        for (let c = 0; c < columns; c += 1) {
+          const cur = raw[inBase + c];
+          const left = c > 0 ? raw[inBase + c - 1] : 0;
+          const up = r > 0 ? raw[(r - 1) * columns + c] : 0;
+          const upLeft = r > 0 && c > 0 ? raw[(r - 1) * columns + c - 1] : 0;
+          let encoded = cur;
+          if (filterType === 1) encoded = (cur - left) & 0xff;
+          else if (filterType === 2) encoded = (cur - up) & 0xff;
+          else if (filterType === 3) encoded = (cur - ((left + up) >> 1)) & 0xff;
+          else if (filterType === 4) encoded = (cur - paeth(left, up, upLeft)) & 0xff;
+          out[outBase + 1 + c] = encoded;
+        }
+      }
+      return out;
+    };
+
+    const buildXrefPredictorPdfBytes = (
+      predictor: 11 | 12 | 13 | 14,
+      tamper?: 'bad-filter-byte' | 'bad-predictor-2' | 'truncated-row'
+    ): Buffer => {
+      const header = '%PDF-1.7\n';
+      const obj1 = '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n';
+      const obj2 = '2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n';
+      const off1 = Buffer.byteLength(header, 'latin1');
+      const off2 = off1 + Buffer.byteLength(obj1, 'latin1');
+      const xrefOffset = off2 + Buffer.byteLength(obj2, 'latin1');
+
+      const entry = (type: number, f2: number, f3: number): Buffer => {
+        const b = Buffer.alloc(6);
+        b.writeUInt8(type, 0);
+        b.writeUInt32BE(f2, 1);
+        b.writeUInt8(f3, 5);
+        return b;
+      };
+      const rawTable = Buffer.concat([
+        entry(0, 0, 255),
+        entry(1, off1, 0),
+        entry(1, off2, 0),
+        entry(1, xrefOffset, 0),
+      ]);
+      let predicted = encodePngPredictorRows(rawTable, 6, predictor);
+      if (tamper === 'bad-filter-byte') {
+        predicted[0] = 9;
+      } else if (tamper === 'truncated-row') {
+        predicted = predicted.subarray(0, predicted.length - 2);
+      }
+      const compressedXref = deflateSync(predicted);
+      const declaredPredictor = tamper === 'bad-predictor-2' ? 2 : predictor;
+      const xrefPrefix =
+        `3 0 obj\n<< /Type /XRef /Size 4 /W [1 4 1] /Root 1 0 R ` +
+        `/Filter /FlateDecode /DecodeParms << /Columns 6 /Predictor ${declaredPredictor} >> ` +
+        `/Length ${compressedXref.byteLength} >>\nstream\n`;
+      const xrefSuffix = `\nendstream\nendobj\nstartxref\n${xrefOffset}\n%%EOF\n`;
+      return Buffer.concat([
+        Buffer.from(header + obj1 + obj2 + xrefPrefix, 'latin1'),
+        compressedXref,
+        Buffer.from(xrefSuffix, 'latin1'),
+      ]);
+    };
+
+    const buildCustomClassicPdf = (objects: readonly string[]): Buffer => {
+      const header = '%PDF-1.7\n';
+      const chunks: string[] = [header];
+      const offsets: number[] = [];
+      let cursor = Buffer.byteLength(header, 'latin1');
+      for (let i = 0; i < objects.length; i += 1) {
+        offsets.push(cursor);
+        const body = `${i + 1} 0 obj\n${objects[i]}\nendobj\n`;
+        chunks.push(body);
+        cursor += Buffer.byteLength(body, 'latin1');
+      }
+      const xrefOffset = cursor;
+      const pad = (n: number) => String(n).padStart(10, '0');
+      let xref = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+      for (const off of offsets) {
+        xref += `${pad(off)} 00000 n \n`;
+      }
+      xref += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+      chunks.push(xref);
+      return Buffer.from(chunks.join(''), 'latin1');
+    };
+
+    // 11A: Safe static /Subtype /Link (inline https://, indirect mailto:, internal /GoTo) + safe /Catalog /OpenAction
+    const safeLinksAndOpenActionPdf = buildCustomClassicPdf([
+      '<< /Type /Catalog /Pages 2 0 R /OpenAction [3 0 R /Fit] >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /Annots [4 0 R 5 0 R 6 0 R] >>',
+      '<< /Type /Annot /Subtype /Link /A << /Type /Action /S /URI /URI (https://www.unep.org/report-2026) >> >>',
+      '<< /Type /Annot /Subtype /Link /A 7 0 R >>',
+      '<< /Type /Annot /Subtype /Link /A << /S /GoTo /D [3 0 R /Fit] >> >>',
+      '<< /Type /Action /S /URI /URI (mailto:library@promiseofplanet.org) >>',
+    ]);
+    const safeLinkDirect = inspectPdfBytesStructurally(safeLinksAndOpenActionPdf);
+    assert.equal(safeLinkDirect.ok, true, 'Safe /Subtype /Link + /OpenAction destination array must pass');
+
+    const safeGoToOpenActionPdf = buildCustomClassicPdf([
+      '<< /Type /Catalog /Pages 2 0 R /OpenAction << /S /GoTo /D [3 0 R /Fit] >> >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R >>',
+    ]);
+    assert.equal(
+      inspectPdfBytesStructurally(safeGoToOpenActionPdf).ok,
+      true,
+      'Safe /Catalog /OpenAction << /S /GoTo >> must pass'
+    );
+
+    // Run full worker with matching qpdf --json tree containing safe Link/URI and safe OpenAction
+    const safeLinkSeeded = seedFullEightDocChain(db, 1101, {
+      format: 'PDF',
+      payloadBytes: safeLinksAndOpenActionPdf,
+    });
+    await dispatchService.dispatchQuarantineAvInspection({
+      receiptId: safeLinkSeeded.receiptId,
+      expectedRequestId: safeLinkSeeded.requestId,
+      expectedSafetyCaseRevision: 1,
+      acknowledgedHumanCaseRevision: 2,
+      confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+    });
+    const safeLinkBucket = createFakeGenerationPinnedBucket({
+      expectedStoragePath: safeLinkSeeded.receipt.storagePath,
+      expectedGeneration: safeLinkSeeded.generation!,
+      payloadBytes: safeLinksAndOpenActionPdf,
+    });
+    const safeLinkWorkerRes = await executeLibraryQuarantineAvWorkerTask({
+      requestId: safeLinkSeeded.requestId,
+      workerRunId: 'worker_safe_links_01',
+      db,
+      bucket: safeLinkBucket,
+      clock: () => '2026-11-11T12:00:00.000Z',
+      signatureVerifier: okSigVerifier,
+      clamAvRunner: async () => ({ exitCode: 0, timedOut: false, spawnFailed: false }),
+      pdfParserVerifier: async () => ({ ok: true, parserName: 'qpdf', parserVersion: '11.9.1' }),
+      pdfInspector: async (params) =>
+        defaultRunIsolatedPdfInspection(params, {
+          binaryVerifier: async () => ({ ok: true, parserName: 'qpdf', parserVersion: '11.9.1' }),
+          qpdfRunner: async () => ({
+            exitCode: 0,
+            timedOut: false,
+            spawnFailed: false,
+            stderr: '',
+            stdout: JSON.stringify({
+              warnings: [],
+              encrypt: { encrypted: false },
+              objects: {
+                trailer: {},
+                'obj:1 0 R': { value: { '/Type': '/Catalog', '/Pages': '2 0 R', '/OpenAction': ['3 0 R', '/Fit'] } },
+                'obj:2 0 R': { value: { '/Type': '/Pages', '/Kids': ['3 0 R'], '/Count': 1 } },
+                'obj:3 0 R': { value: { '/Type': '/Page', '/Parent': '2 0 R', '/Annots': ['4 0 R', '5 0 R', '6 0 R'] } },
+                'obj:4 0 R': {
+                  value: {
+                    '/Type': '/Annot',
+                    '/Subtype': '/Link',
+                    '/A': { '/Type': '/Action', '/S': '/URI', '/URI': 'u:https://www.unep.org/report-2026' },
+                  },
+                },
+                'obj:5 0 R': { value: { '/Type': '/Annot', '/Subtype': '/Link', '/A': '7 0 R' } },
+                'obj:6 0 R': { value: { '/Type': '/Annot', '/Subtype': '/Link', '/A': { '/S': '/GoTo', '/D': ['3 0 R', '/Fit'] } } },
+                'obj:7 0 R': { value: { '/Type': '/Action', '/S': '/URI', '/URI': 'u:mailto:library@promiseofplanet.org' } },
+              },
+            }),
+          }),
+        }),
+    });
+    assert.equal(safeLinkWorkerRes.ok, true);
+    assert.equal(safeLinkWorkerRes.execution?.state, 'AV_NO_THREAT_DETECTED');
+
+    // 11B: Real PNG Predictor XRef streams (Predictors 11, 12, 13, 14) pass; malformed ones fail closed
+    for (const pred of [11, 12, 13, 14] as const) {
+      const predPdf = buildXrefPredictorPdfBytes(pred);
+      const predParse = inspectPdfBytesStructurally(predPdf);
+      assert.equal(predParse.ok, true, `Valid XRef PNG Predictor ${pred} must pass`);
+      if (predParse.ok) {
+        assert.equal(predParse.xrefFormat, 'STREAM');
+      }
+    }
+    for (const tamper of ['bad-filter-byte', 'bad-predictor-2', 'truncated-row'] as const) {
+      const badPredPdf = buildXrefPredictorPdfBytes(12, tamper);
+      const badPredParse = inspectPdfBytesStructurally(badPredPdf);
+      assert.equal(badPredParse.ok, false, `Tampered XRef predictor (${tamper}) must fail`);
+      if (!badPredParse.ok) {
+        assert.equal(badPredParse.failureReasonCode, 'PDF_ENCRYPTED_OR_MALFORMED');
+        assert.equal(badPredParse.findingCode, 'PDF_FINDING_XREF_PREDICTOR_OR_STRUCTURE');
+      }
+    }
+
+    // 11C: Adversarial Link & OpenAction variants still fail closed with safe non-sensitive findingCodes
+    const adversarialCases: ReadonlyArray<{
+      readonly label: string;
+      readonly pdf: Buffer;
+      readonly expectedFinding: string;
+    }> = [
+      {
+        label: 'link-javascript-uri',
+        pdf: buildCustomClassicPdf([
+          '<< /Type /Catalog /Pages 2 0 R >>',
+          '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+          '<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>',
+          '<< /Type /Annot /Subtype /Link /A << /S /URI /URI (javascript:alert(1)) >> >>',
+        ]),
+        expectedFinding: 'PDF_FINDING_UNSAFE_URI_SCHEME',
+      },
+      {
+        label: 'link-file-uri',
+        pdf: buildCustomClassicPdf([
+          '<< /Type /Catalog /Pages 2 0 R >>',
+          '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+          '<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>',
+          '<< /Type /Annot /Subtype /Link /A << /S /URI /URI (file:///etc/passwd) >> >>',
+        ]),
+        expectedFinding: 'PDF_FINDING_UNSAFE_URI_SCHEME',
+      },
+      {
+        label: 'link-ismap-true',
+        pdf: buildCustomClassicPdf([
+          '<< /Type /Catalog /Pages 2 0 R >>',
+          '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+          '<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>',
+          '<< /Type /Annot /Subtype /Link /A << /S /URI /URI (https://example.org/x) /IsMap true >> >>',
+        ]),
+        expectedFinding: 'PDF_FINDING_UNSAFE_LINK_ACTION',
+      },
+      {
+        label: 'link-next-chain',
+        pdf: buildCustomClassicPdf([
+          '<< /Type /Catalog /Pages 2 0 R >>',
+          '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+          '<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>',
+          '<< /Type /Annot /Subtype /Link /A << /S /URI /URI (https://example.org/x) /Next << /S /GoTo /D [3 0 R /Fit] >> >> >>',
+        ]),
+        expectedFinding: 'PDF_FINDING_UNSAFE_LINK_ACTION',
+      },
+      {
+        label: 'openaction-uri-forbidden',
+        pdf: buildCustomClassicPdf([
+          '<< /Type /Catalog /Pages 2 0 R /OpenAction << /S /URI /URI (https://example.org/auto-open) >> >>',
+          '<< /Type /Pages /Kids [] /Count 0 >>',
+        ]),
+        expectedFinding: 'PDF_FINDING_UNSAFE_OPEN_ACTION',
+      },
+      {
+        label: 'openaction-js-forbidden',
+        pdf: buildCustomClassicPdf([
+          '<< /Type /Catalog /Pages 2 0 R /OpenAction << /S /JavaScript /JS (app.alert(1)) >> >>',
+          '<< /Type /Pages /Kids [] /Count 0 >>',
+        ]),
+        expectedFinding: 'PDF_FINDING_UNSAFE_OPEN_ACTION',
+      },
+    ];
+
+    for (const adv of adversarialCases) {
+      const r = inspectPdfBytesStructurally(adv.pdf);
+      assert.equal(r.ok, false, `Adversarial case ${adv.label} must fail`);
+      if (!r.ok) {
+        assert.equal(r.failureReasonCode, 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE', adv.label);
+        assert.equal(r.findingCode, adv.expectedFinding, adv.label);
+      }
+    }
+
+    // 11D: Worker emits ONE structured sanitized JSON diagnostic log on PDF failure without leaking raw PDF text/URLs or mutating DTO schema
+    const logTestPdf = adversarialCases[0].pdf; // javascript:alert(1)
+    const logSeeded = seedFullEightDocChain(db, 1102, {
+      format: 'PDF',
+      payloadBytes: logTestPdf,
+    });
+    await dispatchService.dispatchQuarantineAvInspection({
+      receiptId: logSeeded.receiptId,
+      expectedRequestId: logSeeded.requestId,
+      expectedSafetyCaseRevision: 1,
+      acknowledgedHumanCaseRevision: 2,
+      confirmation: LIBRARY_QUARANTINE_AV_DISPATCH_CONFIRMATION_LITERAL,
+    });
+    const logBucket = createFakeGenerationPinnedBucket({
+      expectedStoragePath: logSeeded.receipt.storagePath,
+      expectedGeneration: logSeeded.generation!,
+      payloadBytes: logTestPdf,
+    });
+    const capturedErrorLogs: string[] = [];
+    const origConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      capturedErrorLogs.push(args.map((a) => String(a)).join(' '));
+    };
+    try {
+      const logRes = await executeLibraryQuarantineAvWorkerTask({
+        requestId: logSeeded.requestId,
+        workerRunId: 'worker_diag_log_01',
+        db,
+        bucket: logBucket,
+        clock: () => '2026-11-11T12:05:00.000Z',
+        signatureVerifier: okSigVerifier,
+        clamAvRunner: async () => ({ exitCode: 0, timedOut: false, spawnFailed: false }),
+        pdfParserVerifier: async () => ({ ok: true, parserName: 'qpdf', parserVersion: '11.9.1' }),
+        pdfInspector: runInProcessIsolatedPdfInspector,
+      });
+      assert.equal(logRes.ok, false);
+      assert.equal(logRes.execution?.state, 'AV_SCAN_FAILED');
+      assert.equal(
+        logRes.execution?.failureReasonCode,
+        'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE'
+      );
+      // Verify persisted AV execution DTO schema remains strictly intact (no findingCode added to DTO)
+      const persistedExec = db.getRawDoc(
+        LIBRARY_QUARANTINE_AV_EXECUTIONS_COLLECTION,
+        logSeeded.requestId
+      );
+      assert.equal(persistedExec !== undefined, true);
+      assert.equal('findingCode' in (persistedExec ?? {}), false);
+      assert.equal(
+        validatePersistedLibraryQuarantineAvExecution(persistedExec).ok,
+        true
+      );
+      const sanitizedDto = toSanitizedLibraryQuarantineAvExecutionDto(
+        persistedExec as any
+      );
+      assert.equal('findingCode' in sanitizedDto, false);
+    } finally {
+      console.error = origConsoleError;
+    }
+
+    const parsedDiagLines = capturedErrorLogs
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry) => entry && entry.event === 'LIBRARY_QUARANTINE_PDF_INSPECTION_FAILED');
+    assert.equal(parsedDiagLines.length, 1, 'Worker must emit exactly 1 structured PDF failure log line');
+    assert.equal(parsedDiagLines[0].requestId, logSeeded.requestId);
+    assert.equal(parsedDiagLines[0].receiptId, logSeeded.receiptId);
+    assert.equal(parsedDiagLines[0].failureReasonCode, 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE');
+    assert.equal(parsedDiagLines[0].findingCode, 'PDF_FINDING_UNSAFE_URI_SCHEME');
+    const serializedLog = JSON.stringify(parsedDiagLines[0]);
+    assert.equal(serializedLog.includes('javascript:'), false);
+    assert.equal(serializedLog.includes('alert(1)'), false);
   }
 
   console.log(
-    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 + PDF-SAFETY-RB1 BACKEND TESTS PASSED (10/10).'
+    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 + PDF-SAFETY-RB1 + COORD BACKEND TESTS PASSED (11/11).'
   );
 }
 

@@ -3,7 +3,6 @@ import {
   doc,
   getDoc,
   getDocs,
-  setDoc,
   query,
   where,
 } from 'firebase/firestore';
@@ -19,9 +18,12 @@ import {
   OperationType,
 } from './firebase';
 import { AccountService } from './accountService';
-import { AdminAccessService } from './adminAccess';
-import { AdminPermission } from '../types/admin';
 import type { AdminUser } from '../types/admin';
+import {
+  canAccessCommunitySubmissions,
+  canModerateCommunitySubmissions,
+  canCreateNewsDraftFromAcceptedCitizenSubmission,
+} from '../../functions/src/shared/adminContract';
 import {
   SubmissionStatus,
   CANONICAL_COMMUNITY_CATEGORIES,
@@ -35,6 +37,8 @@ export type CitizenSubmissionErrorCode =
   | 'VALIDATION_ERROR'
   | 'ATTACHMENT_INVALID'
   | 'ATTACHMENT_UPLOAD_FAILED'
+  | 'SUBMISSION_EXISTS'
+  | 'AMBIGUOUS_SERVER_ERROR'
   | 'BACKEND_UNAVAILABLE'
   | 'NOT_FOUND'
   | 'UNAUTHORIZED';
@@ -492,56 +496,64 @@ export class FirestoreCitizenSubmissionRepository implements CitizenSubmissionRe
   }
 
   async createSubmission(submission: CitizenSubmission): Promise<CitizenSubmission> {
-    if (!this.isConfigured()) {
+    if (!this.isConfigured() || !app) {
       throw new CitizenSubmissionError(
         'BACKEND_UNAVAILABLE',
         'Firebase backend is not configured or unavailable. Submissions cannot be persisted.'
       );
     }
 
-    const validated = validateCitizenSubmissionData(submission, submission.id);
-
-    // Prefer Cloud Function callable boundary if available, falling back to direct Firestore rule-enforced write
-    if (app && auth?.currentUser) {
-      try {
-        const fns = getFunctions(app);
-        const callable = httpsCallable<{ submission: any }, { submission: CitizenSubmission }>(
-          fns,
-          'submitCitizenReport'
-        );
-        const result = await callable({ submission: serializeSubmissionForFirestore(validated) });
-        if (result.data?.submission) {
-          return validateCitizenSubmissionData(result.data.submission);
-        }
-      } catch (callableErr: any) {
-        // If callable fails with explicit validation or auth/precondition error, propagate immediately
-        const code = String(callableErr?.code || '');
-        if (
-          code.includes('unauthenticated') ||
-          code.includes('permission-denied') ||
-          code.includes('invalid-argument') ||
-          code.includes('failed-precondition')
-        ) {
-          throw new CitizenSubmissionError('VALIDATION_ERROR', callableErr.message || 'Submission rejected by server.');
-        }
-        // Otherwise attempt rule-enforced Firestore write directly
-      }
+    if (!auth?.currentUser) {
+      throw new CitizenSubmissionError(
+        'AUTH_REQUIRED',
+        'Active authenticated session is required to submit a citizen report.'
+      );
     }
 
+    const validated = validateCitizenSubmissionData(submission, submission.id);
+
+    // Single authoritative server creation path: submitCitizenReport callable (no silent direct Firestore setDoc fallback)
     try {
-      const docRef = doc(db, 'citizen_submissions', validated.id);
-      await setDoc(docRef, serializeSubmissionForFirestore(validated));
-      return validated;
-    } catch (err: any) {
-      if (err instanceof CitizenSubmissionError) throw err;
-      try {
-        handleFirestoreError(err, OperationType.CREATE, `citizen_submissions/${validated.id}`);
-      } catch {
-        throw new CitizenSubmissionError(
-          'BACKEND_UNAVAILABLE',
-          'Unable to persist citizen submission to Firestore. Ensure Firestore rules for citizen_submissions are deployed.'
-        );
+      const fns = getFunctions(app);
+      const callable = httpsCallable<{ submission: any }, { submission: CitizenSubmission }>(
+        fns,
+        'submitCitizenReport'
+      );
+      const result = await callable({ submission: serializeSubmissionForFirestore(validated) });
+      if (result.data?.submission) {
+        return validateCitizenSubmissionData(result.data.submission, validated.id);
       }
+      throw new CitizenSubmissionError(
+        'AMBIGUOUS_SERVER_ERROR',
+        'Server returned an empty response while submitting citizen report.'
+      );
+    } catch (callableErr: any) {
+      if (callableErr instanceof CitizenSubmissionError) throw callableErr;
+      const code = String(callableErr?.code || '');
+      const message = String(callableErr?.message || 'Submission failed.');
+      if (code.includes('already-exists') || message.includes('SUBMISSION_EXISTS')) {
+        throw new CitizenSubmissionError('SUBMISSION_EXISTS', message);
+      }
+      if (code.includes('unauthenticated')) {
+        throw new CitizenSubmissionError('AUTH_REQUIRED', message);
+      }
+      if (code.includes('permission-denied')) {
+        throw new CitizenSubmissionError('UNAUTHORIZED', message);
+      }
+      if (
+        code.includes('invalid-argument') ||
+        message.includes('VALIDATION_ERROR') ||
+        message.includes('ATTACHMENT_INVALID')
+      ) {
+        throw new CitizenSubmissionError('VALIDATION_ERROR', message);
+      }
+      if (
+        code.includes('failed-precondition') ||
+        message.includes('ACCOUNT_PROVISIONING_REQUIRED')
+      ) {
+        throw new CitizenSubmissionError('ACCOUNT_UNAVAILABLE', message);
+      }
+      throw new CitizenSubmissionError('AMBIGUOUS_SERVER_ERROR', message);
     }
   }
 
@@ -883,10 +895,46 @@ export class CitizenSubmissionServiceClass {
     try {
       return await this.repository.createSubmission(finalSubmission);
     } catch (saveErr: any) {
-      // Rollback uploaded files if metadata persistence fails
-      for (const att of uploadedAttachments) {
-        if (att.storagePath) {
-          await this.storageAdapter.deleteEvidence(att.storagePath);
+      const errCode =
+        saveErr instanceof CitizenSubmissionError ? saveErr.code : undefined;
+      const isDefiniteRejection =
+        errCode === 'VALIDATION_ERROR' ||
+        errCode === 'ATTACHMENT_INVALID' ||
+        errCode === 'AUTH_REQUIRED' ||
+        errCode === 'ACCOUNT_UNAVAILABLE' ||
+        errCode === 'UNAUTHORIZED';
+
+      if (isDefiniteRejection) {
+        // Server definitively rejected creation before persisting; safely roll back newly uploaded evidence
+        for (const att of uploadedAttachments) {
+          if (att.storagePath) {
+            await this.storageAdapter.deleteEvidence(att.storagePath);
+          }
+        }
+        throw saveErr;
+      }
+
+      // Ambiguous server error or SUBMISSION_EXISTS: perform authoritative readback BEFORE deleting evidence
+      let readbackConfirmedMissing = false;
+      try {
+        const persisted = await this.repository.getSubmissionById(submissionId);
+        if (persisted && persisted.submittedByUid === uid) {
+          // Authoritative readback confirms the server committed this submission; preserve evidence and return it
+          return persisted;
+        }
+        if (persisted === null && errCode !== 'SUBMISSION_EXISTS') {
+          readbackConfirmedMissing = true;
+        }
+      } catch {
+        // Readback itself failed/ambiguous; NEVER blindly delete evidence that may already be committed
+        readbackConfirmedMissing = false;
+      }
+
+      if (readbackConfirmedMissing) {
+        for (const att of uploadedAttachments) {
+          if (att.storagePath) {
+            await this.storageAdapter.deleteEvidence(att.storagePath);
+          }
         }
       }
       throw saveErr;
@@ -915,11 +963,11 @@ export class CitizenSubmissionServiceClass {
     if (!adminUser || !adminUser.isActive) {
       throw new CitizenSubmissionError('UNAUTHORIZED', 'Active administrative credentials are required.');
     }
-    const canView =
-      AdminAccessService.hasPermission(adminUser, AdminPermission.View) ||
-      AdminAccessService.hasPermission(adminUser, AdminPermission.Review);
-    if (!canView) {
-      throw new CitizenSubmissionError('UNAUTHORIZED', 'Admin user lacks permission to view citizen submissions.');
+    if (!canAccessCommunitySubmissions(adminUser)) {
+      throw new CitizenSubmissionError(
+        'UNAUTHORIZED',
+        'Only active Owner or CitizenModerator may view confidential citizen submissions.'
+      );
     }
 
     if (this.repository instanceof InMemoryCitizenSubmissionRepository) {
@@ -971,11 +1019,11 @@ export class CitizenSubmissionServiceClass {
     if (!adminUser || !adminUser.isActive) {
       throw new CitizenSubmissionError('UNAUTHORIZED', 'Active administrative credentials are required.');
     }
-    const canView =
-      AdminAccessService.hasPermission(adminUser, AdminPermission.View) ||
-      AdminAccessService.hasPermission(adminUser, AdminPermission.Review);
-    if (!canView) {
-      throw new CitizenSubmissionError('UNAUTHORIZED', 'Admin user lacks permission to view citizen submissions.');
+    if (!canAccessCommunitySubmissions(adminUser)) {
+      throw new CitizenSubmissionError(
+        'UNAUTHORIZED',
+        'Only active Owner or CitizenModerator may view confidential citizen submissions.'
+      );
     }
 
     if (this.repository instanceof InMemoryCitizenSubmissionRepository) {
@@ -1038,10 +1086,10 @@ export class CitizenSubmissionServiceClass {
         'Active administrative credentials are required to moderate submissions.'
       );
     }
-    if (!AdminAccessService.hasPermission(adminUser, AdminPermission.Review)) {
+    if (!canModerateCommunitySubmissions(adminUser)) {
       throw new CitizenSubmissionError(
         'UNAUTHORIZED',
-        'Review permission is required to modify citizen submission status.'
+        'Only active Owner or CitizenModerator may modify citizen submission status.'
       );
     }
 
@@ -1153,10 +1201,10 @@ export class CitizenSubmissionServiceClass {
         'Active administrative credentials are required to create a news draft.'
       );
     }
-    if (!AdminAccessService.hasPermission(adminUser, AdminPermission.Create)) {
+    if (!canCreateNewsDraftFromAcceptedCitizenSubmission(adminUser)) {
       throw new CitizenSubmissionError(
         'UNAUTHORIZED',
-        'Create permission is required to create a news draft from a citizen submission.'
+        'Only active Owner, CitizenModerator, or ContentEditor may create a news draft from an accepted citizen submission.'
       );
     }
 
@@ -1286,10 +1334,7 @@ export class CitizenSubmissionServiceClass {
     attachment: CitizenSubmissionAttachment,
     actor: { adminUser?: AdminUser | null; contributorUid?: string | null }
   ): Promise<string> {
-    const isAuthorizedAdmin =
-      Boolean(actor.adminUser && actor.adminUser.isActive) &&
-      (AdminAccessService.hasPermission(actor.adminUser!, AdminPermission.View) ||
-        AdminAccessService.hasPermission(actor.adminUser!, AdminPermission.Review));
+    const isAuthorizedAdmin = canAccessCommunitySubmissions(actor.adminUser);
 
     const effectiveContributorUid = actor.contributorUid ?? this.getAuthenticatedUid();
     const isOwner =

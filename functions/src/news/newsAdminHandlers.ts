@@ -1,6 +1,10 @@
 import { onCall, HttpsError, type FunctionsErrorCode } from 'firebase-functions/v2/https';
 import { getFirestore } from 'firebase-admin/firestore';
-import { NewsApplicationService } from './newsApplicationService';
+import {
+  NewsApplicationService,
+  NewsOperationError,
+  EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+} from './newsApplicationService';
 import { FirestoreNewsRepository } from './firestoreNewsRepository';
 import {
   FirestoreEditorialImageAssetRepository,
@@ -34,6 +38,7 @@ import type {
 import { PublicNewsRepository } from './publicNewsRepository';
 import type { AdminRepository } from '../admin/adminRepository';
 import { FirestoreAdminRepository } from '../admin/firestoreAdminRepository';
+import { canCreateNewsDraftFromAcceptedCitizenSubmission } from '../shared/adminContract';
 import { AdminAuthorizationService } from '../admin/adminAuthorizationService';
 import {
   AdminDomain,
@@ -1361,7 +1366,16 @@ export async function executeManageNewsRequest(
         const updated = await newsService.updateDraft(payload.id, payload, actor);
         return { item: updated };
       } else {
-        const created = await newsService.createDraft(payload, actor);
+        const createIdempotencyKey =
+          payload.createIdempotencyKey !== undefined
+            ? payload.createIdempotencyKey
+            : data.createIdempotencyKey;
+        const created = await newsService.createDraft(
+          createIdempotencyKey !== undefined
+            ? { ...payload, createIdempotencyKey }
+            : payload,
+          actor
+        );
         return { item: created };
       }
     }
@@ -1441,7 +1455,29 @@ export async function executeManageNewsRequest(
         throw new HttpsError('invalid-argument', 'INVALID_ARGUMENT: submissionId is required');
       }
 
-      const admin = await authenticateAndAuthorize(requestContext, AdminPermission.Create, adminRepo);
+      if (!requestContext.auth || !requestContext.auth.uid || requestContext.auth.uid.trim() === '') {
+        throw new HttpsError('unauthenticated', 'UNAUTHENTICATED: Request missing valid Firebase Authentication token');
+      }
+      const uid = requestContext.auth.uid.trim();
+      let admin: AdminUser | null = null;
+      try {
+        admin = await adminRepo.getAdminByUid(uid);
+      } catch (_err) {
+        throw new HttpsError('internal', 'ADMIN_LOOKUP_FAILED: Failed to verify admin identity');
+      }
+      if (!admin) {
+        throw new HttpsError('permission-denied', 'ADMIN_NOT_REGISTERED: User identity is not registered as a canonical AdminUser');
+      }
+      if (!admin.isActive) {
+        throw new HttpsError('permission-denied', 'ADMIN_INACTIVE: AdminUser account is inactive');
+      }
+      if (!canCreateNewsDraftFromAcceptedCitizenSubmission(admin)) {
+        throw new HttpsError(
+          'permission-denied',
+          'PERMISSION_DENIED: Only active Owner, CitizenModerator, or ContentEditor may create a news draft from an accepted citizen submission'
+        );
+      }
+
       const actor = {
         uid: admin.id,
         name: admin.name,
@@ -1458,15 +1494,54 @@ export async function executeManageNewsRequest(
     throw new HttpsError('invalid-argument', `INVALID_ARGUMENT: Unrecognized action '${action}'`);
   } catch (err: any) {
     if (err instanceof HttpsError) throw err;
-    const msg = err?.message || 'Operation failed';
+    const sanitizeErrorText = (raw: string): string =>
+      raw
+        .replace(/editorial_images\/[^\s"';)]*/gi, '[REDACTED_STORAGE_PATH]')
+        .replace(/gs:\/\/[^\s"';)]*/gi, '[REDACTED_BUCKET_URI]')
+        .replace(/https?:\/\/storage\.googleapis\.com\/[^\s"';)]*/gi, '[REDACTED_STORAGE_URL]');
+
+    if (err instanceof NewsOperationError) {
+      throw new HttpsError(
+        err.httpErrorCode,
+        sanitizeErrorText(err.message),
+        err.details
+      );
+    }
+
+    const rawMsg =
+      typeof err?.message === 'string' && err.message.trim().length > 0
+        ? err.message
+        : 'Operation failed';
+    const msg = sanitizeErrorText(rawMsg);
+
     if (msg.startsWith('NOT_FOUND')) {
-      throw new HttpsError('not-found', msg);
+      throw new HttpsError('not-found', msg, { reasonCode: 'NOT_FOUND' });
     }
-    if (msg.startsWith('FAILED_PRECONDITION')) {
-      throw new HttpsError('failed-precondition', msg);
+    if (msg.startsWith('PERMISSION_DENIED')) {
+      throw new HttpsError('permission-denied', msg, { reasonCode: 'PERMISSION_DENIED' });
     }
-    if (msg.startsWith('INVALID_ARGUMENT')) {
-      throw new HttpsError('invalid-argument', msg);
+    if (
+      msg.startsWith('FAILED_PRECONDITION') ||
+      msg.startsWith(EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE) ||
+      msg.startsWith('INVALID_TRANSITION') ||
+      msg.startsWith('UNVERIFIED_EDITORIAL_IMAGE_ASSET_') ||
+      msg.startsWith('INELIGIBLE_EDITORIAL_IMAGE_ASSET_') ||
+      msg.startsWith('INVALID_EDITORIAL_IMAGE_ASSET_RECORD') ||
+      msg.startsWith('EDITORIAL_IMAGE_ASSET_REPOSITORY_ERROR')
+    ) {
+      const colonIdx = msg.indexOf(':');
+      const reasonCode = colonIdx > 0 ? msg.slice(0, colonIdx).trim() : 'FAILED_PRECONDITION';
+      throw new HttpsError('failed-precondition', msg, { reasonCode });
+    }
+    if (
+      msg.startsWith('INVALID_ARGUMENT') ||
+      msg.startsWith('VALIDATION_ERROR') ||
+      msg.startsWith('INVALID_RICH_DOCUMENT_') ||
+      msg.startsWith('CONTRADICTORY_UPDATE')
+    ) {
+      const colonIdx = msg.indexOf(':');
+      const reasonCode = colonIdx > 0 ? msg.slice(0, colonIdx).trim() : 'INVALID_ARGUMENT';
+      throw new HttpsError('invalid-argument', msg, { reasonCode });
     }
     throw new HttpsError('internal', msg);
   }

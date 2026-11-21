@@ -173,59 +173,98 @@ jobs:
             }
             console.log("Validated VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL: " + parsed.origin + parsed.pathname);
           '
-      - name: Validate Library Quarantine Upload Configuration
+      - name: Validate Library Quarantine, Review, Release & AV Flags
         env:
-          LIBRARY_UPLOAD_ENABLED: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED }}
-          LIBRARY_UPLOAD_ENDPOINT_URL: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL }}
+          VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED }}
+          VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL }}
+          VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: ${{ vars.VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED }}
+          VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: ${{ vars.VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED }}
+          VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: ${{ vars.VITE_LIBRARY_CATALOG_HANDOFF_ENABLED }}
+          VITE_LIBRARY_RIGHTS_DECISION_ENABLED: ${{ vars.VITE_LIBRARY_RIGHTS_DECISION_ENABLED }}
+          VITE_LIBRARY_CASE_ALIGNMENT_ENABLED: ${{ vars.VITE_LIBRARY_CASE_ALIGNMENT_ENABLED }}
+          VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED: ${{ vars.VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED }}
+          VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: ${{ vars.VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED }}
+          VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: ${{ vars.VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED }}
+          VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED: ${{ vars.VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED }}
+          VITE_LIBRARY_AV_EXECUTION_ENABLED: ${{ vars.VITE_LIBRARY_AV_EXECUTION_ENABLED }}
         run: |
-          if [ -z "$LIBRARY_UPLOAD_ENABLED" ]; then
-            echo "::error::Repository variable VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED is missing or empty."
-            exit 1
-          fi
-          if [ -z "$LIBRARY_UPLOAD_ENDPOINT_URL" ]; then
-            echo "::error::Repository variable VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL is missing or empty."
-            exit 1
-          fi
           node -e '
-            const rawEnabled = process.env.LIBRARY_UPLOAD_ENABLED;
-            const rawUrl = process.env.LIBRARY_UPLOAD_ENDPOINT_URL;
             const expectedUrl = "https://us-central1-promiseofplanet-bb325.cloudfunctions.net/libraryQuarantineUploadEndpoint";
+            const requiredTrueFlags = [
+              "VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED",
+              "VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED",
+              "VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED",
+              "VITE_LIBRARY_CATALOG_HANDOFF_ENABLED",
+              "VITE_LIBRARY_RIGHTS_DECISION_ENABLED",
+              "VITE_LIBRARY_CASE_ALIGNMENT_ENABLED",
+              "VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED",
+              "VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED",
+              "VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED",
+              "VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED",
+            ];
 
-            if (typeof rawEnabled !== "string" || rawEnabled.trim() !== rawEnabled || /\s/.test(rawEnabled)) {
-              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED must not contain leading, trailing, or internal whitespace.");
-              process.exit(1);
-            }
-            if (rawEnabled !== "true") {
-              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED must equal exactly \"true\".");
-              process.exit(1);
-            }
-
-            if (typeof rawUrl !== "string" || rawUrl.trim() !== rawUrl || /\s/.test(rawUrl)) {
-              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must not contain leading, trailing, or internal whitespace.");
-              process.exit(1);
-            }
-            if (rawUrl.includes("?") || rawUrl.includes("#")) {
-              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must not include query parameters or URL fragments.");
-              process.exit(1);
-            }
-
-            let parsed;
-            try {
-              parsed = new URL(rawUrl);
-            } catch (err) {
-              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL is not a syntactically valid URL: " + err.message);
-              process.exit(1);
-            }
-            if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
-              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must be a clean https URL without credentials, query parameters, or fragments.");
-              process.exit(1);
-            }
-            if (rawUrl !== expectedUrl) {
-              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must equal exactly \"" + expectedUrl + "\".");
-              process.exit(1);
+            let failed = false;
+            for (const name of requiredTrueFlags) {
+              const raw = process.env[name];
+              if (typeof raw !== "string" || raw.length === 0) {
+                console.error(`::error::Repository variable ${name} is missing or empty. Refusing to deploy Hosting with disabled or unconfigured Library editorial gates.`);
+                failed = true;
+                continue;
+              }
+              if (raw.trim() !== raw || /\s/.test(raw)) {
+                console.error(`::error::${name} must not contain leading, trailing, or internal whitespace.`);
+                failed = true;
+                continue;
+              }
+              if (raw !== "true") {
+                console.error(`::error::${name} must equal exactly "true" (received "${raw}").`);
+                failed = true;
+              }
             }
 
-            console.log("Validated VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED=true and VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL=" + expectedUrl);
+            const rawAv = process.env.VITE_LIBRARY_AV_EXECUTION_ENABLED;
+            if (typeof rawAv !== "string" || rawAv.length === 0) {
+              console.error("::error::Repository variable VITE_LIBRARY_AV_EXECUTION_ENABLED is missing or empty. Explicitly set it to \"true\" or \"false\" in GitHub repository variables.");
+              failed = true;
+            } else if (rawAv.trim() !== rawAv || /\s/.test(rawAv) || (rawAv !== "true" && rawAv !== "false")) {
+              console.error(`::error::VITE_LIBRARY_AV_EXECUTION_ENABLED must equal exactly "true" or "false" (received "${rawAv}").`);
+              failed = true;
+            }
+
+            const rawUrl = process.env.VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL;
+            if (typeof rawUrl !== "string" || rawUrl.length === 0) {
+              console.error("::error::Repository variable VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL is missing or empty.");
+              failed = true;
+            } else if (rawUrl.trim() !== rawUrl || /\s/.test(rawUrl) || rawUrl.includes("?") || rawUrl.includes("#")) {
+              console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must be a clean URL without whitespace, query parameters, or fragments.");
+              failed = true;
+            } else {
+              try {
+                const parsed = new URL(rawUrl);
+                if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+                  console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must be a clean https URL without credentials, query parameters, or fragments.");
+                  failed = true;
+                } else if (rawUrl !== expectedUrl) {
+                  console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL must equal exactly \"" + expectedUrl + "\".");
+                  failed = true;
+                }
+              } catch (err) {
+                console.error("::error::VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL is not a syntactically valid URL: " + err.message);
+                failed = true;
+              }
+            }
+
+            if (failed) {
+              process.exit(1);
+            }
+
+            console.log(
+              "Validated all 12 Library Hosting repo variables (10 required upload/review/release flags=true, VITE_LIBRARY_AV_EXECUTION_ENABLED=" +
+                rawAv +
+                ", endpoint=" +
+                expectedUrl +
+                ")."
+            );
           '
       - run: npx vite build
         env:
@@ -239,6 +278,16 @@ jobs:
           VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL: ${{ vars.VITE_PUBLIC_EDITORIAL_IMAGE_DELIVERY_URL }}
           VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENABLED }}
           VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL: ${{ vars.VITE_LIBRARY_QUARANTINE_UPLOAD_ENDPOINT_URL }}
+          VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED: ${{ vars.VITE_LIBRARY_REVIEW_WORKBENCH_ENABLED }}
+          VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED: ${{ vars.VITE_LIBRARY_HUMAN_CASE_REVIEW_ENABLED }}
+          VITE_LIBRARY_CATALOG_HANDOFF_ENABLED: ${{ vars.VITE_LIBRARY_CATALOG_HANDOFF_ENABLED }}
+          VITE_LIBRARY_RIGHTS_DECISION_ENABLED: ${{ vars.VITE_LIBRARY_RIGHTS_DECISION_ENABLED }}
+          VITE_LIBRARY_CASE_ALIGNMENT_ENABLED: ${{ vars.VITE_LIBRARY_CASE_ALIGNMENT_ENABLED }}
+          VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED: ${{ vars.VITE_LIBRARY_BINARY_SAFETY_CASE_ENABLED }}
+          VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED: ${{ vars.VITE_LIBRARY_ISOLATED_INSPECTION_REQUEST_ENABLED }}
+          VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED: ${{ vars.VITE_LIBRARY_REVIEWED_SOURCE_RELEASE_ENABLED }}
+          VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED: ${{ vars.VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED }}
+          VITE_LIBRARY_AV_EXECUTION_ENABLED: ${{ vars.VITE_LIBRARY_AV_EXECUTION_ENABLED }}
       - uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: '${{ secrets.GITHUB_TOKEN }}'

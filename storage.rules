@@ -19,7 +19,13 @@ service firebase.storage {
     match /citizen_submissions/{userId}/{submissionId}/{fileName} {
       allow read: if request.auth != null && (
         request.auth.uid == userId ||
-        firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.isActive == true
+        (
+          firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.isActive == true &&
+          (
+            firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.role == 'Owner' ||
+            firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.role == 'CitizenModerator'
+          )
+        )
       );
 
       allow create: if request.auth != null

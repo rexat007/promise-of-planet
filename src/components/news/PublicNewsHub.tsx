@@ -405,8 +405,10 @@ export function resolveActiveRichDocumentForArticle(
 
 /**
  * Determines whether the top cover banner in the full article reader should be
- * suppressed to avoid displaying an automatically derived first inline image
- * twice as two separate visual blocks at the beginning of the article.
+ * suppressed to avoid displaying the exact same canonical editorial image asset
+ * twice (both for derived first inline covers and for explicit `usage='both'` covers
+ * that share the identical `assetId` with an inline image in the active V2 body).
+ * Article cards continue to show the cover image normally.
  */
 export function shouldSuppressDuplicateCoverBanner(
   article: News | PublicNewsArticle,
@@ -414,7 +416,10 @@ export function shouldSuppressDuplicateCoverBanner(
 ): boolean {
   const publicArticle = article as PublicNewsArticle;
   const coverMeta = publicArticle.coverImage;
-  if (!coverMeta || coverMeta.source !== 'derived_first_inline') {
+  if (
+    !coverMeta ||
+    (coverMeta.source !== 'derived_first_inline' && coverMeta.source !== 'explicit')
+  ) {
     return false;
   }
   if (!coverMeta.assetId || !activeRichDoc || activeRichDoc.schemaVersion !== 2) {

@@ -131,6 +131,7 @@ export type LibraryUploadDeepStructureResult =
   | LibraryUploadPdfRequiresIsolatedParserResult;
 
 const ZIP_LOCAL_FILE_HEADER_SIG = 0x04034b50;
+const ZIP_DATA_DESCRIPTOR_SIG = 0x08074b50;
 const ZIP_CENTRAL_DIR_HEADER_SIG = 0x02014b50;
 const ZIP64_EOCD_RECORD_SIG = 0x06064b50;
 const ZIP64_EOCD_LOCATOR_SIG = 0x07064b50;
@@ -142,6 +143,8 @@ const OOXML_RELATIONSHIPS_NAMESPACE =
   'http://schemas.openxmlformats.org/package/2006/relationships';
 const OOXML_OFFICE_DOCUMENT_REL_TYPE =
   'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument';
+const OOXML_HYPERLINK_REL_TYPE =
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink';
 const OOXML_WORD_MAIN_CONTENT_TYPE =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml';
 const OOXML_WORDPROCESSINGML_MAIN_NAMESPACE =
@@ -149,6 +152,44 @@ const OOXML_WORDPROCESSINGML_MAIN_NAMESPACE =
 
 const CONTROL_OR_BIDI_CHAR_REGEX =
   /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2069\uFEFF\uFFF9-\uFFFB]/;
+
+const SAFE_EXTERNAL_DOCX_MAILTO_REGEX =
+  /^mailto:[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\?[^\r\n\x00-\x1f]*)?$/i;
+
+function isSafeExternalDocxHyperlinkTarget(rawTarget: string): boolean {
+  const trimmed = rawTarget.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > 2048 ||
+    CONTROL_OR_BIDI_CHAR_REGEX.test(trimmed) ||
+    trimmed.includes('\\') ||
+    trimmed.startsWith('//')
+  ) {
+    return false;
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('mailto:')) {
+    return SAFE_EXTERNAL_DOCX_MAILTO_REGEX.test(trimmed);
+  }
+  if (!lower.startsWith('https://') && !lower.startsWith('http://')) {
+    return false;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return false;
+    }
+    if (!parsed.hostname || parsed.hostname.length === 0) {
+      return false;
+    }
+    if (parsed.username || parsed.password) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const FORBIDDEN_PACKAGE_ENTRY_EXTENSIONS: ReadonlySet<string> = new Set([
   'exe',
@@ -255,6 +296,7 @@ interface ParsedZipEntryDescriptor {
   readonly localHeaderOffset: number;
   readonly dataStartOffset: number;
   readonly dataEndOffset: number;
+  readonly entrySpanEndOffset: number;
   readonly externalAttributes: number;
 }
 
@@ -1417,11 +1459,13 @@ function inspectDeepDocxStructure(
       );
     }
 
-    // Streaming data descriptor (bit 3) or compressed patched data (bit 5)
-    if ((flags & 0x0008) !== 0 || (flags & 0x0020) !== 0) {
+    // Compressed patched data (bit 5) remains strictly forbidden.
+    // Bit 3 (0x0008, streaming data descriptor) is supported ONLY with exact verified descriptor + Central Directory match below.
+    const hasDataDescriptorFlag = (flags & 0x0008) !== 0;
+    if ((flags & 0x0020) !== 0) {
       return makeRejected(
         'DATA_DESCRIPTOR_STREAMING_UNSUPPORTED',
-        `ZIP entry #${i} uses streaming data descriptors or patched data flags (0x${flags.toString(16)}).`,
+        `ZIP entry #${i} uses forbidden compressed patched data flags (0x${flags.toString(16)}).`,
         sizeBytes,
         sha256,
         'DOCX'
@@ -1618,14 +1662,20 @@ function inspectDeepDocxStructure(
       );
     }
 
+    const lfhSizesAndCrcMatchCd =
+      lfhCrc32 === crc32 &&
+      lfhCompressedSize === compressedSize &&
+      lfhUncompressedSize === uncompressedSize;
+    const lfhSizesAndCrcZeroed =
+      lfhCrc32 === 0 && lfhCompressedSize === 0 && lfhUncompressedSize === 0;
+
     if (
       lfhVersionNeeded !== versionNeeded ||
       lfhFlags !== flags ||
       lfhMethod !== compressionMethod ||
-      lfhCrc32 !== crc32 ||
-      lfhCompressedSize !== compressedSize ||
-      lfhUncompressedSize !== uncompressedSize ||
-      !lfhNameBytes.equals(cdNameBytes)
+      !lfhNameBytes.equals(cdNameBytes) ||
+      (!hasDataDescriptorFlag && !lfhSizesAndCrcMatchCd) ||
+      (hasDataDescriptorFlag && !lfhSizesAndCrcZeroed && !lfhSizesAndCrcMatchCd)
     ) {
       return makeRejected(
         'CENTRAL_LOCAL_HEADER_MISMATCH',
@@ -1634,6 +1684,67 @@ function inspectDeepDocxStructure(
         sha256,
         'DOCX'
       );
+    }
+
+    let entrySpanEndOffset = dataEndOffset;
+    if (hasDataDescriptorFlag) {
+      if (dataEndOffset + 12 > cdOffset) {
+        return makeRejected(
+          'CENTRAL_LOCAL_HEADER_MISMATCH',
+          `ZIP entry "${name}" with bit-3 data descriptor flag is missing a complete Data Descriptor before Central Directory.`,
+          sizeBytes,
+          sha256,
+          'DOCX'
+        );
+      }
+
+      const firstDword = buffer.readUInt32LE(dataEndOffset);
+      if (firstDword === ZIP_DATA_DESCRIPTOR_SIG) {
+        if (dataEndOffset + 16 > cdOffset) {
+          return makeRejected(
+            'CENTRAL_LOCAL_HEADER_MISMATCH',
+            `ZIP entry "${name}" has truncated 16-byte signed Data Descriptor.`,
+            sizeBytes,
+            sha256,
+            'DOCX'
+          );
+        }
+        const ddCrc32 = buffer.readUInt32LE(dataEndOffset + 4);
+        const ddCompressedSize = buffer.readUInt32LE(dataEndOffset + 8);
+        const ddUncompressedSize = buffer.readUInt32LE(dataEndOffset + 12);
+        if (
+          ddCrc32 !== crc32 ||
+          ddCompressedSize !== compressedSize ||
+          ddUncompressedSize !== uncompressedSize
+        ) {
+          return makeRejected(
+            'CENTRAL_LOCAL_HEADER_MISMATCH',
+            `Signed Data Descriptor for "${name}" disagrees with Central Directory CRC-32 or sizes.`,
+            sizeBytes,
+            sha256,
+            'DOCX'
+          );
+        }
+        entrySpanEndOffset = dataEndOffset + 16;
+      } else {
+        const ddCrc32 = firstDword;
+        const ddCompressedSize = buffer.readUInt32LE(dataEndOffset + 4);
+        const ddUncompressedSize = buffer.readUInt32LE(dataEndOffset + 8);
+        if (
+          ddCrc32 !== crc32 ||
+          ddCompressedSize !== compressedSize ||
+          ddUncompressedSize !== uncompressedSize
+        ) {
+          return makeRejected(
+            'CENTRAL_LOCAL_HEADER_MISMATCH',
+            `Unsigned Data Descriptor for "${name}" disagrees with Central Directory CRC-32 or sizes.`,
+            sizeBytes,
+            sha256,
+            'DOCX'
+          );
+        }
+        entrySpanEndOffset = dataEndOffset + 12;
+      }
     }
 
     entries.push({
@@ -1649,6 +1760,7 @@ function inspectDeepDocxStructure(
       localHeaderOffset,
       dataStartOffset,
       dataEndOffset,
+      entrySpanEndOffset,
       externalAttributes,
     });
 
@@ -1684,7 +1796,7 @@ function inspectDeepDocxStructure(
     const current = sortedByOffset[i];
     if (i > 0) {
       const prev = sortedByOffset[i - 1];
-      if (current.localHeaderOffset < prev.dataEndOffset) {
+      if (current.localHeaderOffset < prev.entrySpanEndOffset) {
         return makeRejected(
           'OVERLAPPING_OR_GAP_ENTRY_RANGES',
           `ZIP entries "${prev.name}" and "${current.name}" have overlapping byte ranges.`,
@@ -1693,7 +1805,7 @@ function inspectDeepDocxStructure(
           'DOCX'
         );
       }
-      if (current.localHeaderOffset !== prev.dataEndOffset) {
+      if (current.localHeaderOffset !== prev.entrySpanEndOffset) {
         return makeRejected(
           'OVERLAPPING_OR_GAP_ENTRY_RANGES',
           `Unindexed byte gap detected between ZIP entries "${prev.name}" and "${current.name}".`,
@@ -1706,7 +1818,7 @@ function inspectDeepDocxStructure(
   }
 
   const lastEntry = sortedByOffset[sortedByOffset.length - 1];
-  if (lastEntry.dataEndOffset !== cdOffset) {
+  if (lastEntry.entrySpanEndOffset !== cdOffset) {
     return makeRejected(
       'OVERLAPPING_OR_GAP_ENTRY_RANGES',
       `Unindexed byte gap detected between last ZIP entry "${lastEntry.name}" and Central Directory.`,
@@ -2032,16 +2144,6 @@ function inspectDeepDocxStructure(
       }
       seenRelIds.add(relId);
 
-      if (relTargetMode.length > 0 && relTargetMode.toLowerCase() !== 'internal') {
-        return makeRejected(
-          'EXTERNAL_OR_UNSAFE_RELATIONSHIP_FORBIDDEN',
-          `External relationship (TargetMode="${relTargetMode}", Target="${relTarget}") in "${entry.name}" is forbidden.`,
-          sizeBytes,
-          sha256,
-          'DOCX'
-        );
-      }
-
       const lowerRelType = relType.toLowerCase();
       if (
         lowerRelType.includes('vbaproject') ||
@@ -2080,6 +2182,34 @@ function inspectDeepDocxStructure(
         return makeRejected(
           'EXTERNAL_OR_UNSAFE_RELATIONSHIP_FORBIDDEN',
           `Forbidden template/subDocument/frame relationship Type "${relType}" in "${entry.name}".`,
+          sizeBytes,
+          sha256,
+          'DOCX'
+        );
+      }
+
+      const lowerTargetMode = relTargetMode.toLowerCase();
+      if (lowerTargetMode === 'external') {
+        if (
+          relType === OOXML_HYPERLINK_REL_TYPE &&
+          isSafeExternalDocxHyperlinkTarget(relTarget)
+        ) {
+          // Narrowly allow verified static http(s)/mailto hyperlinks only
+          continue;
+        }
+        return makeRejected(
+          'EXTERNAL_OR_UNSAFE_RELATIONSHIP_FORBIDDEN',
+          `External relationship (TargetMode="${relTargetMode}", Type="${relType}", Target="${relTarget}") in "${entry.name}" is forbidden.`,
+          sizeBytes,
+          sha256,
+          'DOCX'
+        );
+      }
+
+      if (lowerTargetMode.length > 0 && lowerTargetMode !== 'internal') {
+        return makeRejected(
+          'EXTERNAL_OR_UNSAFE_RELATIONSHIP_FORBIDDEN',
+          `Unsupported relationship TargetMode="${relTargetMode}" in "${entry.name}".`,
           sizeBytes,
           sha256,
           'DOCX'

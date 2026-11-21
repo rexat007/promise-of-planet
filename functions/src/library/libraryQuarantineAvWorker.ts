@@ -1034,6 +1034,17 @@ export async function executeLibraryQuarantineAvWorkerTask(
         timeoutMs: pdfTimeoutMs,
       });
       if (!pdfCheck.ok) {
+        console.error(
+          JSON.stringify({
+            event: 'LIBRARY_QUARANTINE_PDF_INSPECTION_FAILED',
+            requestId: parsedId.requestId,
+            receiptId:
+              claimResult.eligibleChain.chainSnapshot.receiptEnvelope.receipt
+                .receiptId,
+            failureReasonCode: pdfCheck.failureReasonCode,
+            findingCode: pdfCheck.findingCode ?? 'PDF_FINDING_MALFORMED_STRUCTURE',
+          })
+        );
         return await recordFailClosed(pdfCheck.failureReasonCode, {
           engineName: 'ClamAV',
           engineVersion: sigCheck.engineVersion,

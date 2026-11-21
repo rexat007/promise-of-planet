@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { JournalisticType } from '../shared/contentContract';
 import type { 
   NewsRepository, 
@@ -20,6 +21,7 @@ import {
   type EditorialImageAssetVariantKey,
 } from '../types/editorialImageAsset';
 import {
+  validateAssetId,
   validateEditorialImageAsset,
   validateEditorialImageAssetVariant,
   validateEditorialImageUsageScope,
@@ -64,6 +66,74 @@ export function isMalformedOrUrlRelatedVideoId(candidate: unknown): boolean {
   return !CANONICAL_RELATED_VIDEO_ID_REGEX.test(candidate);
 }
 
+export type EditorialImageLocationRole = 'cover' | 'inline_ar' | 'inline_en';
+
+export interface EditorialImageReferenceWithLocations {
+  readonly assetId: string;
+  readonly locations: readonly EditorialImageLocationRole[];
+}
+
+export type NewsOperationHttpErrorCode =
+  | 'failed-precondition'
+  | 'invalid-argument'
+  | 'permission-denied'
+  | 'not-found';
+
+export interface NewsEditorialImageErrorDetails {
+  readonly reasonCode: string;
+  readonly subReasonCode?: string;
+  readonly assetId?: string;
+  readonly locations?: readonly EditorialImageLocationRole[];
+  readonly articleId?: string;
+}
+
+export class NewsOperationError extends Error {
+  public readonly httpErrorCode: NewsOperationHttpErrorCode;
+  public readonly reasonCode: string;
+  public readonly details?: NewsEditorialImageErrorDetails;
+
+  constructor(
+    httpErrorCode: NewsOperationHttpErrorCode,
+    reasonCode: string,
+    message: string,
+    details?: NewsEditorialImageErrorDetails
+  ) {
+    super(redactSensitivePathsFromDiagnostic(message));
+    this.name = 'NewsOperationError';
+    this.httpErrorCode = httpErrorCode;
+    this.reasonCode = reasonCode;
+    this.details = details;
+  }
+}
+
+export const CREATE_DRAFT_IDEMPOTENCY_KEY_REGEX = /^[A-Za-z0-9_-]{16,96}$/;
+
+export function deriveDeterministicCreateDraftId(
+  actorUid: string,
+  createIdempotencyKey: string
+): string {
+  const digest = createHash('sha256')
+    .update(`pop-news-create-draft:v1:${actorUid}:${createIdempotencyKey}`)
+    .digest('hex')
+    .slice(0, 24);
+  return `news-idem-${digest}`;
+}
+
+export function extractManagedFeaturedImageAssetId(
+  featuredImage: unknown
+): string | null {
+  if (typeof featuredImage !== 'string') {
+    return null;
+  }
+  const trimmed = featuredImage.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return validateAssetId(trimmed, DEFAULT_ASSET_VALIDATION_LIMITS).valid
+    ? trimmed
+    : null;
+}
+
 function redactSensitivePathsFromDiagnostic(message: string): string {
   return message
     .replace(/editorial_images\/[^\s"';)]*/gi, '[REDACTED_STORAGE_PATH]')
@@ -73,22 +143,31 @@ function redactSensitivePathsFromDiagnostic(message: string): string {
 function describePublicationIneligibilityReason(
   asset: EditorialImageAssetMetadata,
   articleId: string
-): string {
+): { readonly subReasonCode: string; readonly message: string } {
   const assetId =
     typeof asset?.assetId === 'string' && asset.assetId.trim().length > 0
       ? asset.assetId
       : '<unknown>';
 
   if (asset.status !== 'active') {
-    return `[INACTIVE_ASSET_STATUS] Editorial image asset "${assetId}" referenced by article "${articleId}" has status "${String(asset.status)}"; only "active" assets are eligible for publication.`;
+    return {
+      subReasonCode: 'INACTIVE_ASSET_STATUS',
+      message: `[INACTIVE_ASSET_STATUS] Editorial image asset "${assetId}" referenced by article "${articleId}" has status "${String(asset.status)}"; only "active" assets are eligible for publication.`,
+    };
   }
 
   if (!asset.rights || typeof asset.rights !== 'object') {
-    return `[INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${articleId}" is missing a valid rights record.`;
+    return {
+      subReasonCode: 'INVALID_ASSET_RECORD',
+      message: `[INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${articleId}" is missing a valid rights record.`,
+    };
   }
 
   if (asset.rights.status !== 'Approved') {
-    return `[RIGHTS_STATUS_NOT_APPROVED] Editorial image asset "${assetId}" referenced by article "${articleId}" has rights status "${String(asset.rights.status)}"; only human-"Approved" assets are eligible for publication.`;
+    return {
+      subReasonCode: 'RIGHTS_STATUS_NOT_APPROVED',
+      message: `[RIGHTS_STATUS_NOT_APPROVED] Editorial image asset "${assetId}" referenced by article "${articleId}" has rights status "${String(asset.rights.status)}"; only human-"Approved" assets are eligible for publication.`,
+    };
   }
 
   const usageScope = asset.rights.usageScope;
@@ -105,18 +184,27 @@ function describePublicationIneligibilityReason(
       (!Array.isArray(usageScope.articleIds) ||
         !usageScope.articleIds.includes(articleId)))
   ) {
-    return `[USAGE_SCOPE_NOT_AUTHORIZED] Editorial image asset "${assetId}" does not have an approved usageScope authorizing publication in article "${articleId}".`;
+    return {
+      subReasonCode: 'USAGE_SCOPE_NOT_AUTHORIZED',
+      message: `[USAGE_SCOPE_NOT_AUTHORIZED] Editorial image asset "${assetId}" does not have an approved usageScope authorizing publication in article "${articleId}".`,
+    };
   }
 
   const variants = asset.variants as Record<string, unknown> | undefined;
   if (!variants || typeof variants !== 'object' || Array.isArray(variants)) {
-    return `[INVALID_CANONICAL_VARIANTS] Editorial image asset "${assetId}" referenced by article "${articleId}" is missing a valid canonical variants map.`;
+    return {
+      subReasonCode: 'INVALID_CANONICAL_VARIANTS',
+      message: `[INVALID_CANONICAL_VARIANTS] Editorial image asset "${assetId}" referenced by article "${articleId}" is missing a valid canonical variants map.`,
+    };
   }
 
   for (const requiredKey of REQUIRED_EDITORIAL_IMAGE_VARIANT_KEYS) {
     const candidateVariant = variants[requiredKey];
     if (!candidateVariant) {
-      return `[INVALID_CANONICAL_VARIANTS] Editorial image asset "${assetId}" referenced by article "${articleId}" is missing required canonical variant "${requiredKey}".`;
+      return {
+        subReasonCode: 'INVALID_CANONICAL_VARIANTS',
+        message: `[INVALID_CANONICAL_VARIANTS] Editorial image asset "${assetId}" referenced by article "${articleId}" is missing required canonical variant "${requiredKey}".`,
+      };
     }
     const variantCheck = validateEditorialImageAssetVariant(
       candidateVariant,
@@ -125,11 +213,17 @@ function describePublicationIneligibilityReason(
       assetId
     );
     if (!variantCheck.valid) {
-      return `[INVALID_CANONICAL_VARIANTS] Editorial image asset "${assetId}" referenced by article "${articleId}" has invalid canonical variant "${requiredKey}".`;
+      return {
+        subReasonCode: 'INVALID_CANONICAL_VARIANTS',
+        message: `[INVALID_CANONICAL_VARIANTS] Editorial image asset "${assetId}" referenced by article "${articleId}" has invalid canonical variant "${requiredKey}".`,
+      };
     }
   }
 
-  return `[INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${articleId}" failed canonical public eligibility validation.`;
+  return {
+    subReasonCode: 'INVALID_ASSET_RECORD',
+    message: `[INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${articleId}" failed canonical public eligibility validation.`,
+  };
 }
 
 export const REQUIRED_EDITORIAL_IMAGE_VARIANT_KEYS: readonly EditorialImageAssetVariantKey[] =
@@ -215,8 +309,61 @@ export function collectUniqueEditorialImageAssetIds(
   return Array.from(combined);
 }
 
+/**
+ * Collects every canonical managed editorial image `assetId` referenced by an
+ * article across `featuredImage` (ignoring legacy safe HTTP(S) cover URLs),
+ * `richBodyAr`, and `richBodyEn`, recording all role locations per asset.
+ */
+export function collectArticleEditorialImageReferences(article: {
+  readonly featuredImage?: unknown;
+  readonly richBodyAr?: unknown;
+  readonly richBodyEn?: unknown;
+}): EditorialImageReferenceWithLocations[] {
+  const locationMap = new Map<string, EditorialImageLocationRole[]>();
+  const addRef = (assetId: string, role: EditorialImageLocationRole) => {
+    const existing = locationMap.get(assetId);
+    if (existing) {
+      if (!existing.includes(role)) {
+        existing.push(role);
+      }
+    } else {
+      locationMap.set(assetId, [role]);
+    }
+  };
+
+  const coverAssetId = extractManagedFeaturedImageAssetId(article.featuredImage);
+  if (coverAssetId) {
+    addRef(coverAssetId, 'cover');
+  }
+
+  for (const id of extractEditorialImageAssetIdsFromRichDocument(article.richBodyAr)) {
+    addRef(id, 'inline_ar');
+  }
+  for (const id of extractEditorialImageAssetIdsFromRichDocument(article.richBodyEn)) {
+    addRef(id, 'inline_en');
+  }
+
+  return Array.from(locationMap.entries()).map(([assetId, locations]) => ({
+    assetId,
+    locations,
+  }));
+}
+
+export function collectAllArticleEditorialImageAssetIds(
+  featuredImage: unknown,
+  richBodyAr: unknown,
+  richBodyEn: unknown
+): string[] {
+  return collectArticleEditorialImageReferences({
+    featuredImage,
+    richBodyAr,
+    richBodyEn,
+  }).map((entry) => entry.assetId);
+}
+
 export interface SaveNewsInput {
   id?: string;
+  createIdempotencyKey?: string;
   titleAr: string;
   titleEn?: string;
   kickerAr?: string;
@@ -366,19 +513,34 @@ export class NewsApplicationService {
    * `'PendingReview' | 'Approved'`, and all 5 canonical variants present).
    */
   private async verifyNewlyIntroducedEditorialImageAssets(
-    newAssetIds: readonly string[]
+    newAssetIds: readonly string[],
+    locationsByAssetId?: ReadonlyMap<string, readonly EditorialImageLocationRole[]>
   ): Promise<void> {
     if (newAssetIds.length === 0) {
       return;
     }
 
+    const getLocations = (
+      assetId: string
+    ): readonly EditorialImageLocationRole[] | undefined =>
+      locationsByAssetId?.get(assetId);
+
     if (!this.assetRepo) {
-      throw new Error(
-        `UNVERIFIED_EDITORIAL_IMAGE_ASSET_REPO_MISSING: EditorialImageAssetRepository is required to verify newly introduced editorial image asset "${newAssetIds[0]}".`
+      const firstId = newAssetIds[0];
+      throw new NewsOperationError(
+        'failed-precondition',
+        'UNVERIFIED_EDITORIAL_IMAGE_ASSET_REPO_MISSING',
+        `UNVERIFIED_EDITORIAL_IMAGE_ASSET_REPO_MISSING: EditorialImageAssetRepository is required to verify newly introduced editorial image asset "${firstId}".`,
+        {
+          reasonCode: 'UNVERIFIED_EDITORIAL_IMAGE_ASSET_REPO_MISSING',
+          assetId: firstId,
+          locations: getLocations(firstId),
+        }
       );
     }
 
     for (const assetId of newAssetIds) {
+      const locations = getLocations(assetId);
       let readResult;
       try {
         readResult = await this.assetRepo.getById(assetId);
@@ -387,16 +549,30 @@ export class NewsApplicationService {
           err instanceof EditorialImageAssetRepositoryError &&
           err.code === 'INVALID_ASSET'
         ) {
-          throw new Error(
-            `INVALID_EDITORIAL_IMAGE_ASSET_RECORD: Editorial image asset "${assetId}" has an invalid or corrupted repository record: ${err.message}`
+          throw new NewsOperationError(
+            'failed-precondition',
+            'INVALID_EDITORIAL_IMAGE_ASSET_RECORD',
+            `INVALID_EDITORIAL_IMAGE_ASSET_RECORD: Editorial image asset "${assetId}" has an invalid or corrupted repository record: ${redactSensitivePathsFromDiagnostic(err.message)}`,
+            {
+              reasonCode: 'INVALID_EDITORIAL_IMAGE_ASSET_RECORD',
+              assetId,
+              locations,
+            }
           );
         }
         const message =
           err instanceof Error
-            ? err.message
+            ? redactSensitivePathsFromDiagnostic(err.message)
             : 'Unknown asset repository error.';
-        throw new Error(
-          `EDITORIAL_IMAGE_ASSET_REPOSITORY_ERROR: Failed to read editorial image asset "${assetId}" from repository: ${message}`
+        throw new NewsOperationError(
+          'failed-precondition',
+          'EDITORIAL_IMAGE_ASSET_REPOSITORY_ERROR',
+          `EDITORIAL_IMAGE_ASSET_REPOSITORY_ERROR: Failed to read editorial image asset "${assetId}" from repository: ${message}`,
+          {
+            reasonCode: 'EDITORIAL_IMAGE_ASSET_REPOSITORY_ERROR',
+            assetId,
+            locations,
+          }
         );
       }
 
@@ -406,8 +582,15 @@ export class NewsApplicationService {
         readResult.status !== 'FOUND' ||
         !readResult.asset
       ) {
-        throw new Error(
-          `UNVERIFIED_EDITORIAL_IMAGE_ASSET_NOT_FOUND: Editorial image asset "${assetId}" does not exist in the canonical asset repository.`
+        throw new NewsOperationError(
+          'failed-precondition',
+          'UNVERIFIED_EDITORIAL_IMAGE_ASSET_NOT_FOUND',
+          `UNVERIFIED_EDITORIAL_IMAGE_ASSET_NOT_FOUND: Editorial image asset "${assetId}" does not exist in the canonical asset repository.`,
+          {
+            reasonCode: 'UNVERIFIED_EDITORIAL_IMAGE_ASSET_NOT_FOUND',
+            assetId,
+            locations,
+          }
         );
       }
 
@@ -419,22 +602,43 @@ export class NewsApplicationService {
         Array.isArray(asset) ||
         asset.assetId !== assetId
       ) {
-        throw new Error(
-          `INVALID_EDITORIAL_IMAGE_ASSET_RECORD: Editorial image asset "${assetId}" has a malformed or mismatched asset envelope.`
+        throw new NewsOperationError(
+          'failed-precondition',
+          'INVALID_EDITORIAL_IMAGE_ASSET_RECORD',
+          `INVALID_EDITORIAL_IMAGE_ASSET_RECORD: Editorial image asset "${assetId}" has a malformed or mismatched asset envelope.`,
+          {
+            reasonCode: 'INVALID_EDITORIAL_IMAGE_ASSET_RECORD',
+            assetId,
+            locations,
+          }
         );
       }
 
       // Check lifecycle and rights status before full variant inspection so ineligible lifecycle/rights states report deterministic status codes
       if (asset.status !== 'active') {
-        throw new Error(
-          `INELIGIBLE_EDITORIAL_IMAGE_ASSET_STATUS: Editorial image asset "${assetId}" has lifecycle status "${String(asset.status)}"; only "active" assets may be newly linked to drafts.`
+        throw new NewsOperationError(
+          'failed-precondition',
+          'INELIGIBLE_EDITORIAL_IMAGE_ASSET_STATUS',
+          `INELIGIBLE_EDITORIAL_IMAGE_ASSET_STATUS: Editorial image asset "${assetId}" has lifecycle status "${String(asset.status)}"; only "active" assets may be newly linked to drafts.`,
+          {
+            reasonCode: 'INELIGIBLE_EDITORIAL_IMAGE_ASSET_STATUS',
+            assetId,
+            locations,
+          }
         );
       }
 
       const rightsStatus = asset.rights?.status;
       if (rightsStatus !== 'PendingReview' && rightsStatus !== 'Approved') {
-        throw new Error(
-          `INELIGIBLE_EDITORIAL_IMAGE_ASSET_RIGHTS: Editorial image asset "${assetId}" has rights status "${String(rightsStatus)}"; only "PendingReview" or "Approved" assets may be newly linked to private drafts.`
+        throw new NewsOperationError(
+          'failed-precondition',
+          'INELIGIBLE_EDITORIAL_IMAGE_ASSET_RIGHTS',
+          `INELIGIBLE_EDITORIAL_IMAGE_ASSET_RIGHTS: Editorial image asset "${assetId}" has rights status "${String(rightsStatus)}"; only "PendingReview" or "Approved" assets may be newly linked to private drafts.`,
+          {
+            reasonCode: 'INELIGIBLE_EDITORIAL_IMAGE_ASSET_RIGHTS',
+            assetId,
+            locations,
+          }
         );
       }
 
@@ -443,16 +647,30 @@ export class NewsApplicationService {
         | Record<string, unknown>
         | undefined;
       if (!variants || typeof variants !== 'object' || Array.isArray(variants)) {
-        throw new Error(
-          `INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS: Editorial image asset "${assetId}" is missing a valid variants map.`
+        throw new NewsOperationError(
+          'failed-precondition',
+          'INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS',
+          `INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS: Editorial image asset "${assetId}" is missing a valid variants map.`,
+          {
+            reasonCode: 'INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS',
+            assetId,
+            locations,
+          }
         );
       }
 
       for (const requiredKey of REQUIRED_EDITORIAL_IMAGE_VARIANT_KEYS) {
         const candidateVariant = variants[requiredKey];
         if (!candidateVariant) {
-          throw new Error(
-            `INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS: Editorial image asset "${assetId}" is missing required canonical variant "${requiredKey}".`
+          throw new NewsOperationError(
+            'failed-precondition',
+            'INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS',
+            `INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS: Editorial image asset "${assetId}" is missing required canonical variant "${requiredKey}".`,
+            {
+              reasonCode: 'INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS',
+              assetId,
+              locations,
+            }
           );
         }
         const variantCheck = validateEditorialImageAssetVariant(
@@ -462,8 +680,15 @@ export class NewsApplicationService {
           assetId
         );
         if (!variantCheck.valid) {
-          throw new Error(
-            `INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS: Editorial image asset "${assetId}" has invalid variant "${requiredKey}": ${variantCheck.errors.join('; ')}`
+          throw new NewsOperationError(
+            'failed-precondition',
+            'INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS',
+            `INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS: Editorial image asset "${assetId}" has invalid variant "${requiredKey}": ${redactSensitivePathsFromDiagnostic(variantCheck.errors.join('; '))}`,
+            {
+              reasonCode: 'INELIGIBLE_EDITORIAL_IMAGE_ASSET_VARIANTS',
+              assetId,
+              locations,
+            }
           );
         }
       }
@@ -473,8 +698,15 @@ export class NewsApplicationService {
         DEFAULT_ASSET_VALIDATION_LIMITS
       );
       if (!fullAssetCheck.valid) {
-        throw new Error(
-          `INVALID_EDITORIAL_IMAGE_ASSET_RECORD: Editorial image asset "${assetId}" failed canonical contract validation: ${fullAssetCheck.errors.join('; ')}`
+        throw new NewsOperationError(
+          'failed-precondition',
+          'INVALID_EDITORIAL_IMAGE_ASSET_RECORD',
+          `INVALID_EDITORIAL_IMAGE_ASSET_RECORD: Editorial image asset "${assetId}" failed canonical contract validation: ${redactSensitivePathsFromDiagnostic(fullAssetCheck.errors.join('; '))}`,
+          {
+            reasonCode: 'INVALID_EDITORIAL_IMAGE_ASSET_RECORD',
+            assetId,
+            locations,
+          }
         );
       }
     }
@@ -492,12 +724,44 @@ export class NewsApplicationService {
    * Creates a new draft article.
    */
   async createDraft(input: SaveNewsInput, actor: ActorContext): Promise<NewsItemBackend> {
+    let deterministicId: string | null = null;
+    if (input.createIdempotencyKey !== undefined) {
+      if (
+        typeof input.createIdempotencyKey !== 'string' ||
+        !CREATE_DRAFT_IDEMPOTENCY_KEY_REGEX.test(input.createIdempotencyKey.trim())
+      ) {
+        throw new NewsOperationError(
+          'invalid-argument',
+          'VALIDATION_ERROR',
+          'VALIDATION_ERROR: createIdempotencyKey must be a 16-96 character alphanumeric/hyphen/underscore token.'
+        );
+      }
+      if (!actor?.uid || typeof actor.uid !== 'string' || actor.uid.trim().length === 0) {
+        throw new NewsOperationError(
+          'permission-denied',
+          'PERMISSION_DENIED',
+          'PERMISSION_DENIED: Authenticated actor UID is required for idempotent draft creation.'
+        );
+      }
+      deterministicId = deriveDeterministicCreateDraftId(
+        actor.uid.trim(),
+        input.createIdempotencyKey.trim()
+      );
+      const existingByKey = await this.repo.getById(deterministicId);
+      if (existingByKey) {
+        return existingByKey;
+      }
+    }
+
     // Canonical environmental category is strictly required for new drafts
     NewsValidator.validateCanonicalCategory(input.category);
 
     const now = new Date().toISOString();
-    // Server-authoritative ID generation: client-supplied document IDs are never accepted as authoritative
-    const id = `news-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    // Server-authoritative ID generation: client-supplied document IDs are never accepted as authoritative.
+    // When a validated createIdempotencyKey is supplied, the server deterministically derives an actor-scoped ID.
+    const id =
+      deterministicId ??
+      `news-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
     // Rich validation and plain text derivation
     let bodyAr = input.bodyAr || '';
@@ -567,11 +831,31 @@ export class NewsApplicationService {
 
     NewsValidator.validateNewsPayload(item);
 
-    const newAssetIds = collectUniqueEditorialImageAssetIds(
-      item.richBodyAr,
-      item.richBodyEn
+    const imageRefs = collectArticleEditorialImageReferences(item);
+    const locationsByAssetId = new Map<string, readonly EditorialImageLocationRole[]>(
+      imageRefs.map((ref) => [ref.assetId, ref.locations])
     );
-    await this.verifyNewlyIntroducedEditorialImageAssets(newAssetIds);
+    await this.verifyNewlyIntroducedEditorialImageAssets(
+      imageRefs.map((ref) => ref.assetId),
+      locationsByAssetId
+    );
+
+    if (deterministicId && this.repo instanceof FirestoreNewsRepository) {
+      const db = getFirestore();
+      const docRef = db.collection(FirestoreNewsRepository.COLLECTION).doc(deterministicId);
+      const committed = await db.runTransaction(async (tx) => {
+        const snap = await tx.get(docRef);
+        if (snap.exists) {
+          const data = snap.data();
+          if (data) {
+            return data as NewsItemBackend;
+          }
+        }
+        tx.create(docRef, sanitizeForFirestore({ ...item }));
+        return item;
+      });
+      return committed;
+    }
 
     await this.repo.save(item);
     return item;
@@ -674,20 +958,22 @@ export class NewsApplicationService {
     NewsValidator.validateNewsPayload(updated);
 
     const existingPersistedAssetIds = new Set(
-      collectUniqueEditorialImageAssetIds(
+      collectAllArticleEditorialImageAssetIds(
+        existing.featuredImage,
         existing.richBodyAr,
         existing.richBodyEn
       )
     );
-    const effectiveNextAssetIds = collectUniqueEditorialImageAssetIds(
-      updated.richBodyAr,
-      updated.richBodyEn
+    const effectiveNextRefs = collectArticleEditorialImageReferences(updated);
+    const locationsByAssetId = new Map<string, readonly EditorialImageLocationRole[]>(
+      effectiveNextRefs.map((ref) => [ref.assetId, ref.locations])
     );
-    const newlyIntroducedAssetIds = effectiveNextAssetIds.filter(
-      (assetId) => !existingPersistedAssetIds.has(assetId)
-    );
+    const newlyIntroducedAssetIds = effectiveNextRefs
+      .map((ref) => ref.assetId)
+      .filter((assetId) => !existingPersistedAssetIds.has(assetId));
     await this.verifyNewlyIntroducedEditorialImageAssets(
-      newlyIntroducedAssetIds
+      newlyIntroducedAssetIds,
+      locationsByAssetId
     );
 
     await this.repo.save(updated);
@@ -695,31 +981,41 @@ export class NewsApplicationService {
   }
 
   /**
-   * Authoritatively verifies that every V2 `editorialImage` asset referenced by
-   * the persisted article documents (`richBodyAr` and `richBodyEn`) exists in
-   * `EditorialImageAssetRepository` and satisfies the canonical public article
+   * Authoritatively verifies that every managed canonical editorial image asset
+   * referenced by the persisted article (`featuredImage`, `richBodyAr`, and `richBodyEn`)
+   * exists in `EditorialImageAssetRepository` and satisfies the canonical public article
    * rights eligibility contract (`isEditorialImageAssetEligibleForPublicArticle`)
    * before the article is allowed to transition to `Published`.
+   * Legacy safe HTTP(S) cover URLs are distinguished from canonical assetIds and preserved.
    */
   private async verifyEditorialImageAssetsForPublication(
     article: NewsItemBackend
   ): Promise<void> {
-    const referencedAssetIds = collectUniqueEditorialImageAssetIds(
-      article.richBodyAr,
-      article.richBodyEn
-    );
+    const referencedAssets = collectArticleEditorialImageReferences(article);
 
-    if (referencedAssetIds.length === 0) {
+    if (referencedAssets.length === 0) {
       return;
     }
 
     if (!this.assetRepo) {
-      throw new Error(
-        `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [ASSET_REPO_MISSING] EditorialImageAssetRepository is required to verify publication eligibility for editorial image asset "${referencedAssetIds[0]}" on article "${article.id}".`
+      const firstRef = referencedAssets[0];
+      throw new NewsOperationError(
+        'failed-precondition',
+        EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+        `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [ASSET_REPO_MISSING] EditorialImageAssetRepository is required to verify publication eligibility for editorial image asset "${firstRef.assetId}" (${firstRef.locations.join(',')}) on article "${article.id}".`,
+        {
+          reasonCode: EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+          subReasonCode: 'ASSET_REPO_MISSING',
+          assetId: firstRef.assetId,
+          locations: firstRef.locations,
+          articleId: article.id,
+        }
       );
     }
 
-    for (const assetId of referencedAssetIds) {
+    for (const ref of referencedAssets) {
+      const { assetId, locations } = ref;
+      const roleLabel = locations.join(',');
       let readResult;
       try {
         readResult = await this.assetRepo.getById(assetId);
@@ -728,16 +1024,34 @@ export class NewsApplicationService {
           err instanceof EditorialImageAssetRepositoryError &&
           err.code === 'INVALID_ASSET'
         ) {
-          throw new Error(
-            `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${article.id}" has an invalid or corrupted repository record.`
+          throw new NewsOperationError(
+            'failed-precondition',
+            EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+            `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [INVALID_ASSET_RECORD] Editorial image asset "${assetId}" (${roleLabel}) referenced by article "${article.id}" has an invalid or corrupted repository record.`,
+            {
+              reasonCode: EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+              subReasonCode: 'INVALID_ASSET_RECORD',
+              assetId,
+              locations,
+              articleId: article.id,
+            }
           );
         }
         const safeDetail =
           err instanceof Error
             ? redactSensitivePathsFromDiagnostic(err.message)
             : 'Unknown asset repository error.';
-        throw new Error(
-          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [ASSET_REPOSITORY_ERROR] Failed to read editorial image asset "${assetId}" for article "${article.id}": ${safeDetail}`
+        throw new NewsOperationError(
+          'failed-precondition',
+          EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [ASSET_REPOSITORY_ERROR] Failed to read editorial image asset "${assetId}" (${roleLabel}) for article "${article.id}": ${safeDetail}`,
+          {
+            reasonCode: EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+            subReasonCode: 'ASSET_REPOSITORY_ERROR',
+            assetId,
+            locations,
+            articleId: article.id,
+          }
         );
       }
 
@@ -747,8 +1061,17 @@ export class NewsApplicationService {
         readResult.status !== 'FOUND' ||
         !readResult.asset
       ) {
-        throw new Error(
-          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [ASSET_NOT_FOUND] Editorial image asset "${assetId}" referenced by article "${article.id}" does not exist in the canonical asset repository.`
+        throw new NewsOperationError(
+          'failed-precondition',
+          EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [ASSET_NOT_FOUND] Editorial image asset "${assetId}" (${roleLabel}) referenced by article "${article.id}" does not exist in the canonical asset repository.`,
+          {
+            reasonCode: EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+            subReasonCode: 'ASSET_NOT_FOUND',
+            assetId,
+            locations,
+            articleId: article.id,
+          }
         );
       }
 
@@ -759,15 +1082,33 @@ export class NewsApplicationService {
         Array.isArray(asset) ||
         asset.assetId !== assetId
       ) {
-        throw new Error(
-          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [INVALID_ASSET_RECORD] Editorial image asset "${assetId}" referenced by article "${article.id}" has a malformed or mismatched asset envelope.`
+        throw new NewsOperationError(
+          'failed-precondition',
+          EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: [INVALID_ASSET_RECORD] Editorial image asset "${assetId}" (${roleLabel}) referenced by article "${article.id}" has a malformed or mismatched asset envelope.`,
+          {
+            reasonCode: EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+            subReasonCode: 'INVALID_ASSET_RECORD',
+            assetId,
+            locations,
+            articleId: article.id,
+          }
         );
       }
 
       if (!isEditorialImageAssetEligibleForPublicArticle(asset, article.id)) {
         const reason = describePublicationIneligibilityReason(asset, article.id);
-        throw new Error(
-          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: ${reason}`
+        throw new NewsOperationError(
+          'failed-precondition',
+          EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+          `${EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE}: ${reason.message} [roles=${roleLabel}]`,
+          {
+            reasonCode: EDITORIAL_IMAGE_PUBLICATION_RIGHTS_NOT_ELIGIBLE_CODE,
+            subReasonCode: reason.subReasonCode,
+            assetId,
+            locations,
+            articleId: article.id,
+          }
         );
       }
     }

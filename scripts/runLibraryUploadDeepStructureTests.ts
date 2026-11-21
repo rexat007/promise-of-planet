@@ -60,6 +60,13 @@ interface SyntheticZipEntrySpec {
   readonly cdExtraField?: Buffer;
   readonly lfhExtraField?: Buffer;
   readonly rawCompressedBytesOverride?: Buffer;
+  readonly dataDescriptor?: {
+    readonly signed?: boolean;
+    readonly overrideCrc32?: number;
+    readonly overrideCompressedSize?: number;
+    readonly overrideUncompressedSize?: number;
+    readonly rawBytesOverride?: Buffer;
+  };
 }
 
 interface SyntheticZipArchiveOptions {
@@ -159,11 +166,35 @@ function buildSyntheticZipBuffer(
     lfh.writeUInt16LE(lfhNameBuf.length, 26);
     lfh.writeUInt16LE(lfhExtraBuf.length, 28);
 
+    let dataDescBuf = Buffer.alloc(0);
+    if (spec.dataDescriptor) {
+      if (spec.dataDescriptor.rawBytesOverride) {
+        dataDescBuf = spec.dataDescriptor.rawBytesOverride;
+      } else {
+        const ddCrc = spec.dataDescriptor.overrideCrc32 ?? crc;
+        const ddComp = spec.dataDescriptor.overrideCompressedSize ?? compSize;
+        const ddUncomp = spec.dataDescriptor.overrideUncompressedSize ?? uncompSize;
+        if (spec.dataDescriptor.signed !== false) {
+          dataDescBuf = Buffer.alloc(16);
+          dataDescBuf.writeUInt32LE(0x08074b50, 0);
+          dataDescBuf.writeUInt32LE(ddCrc, 4);
+          dataDescBuf.writeUInt32LE(ddComp, 8);
+          dataDescBuf.writeUInt32LE(ddUncomp, 12);
+        } else {
+          dataDescBuf = Buffer.alloc(12);
+          dataDescBuf.writeUInt32LE(ddCrc, 0);
+          dataDescBuf.writeUInt32LE(ddComp, 4);
+          dataDescBuf.writeUInt32LE(ddUncomp, 8);
+        }
+      }
+    }
+
     const localEntryBuf = Buffer.concat([
       lfh,
       lfhNameBuf,
       lfhExtraBuf,
       compressedPayload,
+      dataDescBuf,
     ]);
     localChunks.push(localEntryBuf);
 
@@ -608,21 +639,38 @@ async function runTests(): Promise<void> {
       'Encrypted ZIP entry must be rejected with ENCRYPTED_ARCHIVE_FORBIDDEN'
     );
 
-    // 6b. Streaming data descriptor (flag bit 3 = 0x0008)
+    // 6b. Malformed streaming data descriptor (flag bit 3 = 0x0008 without zeroed LFH / valid descriptor) & compressed patched data (bit 5 = 0x0020)
     const streamingZip = buildSyntheticZipBuffer([
       { name: '[Content_Types].xml', content: CANONICAL_CONTENT_TYPES_XML, flags: 0x0008 },
       { name: '_rels/.rels', content: CANONICAL_ROOT_RELS_XML },
       { name: 'word/document.xml', content: CANONICAL_WORD_DOCUMENT_XML },
     ]);
     const streamingRes = inspectLibraryUploadDeepStructure({
-      originalFilename: 'streaming-dd.docx',
+      originalFilename: 'streaming-dd-malformed.docx',
       claimedMimeType: CANONICAL_DOCX_MIME_TYPE,
       bytes: streamingZip,
     });
     assert(
       streamingRes.status === 'REJECTED' &&
-        streamingRes.reasonCode === 'DATA_DESCRIPTOR_STREAMING_UNSUPPORTED',
-      'Streaming data descriptor flag must be rejected with DATA_DESCRIPTOR_STREAMING_UNSUPPORTED'
+        (streamingRes.reasonCode === 'CENTRAL_LOCAL_HEADER_MISMATCH' ||
+          streamingRes.reasonCode === 'DATA_DESCRIPTOR_STREAMING_UNSUPPORTED'),
+      'Malformed bit-3 data descriptor without zeroed LFH/valid descriptor must be rejected'
+    );
+
+    const patchedDataZip = buildSyntheticZipBuffer([
+      { name: '[Content_Types].xml', content: CANONICAL_CONTENT_TYPES_XML, flags: 0x0020 },
+      { name: '_rels/.rels', content: CANONICAL_ROOT_RELS_XML },
+      { name: 'word/document.xml', content: CANONICAL_WORD_DOCUMENT_XML },
+    ]);
+    const patchedDataRes = inspectLibraryUploadDeepStructure({
+      originalFilename: 'patched-data.docx',
+      claimedMimeType: CANONICAL_DOCX_MIME_TYPE,
+      bytes: patchedDataZip,
+    });
+    assert(
+      patchedDataRes.status === 'REJECTED' &&
+        patchedDataRes.reasonCode === 'DATA_DESCRIPTOR_STREAMING_UNSUPPORTED',
+      'Compressed patched data flag (bit 5) must be rejected with DATA_DESCRIPTOR_STREAMING_UNSUPPORTED'
     );
 
     // 6c. ZIP64 extra field (headerId 0x0001)
@@ -896,11 +944,11 @@ async function runTests(): Promise<void> {
       '<o:OLEObject> in word/document.xml must be rejected with ACTIVEX_OR_OLE_OBJECT_FORBIDDEN'
     );
 
-    // 9d. External relationship (TargetMode="External" / remote URL) in word/_rels/document.xml.rels
+    // 9d. External non-hyperlink relationship (e.g. attachedTemplate TargetMode="External") in word/_rels/document.xml.rels
     const externalRelRels =
       '<?xml version="1.0" encoding="UTF-8"?>' +
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-      '<Relationship Id="rIdExt" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://evil.example.org/payload" TargetMode="External"/>' +
+      '<Relationship Id="rIdExt" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="https://evil.example.org/payload.dotm" TargetMode="External"/>' +
       '</Relationships>';
     const externalRelZip = buildSyntheticZipBuffer([
       { name: '[Content_Types].xml', content: CANONICAL_CONTENT_TYPES_XML },
@@ -910,14 +958,14 @@ async function runTests(): Promise<void> {
       { name: 'word/_rels/document.xml.rels', content: externalRelRels },
     ]);
     const externalRelRes = inspectLibraryUploadDeepStructure({
-      originalFilename: 'external-rel.docx',
+      originalFilename: 'external-template-rel.docx',
       claimedMimeType: CANONICAL_DOCX_MIME_TYPE,
       bytes: externalRelZip,
     });
     assert(
       externalRelRes.status === 'REJECTED' &&
         externalRelRes.reasonCode === 'EXTERNAL_OR_UNSAFE_RELATIONSHIP_FORBIDDEN',
-      'TargetMode="External" relationship must be rejected with EXTERNAL_OR_UNSAFE_RELATIONSHIP_FORBIDDEN'
+      'External attachedTemplate relationship must be rejected with EXTERNAL_OR_UNSAFE_RELATIONSHIP_FORBIDDEN'
     );
 
     // 9e. External URI Target without TargetMode="External" (e.g. file:// or \\UNC)
@@ -1167,8 +1215,8 @@ async function runTests(): Promise<void> {
       ['functions/src/library/libraryUploadBinaryAdmission.ts', 'c479007641d799afb145436bf91e661a7c2d5611'],
       ['scripts/runLibraryUploadBinaryAdmissionTests.ts', 'daaaeee64e31dcbd0d9ef126769875829a6f75a5'],
       ['functions/src/shared/libraryContract.ts', 'cfb0849c0418ba7b075f7de49c3debe668adc724'],
-      ['functions/src/library/libraryApplicationService.ts', '32b54a8946f3749c18b21ab7f4d0fb4c21b2ebcf'],
-      ['functions/src/library/libraryAdminHandlers.ts', 'e8711ca2c4430fa4ea53d1e5c1005890ef33a479'],
+      ['functions/src/library/libraryApplicationService.ts', '03ad42b565cdbb22fba37d4df521e4d993a285e1'],
+      ['functions/src/library/libraryAdminHandlers.ts', 'f2af9cc6789c6161b57464afcae9e2551dd85fd6'],
       ['functions/src/news/editorialBinaryInspector.ts', '529d035c0d1fa13347168303de54d1ac0a815a0f'],
     ];
 
@@ -1179,6 +1227,209 @@ async function runTests(): Promise<void> {
         `${filePath} Git blob SHA-1 must remain ${expectedHash} (got ${actualHash})`
       );
     }
+  });
+
+  await test('14. Narrow DOCX external hyperlink allowlist accepts https/http/mailto hyperlinks and rejects unsafe schemes & external non-hyperlink relationships', () => {
+    const safeHyperlinkRels =
+      '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+      '<Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://www.unep.org/resources/report-2026" TargetMode="External"/>' +
+      '<Relationship Id="rIdH2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="http://example.org/archive" TargetMode="External"/>' +
+      '<Relationship Id="rIdH3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="mailto:library@promiseofplanet.org" TargetMode="External"/>' +
+      '</Relationships>';
+
+    const safeHyperlinkDocx = buildSyntheticZipBuffer([
+      { name: '[Content_Types].xml', content: CANONICAL_CONTENT_TYPES_XML },
+      { name: '_rels/.rels', content: CANONICAL_ROOT_RELS_XML },
+      { name: 'word/document.xml', content: CANONICAL_WORD_DOCUMENT_XML },
+      { name: 'word/styles.xml', content: CANONICAL_WORD_STYLES_XML },
+      { name: 'word/_rels/document.xml.rels', content: safeHyperlinkRels },
+    ]);
+    const safeRes = inspectLibraryUploadDeepStructure({
+      originalFilename: 'report-with-citations.docx',
+      claimedMimeType: CANONICAL_DOCX_MIME_TYPE,
+      bytes: safeHyperlinkDocx,
+    });
+    assert(
+      safeRes.status === 'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION',
+      `Safe external https/http/mailto hyperlinks must pass (got ${safeRes.status})`
+    );
+
+    const rejectedExternalCases: ReadonlyArray<{ readonly label: string; readonly type: string; readonly target: string }> = [
+      {
+        label: 'javascript hyperlink',
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
+        target: 'javascript:alert(1)',
+      },
+      {
+        label: 'file hyperlink',
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
+        target: 'file:///etc/passwd',
+      },
+      {
+        label: 'UNC path hyperlink',
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
+        target: '\\\\fileserver\\share\\doc.docx',
+      },
+      {
+        label: 'credentials in https hyperlink',
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
+        target: 'https://user:pass@example.org/secret',
+      },
+      {
+        label: 'external subDocument',
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/subDocument',
+        target: 'https://example.org/sub.docx',
+      },
+      {
+        label: 'external frame',
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/frame',
+        target: 'https://example.org/frame.html',
+      },
+      {
+        label: 'external image',
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image',
+        target: 'https://example.org/tracker.png',
+        expectedReasonCode: 'EXTERNAL_OR_UNSAFE_RELATIONSHIP_FORBIDDEN',
+      },
+      {
+        label: 'external oleObject',
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject',
+        target: 'https://example.org/object.bin',
+        expectedReasonCode: 'ACTIVEX_OR_OLE_OBJECT_FORBIDDEN',
+      },
+    ];
+
+    for (const c of rejectedExternalCases) {
+      const badRels =
+        '<?xml version="1.0" encoding="UTF-8"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        `<Relationship Id="rIdBad" Type="${c.type}" Target="${c.target}" TargetMode="External"/>` +
+        '</Relationships>';
+      const badZip = buildSyntheticZipBuffer([
+        { name: '[Content_Types].xml', content: CANONICAL_CONTENT_TYPES_XML },
+        { name: '_rels/.rels', content: CANONICAL_ROOT_RELS_XML },
+        { name: 'word/document.xml', content: CANONICAL_WORD_DOCUMENT_XML },
+        { name: 'word/styles.xml', content: CANONICAL_WORD_STYLES_XML },
+        { name: 'word/_rels/document.xml.rels', content: badRels },
+      ]);
+      const res = inspectLibraryUploadDeepStructure({
+        originalFilename: 'unsafe-ext.docx',
+        claimedMimeType: CANONICAL_DOCX_MIME_TYPE,
+        bytes: badZip,
+      });
+      const expectedCode =
+        (c as { expectedReasonCode?: string }).expectedReasonCode ??
+        'EXTERNAL_OR_UNSAFE_RELATIONSHIP_FORBIDDEN';
+      assert(
+        res.status === 'REJECTED' && res.reasonCode === expectedCode,
+        `${c.label} must be rejected with ${expectedCode} (got ${res.status}:${'reasonCode' in res ? res.reasonCode : 'none'})`
+      );
+    }
+  });
+
+  await test('15. Verified ZIP bit-3 Data Descriptor (signed 16-byte & unsigned 12-byte) passes; tampered/mismatched/gapped descriptors fail closed', () => {
+    for (const signed of [true, false]) {
+      const ddDocx = buildSyntheticZipBuffer([
+        {
+          name: '[Content_Types].xml',
+          content: CANONICAL_CONTENT_TYPES_XML,
+          method: 8,
+          flags: 0x0008,
+          overrideLfhCrc32: 0,
+          overrideLfhCompressedSize: 0,
+          overrideLfhUncompressedSize: 0,
+          dataDescriptor: { signed },
+        },
+        {
+          name: '_rels/.rels',
+          content: CANONICAL_ROOT_RELS_XML,
+          method: 8,
+          flags: 0x0008,
+          overrideLfhCrc32: 0,
+          overrideLfhCompressedSize: 0,
+          overrideLfhUncompressedSize: 0,
+          dataDescriptor: { signed },
+        },
+        {
+          name: 'word/document.xml',
+          content: CANONICAL_WORD_DOCUMENT_XML,
+          method: 8,
+          flags: 0x0008,
+          overrideLfhCrc32: 0,
+          overrideLfhCompressedSize: 0,
+          overrideLfhUncompressedSize: 0,
+          dataDescriptor: { signed },
+        },
+        { name: 'word/styles.xml', content: CANONICAL_WORD_STYLES_XML, method: 8 },
+        { name: 'word/_rels/document.xml.rels', content: CANONICAL_WORD_DOCUMENT_RELS_XML, method: 0 },
+      ]);
+      const res = inspectLibraryUploadDeepStructure({
+        originalFilename: signed ? 'google-docs-signed-dd.docx' : 'unsigned-dd.docx',
+        claimedMimeType: CANONICAL_DOCX_MIME_TYPE,
+        bytes: ddDocx,
+      });
+      assert(
+        res.status === 'DOCX_STRUCTURE_CHECKED_PENDING_SANITIZATION',
+        `Valid bit-3 Data Descriptor (signed=${signed}) must pass (got ${res.status})`
+      );
+    }
+
+    // Tampered CRC inside Data Descriptor -> REJECTED
+    const tamperedCrcDd = buildSyntheticZipBuffer([
+      {
+        name: '[Content_Types].xml',
+        content: CANONICAL_CONTENT_TYPES_XML,
+        method: 8,
+        flags: 0x0008,
+        overrideLfhCrc32: 0,
+        overrideLfhCompressedSize: 0,
+        overrideLfhUncompressedSize: 0,
+        dataDescriptor: { signed: true, overrideCrc32: 0x12345678 },
+      },
+      { name: '_rels/.rels', content: CANONICAL_ROOT_RELS_XML },
+      { name: 'word/document.xml', content: CANONICAL_WORD_DOCUMENT_XML },
+    ]);
+    const tamperedRes = inspectLibraryUploadDeepStructure({
+      originalFilename: 'tampered-dd.docx',
+      claimedMimeType: CANONICAL_DOCX_MIME_TYPE,
+      bytes: tamperedCrcDd,
+    });
+    assert(
+      tamperedRes.status === 'REJECTED' &&
+        tamperedRes.reasonCode === 'CENTRAL_LOCAL_HEADER_MISMATCH',
+      'Tampered CRC in bit-3 Data Descriptor must fail closed with CENTRAL_LOCAL_HEADER_MISMATCH'
+    );
+
+    // Extra hidden gap byte after valid Data Descriptor -> REJECTED
+    const gapAfterDd = buildSyntheticZipBuffer(
+      [
+        {
+          name: '[Content_Types].xml',
+          content: CANONICAL_CONTENT_TYPES_XML,
+          method: 8,
+          flags: 0x0008,
+          overrideLfhCrc32: 0,
+          overrideLfhCompressedSize: 0,
+          overrideLfhUncompressedSize: 0,
+          dataDescriptor: { signed: true },
+        },
+        { name: '_rels/.rels', content: CANONICAL_ROOT_RELS_XML },
+        { name: 'word/document.xml', content: CANONICAL_WORD_DOCUMENT_XML },
+      ],
+      { gapBeforeCentralDirectoryBytes: 4 }
+    );
+    const gapAfterDdRes = inspectLibraryUploadDeepStructure({
+      originalFilename: 'gap-after-dd.docx',
+      claimedMimeType: CANONICAL_DOCX_MIME_TYPE,
+      bytes: gapAfterDd,
+    });
+    assert(
+      gapAfterDdRes.status === 'REJECTED' &&
+        gapAfterDdRes.reasonCode === 'OVERLAPPING_OR_GAP_ENTRY_RANGES',
+      'Hidden gap after bit-3 Data Descriptor must be rejected with OVERLAPPING_OR_GAP_ENTRY_RANGES'
+    );
   });
 
   console.log('------------------------------------------------------------');

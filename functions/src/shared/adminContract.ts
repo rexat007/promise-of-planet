@@ -200,3 +200,52 @@ export function isTabAuthorized(
   }
   return true;
 }
+
+/**
+ * Least-privilege Community / Citizen Journalism RBAC helpers.
+ * - Strictly restricts confidential citizen submissions & private evidence to Owner and CitizenModerator.
+ * - Explicitly scopes the accepted-report -> News Draft handoff to Owner, CitizenModerator, and ContentEditor
+ *   without granting broad Create/Review/Approve/Publish permissions or blanket community evidence access.
+ */
+export function canAccessCommunitySubmissions(user: AdminUser | null | undefined): boolean {
+  if (!user || !user.isActive) {
+    return false;
+  }
+  return (
+    (user.role === AdminRole.Owner || user.role === AdminRole.CitizenModerator) &&
+    hasDomainResponsibility(user.role, AdminDomain.Community) &&
+    hasAdminPermission(user, AdminPermission.View)
+  );
+}
+
+export function canModerateCommunitySubmissions(user: AdminUser | null | undefined): boolean {
+  if (!user || !user.isActive) {
+    return false;
+  }
+  return (
+    canAccessCommunitySubmissions(user) &&
+    hasAdminPermission(user, AdminPermission.Review)
+  );
+}
+
+export function canCreateNewsDraftFromAcceptedCitizenSubmission(
+  user: AdminUser | null | undefined
+): boolean {
+  if (!user || !user.isActive) {
+    return false;
+  }
+  if (user.role === AdminRole.Owner) {
+    return true;
+  }
+  if (user.role === AdminRole.CitizenModerator) {
+    return canModerateCommunitySubmissions(user);
+  }
+  if (user.role === AdminRole.ContentEditor) {
+    return (
+      hasDomainResponsibility(user.role, AdminDomain.News) &&
+      hasAdminPermission(user, AdminPermission.Create)
+    );
+  }
+  return false;
+}
+

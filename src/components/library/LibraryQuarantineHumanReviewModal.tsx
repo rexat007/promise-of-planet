@@ -2677,6 +2677,57 @@ function getBinaryRightsBasisLabel(
   }
 }
 
+export function formatLibraryQuarantineHoldGuidance(
+  holdCode: string | null | undefined,
+  avExecutionState: string | null | undefined,
+  isAr: boolean
+): string | null {
+  const code = (holdCode || '').trim();
+  const state = (avExecutionState || '').trim();
+
+  if (code === 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE') {
+    return isAr
+      ? 'فشل الفحص البنيوي المعزول لملف PDF لاحتوائه على محتوى نشط أو بنية غير آمنة (مثل JavaScript أو ملفات مضمّنة أو أوامر تشغيل أو روابط خارجية غير آمنة). يرجى مراجعة الملف وإعادة تصديره بصيغة PDF نظيفة وثابتة قبل إعادة الرفع.'
+      : 'Isolated PDF structural inspection failed because the PDF contains active content or unsafe structure (such as JavaScript, embedded files, launch/form actions, or unsafe URI schemes). Export a clean static PDF before re-uploading.';
+  }
+  if (code === 'PDF_ENCRYPTED_OR_MALFORMED') {
+    return isAr
+      ? 'ملف PDF مشفّر/محمي بكلمة مرور أو تالف بنيوياً (أو أظهر تحذيرات من قارئ qpdf). يرجى إزالة التشفير أو إعادة تصدير الملف بصيغة PDF قياسية سليمة.'
+      : 'The PDF is encrypted/password-protected or structurally malformed (or produced qpdf warnings). Remove encryption or re-export a clean standard PDF.';
+  }
+  if (code === 'PDF_PARSER_BINARY_MISSING') {
+    return isAr
+      ? 'تعذر تنفيذ الفحص البنيوي المعزول لملف PDF لعدم توفر أداة التحليل (qpdf) في حاوية الفحص. يرجى إبلاغ مسؤول التشغيل.'
+      : 'Isolated PDF inspection could not run because the qpdf parser binary was unavailable in the worker container. Contact platform operations.';
+  }
+  if (code === 'PDF_INSPECTION_TIMEOUT') {
+    return isAr
+      ? 'انتهت المهلة المحددة للفحص البنيوي المعزول لملف PDF. تحقق من حجم/تعقيد الملف أو أعد المحاولة بعد المراجعة.'
+      : 'Isolated PDF structural inspection timed out. Check file complexity or retry after review.';
+  }
+  if (code === 'PDF_INSPECTION_FAILED') {
+    return isAr
+      ? 'أُغلق الفحص البنيوي المعزول لملف PDF احترازياً قبل اكتمال التحقق. راجع قسم السلامة الثنائية وسجلات عامل الفحص المعزول.'
+      : 'Isolated PDF structural inspection failed closed before verification completed. Check the Binary Safety section and worker diagnostic logs.';
+  }
+  if (code === 'PDF_INSPECTION_ATTESTATION_MISSING_OR_INVALID') {
+    return isAr
+      ? 'لا تتوفر شهادة فحص بنيوي صالحة للإصدار الحالي من ملف PDF. أعد تشغيل الفحص المعزول قبل النشر.'
+      : 'A valid current-revision isolated PDF structural inspection attestation is missing. Re-run isolated inspection before publishing.';
+  }
+  if (state === 'AV_THREAT_DETECTED' || code === 'AV_THREAT_DETECTED') {
+    return isAr
+      ? 'رصد فحص ClamAV تهديداً أمنياً في الملف؛ النشر المباشر محظور تماماً.'
+      : 'ClamAV detected a security threat in this binary; public publication is permanently blocked.';
+  }
+  if (state === 'AV_SCAN_FAILED' || code === 'AV_SCAN_FAILED') {
+    return isAr
+      ? 'فشل الفحص المعزول (ClamAV / فحص PDF البنيوي) وأُغلق احترازياً. راجع رمز الفشل التفصيلي في لوحة السلامة الثنائية أعلاه قبل أي إجراء.'
+      : 'Isolated AV or PDF structural inspection failed closed. Check the specific failure code in the Binary Safety panel above before taking action.';
+  }
+  return null;
+}
+
 export function LibraryQuarantinePublishedBinaryReleaseSection({
   controller,
   currentUser,
@@ -2745,10 +2796,26 @@ export function LibraryQuarantinePublishedBinaryReleaseSection({
 
   const isPublished = readinessStatus?.isPublished === true;
   const isEligible = readinessStatus?.eligibleForPublish === true;
+  const avExecutionState = readinessStatus?.avExecutionState ?? null;
+  const isTerminalScanFailure =
+    avExecutionState === 'AV_SCAN_FAILED' ||
+    avExecutionState === 'AV_THREAT_DETECTED' ||
+    avExecutionState === 'DISPATCH_FAILED' ||
+    avExecutionState === 'STALE_HOLD' ||
+    (typeof holdCode === 'string' &&
+      (holdCode.startsWith('PDF_') ||
+        holdCode === 'AV_SCAN_FAILED' ||
+        holdCode === 'AV_THREAT_DETECTED'));
   const waitingForScan =
-    holdCode === 'WAITING_FOR_ACTUAL_SCAN' ||
-    (readinessStatus !== null &&
-      !readinessStatus.isScanCleanForCurrentRevision);
+    !isTerminalScanFailure &&
+    (holdCode === 'WAITING_FOR_ACTUAL_SCAN' ||
+      (readinessStatus !== null &&
+        !readinessStatus.isScanCleanForCurrentRevision));
+  const holdGuidance = formatLibraryQuarantineHoldGuidance(
+    holdCode,
+    avExecutionState,
+    isAr
+  );
 
   return (
     <section
@@ -2796,9 +2863,13 @@ export function LibraryQuarantinePublishedBinaryReleaseSection({
                     ? isAr
                       ? 'جاهز لنشر الملف المرفوع'
                       : 'ELIGIBLE FOR BINARY RELEASE'
-                    : isAr
-                      ? 'موقوف لحين استيفاء المتطلبات'
-                      : 'HOLD'}
+                    : isTerminalScanFailure
+                      ? isAr
+                        ? 'فشل الفحص الأمني / البنيوي (موقوف)'
+                        : 'SCAN FAILED (HOLD)'
+                      : isAr
+                        ? 'موقوف لحين استيفاء المتطلبات'
+                        : 'HOLD'}
             </span>
           </div>
           <p className="text-[11px] text-gray-600 dark:text-gray-400 leading-relaxed">
@@ -2862,7 +2933,7 @@ export function LibraryQuarantinePublishedBinaryReleaseSection({
         </div>
       )}
 
-      {!loading && !loadError && holdCode && (
+      {!loading && !loadError && (holdCode || isTerminalScanFailure) && (
         <div
           data-testid="published-binary-release-hold-banner"
           role="alert"
@@ -2875,18 +2946,32 @@ export function LibraryQuarantinePublishedBinaryReleaseSection({
                 ? isAr
                   ? 'نشر الملف المرفوع موقوف — بانتظار نتيجة فحص ClamAV النظيفة الفعلية'
                   : 'Binary Release Held — WAITING FOR ACTUAL CLEAN CLAMAV SCAN'
-                : isAr
-                  ? 'نشر الملف المرفوع موقوف لحين استيفاء المتطلبات'
-                  : 'Binary Release Held'}
+                : isTerminalScanFailure
+                  ? isAr
+                    ? 'نشر الملف المرفوع موقوف — فشل الفحص الأمني أو البنيوي المعزول'
+                    : 'Binary Release Held — Isolated Security / Structural Inspection Failed'
+                  : isAr
+                    ? 'نشر الملف المرفوع موقوف لحين استيفاء المتطلبات'
+                    : 'Binary Release Held'}
             </span>
           </div>
-          <div
-            data-testid="published-binary-release-hold-code"
-            className="font-mono text-[11px] font-bold"
-            dir="ltr"
-          >
-            {holdCode}
-          </div>
+          {(holdCode || avExecutionState) && (
+            <div
+              data-testid="published-binary-release-hold-code"
+              className="font-mono text-[11px] font-bold"
+              dir="ltr"
+            >
+              {holdCode ?? avExecutionState}
+            </div>
+          )}
+          {holdGuidance && (
+            <p
+              data-testid="published-binary-release-hold-guidance"
+              className="text-[11px] font-semibold leading-relaxed"
+            >
+              {holdGuidance}
+            </p>
+          )}
           {holdMessage && (
             <p className="text-[11px] leading-relaxed">{holdMessage}</p>
           )}

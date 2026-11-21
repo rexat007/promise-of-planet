@@ -33,6 +33,11 @@ import {
   type SanitizedLibraryQuarantineIsolatedInspectionRequestDto,
 } from '../src/services/libraryQuarantineIsolatedInspectionRequestClient';
 import { LibraryQuarantineBinarySafetyCasePanel } from '../src/components/library/LibraryQuarantineBinarySafetyCasePanel';
+import {
+  formatLibraryQuarantineHoldGuidance,
+  LibraryQuarantinePublishedBinaryReleaseSection,
+} from '../src/components/library/LibraryQuarantineHumanReviewModal';
+import { LibraryQuarantinePublishedBinaryReleasePanelController } from '../src/services/libraryPublishedBinaryClient';
 
 const RECEIPT_ID_A = '0123456789abcdef0123456789abcdef';
 const RECEIPT_ID_B = 'fedcba9876543210fedcba9876543210';
@@ -968,8 +973,123 @@ async function runClientTests(): Promise<void> {
     assert.equal(holdCtrl.getState().avStatusSnapshot, null);
   }
 
+  // =========================================================================
+  // PASS 6: Published Binary Hold Guidance & Non-Mislabeled AV_SCAN_FAILED UI
+  // =========================================================================
+  const allGuidedHoldCodes = [
+    'PDF_PARSER_BINARY_MISSING',
+    'PDF_ENCRYPTED_OR_MALFORMED',
+    'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+    'PDF_INSPECTION_TIMEOUT',
+    'PDF_INSPECTION_FAILED',
+    'PDF_INSPECTION_ATTESTATION_MISSING_OR_INVALID',
+  ] as const;
+
+  for (const code of allGuidedHoldCodes) {
+    const arGuidance = formatLibraryQuarantineHoldGuidance(code, 'AV_SCAN_FAILED', true);
+    const enGuidance = formatLibraryQuarantineHoldGuidance(code, 'AV_SCAN_FAILED', false);
+    assert.equal(typeof arGuidance === 'string' && arGuidance.length > 20, true, `AR guidance missing for ${code}`);
+    assert.equal(typeof enGuidance === 'string' && enGuidance.length > 20, true, `EN guidance missing for ${code}`);
+  }
+  assert.equal(
+    typeof formatLibraryQuarantineHoldGuidance(null, 'AV_THREAT_DETECTED', true) === 'string',
+    true
+  );
+  assert.equal(
+    typeof formatLibraryQuarantineHoldGuidance(null, 'AV_SCAN_FAILED', false) === 'string',
+    true
+  );
+
+  // Verify LibraryQuarantinePublishedBinaryReleaseSection renders hold guidance for AV_SCAN_FAILED
+  // WITHOUT mislabeling it as "waiting for actual AV scan" and keeps publish disabled
+  const failedBinaryReleaseCtrl = new LibraryQuarantinePublishedBinaryReleasePanelController(
+    ownerUser,
+    {
+      enabled: true,
+      api: {
+        getPublishedLibraryBinaryReleaseStatus: async () =>
+          ({
+            ok: true,
+            status: 'HELD',
+            outcome: 'HELD',
+            receiptId: RECEIPT_ID_A,
+            qcatDocumentId: DOC_ID_A,
+            quarantineCatalogDocumentId: DOC_ID_A,
+            quarantineDraftWorkflowState: 'Draft',
+            publicDocumentId: `doc-qbin-${RECEIPT_ID_A}`,
+            sourceRevision: 2,
+            format: 'PDF',
+            byteSize: 32768,
+            suggestedDownloadFilename: 'report.pdf',
+            sourceFormat: 'PDF',
+            sourceByteSize: 32768,
+            catalogAligned: true,
+            effectiveAlignedCaseRevision: 2,
+            effectiveHumanCaseRevision: 2,
+            rightsDecisionRevision: 1,
+            rightsDecisionStatus: 'OPEN_PUBLIC_RELEASE_CLEARED',
+            rightsDecisionBasis: 'OFFICIAL_RECORD',
+            requiresContradictionResolution: false,
+            currentPriorRightsDecision: null,
+            binarySafetyCaseRevision: 1,
+            binarySafetyDisposition: 'ISOLATED_ASSESSMENT_REQUIRED',
+            avExecutionRequestId: REQUEST_ID_A,
+            avExecutionState: 'AV_SCAN_FAILED',
+            avFailureReasonCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+            isScanCleanForCurrentRevision: false,
+            isPublished: false,
+            eligibleForPublish: false,
+            blockCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+            blockMessage: 'Held by isolated PDF inspection',
+            publishedRelease: null,
+            releaseRecord: null,
+            publicDocument: null,
+            readiness: {
+              binarySafety: 'NOT_VERIFIED',
+              fileSanitization: 'NOT_PERFORMED',
+              publication: 'BLOCKED',
+              catalogWorkflow: 'Draft',
+            },
+            isSanitized: false,
+            isVerifiedSafe: false,
+            isRightsApproved: false,
+            isReadyForPeia: false,
+          }) as any,
+        publishQuarantinedBinaryToPublicLibrary: async () => {
+          throw new Error('Publish must not be called when AV_SCAN_FAILED');
+        },
+      },
+    }
+  );
+  await failedBinaryReleaseCtrl.openForSavedCase(makeSavedHumanReviewCase());
+
+  const heldBinaryMarkupAr = renderToStaticMarkup(
+    React.createElement(LibraryQuarantinePublishedBinaryReleaseSection, {
+      controller: failedBinaryReleaseCtrl,
+      currentUser: ownerUser,
+      savedReviewCase: makeSavedHumanReviewCase(),
+      hasUnsavedCaseEdits: false,
+      isAr: true,
+      envOverride: {
+        ...ALL_SIX_FLAGS_ON,
+        VITE_LIBRARY_RIGHTS_DECISION_ENABLED: 'true',
+        VITE_LIBRARY_PUBLISHED_BINARY_RELEASE_ENABLED: 'true',
+      },
+    })
+  );
+  assert.equal(
+    heldBinaryMarkupAr.includes('published-binary-release-hold-guidance'),
+    true,
+    'Hold guidance banner must render when AV_SCAN_FAILED / PDF failure code is present'
+  );
+  assert.equal(
+    heldBinaryMarkupAr.includes('بانتظار نتيجة فحص ClamAV'),
+    false,
+    'AV_SCAN_FAILED must NOT be mislabeled as waiting for actual AV scan'
+  );
+
   console.log(
-    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 CLIENT TESTS PASSED (5/5).'
+    'ALL LIB-FILE-ISOLATED-AV-EXECUTION-M1 CLIENT TESTS PASSED (6/6).'
   );
 }
 

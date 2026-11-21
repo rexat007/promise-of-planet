@@ -52,6 +52,23 @@ export const PDF_INSPECTION_QPDF_MAX_STDERR_BYTES = 256 * 1024;
 
 export type PdfXrefFormat = 'TABLE' | 'STREAM' | 'HYBRID';
 
+export type PdfInspectionFindingCode =
+  | 'PDF_FINDING_JAVASCRIPT'
+  | 'PDF_FINDING_UNSAFE_URI_SCHEME'
+  | 'PDF_FINDING_UNSAFE_LINK_ACTION'
+  | 'PDF_FINDING_UNSAFE_OPEN_ACTION'
+  | 'PDF_FINDING_LAUNCH_OR_EXTERNAL_ACTION'
+  | 'PDF_FINDING_EMBEDDED_OR_ACTIVE_MEDIA'
+  | 'PDF_FINDING_UNSUPPORTED_FILTER'
+  | 'PDF_FINDING_TRAILING_DATA'
+  | 'PDF_FINDING_ENCRYPTED'
+  | 'PDF_FINDING_XREF_PREDICTOR_OR_STRUCTURE'
+  | 'PDF_FINDING_QPDF_NONZERO_OR_WARNINGS'
+  | 'PDF_FINDING_MALFORMED_STRUCTURE'
+  | 'PDF_FINDING_PARSER_BINARY_MISSING'
+  | 'PDF_FINDING_INSPECTION_TIMEOUT'
+  | 'PDF_FINDING_INTEGRITY_OR_IO_ERROR';
+
 export interface LibraryQuarantinePersistedPdfInspection {
   readonly schemaVersion: typeof LIBRARY_QUARANTINE_PDF_INSPECTION_SCHEMA_VERSION;
   readonly requestId: string;
@@ -322,7 +339,6 @@ export function arePersistedPdfInspectionProvenanceIncompatible(
 const PROHIBITED_PDF_DICTIONARY_KEYS: ReadonlySet<string> = new Set([
   '/JS',
   '/JavaScript',
-  '/OpenAction',
   '/AA',
   '/Launch',
   '/Win',
@@ -352,7 +368,6 @@ const PROHIBITED_PDF_DICTIONARY_KEYS: ReadonlySet<string> = new Set([
   '/Collection',
   '/FileAttachment',
   '/Filespec',
-  '/URI',
   '/URL',
   '/UF',
   '/DOS',
@@ -371,7 +386,6 @@ const PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES: ReadonlySet<string> = new Set([
   '/GoToR',
   '/GoToE',
   '/GoTo3DView',
-  '/URI',
   '/EmbeddedFile',
   '/Filespec',
   '/FileAttachment',
@@ -389,6 +403,113 @@ const PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES: ReadonlySet<string> = new Set([
   '/Crypt',
   '/JBIG2Decode',
 ]);
+
+const SAFE_PDF_DESTINATION_MODES: ReadonlySet<string> = new Set([
+  '/XYZ',
+  '/Fit',
+  '/FitH',
+  '/FitV',
+  '/FitR',
+  '/FitB',
+  '/FitBH',
+  '/FitBV',
+]);
+
+const PDF_CONTROL_OR_BIDI_REGEX =
+  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2069\uFEFF\uFFF9-\uFFFB]/;
+
+const SAFE_MAILTO_URI_REGEX =
+  /^mailto:[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\?[^\r\n\x00-\x1f]*)?$/i;
+
+function isSafeStaticPdfUri(rawUri: string): boolean {
+  if (typeof rawUri !== 'string') return false;
+  const trimmed = rawUri.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > 2048 ||
+    trimmed !== rawUri ||
+    PDF_CONTROL_OR_BIDI_REGEX.test(trimmed) ||
+    trimmed.includes('\\')
+  ) {
+    return false;
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('mailto:')) {
+    return SAFE_MAILTO_URI_REGEX.test(trimmed);
+  }
+  if (!lower.startsWith('https://') && !lower.startsWith('http://')) {
+    return false;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return false;
+    }
+    if (!parsed.hostname || parsed.hostname.length === 0) {
+      return false;
+    }
+    if (parsed.username || parsed.password) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function classifyPdfFindingsToCode(
+  findings: readonly string[],
+  fallback: PdfInspectionFindingCode
+): PdfInspectionFindingCode {
+  for (const f of findings) {
+    if (f.includes('ENCRYPTED')) return 'PDF_FINDING_ENCRYPTED';
+  }
+  for (const f of findings) {
+    if (f.includes('/JS') || f.includes('/JavaScript') || f.includes('JAVASCRIPT')) {
+      return 'PDF_FINDING_JAVASCRIPT';
+    }
+    if (f.includes('UNSAFE_URI_SCHEME') || f.includes('PROHIBITED_URI_OUTSIDE_LINK')) {
+      return 'PDF_FINDING_UNSAFE_URI_SCHEME';
+    }
+    if (f.includes('UNSAFE_OPEN_ACTION')) {
+      return 'PDF_FINDING_UNSAFE_OPEN_ACTION';
+    }
+    if (f.includes('LINK_ACTION') || f.includes('UNSAFE_LINK_ACTION')) {
+      return 'PDF_FINDING_UNSAFE_LINK_ACTION';
+    }
+    if (
+      f.includes('/Launch') ||
+      f.includes('/GoToR') ||
+      f.includes('/GoToE') ||
+      f.includes('/SubmitForm') ||
+      f.includes('/ImportData') ||
+      f.includes('/ResetForm') ||
+      f.includes('/Named') ||
+      f.includes('/AA') ||
+      f.includes('EXTERNAL_') ||
+      f.includes('FILESPEC')
+    ) {
+      return 'PDF_FINDING_LAUNCH_OR_EXTERNAL_ACTION';
+    }
+    if (
+      f.includes('/Embedded') ||
+      f.includes('/EF') ||
+      f.includes('/FileAttachment') ||
+      f.includes('/RichMedia') ||
+      f.includes('/Sound') ||
+      f.includes('/Movie') ||
+      f.includes('/3D') ||
+      f.includes('/XFA') ||
+      f.includes('/Screen')
+    ) {
+      return 'PDF_FINDING_EMBEDDED_OR_ACTIVE_MEDIA';
+    }
+    if (f.includes('FILTER')) {
+      return 'PDF_FINDING_UNSUPPORTED_FILTER';
+    }
+  }
+  return fallback;
+}
 
 const ALLOWED_PDF_STREAM_FILTERS: ReadonlySet<string> = new Set([
   '/FlateDecode',
@@ -854,14 +975,274 @@ function boundedFlateDecompress(
   return out;
 }
 
+function paethPredictor(a: number, b: number, c: number): number {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
+}
+
+function decodeBoundedPdfXrefPngPredictor(
+  inflated: Buffer,
+  decodeParmsVal: PdfValue | undefined,
+  entryWidth: number
+): Buffer {
+  if (!decodeParmsVal || decodeParmsVal.kind === 'null') {
+    return inflated;
+  }
+
+  let paramsDict: ReadonlyMap<string, PdfValue> | null = null;
+  if (decodeParmsVal.kind === 'dict') {
+    paramsDict = decodeParmsVal.entries;
+  } else if (decodeParmsVal.kind === 'array' && decodeParmsVal.items.length === 1) {
+    const first = decodeParmsVal.items[0];
+    if (first.kind === 'null') {
+      return inflated;
+    }
+    if (first.kind === 'dict') {
+      paramsDict = first.entries;
+    }
+  }
+
+  if (!paramsDict) {
+    throw new Error('PDF_UNSUPPORTED_XREF_PREDICTOR');
+  }
+
+  const predVal = paramsDict.get('/Predictor');
+  if (!predVal) {
+    return inflated;
+  }
+  if (predVal.kind !== 'number' || !Number.isSafeInteger(predVal.value)) {
+    throw new Error('PDF_UNSUPPORTED_XREF_PREDICTOR');
+  }
+  if (predVal.value === 1) {
+    return inflated;
+  }
+
+  // Strictly support bounded PNG Predictors 10..15 for XRef streams (1 color, 8 bpc)
+  if (predVal.value < 10 || predVal.value > 15) {
+    throw new Error('PDF_UNSUPPORTED_XREF_PREDICTOR');
+  }
+
+  const colorsVal = paramsDict.get('/Colors');
+  if (colorsVal !== undefined) {
+    if (colorsVal.kind !== 'number' || colorsVal.value !== 1) {
+      throw new Error('PDF_UNSUPPORTED_XREF_PREDICTOR');
+    }
+  }
+
+  const bpcVal = paramsDict.get('/BitsPerComponent');
+  if (bpcVal !== undefined) {
+    if (bpcVal.kind !== 'number' || bpcVal.value !== 8) {
+      throw new Error('PDF_UNSUPPORTED_XREF_PREDICTOR');
+    }
+  }
+
+  const colsVal = paramsDict.get('/Columns');
+  const columns =
+    colsVal === undefined
+      ? 1
+      : colsVal.kind === 'number' && Number.isSafeInteger(colsVal.value)
+        ? colsVal.value
+        : -1;
+
+  if (columns < 1 || columns > 64 || (entryWidth > 0 && columns !== entryWidth)) {
+    throw new Error('PDF_XREF_PREDICTOR_INVALID_COLUMNS');
+  }
+
+  const stride = columns + 1; // 1 PNG filter tag byte + columns payload bytes
+  if (inflated.length === 0 || inflated.length % stride !== 0) {
+    throw new Error('PDF_XREF_PREDICTOR_MALFORMED_ROW_LENGTH');
+  }
+
+  const rowCount = inflated.length / stride;
+  if (
+    rowCount > PDF_INSPECTION_MAX_OBJECT_COUNT ||
+    rowCount * columns > PDF_INSPECTION_MAX_DECOMPRESSED_BYTES_PER_STREAM
+  ) {
+    throw new Error('PDF_XREF_PREDICTOR_ROW_LIMIT_EXCEEDED');
+  }
+
+  const output = Buffer.alloc(rowCount * columns);
+  for (let row = 0; row < rowCount; row += 1) {
+    const srcRowStart = row * stride;
+    const dstRowStart = row * columns;
+    const filterType = inflated[srcRowStart];
+    if (filterType > 4) {
+      throw new Error('PDF_XREF_PREDICTOR_INVALID_FILTER_BYTE');
+    }
+
+    for (let col = 0; col < columns; col += 1) {
+      const rawByte = inflated[srcRowStart + 1 + col];
+      const left = col > 0 ? output[dstRowStart + col - 1] : 0;
+      const up = row > 0 ? output[dstRowStart - columns + col] : 0;
+      const upLeft =
+        row > 0 && col > 0 ? output[dstRowStart - columns + col - 1] : 0;
+
+      let recon: number;
+      if (filterType === 0) {
+        recon = rawByte;
+      } else if (filterType === 1) {
+        recon = (rawByte + left) & 0xff;
+      } else if (filterType === 2) {
+        recon = (rawByte + up) & 0xff;
+      } else if (filterType === 3) {
+        recon = (rawByte + ((left + up) >> 1)) & 0xff;
+      } else {
+        recon = (rawByte + paethPredictor(left, up, upLeft)) & 0xff;
+      }
+      output[dstRowStart + col] = recon;
+    }
+  }
+
+  return output;
+}
+
+function isSafePdfDestinationArray(val: PdfValue): boolean {
+  if (val.kind !== 'array' || val.items.length < 2 || val.items.length > 8) {
+    return false;
+  }
+  const first = val.items[0];
+  if (
+    first.kind !== 'ref' &&
+    !(first.kind === 'number' && Number.isSafeInteger(first.value) && first.value >= 0)
+  ) {
+    return false;
+  }
+  const mode = val.items[1];
+  if (mode.kind !== 'name' || !SAFE_PDF_DESTINATION_MODES.has(mode.value)) {
+    return false;
+  }
+  for (let i = 2; i < val.items.length; i += 1) {
+    const item = val.items[i];
+    if (item.kind !== 'number' && item.kind !== 'null') {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isSafePdfDestinationValue(val: PdfValue): boolean {
+  if (val.kind === 'array') {
+    return isSafePdfDestinationArray(val);
+  }
+  if (val.kind === 'name') {
+    return (
+      val.value.length > 1 &&
+      val.value.length <= 256 &&
+      !PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES.has(val.value)
+    );
+  }
+  if (val.kind === 'string') {
+    return (
+      val.value.length > 0 &&
+      val.value.length <= 256 &&
+      !PDF_CONTROL_OR_BIDI_REGEX.test(val.value)
+    );
+  }
+  return false;
+}
+
+function isSafeGoToActionDict(dict: ReadonlyMap<string, PdfValue>): boolean {
+  for (const key of dict.keys()) {
+    if (key !== '/Type' && key !== '/S' && key !== '/D') {
+      return false;
+    }
+  }
+  const typeVal = dict.get('/Type');
+  if (typeVal !== undefined && (typeVal.kind !== 'name' || typeVal.value !== '/Action')) {
+    return false;
+  }
+  const sVal = dict.get('/S');
+  if (!sVal || sVal.kind !== 'name' || sVal.value !== '/GoTo') {
+    return false;
+  }
+  const dVal = dict.get('/D');
+  if (!dVal || !isSafePdfDestinationValue(dVal)) {
+    return false;
+  }
+  return true;
+}
+
+function isSafeStaticUriActionDict(dict: ReadonlyMap<string, PdfValue>): {
+  readonly safe: boolean;
+  readonly reason: string;
+} {
+  for (const key of dict.keys()) {
+    if (key !== '/Type' && key !== '/S' && key !== '/URI') {
+      return { safe: false, reason: `UNSAFE_LINK_ACTION_KEY:${key}` };
+    }
+  }
+  const typeVal = dict.get('/Type');
+  if (typeVal !== undefined && (typeVal.kind !== 'name' || typeVal.value !== '/Action')) {
+    return { safe: false, reason: 'UNSAFE_LINK_ACTION_TYPE' };
+  }
+  const sVal = dict.get('/S');
+  if (!sVal || sVal.kind !== 'name' || sVal.value !== '/URI') {
+    return { safe: false, reason: 'UNSAFE_LINK_ACTION_SUBTYPE' };
+  }
+  const uriVal = dict.get('/URI');
+  if (!uriVal || uriVal.kind !== 'string' || !isSafeStaticPdfUri(uriVal.value)) {
+    return { safe: false, reason: 'UNSAFE_URI_SCHEME' };
+  }
+  return { safe: true, reason: '' };
+}
+
+function isSafeStaticLinkActionValue(
+  val: PdfValue,
+  parsedObjects?: ReadonlyMap<number, PdfValue>
+): { readonly safe: boolean; readonly reason: string } {
+  const resolved =
+    val.kind === 'ref' && parsedObjects ? parsedObjects.get(val.objNum) : val;
+  if (!resolved || resolved.kind !== 'dict') {
+    return { safe: false, reason: 'UNSAFE_LINK_ACTION_TARGET' };
+  }
+  if (isSafeGoToActionDict(resolved.entries)) {
+    return { safe: true, reason: '' };
+  }
+  const sVal = resolved.entries.get('/S');
+  if (sVal && sVal.kind === 'name' && sVal.value === '/URI') {
+    return isSafeStaticUriActionDict(resolved.entries);
+  }
+  return { safe: false, reason: 'LINK_ACTION_PROHIBITED' };
+}
+
+function isSafeStaticOpenActionValue(
+  val: PdfValue,
+  parsedObjects?: ReadonlyMap<number, PdfValue>
+): boolean {
+  const resolved =
+    val.kind === 'ref' && parsedObjects ? parsedObjects.get(val.objNum) : val;
+  if (!resolved) {
+    return false;
+  }
+  if (resolved.kind === 'array') {
+    return isSafePdfDestinationArray(resolved);
+  }
+  if (resolved.kind === 'dict') {
+    return isSafeGoToActionDict(resolved.entries);
+  }
+  return false;
+}
+
+interface PdfInspectionContext {
+  readonly parsedObjects?: ReadonlyMap<number, PdfValue>;
+  readonly safeLinkActionObjNums?: ReadonlySet<number>;
+}
+
 function inspectPdfValueTree(
   val: PdfValue,
   enclosingDictKeys: ReadonlySet<string> | null,
-  findings: string[]
+  findings: string[],
+  ctx?: PdfInspectionContext,
+  currentObjNum?: number
 ): void {
   if (val.kind === 'array') {
     for (const item of val.items) {
-      inspectPdfValueTree(item, null, findings);
+      inspectPdfValueTree(item, null, findings, ctx);
       if (findings.length >= 16) return;
     }
     return;
@@ -886,12 +1267,53 @@ function inspectPdfValueTree(
       }
     }
 
+    const typeVal = dict.get('/Type');
+    const isCatalogDict =
+      val.kind === 'dict' &&
+      typeVal !== undefined &&
+      typeVal.kind === 'name' &&
+      typeVal.value === '/Catalog';
+
+    const subtypeVal = dict.get('/Subtype');
+    const isLinkAnnotationDict =
+      val.kind === 'dict' &&
+      subtypeVal !== undefined &&
+      subtypeVal.kind === 'name' &&
+      subtypeVal.value === '/Link';
+
+    // Standalone indirect action object referenced solely by a safe /Subtype /Link /A
+    if (
+      val.kind === 'dict' &&
+      currentObjNum !== undefined &&
+      ctx?.safeLinkActionObjNums?.has(currentObjNum)
+    ) {
+      if (isSafeGoToActionDict(dict)) {
+        return;
+      }
+      const uriCheck = isSafeStaticUriActionDict(dict);
+      if (uriCheck.safe) {
+        return;
+      }
+      findings.push(uriCheck.reason);
+      return;
+    }
+
     for (const [k, v] of dict.entries()) {
       if (k === '/Encrypt') {
         findings.push('ENCRYPTED_PDF_PROHIBITED');
       }
       if (PROHIBITED_PDF_DICTIONARY_KEYS.has(k)) {
         findings.push(`PROHIBITED_PDF_KEY:${k}`);
+      }
+      if (k === '/OpenAction') {
+        if (!isCatalogDict || !isSafeStaticOpenActionValue(v, ctx?.parsedObjects)) {
+          findings.push('UNSAFE_OPEN_ACTION_PROHIBITED');
+        } else {
+          continue;
+        }
+      }
+      if (k === '/URI') {
+        findings.push('PROHIBITED_URI_OUTSIDE_LINK');
       }
       if (k === '/F') {
         // Numeric annotation bitflag `/F 4` on annotations is standard; string/dict/array `/F` or Filespec `/F` is prohibited
@@ -914,17 +1336,23 @@ function inspectPdfValueTree(
       if (
         (k === '/Type' || k === '/Subtype' || k === '/S') &&
         v.kind === 'name' &&
-        PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES.has(v.value)
+        (PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES.has(v.value) || v.value === '/URI')
       ) {
         findings.push(`PROHIBITED_TYPE_OR_ACTION:${v.value}`);
       }
-      if (k === '/Subtype' && v.kind === 'name' && v.value === '/Link') {
-        if (dict.has('/A') || dict.has('/PA')) {
-          findings.push('LINK_ACTION_PROHIBITED');
+      if (isLinkAnnotationDict && k === '/PA') {
+        findings.push('LINK_ACTION_PROHIBITED');
+      }
+      if (isLinkAnnotationDict && k === '/A') {
+        const linkCheck = isSafeStaticLinkActionValue(v, ctx?.parsedObjects);
+        if (!linkCheck.safe) {
+          findings.push(linkCheck.reason);
+        } else {
+          continue;
         }
       }
       if (findings.length >= 16) return;
-      inspectPdfValueTree(v, keys, findings);
+      inspectPdfValueTree(v, keys, findings, ctx);
     }
     return;
   }
@@ -932,7 +1360,7 @@ function inspectPdfValueTree(
   if (
     enclosingDictKeys &&
     val.kind === 'name' &&
-    PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES.has(val.value)
+    (PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES.has(val.value) || val.value === '/URI')
   ) {
     findings.push(`PROHIBITED_NAME_TOKEN:${val.value}`);
   }
@@ -956,6 +1384,7 @@ export interface PdfStructuralInspectionFailure {
     | 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE'
     | 'PDF_INSPECTION_FAILED'
   >;
+  readonly findingCode?: PdfInspectionFindingCode;
   readonly errorMessage: string;
 }
 
@@ -1012,6 +1441,7 @@ export function inspectPdfBytesStructurally(
     return {
       ok: false,
       failureReasonCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      findingCode: 'PDF_FINDING_TRAILING_DATA',
       errorMessage: 'PDF contains unexpected trailing data after final %%EOF.',
     };
   }
@@ -1244,22 +1674,16 @@ export function inspectPdfBytesStructurally(
           ) {
             throw new Error(`PDF_UNSUPPORTED_XREF_STREAM_FILTER:${filters.join(',')}`);
           }
-          if (dict.has('/DecodeParms')) {
-            // Conservative: /Predictor transforms in /XRef streams require deterministic exact handling;
-            // reject non-trivial /XRef predictors cleanly if unsupported
-            const dp = dict.get('/DecodeParms');
-            if (dp && dp.kind === 'dict' && dp.entries.has('/Predictor')) {
-              const predVal = dp.entries.get('/Predictor');
-              if (predVal && predVal.kind === 'number' && predVal.value !== 1) {
-                throw new Error('PDF_UNSUPPORTED_XREF_PREDICTOR');
-              }
-            }
-          }
-          decodedXrefBytes = boundedFlateDecompress(
+          const inflatedXref = boundedFlateDecompress(
             decodedXrefBytes,
             PDF_INSPECTION_MAX_TOTAL_DECOMPRESSED_BYTES - totalDecompressedBytes
           );
-          totalDecompressedBytes += decodedXrefBytes.length;
+          totalDecompressedBytes += inflatedXref.length;
+          decodedXrefBytes = decodeBoundedPdfXrefPngPredictor(
+            inflatedXref,
+            dict.get('/DecodeParms'),
+            entryWidth
+          );
         }
 
         const indexPairs: Array<readonly [number, number]> = [];
@@ -1349,15 +1773,20 @@ export function inspectPdfBytesStructurally(
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'PDF cross-reference parse failure.';
+    const isEncrypted =
+      findings.some((f) => f.includes('ENCRYPTED')) || msg.includes('ENCRYPTED');
     return {
       ok: false,
-      failureReasonCode:
-        findings.some((f) => f.includes('ENCRYPTED')) ||
-        msg.includes('ENCRYPTED')
-          ? 'PDF_ENCRYPTED_OR_MALFORMED'
-          : findings.length > 0
-            ? 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE'
-            : 'PDF_ENCRYPTED_OR_MALFORMED',
+      failureReasonCode: isEncrypted
+        ? 'PDF_ENCRYPTED_OR_MALFORMED'
+        : findings.length > 0
+          ? 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE'
+          : 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: isEncrypted
+        ? 'PDF_FINDING_ENCRYPTED'
+        : findings.length > 0
+          ? classifyPdfFindingsToCode(findings, 'PDF_FINDING_XREF_PREDICTOR_OR_STRUCTURE')
+          : 'PDF_FINDING_XREF_PREDICTOR_OR_STRUCTURE',
       errorMessage: msg,
     };
   }
@@ -1366,6 +1795,7 @@ export function inspectPdfBytesStructurally(
     return {
       ok: false,
       failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: 'PDF_FINDING_ENCRYPTED',
       errorMessage: 'Encrypted PDF files are strictly prohibited.',
     };
   }
@@ -1373,6 +1803,7 @@ export function inspectPdfBytesStructurally(
     return {
       ok: false,
       failureReasonCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      findingCode: classifyPdfFindingsToCode(findings, 'PDF_FINDING_MALFORMED_STRUCTURE'),
       errorMessage: `Prohibited PDF trailer/xref construct detected (${findings[0]}).`,
     };
   }
@@ -1380,6 +1811,7 @@ export function inspectPdfBytesStructurally(
     return {
       ok: false,
       failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: 'PDF_FINDING_MALFORMED_STRUCTURE',
       errorMessage: 'PDF trailer is missing required /Root catalog reference.',
     };
   }
@@ -1418,8 +1850,6 @@ export function inspectPdfBytesStructurally(
       }
 
       parsedObjects.set(objNum, parsedVal.value);
-      inspectPdfValueTree(parsedVal.value, null, findings);
-      if (findings.length > 0) break;
 
       // Decompress and parse every compressed object inside `/Type /ObjStm`
       const objStmType = parsedVal.value.kind === 'stream' ? parsedVal.value.dict.get('/Type') : null;
@@ -1498,22 +1928,58 @@ export function inspectPdfBytesStructurally(
           }
           const embeddedVal = parsePdfValue(decodedStmBytes, absOffset, 0, false);
           parsedObjects.set(embeddedObjNum, embeddedVal.value);
-          inspectPdfValueTree(embeddedVal.value, null, findings);
-          if (findings.length > 0) break;
         }
-        if (findings.length > 0) break;
       }
+    }
+
+    // Collect indirect action object numbers referenced by /Subtype /Link /A so safe static URI/GoTo actions validate cleanly
+    const safeLinkActionObjNums = new Set<number>();
+    const collectLinkActionRefs = (node: PdfValue): void => {
+      if (node.kind === 'array') {
+        for (const item of node.items) collectLinkActionRefs(item);
+        return;
+      }
+      if (node.kind === 'dict' || node.kind === 'stream') {
+        const d = node.kind === 'dict' ? node.entries : node.dict;
+        const st = d.get('/Subtype');
+        if (node.kind === 'dict' && st && st.kind === 'name' && st.value === '/Link') {
+          const act = d.get('/A');
+          if (act && act.kind === 'ref') {
+            safeLinkActionObjNums.add(act.objNum);
+          }
+        }
+        for (const v of d.values()) {
+          collectLinkActionRefs(v);
+        }
+      }
+    };
+    for (const objVal of parsedObjects.values()) {
+      collectLinkActionRefs(objVal);
+    }
+
+    const inspectCtx: PdfInspectionContext = {
+      parsedObjects,
+      safeLinkActionObjNums,
+    };
+    for (const [objNum, objVal] of parsedObjects.entries()) {
+      inspectPdfValueTree(objVal, null, findings, inspectCtx, objNum);
+      if (findings.length > 0) break;
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed parsing PDF indirect objects.';
+    const isEncrypted = findings.some((f) => f === 'ENCRYPTED_PDF_PROHIBITED');
     return {
       ok: false,
-      failureReasonCode:
-        findings.some((f) => f === 'ENCRYPTED_PDF_PROHIBITED')
-          ? 'PDF_ENCRYPTED_OR_MALFORMED'
-          : findings.length > 0
-            ? 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE'
-            : 'PDF_ENCRYPTED_OR_MALFORMED',
+      failureReasonCode: isEncrypted
+        ? 'PDF_ENCRYPTED_OR_MALFORMED'
+        : findings.length > 0
+          ? 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE'
+          : 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: isEncrypted
+        ? 'PDF_FINDING_ENCRYPTED'
+        : findings.length > 0
+          ? classifyPdfFindingsToCode(findings, 'PDF_FINDING_MALFORMED_STRUCTURE')
+          : 'PDF_FINDING_MALFORMED_STRUCTURE',
       errorMessage: msg,
     };
   }
@@ -1522,6 +1988,7 @@ export function inspectPdfBytesStructurally(
     return {
       ok: false,
       failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: 'PDF_FINDING_ENCRYPTED',
       errorMessage: 'Encrypted PDF objects are prohibited.',
     };
   }
@@ -1529,6 +1996,7 @@ export function inspectPdfBytesStructurally(
     return {
       ok: false,
       failureReasonCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      findingCode: classifyPdfFindingsToCode(findings, 'PDF_FINDING_MALFORMED_STRUCTURE'),
       errorMessage: `Prohibited active/external/unsafe PDF construct detected (${findings[0]}).`,
     };
   }
@@ -1670,6 +2138,7 @@ export interface IsolatedPdfInspectorFailure {
     | 'PDF_INSPECTION_TIMEOUT'
     | 'PDF_INSPECTION_FAILED'
   >;
+  readonly findingCode?: PdfInspectionFindingCode;
   readonly errorMessage: string;
 }
 
@@ -1819,29 +2288,204 @@ export function defaultQpdfJsonRunner(params: {
   });
 }
 
+const QPDF_INDIRECT_REF_REGEX = /^\d+ \d+ R$/;
+
+function resolveQpdfJsonRef(
+  value: unknown,
+  objectsMap: Readonly<Record<string, unknown>>
+): unknown {
+  if (typeof value === 'string' && QPDF_INDIRECT_REF_REGEX.test(value)) {
+    const entry = objectsMap[`obj:${value}`];
+    if (isPlainRecord(entry) && 'value' in entry) {
+      return entry.value;
+    }
+    return undefined;
+  }
+  return value;
+}
+
+function decodeQpdfJsonString(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  if (raw.startsWith('u:')) {
+    return raw.slice(2);
+  }
+  if (raw.startsWith('b:')) {
+    const hex = raw.slice(2);
+    if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2 !== 0) return null;
+    return Buffer.from(hex, 'hex').toString('utf8');
+  }
+  return raw;
+}
+
+function isSafeQpdfDestinationArray(val: unknown): boolean {
+  if (!Array.isArray(val) || val.length < 2 || val.length > 8) return false;
+  const first = val[0];
+  const validFirst =
+    (typeof first === 'string' && QPDF_INDIRECT_REF_REGEX.test(first)) ||
+    (typeof first === 'number' && Number.isSafeInteger(first) && first >= 0);
+  if (!validFirst) return false;
+  const mode = val[1];
+  if (typeof mode !== 'string' || !SAFE_PDF_DESTINATION_MODES.has(mode)) {
+    return false;
+  }
+  for (let i = 2; i < val.length; i += 1) {
+    const item = val[i];
+    if (typeof item !== 'number' && item !== null) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isSafeQpdfDestinationValue(val: unknown): boolean {
+  if (Array.isArray(val)) return isSafeQpdfDestinationArray(val);
+  if (typeof val === 'string') {
+    if (val.startsWith('/')) {
+      return val.length > 1 && val.length <= 256 && !PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES.has(val);
+    }
+    const decoded = decodeQpdfJsonString(val);
+    return decoded !== null && decoded.length > 0 && decoded.length <= 256 && !PDF_CONTROL_OR_BIDI_REGEX.test(decoded);
+  }
+  return false;
+}
+
+function isSafeQpdfGoToActionDict(rec: Record<string, unknown>): boolean {
+  for (const k of Object.keys(rec)) {
+    if (k !== '/Type' && k !== '/S' && k !== '/D') return false;
+  }
+  if ('/Type' in rec && rec['/Type'] !== '/Action') return false;
+  if (rec['/S'] !== '/GoTo') return false;
+  return isSafeQpdfDestinationValue(rec['/D']);
+}
+
+function isSafeQpdfUriActionDict(rec: Record<string, unknown>): {
+  readonly safe: boolean;
+  readonly reason: string;
+} {
+  for (const k of Object.keys(rec)) {
+    if (k !== '/Type' && k !== '/S' && k !== '/URI') {
+      return { safe: false, reason: `UNSAFE_LINK_ACTION_KEY:${k}` };
+    }
+  }
+  if ('/Type' in rec && rec['/Type'] !== '/Action') {
+    return { safe: false, reason: 'UNSAFE_LINK_ACTION_TYPE' };
+  }
+  if (rec['/S'] !== '/URI') {
+    return { safe: false, reason: 'UNSAFE_LINK_ACTION_SUBTYPE' };
+  }
+  const decodedUri = decodeQpdfJsonString(rec['/URI']);
+  if (decodedUri === null || !isSafeStaticPdfUri(decodedUri)) {
+    return { safe: false, reason: 'UNSAFE_URI_SCHEME' };
+  }
+  return { safe: true, reason: '' };
+}
+
+function isSafeQpdfLinkActionValue(
+  val: unknown,
+  objectsMap: Readonly<Record<string, unknown>>
+): { readonly safe: boolean; readonly reason: string } {
+  const resolved = resolveQpdfJsonRef(val, objectsMap);
+  if (!isPlainRecord(resolved)) {
+    return { safe: false, reason: 'UNSAFE_LINK_ACTION_TARGET' };
+  }
+  if (isSafeQpdfGoToActionDict(resolved)) {
+    return { safe: true, reason: '' };
+  }
+  if (resolved['/S'] === '/URI') {
+    return isSafeQpdfUriActionDict(resolved);
+  }
+  return { safe: false, reason: 'LINK_ACTION_PROHIBITED' };
+}
+
+function isSafeQpdfOpenActionValue(
+  val: unknown,
+  objectsMap: Readonly<Record<string, unknown>>
+): boolean {
+  const resolved = resolveQpdfJsonRef(val, objectsMap);
+  if (Array.isArray(resolved)) {
+    return isSafeQpdfDestinationArray(resolved);
+  }
+  if (isPlainRecord(resolved)) {
+    return isSafeQpdfGoToActionDict(resolved);
+  }
+  return false;
+}
+
+function collectQpdfLinkActionObjectKeys(
+  node: unknown,
+  depth: number,
+  outKeys: Set<string>
+): void {
+  if (depth > PDF_INSPECTION_MAX_VALUE_NESTING_DEPTH) return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectQpdfLinkActionObjectKeys(item, depth + 1, outKeys);
+    return;
+  }
+  if (isPlainRecord(node)) {
+    if (node['/Subtype'] === '/Link') {
+      const aVal = node['/A'];
+      if (typeof aVal === 'string' && QPDF_INDIRECT_REF_REGEX.test(aVal)) {
+        outKeys.add(`obj:${aVal}`);
+      }
+    }
+    for (const v of Object.values(node)) {
+      collectQpdfLinkActionObjectKeys(v, depth + 1, outKeys);
+    }
+  }
+}
+
 function walkQpdfJsonObjectTree(
   node: unknown,
   depth: number,
-  findings: string[]
+  findings: string[],
+  objectsMap: Readonly<Record<string, unknown>>,
+  safeLinkActionKeys: ReadonlySet<string>,
+  currentObjectKey?: string
 ): void {
   if (depth > PDF_INSPECTION_MAX_VALUE_NESTING_DEPTH || findings.length >= 16) {
     return;
   }
   if (Array.isArray(node)) {
     for (const item of node) {
-      walkQpdfJsonObjectTree(item, depth + 1, findings);
+      walkQpdfJsonObjectTree(item, depth + 1, findings, objectsMap, safeLinkActionKeys);
     }
     return;
   }
   if (typeof node === 'object' && node !== null) {
     const rec = node as Record<string, unknown>;
+    if (currentObjectKey !== undefined && safeLinkActionKeys.has(currentObjectKey)) {
+      const targetRec = isPlainRecord(rec.value) ? rec.value : rec;
+      if (isSafeQpdfGoToActionDict(targetRec)) {
+        return;
+      }
+      const uriCheck = isSafeQpdfUriActionDict(targetRec);
+      if (uriCheck.safe) {
+        return;
+      }
+      findings.push(uriCheck.reason);
+      return;
+    }
+
     const typeName = typeof rec['/Type'] === 'string' ? rec['/Type'] : null;
+    const isCatalogDict = typeName === '/Catalog';
+    const isLinkDict = rec['/Subtype'] === '/Link';
+
     for (const [k, v] of Object.entries(rec)) {
       if (k === '/Encrypt') {
         findings.push('ENCRYPTED_PDF_PROHIBITED');
       }
       if (PROHIBITED_PDF_DICTIONARY_KEYS.has(k)) {
         findings.push(`PROHIBITED_PDF_KEY:${k}`);
+      }
+      if (k === '/OpenAction') {
+        if (!isCatalogDict || !isSafeQpdfOpenActionValue(v, objectsMap)) {
+          findings.push('UNSAFE_OPEN_ACTION_PROHIBITED');
+        } else {
+          continue;
+        }
+      }
+      if (k === '/URI') {
+        findings.push('PROHIBITED_URI_OUTSIDE_LINK');
       }
       if (k === '/F') {
         if (
@@ -1857,14 +2501,30 @@ function walkQpdfJsonObjectTree(
       if (
         (k === '/Type' || k === '/Subtype' || k === '/S') &&
         typeof v === 'string' &&
-        PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES.has(v)
+        (PROHIBITED_PDF_TYPE_OR_SUBTYPE_NAMES.has(v) || v === '/URI')
       ) {
         findings.push(`PROHIBITED_TYPE_OR_ACTION:${v}`);
       }
-      if (k === '/Subtype' && v === '/Link' && ('/A' in rec || '/PA' in rec)) {
+      if (isLinkDict && k === '/PA') {
         findings.push('LINK_ACTION_PROHIBITED');
       }
-      walkQpdfJsonObjectTree(v, depth + 1, findings);
+      if (isLinkDict && k === '/A') {
+        const linkCheck = isSafeQpdfLinkActionValue(v, objectsMap);
+        if (!linkCheck.safe) {
+          findings.push(linkCheck.reason);
+        } else {
+          continue;
+        }
+      }
+      const childObjKey = depth === 0 && k.startsWith('obj:') ? k : undefined;
+      walkQpdfJsonObjectTree(
+        v,
+        depth + 1,
+        findings,
+        objectsMap,
+        safeLinkActionKeys,
+        childObjKey
+      );
     }
   }
 }
@@ -1879,6 +2539,7 @@ function evaluateQpdfJsonOutput(rawStdout: string):
         | 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE'
         | 'PDF_INSPECTION_FAILED'
       >;
+      readonly findingCode: PdfInspectionFindingCode;
       readonly errorMessage: string;
     } {
   let parsed: unknown;
@@ -1888,6 +2549,7 @@ function evaluateQpdfJsonOutput(rawStdout: string):
     return {
       ok: false,
       failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: 'PDF_FINDING_QPDF_NONZERO_OR_WARNINGS',
       errorMessage: 'qpdf --json produced unparseable JSON output.',
     };
   }
@@ -1895,6 +2557,7 @@ function evaluateQpdfJsonOutput(rawStdout: string):
     return {
       ok: false,
       failureReasonCode: 'PDF_INSPECTION_FAILED',
+      findingCode: 'PDF_FINDING_QPDF_NONZERO_OR_WARNINGS',
       errorMessage: 'qpdf --json root value must be an object.',
     };
   }
@@ -1904,6 +2567,7 @@ function evaluateQpdfJsonOutput(rawStdout: string):
     return {
       ok: false,
       failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: 'PDF_FINDING_QPDF_NONZERO_OR_WARNINGS',
       errorMessage: 'qpdf emitted structural warnings on PDF input.',
     };
   }
@@ -1916,6 +2580,7 @@ function evaluateQpdfJsonOutput(rawStdout: string):
       return {
         ok: false,
         failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+        findingCode: 'PDF_FINDING_ENCRYPTED',
         errorMessage: 'qpdf reported encryption parameters on PDF input.',
       };
     }
@@ -1932,6 +2597,7 @@ function evaluateQpdfJsonOutput(rawStdout: string):
         return {
           ok: false,
           failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+          findingCode: 'PDF_FINDING_ENCRYPTED',
           errorMessage: 'qpdf reported encrypted PDF.',
         };
       }
@@ -1945,16 +2611,21 @@ function evaluateQpdfJsonOutput(rawStdout: string):
     return {
       ok: false,
       failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: 'PDF_FINDING_MALFORMED_STRUCTURE',
       errorMessage: 'qpdf --json output is missing trailer/objects structure.',
     };
   }
 
+  const safeLinkActionKeys = new Set<string>();
+  collectQpdfLinkActionObjectKeys(objectsMap, 0, safeLinkActionKeys);
+
   const findings: string[] = [];
-  walkQpdfJsonObjectTree(objectsMap, 0, findings);
+  walkQpdfJsonObjectTree(objectsMap, 0, findings, objectsMap, safeLinkActionKeys);
   if (findings.some((f) => f === 'ENCRYPTED_PDF_PROHIBITED')) {
     return {
       ok: false,
       failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: 'PDF_FINDING_ENCRYPTED',
       errorMessage: 'Encrypted PDF trailer or object detected by qpdf.',
     };
   }
@@ -1962,6 +2633,7 @@ function evaluateQpdfJsonOutput(rawStdout: string):
     return {
       ok: false,
       failureReasonCode: 'PDF_ACTIVE_CONTENT_OR_UNSAFE_STRUCTURE',
+      findingCode: classifyPdfFindingsToCode(findings, 'PDF_FINDING_MALFORMED_STRUCTURE'),
       errorMessage: `Prohibited PDF structure detected in qpdf JSON (${findings[0]}).`,
     };
   }
@@ -1973,6 +2645,7 @@ function evaluateQpdfJsonOutput(rawStdout: string):
     return {
       ok: false,
       failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: 'PDF_FINDING_MALFORMED_STRUCTURE',
       errorMessage: 'PDF must contain at least Catalog and Pages objects.',
     };
   }
@@ -1996,7 +2669,10 @@ export async function defaultRunIsolatedPdfInspection(
   const verifyFn = deps?.binaryVerifier ?? defaultVerifyPdfParserBinary;
   const binRes = await verifyFn(deps?.qpdfPath);
   if (!binRes.ok) {
-    return binRes;
+    return {
+      ...binRes,
+      findingCode: 'PDF_FINDING_PARSER_BINARY_MISSING',
+    };
   }
 
   let fileBytes: Buffer;
@@ -2010,6 +2686,7 @@ export async function defaultRunIsolatedPdfInspection(
       return {
         ok: false,
         failureReasonCode: 'PDF_INSPECTION_FAILED',
+        findingCode: 'PDF_FINDING_INTEGRITY_OR_IO_ERROR',
         errorMessage: 'Temporary PDF size did not match expected receipt byteSize.',
       };
     }
@@ -2018,6 +2695,7 @@ export async function defaultRunIsolatedPdfInspection(
     return {
       ok: false,
       failureReasonCode: 'PDF_INSPECTION_FAILED',
+      findingCode: 'PDF_FINDING_INTEGRITY_OR_IO_ERROR',
       errorMessage: 'Failed reading streamed PDF workspace file for structural inspection.',
     };
   }
@@ -2027,6 +2705,7 @@ export async function defaultRunIsolatedPdfInspection(
     return {
       ok: false,
       failureReasonCode: 'PDF_INSPECTION_FAILED',
+      findingCode: 'PDF_FINDING_INTEGRITY_OR_IO_ERROR',
       errorMessage: 'Temporary PDF SHA-256 verification failed prior to PDF inspection.',
     };
   }
@@ -2043,6 +2722,7 @@ export async function defaultRunIsolatedPdfInspection(
     return {
       ok: false,
       failureReasonCode: 'PDF_PARSER_BINARY_MISSING',
+      findingCode: 'PDF_FINDING_PARSER_BINARY_MISSING',
       errorMessage: 'Failed spawning isolated qpdf executable.',
     };
   }
@@ -2050,6 +2730,7 @@ export async function defaultRunIsolatedPdfInspection(
     return {
       ok: false,
       failureReasonCode: 'PDF_INSPECTION_TIMEOUT',
+      findingCode: 'PDF_FINDING_INSPECTION_TIMEOUT',
       errorMessage: 'Isolated qpdf PDF inspection timed out.',
     };
   }
@@ -2058,6 +2739,7 @@ export async function defaultRunIsolatedPdfInspection(
     return {
       ok: false,
       failureReasonCode: 'PDF_ENCRYPTED_OR_MALFORMED',
+      findingCode: 'PDF_FINDING_QPDF_NONZERO_OR_WARNINGS',
       errorMessage: `qpdf exited with code ${qpdfRun.exitCode} or non-empty diagnostic stderr.`,
     };
   }
