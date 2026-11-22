@@ -1,0 +1,255 @@
+name: Deploy Firestore Rules Live
+
+# PREREQUISITE NOTICE FOR PROJECT OWNER:
+# 1. SEPARATE AUTHORIZATION REQUIRED: This workflow must NOT be dispatched without separate,
+#    explicit owner authorization and the exact typed confirmation token
+#    DEPLOY_POP_FIRESTORE_RULES_LIVE.
+# 2. VERIFICATION BOUNDARY: Deploys firestore.rules via 'firebase deploy --only firestore:rules'.
+#    A successful deployment updates the active Firestore ruleset only and is NOT proof of live
+#    production authorization behavior; verified post-deploy authorization and smoke testing
+#    must be conducted following deployment.
+# 3. SCOPE INTEGRITY: This workflow deploys only Firebase Firestore security rules
+#    ('--only firestore:rules'). No Firestore indexes, Firebase Storage security rules,
+#    Cloud Functions, or Firebase Hosting bundles are deployed.
+# 4. ROLLBACK SAFETY: Reverting firestore.rules locally or in git does NOT automatically
+#    undeploy active rules in Google Cloud / Firebase. No automatic retry, rollback, or
+#    downstream workflow triggering is performed. Rollback requires explicitly re-running this
+#    workflow from an authorized rollback commit.
+# 5. CREDENTIAL SAFETY: Never echo, log, or expose secret values or service account credentials.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_deploy:
+        description: "Required typed confirmation: DEPLOY_POP_FIRESTORE_RULES_LIVE"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-firebase-firestore-rules-live
+  cancel-in-progress: false
+
+jobs:
+  deploy_firestore_rules:
+    name: Deploy Firestore Rules
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Verify Main Branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::This workflow can only be run on refs/heads/main."
+            exit 1
+          fi
+
+      - name: Verify Explicit Deployment Confirmation
+        env:
+          CONFIRM_DEPLOY: ${{ inputs.confirm_deploy }}
+        run: |
+          if [ -z "$CONFIRM_DEPLOY" ] || [ "$CONFIRM_DEPLOY" != "DEPLOY_POP_FIRESTORE_RULES_LIVE" ]; then
+            echo "::error::Invalid or missing confirmation input. Exact required value: DEPLOY_POP_FIRESTORE_RULES_LIVE."
+            exit 1
+          fi
+          echo "Verified explicit deployment confirmation token."
+
+      - name: Checkout Triggering Commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify Firebase Configuration, Firestore Rules Source, and Deploy Scope Guards
+        run: |
+          node -e '
+            const fs = require("fs");
+
+            // Structural preflight guards only; not a substitute for Firestore Rules
+            // compilation or live production authorization verification.
+
+            // 1. Verify firebase.json exists, parses, and maps firestore.rules exactly
+            if (!fs.existsSync("firebase.json")) {
+              console.error("::error::Missing firebase.json in repository root.");
+              process.exit(1);
+            }
+            let fbConfig;
+            try {
+              fbConfig = JSON.parse(fs.readFileSync("firebase.json", "utf8"));
+            } catch (err) {
+              console.error("::error::Failed to parse firebase.json: " + err.message);
+              process.exit(1);
+            }
+            if (
+              !fbConfig ||
+              typeof fbConfig !== "object" ||
+              !fbConfig.firestore ||
+              typeof fbConfig.firestore !== "object" ||
+              fbConfig.firestore.rules !== "firestore.rules"
+            ) {
+              console.error("::error::firebase.json must define firestore.rules as \"firestore.rules\".");
+              process.exit(1);
+            }
+            console.log("Verified firebase.json firestore.rules mapping: " + fbConfig.firestore.rules);
+
+            // 2. Verify firestore.rules exists, is nonempty, and satisfies required structural guards
+            if (!fs.existsSync("firestore.rules")) {
+              console.error("::error::Missing firestore.rules file.");
+              process.exit(1);
+            }
+            const rulesContent = fs.readFileSync("firestore.rules", "utf8");
+            if (!rulesContent.trim()) {
+              console.error("::error::firestore.rules is empty.");
+              process.exit(1);
+            }
+
+            if (!/rules_version\s*=\s*\x272\x27\s*;/.test(rulesContent)) {
+              console.error("::error::firestore.rules must declare rules_version = \x272\x27;.");
+              process.exit(1);
+            }
+
+            if (!/service\s+cloud\.firestore\s*\{/.test(rulesContent)) {
+              console.error("::error::firestore.rules must declare service cloud.firestore.");
+              process.exit(1);
+            }
+
+            const defaultDenyBlock = rulesContent.match(/match\s+\/\{document=\*\*\}\s*\{([\s\S]*?)\}/);
+            if (!defaultDenyBlock || !/allow\s+read\s*,\s*write\s*:\s*if\s+false\s*;/.test(defaultDenyBlock[1])) {
+              console.error("::error::firestore.rules must contain the catch-all default deny rule.");
+              process.exit(1);
+            }
+
+            const communityAdminFn = rulesContent.match(/function\s+isAuthorizedCommunityAdmin\s*\(\s*\)\s*\{([\s\S]*?)\}/);
+            if (!communityAdminFn) {
+              console.error("::error::firestore.rules missing isAuthorizedCommunityAdmin() predicate.");
+              process.exit(1);
+            }
+            const communityAdminBody = communityAdminFn[1];
+            const predicateRoles = [...communityAdminBody.matchAll(/\.data\.role\s*==\s*\x27([^'\''\n]+)\x27/g)].map((m) => m[1]);
+            const uniquePredicateRoles = [...new Set(predicateRoles)].sort();
+            if (
+              !/isAdmin\s*\(\s*\)/.test(communityAdminBody) ||
+              uniquePredicateRoles.length !== 2 ||
+              uniquePredicateRoles[0] !== "CitizenModerator" ||
+              uniquePredicateRoles[1] !== "Owner"
+            ) {
+              console.error("::error::isAuthorizedCommunityAdmin() must narrowly authorize only active Owner and CitizenModerator roles.");
+              process.exit(1);
+            }
+
+            const citizenBlock = rulesContent.match(/match\s+\/citizen_submissions\/\{submissionId\}\s*\{([\s\S]*?)\}/);
+            if (!citizenBlock) {
+              console.error("::error::firestore.rules missing /citizen_submissions/{submissionId} namespace.");
+              process.exit(1);
+            }
+            const citizenBody = citizenBlock[1];
+            if (!/allow\s+create\s*:\s*if\s+false\s*;/.test(citizenBody)) {
+              console.error("::error::/citizen_submissions/{submissionId} must enforce allow create: if false;.");
+              process.exit(1);
+            }
+            if (!/allow\s+get\s*,\s*list\s*:[\s\S]*?isAuthorizedCommunityAdmin\s*\(\s*\)/.test(citizenBody)) {
+              console.error("::error::/citizen_submissions/{submissionId} read rule must gate admin access via isAuthorizedCommunityAdmin().");
+              process.exit(1);
+            }
+            if (!/allow\s+update\s*:\s*if\s+isAuthorizedCommunityAdmin\s*\(\s*\)/.test(citizenBody)) {
+              console.error("::error::/citizen_submissions/{submissionId} update rule must gate moderation via isAuthorizedCommunityAdmin().");
+              process.exit(1);
+            }
+
+            // 3. Verify workflow deploy command selector is strictly firestore:rules
+            const workflowPath = ".github/workflows/firebase-firestore-rules-live.yml";
+            if (!fs.existsSync(workflowPath)) {
+              console.error("::error::Missing workflow file for scope contract check.");
+              process.exit(1);
+            }
+            const workflowLines = fs.readFileSync(workflowPath, "utf8").split(/\r?\n/);
+            const deployCmdLines = workflowLines
+              .map((line) => line.trim())
+              .filter((line) => line.startsWith("firebase deploy "));
+            const expectedDeployCmd =
+              "firebase deploy --project promiseofplanet-bb325 --only firestore:rules --non-interactive";
+            if (deployCmdLines.length !== 1 || deployCmdLines[0] !== expectedDeployCmd) {
+              console.error("::error::Workflow deploy scope contract failed. Expected exactly one deploy command targeting --only firestore:rules.");
+              process.exit(1);
+            }
+
+            console.log("Verified firestore.rules source guards and strict --only firestore:rules workflow scope contract.");
+          '
+
+      - name: Verify Service Account Credential
+        env:
+          CREDENTIAL_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+        run: |
+          if [ -z "$CREDENTIAL_JSON" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 secret is empty or missing."
+            exit 1
+          fi
+          node -e '
+            const raw = process.env.CREDENTIAL_JSON;
+            let cred;
+            try {
+              cred = JSON.parse(raw);
+            } catch (_err) {
+              console.error("::error::Failed to parse FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 JSON.");
+              process.exit(1);
+            }
+            if (!cred || typeof cred !== "object" || Array.isArray(cred)) {
+              console.error("::error::Service account credential must be a JSON object.");
+              process.exit(1);
+            }
+            if (cred.type !== "service_account") {
+              console.error("::error::Credential type is not service_account.");
+              process.exit(1);
+            }
+            if (cred.project_id !== "promiseofplanet-bb325") {
+              console.error("::error::Credential project_id mismatch. Expected promiseofplanet-bb325.");
+              process.exit(1);
+            }
+            if (typeof cred.client_email !== "string" || !cred.client_email.trim()) {
+              console.error("::error::Credential missing required client_email.");
+              process.exit(1);
+            }
+            if (typeof cred.private_key !== "string" || !cred.private_key.includes("BEGIN PRIVATE KEY")) {
+              console.error("::error::Credential missing required private_key.");
+              process.exit(1);
+            }
+            console.log("Verified service-account credential structure for target project promiseofplanet-bb325.");
+          '
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PROMISEOFPLANET_BB325 }}
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy Firestore Rules to Firebase
+        run: |
+          firebase deploy --project promiseofplanet-bb325 --only firestore:rules --non-interactive
+
+      - name: Generate Deployment Summary
+        if: always()
+        run: |
+          OUTCOME="FAIL"
+          if [ "${{ job.status }}" = "success" ]; then
+            OUTCOME="PASS"
+          fi
+          {
+            echo "### Firebase Firestore Rules Deployment Summary"
+            echo ""
+            echo "- **Run ID:** \`${{ github.run_id }}\` (attempt \`${{ github.run_attempt }}\`)"
+            echo "- **Commit SHA:** \`${{ github.sha }}\`"
+            echo "- **Ref:** \`${{ github.ref }}\`"
+            echo "- **Target Project:** \`promiseofplanet-bb325\`"
+            echo "- **Deploy Target:** \`firestore.rules\` (\`--only firestore:rules\`)"
+            echo "- **Result:** \`${OUTCOME}\` (job status: \`${{ job.status }}\`)"
+            echo ""
+            echo "> **Verification Boundary Warning:** A successful Firestore Rules deployment only publishes \`firestore.rules\` to Firebase and is **NOT proof of live production authorization behavior**. Conduct verified post-deploy authorization and smoke testing separately. No automatic retry, rollback, or downstream workflow trigger is performed."
+          } >> "$GITHUB_STEP_SUMMARY"
