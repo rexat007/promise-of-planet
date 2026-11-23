@@ -1998,9 +1998,10 @@ async function runTests(): Promise<void> {
         'src/components/library/AdminLibraryManagement.tsx',
         'fe71f7ac57a580da5e1309fb77e761f75695d274',
       ],
+      // Reconciled after approved Gate C Citizen Journalism RBAC changes.
       [
         'functions/src/shared/adminContract.ts',
-        'f895313b46de7f1f55d3d0e1cc1aca4fc9e7391d',
+        '0885136bd50dba51fc3107dac0282d13bad784a1',
       ],
       [
         'functions/src/library/libraryApplicationService.ts',
