@@ -1006,9 +1006,10 @@ async function runTests(): Promise<void> {
         'functions/src/library/libraryQuarantineRightsDecisionContract.ts',
         'b96652303ae516c2ba01f7f9d52e3c8875860f1f',
       ],
+      // Reconciled with approved Gate C Citizen Journalism RBAC changes.
       [
         'functions/src/shared/adminContract.ts',
-        'f895313b46de7f1f55d3d0e1cc1aca4fc9e7391d',
+        '0885136bd50dba51fc3107dac0282d13bad784a1',
       ],
       [
         'functions/src/library/libraryApplicationService.ts',
