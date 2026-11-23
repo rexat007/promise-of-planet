@@ -7,9 +7,12 @@
     "source": "functions",
     "runtime": "nodejs22"
   },
-  "storage": {
-    "rules": "storage.rules"
-  },
+  "storage": [
+    {
+      "target": "citizenEvidence",
+      "rules": "storage.rules"
+    }
+  ],
   "hosting": {
     "public": "dist",
     "ignore": [

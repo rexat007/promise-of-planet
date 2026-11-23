@@ -3,11 +3,17 @@ name: Deploy Storage Rules Live
 # PREREQUISITE NOTICE FOR PROJECT OWNER:
 # 1. SEPARATE AUTHORIZATION REQUIRED: This workflow must NOT be dispatched without separate,
 #    explicit owner authorization.
-# 2. VERIFICATION BOUNDARY: Deploys storage.rules via 'firebase deploy --only storage'.
-#    Deployment of rules alone does not constitute end-to-end upload testing; verified smoke
-#    and permissions testing must be conducted following deployment.
-# 3. SCOPE INTEGRITY: This workflow deploys only Firebase Storage security rules ('--only storage').
-#    No Cloud Functions, Firestore security rules, Firestore indexes, or Hosting bundles are deployed.
+# 2. VERIFICATION BOUNDARY: Deploys storage.rules to explicit target 'citizenEvidence'
+#    (bucket 'promiseofplanet-bb325.firebasestorage.app') via
+#    'firebase deploy --project promiseofplanet-bb325 --only storage:citizenEvidence --non-interactive'.
+#    Deployment of rules alone does not constitute proof of live production authorization or
+#    end-to-end upload behavior; verified live smoke and permissions testing must be conducted
+#    following deployment.
+# 3. SCOPE INTEGRITY: This workflow deploys only Firebase Storage security rules for target
+#    'citizenEvidence' ('--only storage:citizenEvidence'). The separate library quarantine bucket
+#    ('promiseofplanet-bb325-library-quarantine') is strictly out of scope and must NEVER receive
+#    storage.rules. No Cloud Functions, Firestore security rules, Firestore indexes, or Hosting
+#    bundles are deployed.
 # 4. ROLLBACK SAFETY: Reverting storage.rules locally or in git does NOT automatically undeploy
 #    active rules in Google Cloud / Firebase. Rollback requires explicitly re-running this workflow
 #    from an authorized rollback commit or re-deploying previous rules.
@@ -45,12 +51,19 @@ jobs:
         with:
           node-version: 22
 
-      - name: Verify Firebase Configuration and Storage Rules Source
+      - name: Verify Firebase Configuration, Explicit Storage Target, and Storage Rules Source
         run: |
           node -e '
             const fs = require("fs");
 
-            // 1. Verify firebase.json storage configuration
+            const EXPECTED_PROJECT = "promiseofplanet-bb325";
+            const EXPECTED_TARGET = "citizenEvidence";
+            const EXPECTED_BUCKET = "promiseofplanet-bb325.firebasestorage.app";
+            const FORBIDDEN_QUARANTINE_BUCKET = "promiseofplanet-bb325-library-quarantine";
+            const EXPECTED_DEPLOY_CMD =
+              "firebase deploy --project promiseofplanet-bb325 --only storage:citizenEvidence --non-interactive";
+
+            // 1. Verify firebase.json explicit storage target array configuration
             if (!fs.existsSync("firebase.json")) {
               console.error("::error::Missing firebase.json in repository root.");
               process.exit(1);
@@ -62,13 +75,79 @@ jobs:
               console.error("::error::Failed to parse firebase.json: " + err.message);
               process.exit(1);
             }
-            if (!fbConfig.storage || fbConfig.storage.rules !== "storage.rules") {
-              console.error("::error::firebase.json must define storage.rules: " + JSON.stringify(fbConfig.storage));
+            if (!Array.isArray(fbConfig.storage) || fbConfig.storage.length !== 1) {
+              console.error("::error::firebase.json storage must be an array with exactly one explicit target entry.");
               process.exit(1);
             }
-            console.log("Verified firebase.json storage configuration: " + fbConfig.storage.rules);
+            const storageEntry = fbConfig.storage[0];
+            if (
+              !storageEntry ||
+              typeof storageEntry !== "object" ||
+              Array.isArray(storageEntry) ||
+              Object.keys(storageEntry).sort().join(",") !== "rules,target" ||
+              storageEntry.target !== EXPECTED_TARGET ||
+              storageEntry.rules !== "storage.rules"
+            ) {
+              console.error("::error::firebase.json storage[0] must equal exactly { target: \"citizenEvidence\", rules: \"storage.rules\" }.");
+              process.exit(1);
+            }
+            if (JSON.stringify(fbConfig.storage).includes(FORBIDDEN_QUARANTINE_BUCKET)) {
+              console.error("::error::Forbidden quarantine bucket detected in firebase.json storage configuration.");
+              process.exit(1);
+            }
+            console.log("Verified firebase.json explicit storage target: " + storageEntry.target + " -> " + storageEntry.rules);
 
-            // 2. Verify storage.rules exists and contains expected rule blocks
+            // 2. Verify .firebaserc explicit target-to-bucket mapping
+            if (!fs.existsSync(".firebaserc")) {
+              console.error("::error::Missing .firebaserc in repository root.");
+              process.exit(1);
+            }
+            let rcConfig;
+            try {
+              rcConfig = JSON.parse(fs.readFileSync(".firebaserc", "utf8"));
+            } catch (err) {
+              console.error("::error::Failed to parse .firebaserc: " + err.message);
+              process.exit(1);
+            }
+            if (!rcConfig || typeof rcConfig !== "object" || Array.isArray(rcConfig)) {
+              console.error("::error::.firebaserc must be a JSON object.");
+              process.exit(1);
+            }
+            if (!rcConfig.projects || rcConfig.projects.default !== EXPECTED_PROJECT) {
+              console.error("::error::.firebaserc projects.default must equal \"" + EXPECTED_PROJECT + "\".");
+              process.exit(1);
+            }
+            if (!rcConfig.targets || typeof rcConfig.targets !== "object" || Array.isArray(rcConfig.targets)) {
+              console.error("::error::.firebaserc missing targets mapping.");
+              process.exit(1);
+            }
+            if (JSON.stringify(rcConfig.targets).includes(FORBIDDEN_QUARANTINE_BUCKET)) {
+              console.error("::error::Forbidden quarantine bucket detected in .firebaserc targets.");
+              process.exit(1);
+            }
+            const projectTargets = rcConfig.targets[EXPECTED_PROJECT];
+            if (!projectTargets || typeof projectTargets !== "object" || Array.isArray(projectTargets)) {
+              console.error("::error::.firebaserc missing targets for project \"" + EXPECTED_PROJECT + "\".");
+              process.exit(1);
+            }
+            const storageTargets = projectTargets.storage;
+            if (!storageTargets || typeof storageTargets !== "object" || Array.isArray(storageTargets)) {
+              console.error("::error::.firebaserc missing storage targets for project \"" + EXPECTED_PROJECT + "\".");
+              process.exit(1);
+            }
+            const storageTargetNames = Object.keys(storageTargets);
+            if (storageTargetNames.length !== 1 || storageTargetNames[0] !== EXPECTED_TARGET) {
+              console.error("::error::.firebaserc must declare exactly one storage target named \"" + EXPECTED_TARGET + "\". Found: " + JSON.stringify(storageTargetNames));
+              process.exit(1);
+            }
+            const targetBuckets = storageTargets[EXPECTED_TARGET];
+            if (!Array.isArray(targetBuckets) || targetBuckets.length !== 1 || targetBuckets[0] !== EXPECTED_BUCKET) {
+              console.error("::error::.firebaserc storage target \"" + EXPECTED_TARGET + "\" must map exclusively to [\"" + EXPECTED_BUCKET + "\"].");
+              process.exit(1);
+            }
+            console.log("Verified .firebaserc storage target mapping: " + EXPECTED_TARGET + " -> " + EXPECTED_BUCKET);
+
+            // 3. Verify storage.rules exists and contains expected rule blocks
             if (!fs.existsSync("storage.rules")) {
               console.error("::error::Missing storage.rules file.");
               process.exit(1);
@@ -94,7 +173,29 @@ jobs:
               process.exit(1);
             }
 
-            console.log("Verified storage.rules integrity and namespace declarations successfully.");
+            // 4. Verify workflow deploy scope contract targets only storage:citizenEvidence
+            const workflowPath = ".github/workflows/firebase-storage-rules-live.yml";
+            if (!fs.existsSync(workflowPath)) {
+              console.error("::error::Missing workflow file for deploy scope verification.");
+              process.exit(1);
+            }
+            const workflowLines = fs.readFileSync(workflowPath, "utf8").split(/\r?\n/);
+            const deployCmdLines = workflowLines
+              .map((line) => line.trim())
+              .filter((line) => line.startsWith("firebase deploy "));
+            const targetApplyLines = workflowLines
+              .map((line) => line.trim())
+              .filter((line) => line.startsWith("firebase target:apply"));
+            if (targetApplyLines.length !== 0) {
+              console.error("::error::Workflow must not invoke firebase target:apply at runtime.");
+              process.exit(1);
+            }
+            if (deployCmdLines.length !== 1 || deployCmdLines[0] !== EXPECTED_DEPLOY_CMD) {
+              console.error("::error::Workflow deploy scope contract failed. Expected exactly one command: " + EXPECTED_DEPLOY_CMD);
+              process.exit(1);
+            }
+
+            console.log("Verified storage.rules integrity and strict --only storage:citizenEvidence workflow scope contract.");
           '
 
       - name: Verify Service Account Credential
@@ -135,15 +236,21 @@ jobs:
 
       - name: Deploy Storage Rules to Firebase
         run: |
-          firebase deploy --project promiseofplanet-bb325 --only storage --non-interactive
+          firebase deploy --project promiseofplanet-bb325 --only storage:citizenEvidence --non-interactive
 
       - name: Generate Deployment Summary
         if: always()
         run: |
-          echo "### Firebase Storage Rules Deployment Summary 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "### Firebase Storage Rules Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Target Project:** \`promiseofplanet-bb325\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run ID:** \`${{ github.run_id }}\` (attempt \`${{ github.run_attempt }}\`)" >> $GITHUB_STEP_SUMMARY
           echo "- **Ref:** \`${{ github.ref }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit SHA:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Deploy Target:** \`storage.rules\` (\`--only storage\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Storage Target:** \`citizenEvidence\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target Bucket:** \`promiseofplanet-bb325.firebasestorage.app\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Excluded Quarantine Bucket:** \`promiseofplanet-bb325-library-quarantine\` (not targeted)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deploy Target:** \`storage.rules\` (\`--only storage:citizenEvidence\`)" >> $GITHUB_STEP_SUMMARY
           echo "- **Workflow Status:** \`${{ job.status }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **Verification Boundary:** Workflow completion reflects only the CLI deployment attempt for target \`citizenEvidence\` (\`promiseofplanet-bb325.firebasestorage.app\`) and is **not** proof of live production authorization or upload behavior. Separate live Storage rules and attachment permission tests remain required." >> $GITHUB_STEP_SUMMARY

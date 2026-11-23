@@ -1,5 +1,14 @@
 {
   "projects": {
     "default": "promiseofplanet-bb325"
+  },
+  "targets": {
+    "promiseofplanet-bb325": {
+      "storage": {
+        "citizenEvidence": [
+          "promiseofplanet-bb325.firebasestorage.app"
+        ]
+      }
+    }
   }
 }
